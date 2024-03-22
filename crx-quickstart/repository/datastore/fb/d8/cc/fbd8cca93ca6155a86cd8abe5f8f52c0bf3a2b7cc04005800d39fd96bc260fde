@@ -1,0 +1,656 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2015 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function($, ns, window) {
+    'use strict';
+
+    var ui = $(window).adaptTo("foundation-ui");
+
+    if (sessionStorage.variationManipulated) {
+        const manipulated = JSON.parse(sessionStorage.variationManipulated).map(s => _g.XSS.getXSSValue(s));
+        if (manipulated.length === 2){
+            ui.notify(null, Granite.I18n.get("Variation <b>{0}</b> has been {1}.", manipulated));
+        } else {
+            ui.notify(null, Granite.I18n.get("Variation <b>{0}</b> has been {1} <b>{2}</b>.", manipulated));
+        }
+        delete sessionStorage.variationManipulated;
+    }
+
+    var isReadOnly = false;
+
+    /* helpers */
+    var channel = $(window.document);
+    var action = 'click.variation-chooser';
+    var variationNameData = 'data-variation-name';
+    var variationTitleData = 'data-variation-title';
+    var indexContainer = '.content-fragment-variations';
+    var itemSelector = indexContainer + ' [' + variationNameData + ']';
+
+    function returnQuickActions() {
+        var actionsHTML =
+            '<coral-select class="variations-quick-actions" placeholder="' + Granite.I18n.get("Actions") + '">';
+        if (!isReadOnly) {
+            actionsHTML +=
+                '   <coral-select-item value="js-action-rename">' + Granite.I18n.get('Rename') + '</coral-select-item>' +
+                '   <coral-select-item value="js-action-delete">' + Granite.I18n.get('Delete') + '</coral-select-item>' +
+                '   <coral-select-item value="js-action-sync">' + Granite.I18n.get('Sync current element with master') + '</coral-select-item>';
+        }
+        actionsHTML += '</coral-select>';
+        var actions = $(actionsHTML);
+
+        actions[0].hideIfEmpty = function() {
+            $(this).addClass('transparent').show(0);
+
+            /* we need to check in next animation frame as dom changes have to be applied */
+            window.requestAnimationFrame(function() {
+                var isEmpty = $(this).find('coral-selectlist-item').filter(function() { return $(this).css('display') !== 'none'; }).length === 0;
+
+                if (isEmpty) {
+                    actions.hide(0);
+                }
+
+                $(this).removeClass('transparent');
+            }.bind(this));
+        };
+
+        return actions;
+    };
+
+    /* attach click handler */
+    var _isInitialized = false;
+    channel
+        .off(action)
+        .on(action, itemSelector, function(event) {
+            var $variation = $(event.currentTarget);
+            var container = $variation.closest(indexContainer);
+            var newVariation = $.trim(getVariationName($variation));
+            var newVariationTitle = $.trim($variation.attr(variationTitleData));
+            var quickActions = $();
+
+            /* add quick actions if needed */
+            if ($variation.find('.variations-quick-actions').length === 0) {
+                container.find('.variations-quick-actions').remove();
+                quickActions = returnQuickActions();
+
+                $variation.find(".variation-wrapper").append(quickActions);
+                $(document).trigger('cfm-variation-actions-added');
+            } else {
+                quickActions = $variation.find('.variations-quick-actions');
+            }
+
+            /* do nothing if clicked variant is currently loaded */
+            if ($variation.hasClass('is-active')) {
+                if (!_isInitialized) {
+                    Coral.commons.ready(quickActions[0], function() {
+                        quickActions[0].hideIfEmpty();
+                    });
+                    _isInitialized = true;
+                }
+                return;
+            }
+
+            if (newVariation !== undefined) {
+
+                /* deselect previous variant */
+                container.find('li.is-active').removeClass('is-active');
+
+                /* add quick actions and select given variant */
+                $variation.addClass('is-active');
+                Coral.commons.ready(quickActions[0], function() {
+                    quickActions[0].hideIfEmpty();
+                });
+
+                /* request to load new content */
+                ns.editor.Page.requestLoad(undefined, {
+                    variation: newVariation,
+                    variationTitle: newVariationTitle
+                });
+            }
+            _isInitialized = true;
+        });
+
+    $(document).on("foundation-toggleable-hide", function(e) {
+        var title = $('#createVariation').find('[name="variation"]');
+        title.removeAttr("invalid");
+        title.next().hide();
+    });
+
+    var notifyChange = function() {
+        channel.trigger(ns.constants.EVENT_CONTENT_FRAGMENT_FIELD_MODIFIED);
+    };
+
+    // When tag field is changed, notfiy
+    $(document).on("foundation-field-change", ".content-fragment-variation-tags", notifyChange);
+
+    // -------------------------------------------------------------------------------------
+    // UI - Helpers/Shared stuff
+
+    function isValid(container) {
+        return Array.prototype.every.call(container.find(":-foundation-submittable"), function(v) {
+            var api = $(v).adaptTo("foundation-validation");
+            var state = api.getValidity();
+
+            if (state.isValidated()) {
+                return state.isValid();
+            } else {
+                return api.checkValidity();
+            }
+        });
+    }
+
+    $(window).adaptTo("foundation-registry").register("foundation.validation.validator", {
+        selector: "[data-foundation-validation~='regex.exclude.master'],[data-validation~='regex.exclude.master']",
+        validate: function(el) {
+            var excludedTitle = "master";
+            return (el.value && el.value.toLowerCase() === excludedTitle) ? Granite.I18n.get("The case-insensitive name \"{0}\" is a reserved keyword.", excludedTitle): undefined;
+        }
+    });
+
+    // Reload the page and switch to a specific variation
+    function reloadToVariation(variationName) {
+        ns.RequestManager.finish(function() {
+            if (ns.EditSession.isActive()) {
+                ns.EditSession.suspend();
+            }
+            var newQuery = "_=" + new Date().getTime();
+            if (variationName) {
+                newQuery += "&variation=" + encodeURIComponent(variationName);
+            }
+
+            // reloads page and directs to currently selected variation and element
+            // TODO: avoid refresh
+            document.location.search = newQuery;
+        });
+    }
+
+    /* get variation name from the markup of the li-element */
+    function getVariationName($liElement) {
+        var variationName = $liElement.data('variation-name');
+        // this is a workaround to deal with empty attributes not rendered by htl-script
+        if (variationName === "master") {
+            variationName = "";
+        }
+        return variationName;
+    }
+
+    // -------------------------------------------------------------------------------------
+    // UI - Create Variation
+
+    /* handle creation of variation */
+    channel.on("click", "#createVariationButton", function(e, data) {
+        $("#createVariation").submit();
+    });
+
+    channel.on("submit", "#createVariation", function(e, data) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        var $form = $("#createVariation");
+        var $title = $form.find('[name="title"]');
+        if (isValid($form)) {
+            ns.editor.Core.notifyModification();
+            ns.editor.Page.createVariation(function() {
+                sessionStorage.variationManipulated = JSON.stringify([$title.val(), Granite.I18n.get("created", null, "variation")]);
+                reloadToVariation(":last");
+            }, {
+                title: $title.val(),
+                description: $form.find('[name="description"]').val()
+            });
+        } else {
+            $title.trigger("change");
+            $title.next().show();
+        }
+    });
+
+    channel.on("foundation-toggleable-show", function(e, data) {
+        if ($(e.target).find("#createVariation").length) {
+            $("#createVariation").find('.coral-Form-field:first').focus();
+            ns.editor.Core.notifyModification();
+            ns.editor.Page.requestSave(undefined, {
+                newVersion: true
+            });
+        }
+    });
+
+
+    // -------------------------------------------------------------------------------------
+    // UI - Delete variation
+
+    var variantDelete = function(event) {
+        event.stopPropagation();
+
+        var $target = $(event.target);
+        var $variation = $target.closest("li[data-variation-name]");
+        var variationName = getVariationName($variation);
+
+        ns.RequestManager.schedule({
+            request: {
+                url: ns.EditSession.fragment.urlBase + ".cfm.references.json",
+                method: "get",
+                dataType: "json",
+                cache: false,
+                data: {
+                    variation: variationName,
+                    limit: 11
+                }
+            },
+            type: ns.RequestManager.REQ_SEQUENTIAL,
+            condition: ns.RequestManager.COND_NONE,
+            ui: ns.RequestManager.UI_MASK_IMMEDIATELY,
+            handlers: {
+                success: function(response) {
+                    doDeleteVariant(response.data, $target);
+                },
+                error: function() {
+                    doDeleteVariant({}, $target);
+                }
+            }
+        });
+    };
+
+    function doDeleteVariant(data, $target) {
+        var pagesUsingVariation = [];
+        var $variation = $target.closest("li[data-variation-name]");
+        var variationTitle = ns.state.fragment.variationTitle;
+
+        var message = Granite.I18n.get('The following variation will be removed from all elements of this content fragment:')
+                + '<br/><br/><b>' + _g.XSS.getXSSValue(variationTitle || '') + '</b>';
+
+        $.each(data.refs || [], function(idx, item) {
+            pagesUsingVariation.push(_g.XSS.getXSSValue(item.title || ''));
+        });
+
+        var isReferenced = (pagesUsingVariation.length > 0);
+
+        if (isReferenced) {
+            var maxItems = 10;
+
+            message += '<br/><br/>' + Granite.I18n.get('and from referenced pages');
+            message += ((pagesUsingVariation.length > maxItems) ? (' (' + maxItems + '+)') : '') + ':<br/><br/>';
+            message += '<b>' + pagesUsingVariation.slice(0, maxItems).join('</b><br/><b>') + '</b>';
+            message += (pagesUsingVariation.length > maxItems) ? '<br/>...' : '';
+        }
+
+        ui.prompt(Granite.I18n.get("Delete Variation"),
+            message,
+            "error",
+            [
+                {
+                    text: Granite.I18n.get("Cancel"),
+                    id: "no"
+                },
+                {
+                    text: Granite.I18n.get(isReferenced ? "Force Delete" : "Delete"),
+                    id: "yes",
+                    warning: true
+                }
+            ],
+            function (btnId) {
+                if (btnId === "yes") {
+                    ns.editor.Core.notifyModification();
+                    ns.editor.Page.deleteVariation(function(isSuccess, xhr) {
+                        if (isSuccess) {
+                            $variation.remove();
+                            sessionStorage.variationManipulated = JSON.stringify([variationTitle, Granite.I18n.get("removed", null, "variation")]);
+                            reloadToVariation(undefined);
+                        } else {
+                            // TODO: find a better parsing method
+                            ui.alert(Granite.I18n.get("Error"), $(xhr.responseText)[3].innerHTML, "error");
+                        }
+                    }, {
+                        variation: $variation.data("variation-name")
+                    });
+                }
+            }
+        );
+    }
+
+
+    // -------------------------------------------------------------------------------------
+    // UI - Rename variation
+
+    var variantRename = function(event) {
+        event.stopPropagation();
+
+        var variationTitle = ns.state.fragment.variationTitle;
+        var description = $('.content-fragment-variations [data-variation-name].is-active .variation-description').text();
+
+        promptRename(ui, variationTitle, description, true);
+    };
+
+    function doRename() {
+        var $form = $("#renameVariation");
+
+        var variationTitle = ns.state.fragment.variationTitle;
+        var description = $('.content-fragment-variations [data-variation-name].is-active .variation-description').text();
+
+        var newTitle = $form.find('[name="variationTitle"]').val();
+        var newDescription = $form.find('[name="description"]').val();
+        var titleChanged = newTitle !== variationTitle;
+        var descriptionChanged = newDescription !== description;
+        if (titleChanged || descriptionChanged) {
+            if (isValid($form)) {
+                ns.editor.Core.notifyModification();
+                ns.editor.Page.requestSave(function() {
+                    var variationItem = $(indexContainer + " [data-variation-name].is-active");
+                    var variationName = getVariationName(variationItem);
+
+                    var $title = variationItem.find('.variation-title');
+                    $title.text(newTitle);
+
+                    ns.editor.Page.renameVariation(function(isSuccess, xhr) {
+                        if (isSuccess) {
+                            if (titleChanged) {
+                                sessionStorage.variationManipulated = JSON.stringify([variationTitle, Granite.I18n.get("renamed to", null, "variation"), newTitle]);
+                                reloadToVariation(variationName);
+                            } else {
+                                var hasDescription = !!newDescription;
+                                $title.toggleClass('no-description', !hasDescription);
+                                ns.state.fragment.variationDescription = newDescription;
+                                var $description = variationItem.find('.variation-description');
+                                $description.text(newDescription);
+                                if (hasDescription) {
+                                    $description.attr('title', newDescription);
+                                } else {
+                                    $description.removeAttr('title');
+                                }
+                                sessionStorage.variationManipulated = JSON.stringify([newTitle, Granite.I18n.get("edited", null, "variation")]);
+                                reloadToVariation(variationName);
+                            }
+                        } else {
+                            // TODO: find a better parsing method
+                            ui.alert(Granite.I18n.get("Error"), $(xhr.responseText)[3].innerHTML, "error");
+                        }
+                    }, {
+                        variation: variationName,
+                        title: newTitle,
+                        description: newDescription
+                    });
+                }, {
+                    ui: ns.RequestManager.UI_SHOW_MASK_IMMEDIATELY
+                });
+            }
+            else {
+                promptRename(ui, variationTitle, description, false);
+            }
+        }
+    }
+
+    function promptRename(ui, variationTitle, description, isNotInvalid) {
+        // TODO: replace this with call to proper dialog, or build using CoralUI API
+        ui.prompt(Granite.I18n.get("Rename Variation"),
+            '<form id="renameVariation" class="coral-Form coral-Form--vertical foundation-layout-util-maximized-container foundation-form">' +
+            '<div class="coral-Form-fieldwrapper">' +
+            '<label class="coral-Form-fieldlabel">' + Granite.I18n.get("Title") + ' *</label>' +
+            '<input type="text" name="variationTitle" value="' + _g.XSS.getXSSValue((isNotInvalid ? variationTitle : "'") || '') + '" class="coral-Form-field coral-Textfield" aria-required="true" >' +
+            '</div>' +
+            '<div class="coral-Form-fieldwrapper">' +
+            '<label class="coral-Form-fieldlabel">' + Granite.I18n.get("Description") + '</label>' +
+            '<textarea is="coral-textarea" name="description" class="coral-Form-field foundation-layout-util-resizable-none coral-Textfield coral-Textfield--multiline" maxlength="120" rows="4" aria-invalid="false" >' +
+            _g.XSS.getXSSValue(description || '') +
+            '</textarea>' +
+            '</div>' +
+            '</form>',
+            "",
+            [
+                {
+                    text: Granite.I18n.get("Cancel"),
+                    id: "no"
+                },
+                {
+                    text: Granite.I18n.get("Rename"),
+                    id: "rename",
+                    primary: true
+                }
+            ],
+            function(btnId) {
+                if (btnId == "rename") {
+                    doRename();
+                }
+            });
+        var $form = $("#renameVariation");
+        if (!isNotInvalid) {
+            var title = $form.find('[name="variationTitle"]');
+            title.trigger("change");
+        }
+        $("#renameVariation").on("submit", function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            $form.parents("coral-dialog")[0].hide()
+            doRename();
+        });
+    }
+
+    // -------------------------------------------------------------------------------------
+    // UI - Other quickactions
+
+    /* starts summarization */
+    var variationSummarization = function() {
+        // we have to click another button (hidden) that is rendered by toolbar.jsp, as
+        // there is a check whether summarization is supported
+        $('.js-cfm-trigger-summarization').click();
+    };
+
+    /* starts synchronization */
+    var elementSynchronization = function() {
+        if(ns.state.currentMultiEditor === undefined)
+            return;
+
+        ns.Synchronization.setUp(ns.state.currentMultiEditor);
+    };
+
+    /* handles the synchronize action if no multieditor is selected */
+    var handleSynchronizeAction = function() {
+
+        var syncSelectItem = $('.variations-quick-actions').find('[value="js-action-sync"]');
+
+        if (ns.state.currentMultiEditor) {
+            syncSelectItem.attr('disabled', false);
+        } else {
+            syncSelectItem.attr('disabled', true)
+        }
+
+
+    };
+
+    // -------------------------------------------------------------------------------------
+    // UI - Quick Actions
+
+    /* possible actions */
+    var quickActionHandlers = {
+        'js-action-delete': variantDelete,
+        'js-action-rename': variantRename,
+        'js-action-sync': elementSynchronization,
+        'js-action-summarize': variationSummarization
+    };
+
+    channel.on('change', '.variations-quick-actions', function(event) {
+        /* call desired quick action handler */
+        var handler = quickActionHandlers[this.value];
+
+        if (handler) {
+            handler.call(this, event);
+        }
+
+        /* reset selection so actions are selectable again */
+        Coral.commons.nextFrame(function() {
+            this.clear();
+        }.bind(this));
+    });
+
+    channel.on('click', '.variations-quick-actions', function(event) {
+
+        handleSynchronizeAction();
+
+    });
+
+
+    // -------------------------------------------------------------------------------------
+    // Initialization
+
+    ns.Core.registerReadyHandler(function() {
+        isReadOnly = ns.RequestManager.isReadOnly();
+        $(window.document).trigger(window.dam_cfm.constants.EVENT_VARIATIONS_LIST_LOADED);
+        /* click on pre-selected variation to trigger adding quick-actions */
+        $('.content-fragment-variations [data-variation-name].is-active').click();
+    }, 1010);
+
+
+    // -------------------------------------------------------------------------------------
+    // Variation management implementation
+
+    /**
+     * Create a new variation.
+     *
+     * <p>Options object:</p>
+     * <ul>
+     *   <li><b>title</b> - The title of the variation to be created (mandatory)</li>
+     *   <li><b>description</b> - The descrition of the variation (optional)</li>
+     *   <li><b>element</b> - The element (optional)</li>
+     * </ul>
+     *
+     * @param callback
+     * @param options
+     */
+    ns.editor.Page.createVariation = function(callback, options) {
+        var description = (options && options.description);
+        var title = (options && options.title);
+        if (!title) {
+            throw new Error("Missing mandatory variation title.")
+        }
+
+        var data = {
+            ":operation": "create",
+            "_charset_": "utf-8",
+            "variation": title
+        };
+        if (description) {
+            data.description = description;
+        }
+
+        var url = ns.EditSession.fragment.urlBase + ".cfm.content.json";
+        ns.RequestManager.schedule({
+            request: {
+                url: url,
+                data: data,
+                method: "post",
+                dataType: "json",
+                cache: false
+            },
+            type: ns.RequestManager.REQ_BLOCKING,
+            condition: ns.RequestManager.COND_EDITSESSION,
+            ui: ns.RequestManager.UI_MASK_IMMEDIATELY,
+            handlers: {
+                success: function(response) {
+                    var isSuccess = (response.textStatus == "success");
+                    if (callback) {
+                        callback(isSuccess);
+                    }
+                },
+                fail: function() {
+                    // TODO error handling
+                    if (callback) {
+                        callback(false);
+                    }
+                }
+            }
+        });
+    };
+
+    ns.editor.Page.deleteVariation = function(callback, options) {
+        if (!options || !options.variation) {
+            throw new Error("Variation to delete not specified.");
+        }
+
+        var url = ns.EditSession.fragment.urlBase + '.cfm.content.json';
+        ns.RequestManager.schedule({
+            request: {
+                url: url,
+                method: "post",
+                dataType: "json",
+                cache: false,
+                data: {
+                    ":operation": "remove",
+                    variation: options.variation
+                }
+            },
+            type: ns.RequestManager.REQ_BLOCKING,
+            condition: ns.RequestManager.COND_EDITSESSION,
+            ui: ns.RequestManager.UI_MASK_IMMEDIATELY,
+            handlers: {
+                success: function(response) {
+                    if (callback) {
+                        callback(true, response.jqXHR);
+                    }
+                },
+                fail: function(response) {
+                    if (callback) {
+                        callback(false, response.jqXHR);
+                    }
+                }
+            }
+        });
+    };
+
+    ns.editor.Page.renameVariation = function(callback, options) {
+        if (!options || !options.variation) {
+            throw new Error("Variation to rename not specified.");
+        }
+
+        var title = options && options.title;
+        var description = options && options.description;
+        var data = {
+            "_charset_": "utf-8",
+            ":operation": "rename",
+            variation: options.variation
+        };
+        if (title) {
+            data.title = title;
+        }
+        if (description) {
+            data.description = description;
+        }
+
+        var url = ns.EditSession.fragment.urlBase + '.cfm.content.json';
+        ns.RequestManager.schedule({
+            request: {
+                url: url,
+                method: "post",
+                dataType: "json",
+                cache: false,
+                data: data
+            },
+            type: ns.RequestManager.REQ_BLOCKING,
+            condition: ns.RequestManager.COND_EDITSESSION,
+            ui: ns.RequestManager.UI_MASK_IMMEDIATELY,
+            handlers: {
+                success: function(response) {
+                    if (callback) {
+                        callback(true, response.jqXHR);
+                    }
+                },
+                fail: function(response) {
+                    if (callback) {
+                        callback(false, response.jqXHR);
+                    }
+                }
+            }
+        });
+
+    };
+
+})($, window.Dam.CFM, window);

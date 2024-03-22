@@ -1,0 +1,1357 @@
+(function(document, $) {
+    "use strict";
+    var searchAssetsLoaded = false;
+    var previewAsset;
+    var url = decodeURIComponent(document.URL);
+    var brochureName = url.substr(url.lastIndexOf('/') + 1, url.length);
+    var assetPath = url.substr(url.lastIndexOf('html') + 4, url.length);
+    var xmlNodeSubPath = 'cq-indesign-print/jcr:content';
+    var currPage = 1;
+    var isIdsJobStatusChecked = false;
+    var _allfieldsMapped = false;
+    var _invalidPrevPages = [];
+    var _previewDirty = false;
+    var lastPage;
+    var $productProperties = ".product-properties-container";
+    var urlProductProperties = "/mnt/overlay/dam/gui/content/idsprint/templates/edittemplate/productpropertieslist.html";
+    var productReference;
+    var mappedProduct;
+    var EDITABLE_DETAIL_VALUE=".editable-detail-value";
+
+    function handleContent(result) {
+        var content = result.filter("#granite-shell-search-result-content");
+
+        var prevContent = $(".foundation-layout-panel-content").prop("hidden", true);
+
+        content
+            .insertAfter(prevContent)
+            .trigger("foundation-contentloaded");
+
+        return {
+            clean: function() {
+                content.remove();
+                prevContent.prop("hidden", false);
+            },
+            replace: function(result) {
+                content = result.filter("#granite-shell-search-result-content")
+                    .replaceAll(content)
+                    .trigger("foundation-contentloaded");
+            }
+        };
+    }
+    $(window).adaptTo("foundation-registry").register("foundation.form.response.ui.success", {
+        name: "granite.shell.search.result",
+        handler: function(form, config, data, textStatus, xhr) {
+            var html = xhr.responseText;
+
+            var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+            parser.parse(html).then(function(fragment) {
+                var el = $(fragment).children();
+                var $document = $(document);
+                var stack = $document.data("granite-shell-search.internal.stack");
+
+                if (stack) {
+                    stack.forEach(function(v) {
+                        v.replace(el);
+                    });
+                } else {
+                    var stack = [];
+                    stack.push(handleContent(el));
+
+                    $document.data("granite-shell-search.internal.stack", stack);
+                }
+            });
+        }
+    });
+
+    $(document).on("foundation-contentloaded", function(e) {
+	    if(sessionStorage.assetsLastPageVisited){
+		        var navStack = JSON.parse(sessionStorage.assetsLastPageVisited);
+				lastPage = navStack[navStack.length-2];
+		}
+
+        initDragDrop();
+        loadInitialAssets();
+        $('.granite-title').text(brochureName);
+        $('.editbrochure-action-preview').off('click', generatePreview);
+        $('.editbrochure-action-preview').on('click', generatePreview);
+        // handle the submission
+        $('button[data-foundation-wizard-control-action="submit"]').off('click', onSubmit);
+
+        $('button[data-foundation-wizard-control-action="submit"]').on('click', onSubmit);
+
+        $('.button-prev-page').off('click',_onPrevPageClick);
+        $('.button-prev-page').on('click',_onPrevPageClick);
+        $('.button-next-page').off('click',_onNextPageClick);
+        $('.button-next-page').on('click',_onNextPageClick);
+        $('.current-page-text') .on('keypress', _onPgNoEntered);
+        $('.current-page-text').blur(function(){
+            resetPageTextCurr();
+        });
+        $('input','#path-predicate').off('change',handlePathSelection).on('change',handlePathSelection);
+        $('.undo-mapping').off('click',handleUndoButtonClick).on('click',handleUndoButtonClick);
+        //clearPreviewAsset any temp actions on cancel
+        $( 'a[data-foundation-wizard-control-action="cancel"]').off( "click", clearPreviewAsset).on( "click", clearPreviewAsset);
+		if(lastPage) {
+		        $( 'a[data-foundation-wizard-control-action="cancel"]').attr('href',lastPage);
+		}
+
+		// handle product selection
+        $(document).off("foundation-field-change",".product-field",handleProductSelection);
+        $(document).on("foundation-field-change",".product-field",handleProductSelection);
+
+        $(document).off("change", ".search-predicate-publish-option-visible", handlePublishFilterChange)
+        .on("change", ".search-predicate-publish-option-visible", handlePublishFilterChange);
+
+        // loadtags from first page initially
+        syncEditablesForPage(1);
+
+        // edit page is loaded, init product reference
+        productReference = $('.brochure-editables-block').attr('product-reference');
+        mappedProduct = productReference;
+
+        if($('.brochure_page_preview').length){
+            initZoomCanvasImage();
+        }
+
+        handleDroppablesContainerSizing();
+        $('coral-accordion','#cq-damadmin-admin-addtocollection-search-form').off('click',handleDroppablesContainerSizing).on('click',handleDroppablesContainerSizing);
+        $(window).off('resize',handleDroppablesContainerSizing).on('resize',handleDroppablesContainerSizing);
+        syncUiWithIdsProcessing();
+        checkAllFieldsMapped();
+
+    });
+
+   /***********************************************************************  UI Handlers *******************************************************************************************/
+
+
+    /**The droppable container size must be of fixed size in order to enable scroll however elements above it are of flexible height so space available to it is not fixed
+    * This method calculates the size available for the droppable's container and sets it's size as available size
+    * */
+    function handleDroppablesContainerSizing(){
+        var $container;
+
+        if( $('#granite-shell-search-result-content').length){
+            $container = $('#granite-shell-search-result-content');
+        } else if($($productProperties).length){
+            $container = $($productProperties);
+        }
+
+        if($container && $container.length){
+            setTimeout(function(){
+                $container.height(Math.round($(window).height() - $container.offset().top ));
+            },500);
+        }
+
+        //for property draggables , set exact width to prevent the width taking full width of it's parent which in case of drag is the body
+        setTimeout(function(){
+                $('.property-draggable').css('width',Math.round($('.property-draggable').width())+"px");
+        },500);
+
+    }
+
+    function handleUndoButtonClick(){
+        $(this).hide();
+         resetMappingToOriginal($(this).parent());
+         resetPreview()
+    }
+
+    function handlePathSelection(){
+        $(this).closest('form').trigger('submit');
+    }
+
+    function handleProductSelection() {
+        var productPath = $(this).val();
+        if(productPath){
+            setSelectedProduuct(productPath);
+            updatePropertiesFromProduct(productPath);
+        }
+    }
+
+    /** Fetch droppable  properties from this product and replace the existing properties*/
+    function updatePropertiesFromProduct(product){
+        var url = urlProductProperties+encodeURI(product);
+        $.ajax({
+            type: "GET",
+            url: Granite.HTTP.externalize(url)
+        }).done(function(result){
+            // append at properties container
+            var parser = $(window).adaptTo("foundation-util-htmlparser");
+            parser.parse(result).then(function(fragment) {
+                var el = $(fragment).children();
+                if($($productProperties).length && el.length)
+                    el.replaceAll($($productProperties)).trigger("foundation-contentloaded");
+            });
+        });
+    }
+
+    /**  Check if the template/catalog is processed by InDesign server and renditions are generated*/
+    function syncUiWithIdsProcessing(){
+        if(isIdsJobStatusChecked)
+            return;
+
+        if($(".processing",".editbrochure-preview").length) {
+            // exportJob is in processing, show wait
+            var $wait = $('<div class="editable-wait"><coral-wait centered="" size="L"></coral-wait></div>');
+            $wait.appendTo($('body'));
+            isIdsJobStatusChecked = true;
+            checkExportStatus(assetPath,_onExportJobDone,_onExportJobFailed);
+        } else {
+            // loadtags from first page initially
+            syncEditablesForPage(getCurrentPage());
+        }
+    }
+
+    /** Load initial images at side panel ***/
+    function loadInitialAssets() {
+        if (searchAssetsLoaded == false) {
+            searchAssetsLoaded = true;
+           $("#cq-damadmin-admin-addtocollection-search-form").submit();
+        }
+    }
+
+    /** Initially the draggables and droppables ***/
+    function initDragDrop() {
+
+        $('coral-masonry-item, .property-draggable').draggable({
+            revert: true,
+            helper: 'clone',
+            appendTo: 'body',
+            containment: 'window',
+            scroll: false,
+            drag: function(e,ui) {
+                $(ui.helper).css({transform:'', "z-index":1100});
+            }
+        }).sortable();
+
+        /* for product property mapping, make the editable text also droppable, in case of template it is non droppable. */
+        if($($productProperties).length){
+            $(".brochure-editable-item-text").addClass("droppable");
+        }
+
+        $('.droppable').droppable({
+            hoverClass: "hover",
+            drop:function(e,ui){
+                handleDrop($(ui.draggable.context),$(this));
+            }
+        });
+    }
+
+    /** Initialize the zoom canvas with current page preview image*/
+    function initZoomCanvasImage(){
+        $(".dam-zoom-buttons").data('imagePath',$('.brochure_page_preview')[0].src);
+        var src = $('.brochure_page_preview').attr("src");
+        var theImage = new Image();
+        theImage.onload = function(){
+            // Get accurate measurements from that.
+            var imageWidth = theImage.width;
+            var imageHeight = theImage.height;
+            $(".dam-zoom-buttons").data('imageWidth',imageWidth);
+            $(".dam-zoom-buttons").data('imageHeight',imageHeight);
+        }
+        theImage.src = src;
+    }
+
+    function handlePublishFilterChange(){
+        var $this = $(this);
+        var $form = $this.closest("form");
+        var checked = event.target.checked;
+        var toRemoveTags = [];
+        event.stopPropagation();
+
+        $this.parent().parent().find(".search-predicate-publish-option-visible").each(function() {
+            var $option = $(this);
+            var name = $option.data("name");
+            $option.get(0).checked = false;
+
+        });
+
+        var name = event.target.getAttribute("data-name");
+        //    var tag = tagList.querySelector("coral-tag[name='" + name + "']");
+
+        var $predicate = $this.closest(".publish-predicate");
+
+        // option was just selected so we need to create the matching tag
+        var breadcrumbName = name.split(".")[0];
+        var remaining = name.split(".")[1];
+        breadcrumbName += "." + remaining.split(".")[0];
+        if (checked) {
+            $this.get(0).checked = true;
+            // enable hidden inputs
+            $this.parent().find(".search-predicate-publish-option").prop("disabled", false);
+        }else {
+            $this.get(0).checked = false;
+            // disable hidden inputs
+            $this.parent().find(".search-predicate-publish-option").prop("disabled", true);
+        }
+
+        // makes sure the coral internals are not modified
+        $predicate.children("input[type=hidden]").each(function() {
+            this.disabled = !($(this).val());
+        });
+
+        $form.submit();
+
+    }
+
+    function addCustomUISelectors(){
+
+    }
+
+
+    /*********************************************************************** Page Preview *******************************************************************************/
+
+    /** Generate preview page renditions from current mapping state of template/catalog and fetch those renditions */
+    function generatePreview() {
+        var message = Granite.I18n.get("Generating preview");
+        var previewMsgDiv = $('<div class=\"drag-drop-message\">' + message + '</div>');
+        $('.editbrochure-preview').waitOverlay('show',previewMsgDiv);
+
+        // reset the canvas to original img
+        // should trigger before preview src set
+        triggerZoomCanvasResetEvent();
+
+        if(!previewAsset) {
+            createPreviewAsset();
+        } else {
+            submit(previewAsset, previewCallback, 'jpg');
+        }
+    }
+
+    /** Cretae a temporary copy of template/catalog for preview */
+    function createPreviewAsset() {
+        var formData = {};
+        var tempName = brochureName + Date.now();
+        previewAsset = '/var/dam/catalogs-tmp/' + tempName;
+        formData[tempName + "/@CopyFrom"] = assetPath;
+        formData["_charset_"] = "utf-8";
+        $.ajax({
+            type: "POST",
+            url: Granite.HTTP.externalize('/var/dam/catalogs-tmp'),
+            data: formData
+        }).done(function() {
+            submit(previewAsset, previewCallback, 'jpg')
+        }).fail(previewFailed);
+    }
+
+    /** remove temporary preview asset*/
+    function clearPreviewAsset() {
+        // clearPreviewAsset temp actions
+        if (previewAsset) {
+            $.ajax({
+                type: "POST",
+                url: Granite.HTTP.externalize(previewAsset),
+                data: {
+                    ':operation': 'delete'
+                }
+            })
+            previewAsset = '';
+        }
+    }
+
+    /** Handles preview generation */
+    function previewCallback(assetPath) {
+
+        checkExportStatus(assetPath,function(){
+            $('.editbrochure-preview').waitOverlay('hide');
+            var prvSrc = Granite.HTTP.externalize(assetPath) + '/subassets/' +getCurrPageRenditionName()+ '?_ch_ck=' + Date.now();
+            setPreviewImageSrc(prvSrc);
+            // clearPreviewAsset invalid page array
+            _invalidPrevPages.splice(0,_invalidPrevPages.length);
+            _previewDirty = false;
+        },previewFailed);
+
+    }
+
+    /** Handles preview generation failure*/
+    function previewFailed() {
+        $('.editbrochure-preview').waitOverlay('hide');
+        showErrorDialog(Granite.I18n.get("Preview Failed"), Granite.I18n.get("Unable to create preview"));
+    }
+
+    /** Handle page navigation UI events*/
+
+    function _onPrevPageClick() {
+        if(getCurrentPage() == 1) {
+            return ;
+        } else {
+            _onPageChange(getCurrentPage()-1);
+        }
+    }
+
+    function _onNextPageClick() {
+        if(getCurrentPage() == getTotalPagesNo()) {
+            return ;
+        } else {
+            _onPageChange(getCurrentPage()+1);
+        }
+    }
+
+    function _onPgNoEntered(event){
+        var charCode = event.which || event.keyCode;
+        if (charCode == 13) { //Enter keycode
+            var input = $(event.target).val();
+            if(isNaN(input)){
+                resetPageTextCurr();
+            } else {
+                _onPageChange(parseInt(input));
+            }
+        }
+    }
+
+    function _onPageChange(newPageNo){
+        if(newPageNo > getTotalPagesNo() || newPageNo < 1) {
+            resetPageTextCurr();
+            return;
+        }
+
+        var prvSrc;
+        if(previewAsset && (_invalidPrevPages.indexOf(newPageNo) == -1)){
+            //show preview from preview asset
+            prvSrc = Granite.HTTP.externalize(previewAsset) + '/subassets/' +getPageRenditionName(newPageNo)+ '?_ch_ck=' + Date.now();
+        } else {
+            // show preview from main asset
+            prvSrc = Granite.HTTP.externalize(assetPath) + '/subassets/' +getPageRenditionName(newPageNo)+'?_ch_ck=' + Date.now();
+        }
+        // should trigger before preview src set
+        triggerZoomCanvasResetEvent();
+
+        // set new src to image
+        setPreviewImageSrc(prvSrc);
+        setCurrentPage(newPageNo);
+        syncEditablesForPage(newPageNo);
+    }
+
+
+    /** Show editable fields from current page*/
+    function syncEditablesForPage(newPageNo){
+        //get all editables
+        var $editables = $(".editbrochure-editable-container .editable");
+        $editables.each(function(){
+            var $this = $(this);
+            var pageNo = parseInt($this.attr("page"));
+            if(pageNo === newPageNo){
+                // show
+                $this.show();
+            } else {
+                //hide
+                $this.hide();
+            }
+        });
+    }
+
+
+    function setPreviewImageSrc(prvSrc) {
+        $('.brochure_page_preview').attr('src', prvSrc);
+        // update new image attr to imageObj
+        initZoomCanvasImage();
+        //reinit canvas with new image
+        triggerZoomCanvasReInitEvent();
+    }
+
+    function triggerZoomCanvasResetEvent(){
+        $.event.trigger({
+            type: "resetCanvas",
+            message: " invalid source image",
+            time: new Date()
+        });
+    }
+
+    function triggerZoomCanvasReInitEvent(){
+        $.event.trigger({
+            type: "reInitCanvas",
+            message: " new source image",
+            time: new Date()
+        });
+    }
+
+    function getCurrPageRenditionName() {
+        return "page"+getCurrentPage()+'.jpg';
+    }
+
+    function getNextPageRenditionName() {
+        return "page"+(getCurrentPage()+1)+'.jpg';
+    }
+
+    function getPrevPageRenditionName() {
+        return "page"+(getCurrentPage()-1)+'.jpg';
+    }
+
+    function getPageRenditionName(pageNo) {
+        return "page"+pageNo+'.jpg';
+    }
+
+    function getCurrentPage() {
+        return currPage;
+    }
+
+    function setCurrentPage(pageNo) {
+        currPage = pageNo;
+        parseInt($(".current-page-text").val(pageNo));
+    }
+
+    function resetPageTextCurr(){
+        parseInt($(".current-page-text").val(getCurrentPage()));
+    }
+
+    function getTotalPagesNo(){
+        return parseInt($('.preview-controls').attr('total-pages'));
+    }
+
+    function enablePreview(){
+        $(".editbrochure-action-preview").prop("disabled", false);
+        $('button[data-foundation-wizard-control-action="submit"]').prop("disabled", false);
+    }
+
+    function disablePreview(){
+        $(".editbrochure-action-preview").prop("disabled", true);
+        $('button[data-foundation-wizard-control-action="submit"]').prop("disabled", true);
+    }
+
+
+
+    /*********************************************************** Editable Panel -  Editable Mappings Handling  *************************************************************/
+
+    /** Show Text editor toolbar when user click on a text editable field and initialize it from selected editable filed's text and styles*/
+    $(document).on('click','.brochure-editable-item-text', function(evt){
+        var elem = $('.text-preview');
+        var property = $(this).attr('id');
+        elem.val( $(EDITABLE_DETAIL_VALUE,$(this)).text());
+        var style = $('input[name="'+property+'__style"]').val();
+        applyStylesToToolbar(style);
+        elem.attr('property',property);
+
+    })
+
+
+    /** Handles text input from Text Editor and map to editable*/
+    function handleTextInput($editable,val){
+        // mark this as non-product mapped
+        $editable.attr('product-mapped',false);
+        _onTextDrop(val,val,$editable);
+        _onEditableMappingChange();
+    }
+
+    /** Handles text style input from Text Editor and map to editable*/
+    function handleTextStyle($editable,style){
+        var property = $editable.attr('id');
+        $('input[name="'+property+'__style"]',$editable).val(JSON.stringify(style));
+        _onEditableMappingChange();
+        syncUndoButton($editable);
+    }
+
+    /** Handles product mapping change */
+    function _onMappedProductChange(){
+        syncEditablesWithCurrentProduct();
+    }
+
+    /** Handles drop of an draggable field at an editor field */
+    function handleDrop($draggable,$droppable){
+        var imgPath,rendUrl;
+        if($draggable.hasClass('property-draggable')){
+            // handle product property in case of catalog
+
+            if(isEditableImage($droppable)){
+                if(isDrogablePropertyImage($draggable)){
+                    // image property dropped
+
+                    // update the mapped product with the product from which this mapping is done
+                    // it should be updated before editable fields for handling product's clean-up
+                    setCurrentMappedProduct(getSelectedProduct(),$droppable);
+
+                    imgPath = $draggable.attr('property-value');
+                    rendUrl = $('img', $draggable).attr('src');var mapping = $draggable.attr('property-name');
+                    _onImageDrop(imgPath,rendUrl,mapping,$droppable);
+
+                    // Sync preview with new mappings
+                    _onEditableMappingChange();
+                } else {
+                    // ignore it, draggable text can't be mapped to editable text
+                }
+            } else {
+                if(isDrogablePropertyImage($draggable)){
+                    // ignore it, draggable text can't be  mapped with editable image
+                } else {
+                    // text property dropped
+
+                    // update the mapped product with the product from which this mapping is done
+                    // it should be updated before editable fields for handling product's clean-up
+                    setCurrentMappedProduct(getSelectedProduct(),$droppable);
+
+                    var propertyText = $draggable.attr('property-value');
+                    var mapping = $draggable.attr('property-name');
+                    _onTextDrop(propertyText,mapping,$droppable);
+
+                    // Sync preview  with new mappings
+                    _onEditableMappingChange();
+                }
+            }
+        } else {
+            // handle image in case of templates
+            imgPath = $draggable.data('foundation-collection-item-id');
+            rendUrl = $('img',$draggable).attr('src');
+            _onImageDrop(imgPath,rendUrl,imgPath,$droppable);
+            // Sync preview  with new mappings
+            _onEditableMappingChange();
+        }
+
+    }
+
+    /**  Handles drop of an image at an image editable filed*/
+    function _onImageDrop(imagePath,rendUrl,mapping,$editable){
+        //set image name
+        var imgName = imagePath.substring(imagePath.lastIndexOf('/') + 1);
+        $(EDITABLE_DETAIL_VALUE,$editable).text(imgName);
+
+        // if there is already an img element just change the src URL to mapped image,
+        // otherwise replace placeholder with an img element
+        var rendImg = $('img', $editable);
+        if (!(rendImg.length)) {
+            $('#place-holder', $editable).remove();
+            rendImg = $('<img  class="coral-ref-image"/>');
+            $('.brochure-editable-item-content-image', $editable).prepend(rendImg);
+        }
+        rendImg.attr('src', rendUrl);
+
+        $editable.attr('mapping', mapping);
+        $editable.attr("src-resolved", true);
+        syncUndoButton($editable);
+    }
+
+    /**  Handles drop of a text at an text editable filed*/
+    function _onTextDrop(propertyText,mapping,$editable){
+        $(EDITABLE_DETAIL_VALUE,$editable).text(propertyText);
+        $editable.attr('mapping', mapping);
+        $editable.attr("src-resolved", true);
+        syncUndoButton($editable);
+    }
+
+
+    /** */
+    function _onEditableMappingChange(){
+        //enable preview button , if all images paths are resolved
+        checkAllFieldsMapped();
+        _previewDirty = true;
+        // if preview is not already loading and all fileds are mapped than show preview overlay
+        if(isLoadingPreview() == false && _allfieldsMapped == true) {
+            $('.editbrochure-preview').previewButtonOverlay('show');
+        }
+    }
+
+
+
+    /** Hide/Show undo button according to mapping change*/
+    function syncUndoButton($editable){
+        //enable undo button, if field changed
+
+        var property = $editable.attr('id');
+        if ($editable.attr('mapping') != $editable.attr('orig-mapping')
+            || $('input[name="'+property+'__style"]',$editable).attr('value') !=  $('input[name="'+property+'__style"]',$editable).attr('orig-value')
+            ||  getCurrentMappedProduct() != getOriginalMappedProduct($editable)) {
+            // show undo mapping button
+            $('.undo-mapping', $editable).css('display', 'block');
+        }
+    }
+
+    /** Sysnc the editable panel with currently mapped product and it should,be called after a product mapping change**/
+    function syncEditablesWithCurrentProduct(){
+        var prodMappedEditables = $(".editable[product-mapped='true']");
+        var isReset = false;
+        $.each(prodMappedEditables,function () {
+            var $editable = $(this);
+            //if current product is set to original , than reset to original values
+            if(getCurrentMappedProduct() == getOriginalMappedProduct($editable)){
+                resetMappingToOriginal($editable);
+            } else {
+                //replace all values with empty as this editable was mapped from previous product
+                removeMappings($editable);
+            }
+        })
+
+    }
+
+    /** This method removes any product property mapping from given editable field */
+    function removeMappings($editable){
+        $editable.attr('mapping',"");
+        _allfieldsMapped = false;
+        disablePreview();
+        if(isEditableImage($editable)) {
+            // image editable field
+            // replace image element with placeholder icon
+            if($('img', $editable).length){
+                $('img', $editable).remove();
+                var placeHolder = $('<coral-icon id="place-holder" class="editableText-icon" icon="image" size="L"  vertical-align="middle" style="margin-left:auto"></coral-icon>');
+                $(".brochure-editable-item-content-image", $editable).prepend(placeHolder);
+                $editable.attr('src-resolved', false);
+            }
+
+        }
+        $(EDITABLE_DETAIL_VALUE, $editable).text(Granite.I18n.get("NOT MAPPED"));
+    }
+
+    /**Reset editable mappings to original state*/
+    function resetMappingToOriginal($editable) {
+        var origMapping = $editable.attr('orig-mapping');
+        // hide undo button
+        $(this).hide();
+
+        if( getOriginalMappedProduct($editable)){
+            // Product change handler will handle editable resetting
+            setCurrentMappedProduct(getOriginalMappedProduct($editable),$editable);
+        } else {
+            $editable.attr('product-mapped',false);
+        }
+        //Reset mapping
+        $editable.attr('mapping',origMapping);
+
+        if(isEditableImage($editable)) {
+            // image editable field
+            var origSrc = $editable.attr('orig-src');
+            var origPath = $editable.attr('orig-img-path');
+            if (!isPathInCQ(origSrc)) {
+                // if image src doesn't point to an CQ asset, replace it with placeholder icon
+                $('img', $editable).remove();
+                var placeHolder = $('<coral-icon id="place-holder" class="editableText-icon" icon="image" size="L"  vertical-align="middle" style="margin-left:auto"></coral-icon>');
+                $(".brochure-editable-item-content-image", $editable).prepend(placeHolder);
+                $editable.attr('src-resolved', false);
+                disablePreview();
+                _allfieldsMapped = false;
+            } else {
+                //set original image src
+                $('img', $editable).attr('src',origSrc);
+            }
+
+            // set original image name
+            var imageName = origPath.substring(origPath.lastIndexOf('/') + 1) ;
+            $(EDITABLE_DETAIL_VALUE, $editable).text(imageName);
+
+        } else{
+            // Text editable field
+            // set original text
+            var origText = $(EDITABLE_DETAIL_VALUE, $editable).attr('orig-value');
+            $(EDITABLE_DETAIL_VALUE, $editable).text(origText);
+
+            //set original style
+             var property = $editable.attr('id');
+             var origStyle =  $('input[name="'+property+'__style"]',$editable).attr('orig-value');
+             $('input[name="'+property+'__style"]',$editable).val(origStyle);
+             //if text editor was opened, apply style to toolbar
+             if($('coral-tab.is-selected[icon="textEdit"]')){
+                 applyStylesToToolbar(origStyle);
+             }
+        }
+
+    }
+
+    function resetPreview(){
+        // since mapping is resetted, hide generate preview icon
+        $('.editbrochure-preview').previewButtonOverlay('hide');
+
+        // reset original preview , if a preview was generated after mapping
+        if(_allfieldsMapped && !_previewDirty) {
+            // if previewDirty ,preview was not generated after the mapping or text change so no need to generate new preview
+            generatePreview();
+        } else {
+            // show orig asset preview
+            _invalidPrevPages.push(getCurrentPage());
+            _onPageChange(getCurrentPage());
+        }
+    }
+
+    function isEditableImage($editable){
+        return $editable.hasClass('brochure-editable-item-image');
+    }
+
+    function isEditableText($drapable){
+        return $drapable.hasClass('brochure-editable-item-text');
+    }
+
+    /** To check if a product property an Image */
+    function isDrogablePropertyImage($editable){
+        return $editable.hasClass('product-property-image');
+    }
+
+
+    /** Checks if all image editables has a source image or they are mapped to a CQ image asset and enable/disable  and no text field is empty preview buttons accordingly*/
+    function checkAllFieldsMapped(){
+        if( (!$('.brochure-editable-item-image[src-resolved=false]').length) && (!$('.brochure-editable-item-text[mapping=""]').length)){
+            enablePreview()
+            _allfieldsMapped = true;
+        } else {
+            disablePreview();
+            _allfieldsMapped = false;
+        }
+    }
+
+
+    /** returns latest mapped product */
+    function getCurrentMappedProduct(){
+        return mappedProduct;
+    }
+
+    /** update mapped product from new mapping */
+    function setCurrentMappedProduct(product,$editable){
+        $editable.attr('product-mapped',true);
+        if(mappedProduct != product){
+            mappedProduct = product;
+            _onMappedProductChange();
+        }
+    }
+
+    /** returns original mapped product at catalog page */
+    function getOriginalProductReference() {
+        return productReference;
+    }
+
+    /** returns current selected product **/
+    function getSelectedProduct(){
+        return $(".product-properties-container").attr('product-path');
+    }
+
+    function setSelectedProduuct(path) {
+        $(".product-properties-container").attr('product-path',path);
+    }
+
+    function getOriginalMappedProduct($editable){
+         return $editable.attr('product-path');
+    }
+
+
+    /******************************************************************************** Rich Text Editor  Toolbar***********************************************************************/
+
+    var DEFAULT_FONT_SIZE = "16", DEFAULT_FONT_FAMILY = "adobe-clean", DEFAULT_FONT_COLOR = "rgb(0,0,0)";
+
+
+    $(document).on('input','.editor-tools textarea', function(evt){
+        var elem = $('.text-preview');
+        var property = elem.attr('property');
+        var $editable = $('.brochure-editable-item-text[id="'+property+'"]');
+        $(EDITABLE_DETAIL_VALUE,$editable).text(elem.val());
+        handleTextInput($editable,elem.val());
+    })
+
+    $(document).on('click','.brochure-editable-item-text',function(evt){
+        $('coral-tab coral-icon[icon="textEdit"]').parent().click();
+        $('.editable').removeAttr('isActive');
+        $(evt.target).closest('.editable').attr('isActive','');
+    });
+
+    $(document).on('click','.brochure-editable-item-image',function(evt){
+        $('coral-tab coral-icon[icon="selectContainer"]').parent().click();
+        $('coral-tab coral-icon[icon="asset"]').parent().click();
+        $('.editable').removeAttr('isActive');
+        $(evt.target).closest('.editable').attr('isActive','');
+    });
+
+    $(document).on('click','button[data-rte-command]', function(evt){
+        var elem = $('.text-preview');
+        var property = elem.attr('property');
+        var command = $(evt.target).closest('button[data-rte-command]').attr('data-rte-command')
+        var style = $('input[name="'+property+'__style"]').val()
+        var styleObj = style? JSON.parse(style) : {};
+        if (command =="bold"){
+            applyStyleToPreview(elem, styleObj,"font-weight",styleObj["font-weight"]== "bold" ? "normal" : "bold");
+        }
+        if (command =="italic"){
+            applyStyleToPreview(elem, styleObj,"font-style",styleObj["font-style"]== "italic" ? "normal" : "italic");
+        }
+        if (command =="underline"){
+            applyStyleToPreview(elem, styleObj,"text-decoration", styleObj["text-decoration"]== "underline" ? "none" : "underline");
+        }
+        handleTextStyle($('.editable[id="'+property+'"]'),styleObj);
+
+    })
+
+    $(document).on('change','coral-colorinput,coral-numberinput,coral-select',function(evt){
+        var elem = $('.text-preview');
+        var property = elem.attr('property');
+        var style = $('input[name="'+property+'__style"]').val()
+        var styleObj = style? JSON.parse(style) : {};
+        var command = $(evt.target).attr('data-rte-command');
+        if(command == 'font-size') {
+            applyStyleToPreview(elem, styleObj,"font-size", $(evt.target).val()+'px' );
+        }
+        if(command == 'font-family') {
+            applyStyleToPreview(elem, styleObj,"font-family",  $(evt.target).val());
+        }
+        if(command == 'color' && $(evt.target).val().length > 0) {
+            applyStyleToPreview(elem, styleObj,"color", $(evt.target).val() );
+        }
+        handleTextStyle($('.editable[id="'+property+'"]'),styleObj);
+    });
+
+
+    /** Applies the given style to toolbar*/
+    function  applyStylesToToolbar(style) {
+        var styleObj = JSON.parse(style ? style: "{}");
+        var $previewText = $('.text-preview');
+
+        if (styleObj['text-decoration']){
+            $previewText.css("text-decoration", styleObj['text-decoration']);
+        } else {
+            $previewText.css("text-decoration", "none")
+        }
+        if (styleObj['font-weight']){
+            $previewText.css("font-weight", styleObj['font-weight'])
+        } else {
+            $previewText.css("font-weight", "normal")
+        }
+        if (styleObj['font-style']){
+            $previewText.css("font-style", styleObj['font-style'])
+        } else {
+            $previewText.css("font-style", "normal");
+        }
+
+        if(styleObj['font-size']) {
+            var size = styleObj['font-size'];
+            $('.font-size-input')[0].value = size.substr(0,size.lastIndexOf("px")) ;
+             $previewText.css("font-size", styleObj['font-size']);
+        } else {
+            $('.font-size-input')[0].value = "";
+            $previewText.css("font-size",DEFAULT_FONT_SIZE+"px");
+        }
+
+        if(styleObj['color']) {
+            var color = "rgb("+styleObj['color']+")";
+            $('coral-colorinput')[0].value = color ;
+            $previewText.css("color", color);
+        } else {
+            $('coral-colorinput')[0].value = DEFAULT_FONT_COLOR;
+            $previewText.css("color",DEFAULT_FONT_COLOR);
+        }
+
+        if(styleObj['font-family']) {
+            var fontExist = false;
+            $('coral-selectlist-item','.font-select').each(function(){
+                if($(this).val() == styleObj['font-family']){
+                    fontExist = true;
+                    this.trigger('click');
+                }
+            });
+            if(!fontExist) {
+                $('coral-selectlist-item','.font-select')[0].trigger('click');
+            }
+        } else {
+            $('coral-selectlist-item','.font-select')[0].trigger('click');
+        }
+    }
+
+    function applyStyleToPreview($elem, styleObj, name, value){
+        styleObj[name] = value;
+        if(name === 'font-family' && value === 'Select Font'){
+            styleObj[name] = '';
+        }
+        if(name == 'color'){
+            styleObj[name] = parseColor(value);
+        }
+        if(name != 'font-family'){
+            // can't apply fonts to browser, licencing issues
+           $elem.css(name,value);
+        }
+
+    }
+
+
+
+    /***************************************************************************** Wizard Submit and Page Export  *******************************************************************************/
+
+    function onSubmit() {
+        clearPreviewAsset();
+        submit(assetPath, submitSuccessCallback);
+    }
+
+    function submitSuccessCallback(assetPath) {
+        showSuccessDialog(Granite.I18n.get("Document created successfully at {0}", [assetPath]));
+    }
+
+    function submit(path, callback, format) {
+        var wizard = $(".cq-print-admin-brochure-edit");
+        var formData = {};
+
+        $(".editable").each(function() {
+            var property = $(this).attr("id");
+            var value = $(this).attr('mapping');
+            if ($('input[name="'+property +'__style"]', $(this)).length) {
+                formData[property +'__style'] =$('input[name="'+property +'__style"]', $(this)).val();
+            }
+            formData["_charset_"] = "utf-8";
+            formData[property] = value;
+        });
+
+        //delete preview if we are submitting finally and not creating preview
+        if (path.indexOf('/content/dam') == 0 && previewAsset) {
+            $.ajax({
+                type: "POST",
+                url: Granite.HTTP.externalize(previewAsset),
+                data: {
+                    ':operation': 'delete'
+                }
+            })
+        }
+
+        if( getCurrentMappedProduct()){
+            // update product reference
+            formData["productReference"] = getCurrentMappedProduct();
+        }
+
+        $.ajax({
+            type: "POST",
+            url: Granite.HTTP.externalize(path + '/jcr:content/renditions/' + xmlNodeSubPath),
+            data: formData
+        }).done(function(html) {
+            // export jpg for preview
+            if (format) {
+                $.ajax({
+                    url: Granite.HTTP.externalize(path + ".idsprint.html"),
+                    type: "POST",
+                    contentType: wizard.prop("enctype"),
+                    data: {
+                        ':operation': 'export',
+                        "format": format
+                    }
+                }).done(function() {
+                    callback(path)
+                }).fail(previewFailed);
+            } else {
+                showExportDialog();
+            }
+
+        }).fail(function() {
+            showErrorDialog(Granite.I18n.get("Template Edit Failed"), Granite.I18n.get("Template Edit document"));
+        });
+    }
+
+    function exportRendtionsForFormats(exportDialog) {
+        var data = {
+            ':operation': 'export',
+            'addPagesRelation':''
+        };
+        var formats = [];
+        $('coral-checkbox').each(function() {
+            if (this.checked) {
+                formats.push(this.value);
+            }
+        })
+        formats.push('indd');
+        formats.push('jpg');
+        formats.push('xml');
+
+        data["format"] = formats;
+
+        var wizard = $(".cq-print-admin-brochure-edit");
+        $.ajax({
+            url: Granite.HTTP.externalize(assetPath + ".idsprint.html"),
+            type: "POST",
+            contentType: wizard.prop("enctype"),
+            data: data
+        }).done(function() {
+            exportDialog.hide();
+            if(lastPage && lastPage.indexOf("assetdetails.html") > -1){
+                checkStatusBeforeBack();
+            } else{
+                goBack();
+            }
+        }).fail(function() {
+            exportDialog.hide();
+            exportFailed();
+        });
+    }
+
+
+    function checkStatusBeforeBack(){
+        var renditionName = "cq5dam.web.1280.1280.jpeg";
+        var url = assetPath + "/jcr:content/renditions/" + renditionName + "/jcr:content.json";
+        Dam.Util.detectChange(url, 'jcr:lastModified', getLastModified(), 2000, 3, true,goBack);
+    }
+
+    function getLastModified() {
+        var editable = $(".brochure-editables-block");
+        if(editable.length){
+            return editable.attr("data-last-modified");
+        }
+        return -1;
+    }
+
+    function goBack(){
+          window.location =  $( 'a[data-foundation-wizard-control-action="cancel"]').attr('href');
+    }
+
+
+
+    function checkExportStatus(assetPath,onSuccess,onFailed){
+        //check for export complete
+        $.ajax({
+            url: Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/idsprint/catalogs/exportstatus.html' + assetPath),
+            cache:false
+        }).done(function(data, status) {
+            if (data.indexOf("finished") == 0) {
+                onSuccess();
+            } else if (data.indexOf("error") == 0) {
+                onFailed();
+            } else if (data.indexOf("pending") == 0) {
+                setTimeout(function() {
+                    checkExportStatus(assetPath,onSuccess,onFailed)
+                }, 2000);
+            }
+        }).fail(onFailed);
+
+    }
+
+    function _onExportJobFailed(){
+        $('.editable-wait').remove();
+        showErrorDialog(Granite.I18n.get("Template Processing Failed"), Granite.I18n.get("Indesign server failed to process template"));
+    }
+
+    function _onExportJobDone(){
+        var url = Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/idsprint/templates/edittemplate/jcr:content/body/items/form/items/wizard/items/editor/items/edit-content.html'+assetPath);
+        $.ajax({
+            type: "GET",
+            url: Granite.HTTP.externalize(url)
+        }).done(function(result) {
+            var parser = $(window).adaptTo("foundation-util-htmlparser");
+            parser.parse(result).then(function(fragment) {
+                var el = $(fragment).children();
+                $('.editable-wait').remove();
+                $('.brochure-edit-content').replaceWith(el);
+                $(".processing",".editbrochure-preview").remove();
+                $(".processing",".editbrochure-editable-container").remove();
+                $(document).trigger("foundation-contentloaded");
+            });
+        }).fail(function() {
+            $('.editable-wait').remove();
+            showErrorDialog(Granite.I18n.get("Template Processing Failed"), Granite.I18n.get("Indesign server failed to process template"));
+        });
+    }
+
+
+    function exportFailed() {
+        showErrorDialog(Granite.I18n.get("Export Failed"), Granite.I18n.get("Unable to export"));
+    }
+
+
+
+
+    /********************************************************************************  Dialogs  ***********************************************************************************/
+
+    function showExportDialog() {
+        var exportDialog = new Coral.Dialog().set({
+            header: {
+                innerHTML: Granite.I18n.get('Do you want to Export?')
+            },
+            variant: 'default',
+            backdrop: Coral.Dialog.backdrop.STATIC
+        });
+
+        $(exportDialog).attr('id', 'exportDialog');
+
+        //Continue Button
+        var continueButton = new Coral.Button().set({
+            variant: 'primary',
+            label: {
+                innerText: Granite.I18n.get('Continue')
+            }
+        });
+
+        //Cancel Button
+        var cancelButton = new Coral.Button().set({
+            variant: 'default',
+            label: {
+                innerText: Granite.I18n.get('Cancel')
+            }
+
+        });
+
+        exportDialog.footer.appendChild(cancelButton);
+        exportDialog.footer.appendChild(continueButton);
+
+        continueButton.on('click', function() {
+            exportRendtionsForFormats(exportDialog);
+        });
+
+        cancelButton.on('click', function() {
+            exportDialog.hide();
+        });
+
+        var message = document.createElement('div');
+        message.setAttribute('style', 'margin-bottom:0.5rem;');
+        var msgtext = $('<p>' + Granite.I18n.get("Before you exit which extension do you want exported<br><br>of the {0} template?", brochureName) + '</p>');
+        message.appendChild(msgtext[0]);
+        var options = document.createElement('div');
+
+        var inddCheckbox = new Coral.Checkbox().set({
+            label: {
+                innerHTML: "InDesign (.INDD)"
+            },
+            value: "pdf",
+            checked:true,
+            disabled:true
+        });
+
+
+        var pdfCheckbox = new Coral.Checkbox().set({
+            label: {
+                innerHTML: "Acrobat (.PDF)"
+            },
+            value: "pdf"
+        });
+
+        options.appendChild(inddCheckbox);
+        options.appendChild(pdfCheckbox);
+
+        exportDialog.content.appendChild(message);
+        exportDialog.content.appendChild(options);
+
+        document.body.appendChild(exportDialog);
+        exportDialog.show();
+    }
+
+
+    function showSuccessDialog(msg) {
+        var successDialog = new Coral.Dialog().set({
+            header: {
+                innerHTML: Granite.I18n.get('Success')
+            },
+            content: {
+                innerHTML: '<p>' + msg + '</p>'
+            },
+            variant: 'success',
+            backdrop: Coral.Dialog.backdrop.STATIC
+        });
+
+        $(successDialog).attr('id', 'successDialog');
+
+        //Done Button
+        var doneButton = new Coral.Button().set({
+            variant: 'primary',
+            label: {
+                innerText: Granite.I18n.get('Done')
+            }
+        });
+        successDialog.footer.appendChild(doneButton);
+
+        doneButton.on('click', function() {
+            successDialog.hide();
+        });
+
+        document.body.appendChild(successDialog);
+        successDialog.show();
+    }
+
+
+    function showErrorDialog(modalTitle, modalContent) {
+        var errorDialog = new Coral.Dialog().set({
+            header: {
+                innerHTML: Granite.I18n.get(modalTitle)
+            },
+            content: {
+                innerHTML: '<p>' + Granite.I18n.get(modalContent) + '</p>'
+            },
+            footer: {
+                innerHTML: '<button is="coral-button" variant="primary" coral-close>' + Granite.I18n.get("Ok") + '</button>'
+            },
+            variant: 'error'
+        });
+
+        document.body.appendChild(errorDialog);
+        errorDialog.show();
+    }
+
+
+    function isLoadingPreview(){
+        return $('.overlay-mask').is(":visible");
+    }
+
+    $.fn.waitOverlay = function(action, appendEl) {
+        var overlay = this.find('.overlay-mask');
+        // Creates required mask
+
+        if (!overlay.length && (!action || action === 'show')) {
+            overlay = $('<div class="overlay-mask"><coral-wait centered="" size="L"></coral-wait></div>');
+            overlay.appendTo(this);
+            overlay.append(appendEl);
+        }
+
+        // Act based on params
+        var mask = $('.brochure-preview-wrapper');
+        if (!action || action === 'show') {
+            this.previewButtonOverlay('hide');
+            mask.fadeTo(0, 0.2);
+            overlay.show();
+        } else if (action === 'hide') {
+            mask.fadeTo(0, 1);
+            overlay.hide();
+        }
+        return this;
+    };
+
+    $.fn.previewButtonOverlay = function(action) {
+        var overlay = this.find('.preview-button-overlay');
+        var icon = $('<coral-icon class=\"preview-overlay-button-icon\" icon=\"viewOn\" size=\"L\"></coral-icon>');
+        var message = Granite.I18n.get("Click to view changes");
+        var previewMsgDiv = $('<div class=\"overlay-button-text\">' + message + '</div>');
+        var me = this;
+        var mask = $('.brochure-preview-wrapper');
+        if (!overlay.length && (!action || action === 'show')) {
+            overlay = $('<div class="preview-button-overlay"></div>');
+            var contentWrapper = $('<div class="preview-overlay-wrapper"></div>');
+            overlay.appendTo(this);
+            overlay.append(contentWrapper);
+            contentWrapper.append(icon);
+            contentWrapper.append(previewMsgDiv);
+
+            contentWrapper.on('click',function(event){
+                generatePreview();
+                event.stopPropagation();
+            });
+            overlay.on('click',function(){
+                me.previewButtonOverlay('hide');
+            });
+        }
+
+        // Act based on params
+
+        if (!action || action === 'show') {
+            mask.fadeTo(0, 0.2);
+            overlay.show();
+        } else if (action === 'hide') {
+            mask.fadeTo(0, 1);
+            overlay.hide();
+        }
+        return this;
+    };
+
+
+
+
+/****************************************************************************** Utilities *************************************************************************************/
+
+    function isPathInCQ(path) {
+        if(path) {
+            return path.startsWith('/content/dam');
+        }
+        return false;
+    }
+
+
+    function parseColor(color) {
+        if(color.startsWith('#')) {
+            return hexToRgb(color.substr(1,color.length));
+        }
+        var color = color.substring(4,color.length -1);
+        var colors = color.split(',');
+        return colors.toString();
+    }
+
+    function hexToRgb(hex) {
+        var bigint = parseInt(hex, 16);
+        var r = (bigint >> 16) & 255;
+        var g = (bigint >> 8) & 255;
+        var b = bigint & 255;
+
+        return r + "," + g + "," + b;
+    }
+
+
+})(document, Granite.$);
+

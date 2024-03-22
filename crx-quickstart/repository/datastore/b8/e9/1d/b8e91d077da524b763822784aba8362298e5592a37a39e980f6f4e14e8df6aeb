@@ -1,0 +1,666 @@
+/*
+ * ***********************************************************************
+ * ADOBE CONFIDENTIAL
+ * ___________________
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ * ***********************************************************************
+ */
+
+(function (window, document, Granite, $) {
+
+    'use strict';
+
+    var inputTemplate = $('<input type="hidden" name="servicename">');
+
+    /**
+     * Returns the modal dialog. If the dialog is not yet in the DOM it will be
+     * appended.
+     * 
+     * @returns
+     */
+    function getDialog() {
+        var dialog = $('#cloudservicesoptin-progress');
+        if (dialog.length === 0) {
+            var dialog = new Coral.Dialog().set({
+                id: 'cloudservicesoptin-progress',
+                variant: 'info',
+                header: {
+                  innerHTML: Granite.I18n.get('Setup')
+                },
+                content: {
+                  innerHTML: '<p>' + Granite.I18n.get('Setting up Analytics and Targeting for your sites.') + '</p>'
+                }
+            });
+            document.body.appendChild(dialog);
+            return dialog;
+        }
+        return dialog[0];
+    }
+
+    /**
+     * Show a modal progress dialog.
+     * 
+     * @param heading
+     * @param content
+     */
+    function showProgress(heading, content) {
+        var dialog = getDialog();
+        dialog.variant = 'info';
+        dialog.header.innerHTML = heading;
+        $(dialog.content).html('<coral-wait></coral-wait><span>' + content + '</span>');
+        $(dialog.footer).empty();
+        dialog.center().show();
+    }
+
+    /**
+     * Submit the form.
+     * 
+     * @param form Form HTMLElement
+     */
+    function submit(form) {
+        showProgress(
+            Granite.I18n.get('Setup'),
+            Granite.I18n.get('Setting up Analytics and Targeting for your sites.')
+        );
+
+        var params = location.search.slice(1).split('&').reduce(function(a,b){
+            b = b.split('=').filter(function(part){return !!part;});
+            if (b.length > 0){
+                a[b[0]] = decodeURIComponent(b[1]);
+            }
+            return a;
+        },{});
+
+        var taskId = params.item;
+
+        var d1 = provisionServices(form);
+
+        $.when(d1)
+         .then(function(data,status,xhr){
+             var msg = Granite.I18n.get('You are being redirected back to the initial screen now.');
+             if (taskId !== undefined) {
+                 // task deletion might fail but we don't care
+                 var d2 = completeTask(taskId);
+                 $.when(d2)
+                  .always(function(){
+                      handleSuccess(form, msg);
+                  });
+             } else {
+                 handleSuccess(form, msg);
+             }
+         },function(xhr,status,error){
+             var response = xhr.responseText !== '' ? $('#Message', xhr.responseText).text() : error;
+             var msg = Granite.I18n.get('Unable to setup Analytics and Targeting:<br/>{0}', [response]);
+             handleError(form, msg, true);
+         });
+    }
+
+    /**
+     * Provisions the selected services.
+     * 
+     * @param form Form to submit
+     * @returns $.Deferred
+     */
+    function provisionServices(form) {
+        var paths = '',
+            selections = $('#targets-step .foundation-selections-item');
+        
+        for (var i = 0; i < selections.length; i++) {
+            var path = $(selections[i]).data('foundation-collection-item-id');
+            if (path) {
+                paths += '&path=' + encodeURIComponent(path);
+            }
+        }
+        
+        var payload = form.serialize() + paths
+            + '&automaticProvisioning=' + $('input[name="mac.provisioning.automatic"]').val();
+        
+        return $.ajax({
+                    type: form.prop('method'),
+                    url: form.prop('action'),
+                    contentType: form.prop('enctype'),
+                    data: payload
+                });
+    }
+
+    /**
+     * Completes the task with specified {@code taskId}.
+     * 
+     * @param taskId Task id to complete
+     * @returns $.Deferred
+     */
+    function completeTask(taskId) {
+        var TASK_MGR_UPDATE_URL = '/libs/granite/taskmanager/updatetask';
+        return $.ajax({
+                    type: 'POST',
+                    contentType : 'application/json',
+                    processData: false,
+                    url: Granite.HTTP.externalize(TASK_MGR_UPDATE_URL + '?_charset_=utf-8&taskId=' + encodeURIComponent(taskId)),
+                    data: JSON.stringify({
+                        'status': 'COMPLETE'
+                    })
+                });
+    }
+
+    /**
+     * Handles success and show a modal success dialog.
+     * 
+     * @param form
+     * @param message
+     */
+    function handleSuccess(form, message) {
+        var dialog = getDialog();
+        dialog.variant = 'success';
+        dialog.closable = 'on';
+        dialog.header.innerHTML = Granite.I18n.get('Success');
+        $(dialog.content).html('<p>' + message + '</p>');
+        $(dialog.footer).html('<button is="coral-button" variant="primary" coral-close>' + Granite.I18n.get('Ok') + '</button>');
+        dialog.on('coral-overlay:close', function (event) {
+            redirect(form);
+        });
+        dialog.center().show();
+    }
+
+    /**
+     * Handles error and shows a modal error dialog.
+     * 
+     * @param form
+     * @param message
+     * @param isRedirect
+     */
+    function handleError(form, message, isRedirect) {
+        if (!message || typeof message !== 'string') {
+            message = '';
+        }
+        var array=message.split("endpoint/");
+        message=array[0]+"endpoint/"+encodeURI(array[1]);
+        var dialog = getDialog();
+        dialog.variant = 'error';
+        dialog.closable = 'on';
+        dialog.header.innerHTML = Granite.I18n.get("Error");
+        $(dialog.content).text(message);
+        $(dialog.footer).html('<button is="coral-button" variant="primary" coral-close>' + Granite.I18n.get("Ok") + '</button>');
+        dialog.on('coral-overlay:close', function (event) {
+            if (isRedirect) {
+                redirect(form);
+            }
+        });
+        dialog.center().show(); 
+    }
+
+    /**
+     * Redirect to the value of the input if an input field with name :redirect
+     * is present in the form.
+     * 
+     * @param form
+     */
+    function redirect(form) {
+        var redirectTo = form.find('[name=":redirect"]').val();
+        if (redirectTo) {
+            window.location = Granite.HTTP.externalize(redirectTo);
+        } else {
+            var url = window.location.href.replace(/(http:\/\/.*?)\/.*/gi,'$1');
+            window.location = Granite.HTTP.externalize(url);
+        }
+    }
+
+    /**
+     * Triggers authentication of the Test&Target service.
+     * 
+     * @param done
+     */
+    function authenticateTestAndTarget(done) {
+        var form = $('.cloudservicesoptin-form');
+        var tnt = $('article[data-servicename="target"]');
+        
+        showProgress(
+            Granite.I18n.get('Authentication'),
+            Granite.I18n.get('Authenticating...')
+        );
+        
+        $.ajax({
+            type: 'POST',
+            url: '/libs/cq/analytics/testandtarget/command',
+            data: {
+                'cmd':'targetProvisioningConnect',
+                'clientcode': $('input[name="target.clientcode"]',tnt).val(),
+                'email': $('input[name="target.email"]',tnt).val(),
+                'password': $('input[name="target.password"]',tnt).val(),
+                'imsConfigId': $('input[name="target.imsConfigId"]',tnt).val(),
+                'automaticProvisioning': $('input[name="mac.provisioning.automatic"]', tnt).val()
+            }
+        }).done(function(data, status, request) {
+            var response = JSON.parse(request.responseText);
+            if (!response.error) {
+                getDialog().remove();
+                done.call(this, data);
+            } else {
+                var msg = response.error;
+                msg = msg.replace(/Please/, '<br>Please');
+                if (msg.indexOf('only of parameters') > -1
+                        || msg.indexOf('No environment found for client') > -1) {
+                    msg = Granite.I18n.get('Provided credentials are not valid.');
+                }
+                handleError(form, msg);
+            }
+        }).fail(function(request, status, error) {
+            if (status === 'error') {
+                handleError(form, Granite.I18n.get('Error "{0}"', error));
+            }
+        });
+    }
+
+    /**
+     * Triggers authentication of the SiteCatalyst service.
+     * 
+     * @param done
+     */
+    function authenticateSiteCatalyst(done) {
+        var form = $('.cloudservicesoptin-form');
+        var sc = $('article[data-servicename="analytics"]');
+        var server = $('coral-select[name="analytics.server"]', sc);
+        var servers = server.length > 0 ? server[0].items.getAll() : [];
+
+        showProgress(
+            Granite.I18n.get('Authentication'),
+            Granite.I18n.get('Authenticating...')
+        );
+
+        getEndpoint(servers, function(data){
+
+            var getReportSuitesAndTrackingServers = function(data) {
+                getReportSuites(function(data) {
+                    var json = {};
+                    json = JSON.parse(data.response);
+                    if (json.report_suites) {
+                        setReportSuiteOptions(json.report_suites, done);
+                    }
+                });
+            };
+
+            getReportSuitesAndTrackingServers(data);
+        });
+    }
+
+    /**
+     * Marks the service as selected
+     * 
+     * @param button Button element
+     */
+    function selectService(button) {
+        var article = button.parent('article');
+        var isSelected = article.hasClass('selected');
+        toggleService(button, isSelected);
+        toggleWizardNext();
+    }
+
+    /**
+     * Toggles the 'selected' state of the specified {@code btn} element
+     * 
+     * @param btn Button element
+     */
+    function toggleService(btn, selected) {
+        var lbl = btn.data('label');
+        var lblSel = btn.data('label-selected');
+        var $article = btn.parent('article');
+        var value = $article.data('servicename');
+        if (selected) {
+            $article.removeClass('selected');
+            $('input[name="servicename"]',$article).remove();
+            btn[0].icon = '';
+            btn[0].label.innerHTML = lbl;
+        } else {
+            $article.addClass('selected');
+            var input = inputTemplate.clone();
+            input.val(value);
+            $article.append(input);
+            btn[0].icon = 'checkCircle';
+            btn[0].label.innerHTML = lblSel;
+        }
+    }
+
+    /**
+     * Toggles the wizard next button. If no service is selected
+     * it will be disabled, otherwise enabled.
+     */
+    function toggleWizardNext() {
+        var $wizardNext = $('.services-next');
+        if ($('.cloudservicesoptin-wizard .service.selected').length > 0) {
+            $wizardNext.prop('disabled', false);
+        } else {
+            $wizardNext.prop('disabled', true);
+        }
+    }
+
+    /**
+     * Toggles the wizard done button. If no page is selected
+     * it will be disabled, otherwise enabled.
+     */
+    function toggleWizardDone() {
+        var $wizardNext = $('.targets-next');
+        var $selectedPages = $('.foundation-selections-item');
+
+        if ($selectedPages.length > 0) {
+            $wizardNext.prop('disabled', false);
+        } else {
+            $wizardNext.prop('disabled', true);
+        }
+    }
+
+    /**
+     * Sets the report suite dropdown values
+     * 
+     * @param options Options object
+     * @param done Done callback
+     */
+    function setReportSuiteOptions(options, done) {
+        var select = $('coral-select[name="analytics.reportsuite"]').get(0);
+        if (select !== undefined) {
+            if (select.items.length == 0) {
+                $.each(options, function(i, obj) {
+                    select.items.add({
+                        'content':{
+                            'innerHTML':obj.site_title
+                         }, 
+                         'value':obj.rsid
+                    });
+                });
+            }
+            
+            // enable; value is not sent otherwise
+            $('coral-select[name="analytics.reportsuite"]').get(0).disabled = false;
+            $('coral-select[name="analytics.reportsuite"]').get(0).invalid = false;
+            
+            // if autoprovisioning or only 1 option; select & proceed
+            if (isAutoProvisioning() || options.length === 1) {
+                select.value = options[0].rsid;
+                getTrackingServers(function(data){
+                    var json = {};
+                    json =JSON.parse(data.response);
+                    $('input[name="analytics.namespace"]').val(json.namespace);
+                    $('input[name="analytics.trackingserver"]').val(json.tracking_server);
+                    $('input[name="analytics.trackingserversecure"]').val(json.tracking_server);
+                    done.call(this,data);
+                });
+            // if multiple options; let user choose report suite manually
+            } else {
+                $('coral-select[name="analytics.reportsuite"]').get(0).invalid = true;
+                getDialog().remove();
+            }
+        }
+    }
+
+    /**
+     * Hides the input fields if automatic provisioning detected
+     */
+    function checkAutoProvisioning() {
+        if (isAutoProvisioning()) {
+            $('.coral-Form-fieldwrapper').hide();
+        }
+    }
+
+    /**
+     * Checks if the input field with name 'mac.provisioning.automatic' is set to true.
+     * 
+     * @return true or false
+     */
+    function isAutoProvisioning() {
+        var automaticAccountProvisioning = $('[name="mac.provisioning.automatic"]').val();
+        return (automaticAccountProvisioning == 'true');
+    }
+
+    /**
+     * Fetches the Data Center endpoint for the company.
+     * 
+     * @param servers {Array} CUI.Select.Option's of servers
+     * @param done {Function} Done callback
+     * @param fail {Function} Fail callback
+     */
+    function getEndpoint(servers, done, fail) {
+        var form = $('.cloudservicesoptin-form');
+        var dc = servers.splice(0,1)[0];
+        var sc = $('article[data-servicename="analytics"]');
+        var company = $('input[name="analytics.company"]', sc).val();
+        var server = $('coral-select[name="analytics.server"]', sc)[0];
+        querySC('Company.GetEndpoint', {'company': company}, 
+            function(data, status, request){
+                if (!data.error) {
+                    var endpoint = data.response.replace(/[\"\\]/gi, '');
+                    server.value = endpoint;
+                    done.call(this, data, status, request);
+                } else if (data.error === 'not online') {
+                    handleError(form, Granite.I18n.get('Not online. Please check your Internet connection.'));
+                } else if (servers.length == 0) {
+                    var msg = data.error;
+                    if (msg.indexOf('Invalid company') > -1
+                            || msg.indexOf('Unable to validate authentication') > -1) {
+                        msg = Granite.I18n.get('Provided credentials are not valid.');
+                    }
+                    handleError(form, msg);
+                } else {
+                    //try next server?
+                    getEndpoint(servers, done, fail);
+                }
+            }, 
+            function(request, status, error){
+                if (fail) {
+                    fail.call(this, request, status, error);
+                } else {
+                    if (status === 'error') {
+                        handleError(form, Granite.I18n.get('Error "{0}"', error));
+                    }
+                }
+            }
+        );
+    }
+
+    /**
+     * Fetches the report suites for the company.
+     * 
+     * @param done {Function} Done callback
+     */
+    function getReportSuites(done) {
+        querySC('Company.GetReportSuites', {'rs_types':['standard']}, done);
+    }
+
+    /**
+     * Fetches the tracking servers for the report suite.
+     * 
+     * @param done {Function} Done callback
+     */
+    function getTrackingServers(done) {
+        var sc = $('article[data-servicename="analytics"]');
+        var reportSuite = $('coral-select[name="analytics.reportsuite"]', sc).get(0).value;
+        querySC('Company.GetTrackingServer', {'rsid': reportSuite}, done);
+    }
+
+    /**
+     * Queries the SiteCatalyst servlet with the provided {@code method} and {@code data}.
+     * 
+     * @param method
+     * @param data
+     * @param done
+     * @param fail
+     */
+    function querySC(method, data, done, fail) {
+        var form = $('.cloudservicesoptin-form');
+        var sc = $('article[data-servicename="analytics"]');
+        
+        var payload = {};
+        try {
+            payload = JSON.stringify(data)
+        } catch (e) {
+            handleError(form, Granite.I18n.get('Unable to serialize data.'));
+        }
+
+        var sendData = {
+            'method': method,
+            'server': $('[name="analytics.server"]',sc).val(),
+            'company': $('input[name="analytics.company"]',sc).val(),
+            'username': $('input[name="analytics.username"]',sc).val(),
+            'secret': $('input[name="analytics.secret"]',sc).val(),
+            'automaticProvisioning': $('input[name="mac.provisioning.automatic"]', sc).val(),
+            'data': payload
+        };
+
+        $.ajax({
+            type: 'POST',
+            url: '/libs/cq/cloudservicesprovisioning/content/authenticate/sitecatalyst.json',
+            data: sendData
+        }).done(function(data, status, request) {
+            if (!data.error) {
+                done.call(this, data, status, request);
+            } else if (data.error === 'not online') {
+                handleError(form, Granite.I18n.get('Not online. Please check your Internet connection.'));
+            } else {
+                var msg = data.error;
+                if (msg.indexOf('Invalid company ') > -1
+                        || msg.indexOf('Unable to validate authentication') > -1) {
+                    msg = Granite.I18n.get('Provided credentials are not valid.');
+                }
+                handleError(form, msg);
+            }
+        }).fail(function(request, status, error) {
+            if (fail) {
+                fail.call(this, request, status, error);
+            } else {
+                if (status === 'error') {
+                    handleError(form, Granite.I18n.get('Error "{0}"', error));
+                }
+            }
+        });
+    }
+
+    /**
+     * Handler for the Test&Target button
+     */
+    $(document).on('click', '#service-step .service-target button.add', function(e){
+        var button = $(this);
+        if (!button.parent('article').hasClass('selected')) {
+            authenticateTestAndTarget(function(data) {
+                selectService(button);
+            });
+        } else {
+            selectService(button);
+        }
+    });
+
+    /**
+     * Handler for SiteCatalyst report suite selection
+     */
+    $(document).on('change', '#service-step .service-analytics coral-select[name="analytics.reportsuite"]', function(e) {
+        $(this).get(0).invalid = false;
+        getTrackingServers(function(data){
+            var json = {};
+            json =JSON.parse(data.response);
+            $('input[name="analytics.namespace"]').val(json.namespace);
+            $('input[name="analytics.trackingserver"]').val(json.tracking_server);
+            $('input[name="analytics.trackingserversecure"]').val(json.tracking_server);
+            
+            // select service
+            var button = $('#service-step .service-analytics button.add');
+            selectService(button);
+        });
+    });
+
+    /**
+     * Handler for Target authentication selection
+     */
+    $(document).on('change', '#service-step .service-target coral-select[name="target.authentication"]', function(e) {
+        var isIms = e.currentTarget.value === "ims";
+        $('.usercredentials').get(0).hidden = isIms;
+        $('[name="target.imsConfigId"]').get(0).parentNode.hidden = !isIms;
+    });
+
+    /**
+     * Handler for the SiteCatalyst button
+     */
+    $(document).on('click', '#service-step .service-analytics button.add', function(e){
+        var button = $(this);
+        if (!button.parent('article').hasClass('selected')) {
+            authenticateSiteCatalyst(function(data){
+                selectService(button);
+                getDialog().remove();
+            });
+        } else {
+            selectService(button);
+            $('coral-select[name="analytics.reportsuite"]').get(0).items.clear();
+            $('coral-select[name="analytics.reportsuite"] span[handle="label"]').empty();
+        }
+    });
+
+    /**
+     * Handler for form invalidation
+     */
+    $(document).on('keypress', '#service-step .service.selected', function(e){
+        var button = $(this).find('button.add');
+        selectService(button);
+    });
+
+    /**
+     * Handler for card selection change
+     */
+    $(document).on('foundation-selections-change', function(e) {
+        var $collection = $(e.target);
+        var $selectedItems = $collection.find('.foundation-selections-item');
+        var nextEnabled = $selectedItems.length > 0;
+        // toggle the wizard's next button
+        $('.foundation-wizard').adaptTo('foundation-wizard').toggleNext(nextEnabled);
+    });
+
+    /**
+     * Handler for form submission
+     */
+    $(document).on('submit.cloudservicesoptin-form', function(e) {
+        var form = $('.cloudservicesoptin-form');
+        e.preventDefault();
+        e.stopPropagation();
+        submit(form);
+    });
+
+    /**
+     * Initial setup once page is ready
+     */
+    $(document).ready(function(e) {
+        checkAutoProvisioning();
+        
+        // Handler for wizard-step change
+        var wizard = $('.cloudservicesoptin-wizard', e.target);
+        // make Coral.StepList useful
+        $('coral-steplist coral-step:nth-child(1)', wizard).addClass('services-step')
+        $('coral-steplist coral-step:nth-child(2)', wizard).addClass('targets-step')
+        wizard.on('coral-steplist:change', function (e) {
+            if ($(event.detail.selection).hasClass('targets-step')) {
+                // submit the wizard if no sites are available
+                if ($('#targets-step').find('.foundation-collection-item').length <= 0) {
+                    submit(wizard);
+                }
+            }
+        });
+        
+        // disable reportsuite select
+        if (!isAutoProvisioning()) {
+            Coral.commons.ready(function(){
+                $('coral-select[name="analytics.reportsuite"]').get(0).disabled = true;
+            });
+        }
+        
+        // disable if configured already
+        $('input, button', $('#service-step .service[data-disabled="true"]')).attr('disabled', 'disabled');
+        $('coral-select', $('#service-step .service[data-disabled="true"]')).each(function(){
+            $(this)[0].disabled = true;
+        });
+    });
+
+})(window, document, Granite, Granite.$);

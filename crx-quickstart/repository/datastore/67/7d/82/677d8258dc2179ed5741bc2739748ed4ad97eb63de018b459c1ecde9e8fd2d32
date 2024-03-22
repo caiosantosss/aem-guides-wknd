@@ -1,0 +1,440 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2015 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+/* eslint no-useless-concat:0 */
+(function(document, $) {
+    "use strict";
+
+    var form = "#adhocassetshareform";
+
+    var sharejobname = "#sharejobname";
+
+    var expirationDate = "#expirationDate > input";
+
+    var submit = "#adhocassetshareform-submit";
+
+    var userPickerEl = "#adhocassetshare-userpicker";
+    var userPickerErrorToolTip;
+
+    $(document).on("click", submit, function(e) {
+        e.preventDefault();
+
+        var $form = $("#adhocassetshareform");
+
+
+        var contentPath = getContentPath();
+        var data = $form.serialize();
+
+        $(".foundation-selections-item").each(function() {
+            data += "&path=" + (encodeURIComponent($(this).data("foundation-collection-item-id")));
+        });
+
+        if ($(".foundation-selections-item").length === 0) {
+            data += "&path=" + (encodeURIComponent($($(".foundation-content-path")).data("foundation-content-path")));
+        }
+
+        var shareLinkValue = $("#sharelink").val();
+        var shareLinkToken = shareLinkValue.substr(shareLinkValue.indexOf("?sh=") + 4);
+        if (shareLinkToken.length > 0) {
+            data += "&shareLinkToken=" + shareLinkToken;
+        }
+        if ($form.find("#adhocassetshare-allowOriginal").prop("checked")) {
+            data += "&allowOriginal=true";
+        } else {
+            data += "&allowOriginal=false";
+        }
+
+        // renditions checkbox is hidden behind FT_CQ-4319692.  check for existence first.
+        var allowRenditions = $(form).find("#adhocassetshare-allowRenditions");
+        if ($(allowRenditions).length > 0) {
+            if ($(allowRenditions).prop("checked")) {
+                data += "&allowRenditions=true";
+            } else {
+                data += "&allowRenditions=false";
+            }
+        }
+
+        var numAssetsShared = $(".foundation-selections-item").length;
+        $.ajax({
+            type: "POST",
+            url: Granite.HTTP.externalize(contentPath + ".adhocassetshare.html"),
+            contentType: $form.prop("enctype"),
+            data: data,
+            cache: false
+        }).done(function(data, textStatus, jqXHR) {
+            $("#adhocassetshare-dialog").remove();
+            var message = "";
+            if (numAssetsShared > 1) {
+                message = Granite.I18n.get("Assets have been shared.");
+            } else {
+                message = Granite.I18n.get("Asset has been shared.");
+            }
+
+            var successModal = new Coral.Dialog().set({
+                id: "linkshare-success-dialog",
+                variant: "success",
+                closable: "on",
+                header: {
+                    innerHTML: Granite.I18n.get("Share Link")
+                },
+                content: {
+                    innerHTML: message
+                },
+                footer: {
+                    innerHTML: '<button is="coral-button" class="closeExport" variant="default" coral-close>' +
+                               Granite.I18n.get("Close") + "</button>"
+                }
+            });
+            $("body").append(successModal);
+            successModal.show();
+        }).fail(function(jqXHR) {
+            $("#adhocassetshare-dialog").remove();
+
+            var errorDescription = $(jqXHR.responseText).find(".foundation-form-response-description");
+            var errorDescriptionText;
+
+            if (errorDescription.length) {
+                errorDescriptionText = errorDescription.next().text();
+            } else {
+                errorDescriptionText = Granite.I18n.get("An error occurred in link sharing");
+            }
+
+            // show the error
+            var errorModal = new Coral.Dialog().set({
+                id: "linkshare-error-dialog",
+                variant: "error",
+                closable: "on",
+                header: {
+                    innerHTML: Granite.I18n.get("Share Link")
+                },
+                content: {
+                    innerHTML: errorDescriptionText
+                },
+                footer: {
+                    innerHTML: '<button is="coral-button" class="closeExport" variant="default" coral-close>' +
+                                Granite.I18n.get("Close") + "</button>"
+                }
+            });
+            $("body").append(errorModal);
+            errorModal.show();
+        });
+    });
+
+    $(document).on("change", "#sharejobname, #expirationDate, #adhocassetshare-allowOriginal, " +
+        "#adhocassetshare-allowRenditions", function(e) {
+        checkSubmit();
+    });
+
+    function getContentPath() {
+        var contentPath;
+        var isSelectionMode = $(".foundation-selections-item").length ||
+                              $(".cq-damadmin-admin-childpages").hasClass("mode-selection");
+        if (isSelectionMode) {
+            contentPath = $(".foundation-selections-item").data("foundation-collection-item-id");
+        } else {
+            contentPath = $(".foundation-content-path").data("foundationContentPath");
+        }
+        return contentPath;
+    }
+
+    // use change event, rather than click to handle keyboard events for accessibility
+    $(document).on("change", "#adhocassetshare-userpicker", function(e) {
+        var linkShareUser = e.target.querySelector('.linkshare-user[value="' + e.target.value + '"]');
+        if (linkShareUser) {
+            var userId = $(linkShareUser).data("authorizableid").toString().trim();
+            var email = $(linkShareUser).data("email");
+            var name = $(linkShareUser).data("name");
+            var image = $(linkShareUser).data("image");
+            addNewUser(userId, email, name, image);
+        }
+    });
+
+    function addNewUser(userId, email, name, image) {
+        var members;
+        var header = $("<tr>")
+            .append($("<th>"),
+                $("<th>").text(Granite.I18n.get("TITLE")),
+                $("<th>").text(Granite.I18n.get("EMAIL")));
+        if (userId.length > 0 && userId !== "external-anon-user" && isEmailValid(email)) {
+            members = $("#adhocassetshare-members");
+            if ($(members).find("th").length < 1) {
+                if ($(members).find("tbody").length > 0) {
+                    $(members).find("tbody").prepend(header);
+                    // Removing the attribute role (presentation) when table is not empty
+                    $(members).removeAttr("role");
+                }
+            }
+            removeDuplicateandAddNewMember(members, userId, email, name, image);
+            // remove the text from the text box and disable the add button
+            $(userPickerEl).val("");
+            checkSubmit();
+        } else if (userId.length > 0 && userId === "external-anon-user") {
+            var inputTextVal = $(userPickerEl).val();
+            var externalUserName = "External User";
+            var externalUserMail = inputTextVal.substring(inputTextVal.lastIndexOf("<") +
+                                   1, inputTextVal.lastIndexOf(">"));
+            var avatar = Granite.HTTP.externalize("/libs/granite/security/clientlib/themes/default/resources/" +
+                                                  "sample-user-thumbnail.36.png");
+
+            if (isEmailValid(externalUserMail)) {
+                members = $("#adhocassetshare-members");
+                if ($(members).find("th").length < 1) {
+                    if ($(members).find("tbody").length > 0) {
+                        $(members).find("tbody").prepend(header);
+                        // Removing the attribute role (presentation) when table is not empty
+                        $(members).removeAttr("role");
+                    }
+                }
+                removeDuplicateandAddNewMember(members, userId, externalUserMail, externalUserName, avatar);
+            }
+            // remove the text from the text box and disable the add button
+            $(userPickerEl).val("");
+            checkSubmit();
+        }
+    }
+
+    function removeDuplicateandAddNewMember(members, id, email, name, image) {
+        var duplicateFound = false;
+        members.find("tr").each(function() {
+            var m = $(this);
+            var mID = m.find(".email input[name='email']").val();
+            if (email !== undefined && mID !== undefined &&
+                email.toString().toLowerCase() === mID.toString().toLowerCase()) {
+                duplicateFound = true;
+                return;
+            }
+        });
+
+        if (!duplicateFound) {
+            addMember(members, id, email, name, image);
+        }
+    }
+
+    function addMember(members, userid, email, name, avatar) {
+        if (!avatar) {
+            avatar = Granite.HTTP.externalize("/libs/granite/security/clientlib/themes/default/resources" +
+                     "/sample-user-thumbnail.36.png");
+        }
+        // create the markup with these values
+        var member = $("<tr>");
+        var cavatar = $("<td class=\"avatar\"><img src=\"" + avatar + "\" width=\"42\" alt=\"\"></td>");
+        var displayLocName = name;
+        if (name === "External User") {
+            displayLocName = Granite.I18n.get("External User");
+        }
+        var cName = $("<td class=\"name\">" + displayLocName + "</td>");
+        var cEmail = $("<td class=\"email\"> <input type=\"hidden\" name=\"principalName\" value=\"" +
+                     userid + "\"> <input type=\"hidden\" name=\"email\" value=\"" +
+                     email + "\"> <span class=\"greyText\"></span>" + email + "</td>");
+        var cRemove = $("<td class=\"remove\"><button title=\"" + Granite.I18n.get("Remove") +
+                      "\"class=\"coral-Button coral-Button--quiet\" type=\"button\"><i class=\"" +
+                      "coral-Icon coral-Icon--sizeXS coral-Icon--closeCircle \"></i></button></td>");
+        member.append(cavatar);
+        member.append(cName);
+        if (email && email.length > 0) {
+            member.append(cEmail);
+            // member.append(cUserid);
+        }
+        member.append(cRemove);
+        members.append(member);
+        var numusers = $("#adhocassetshare-members").find(".avatar").length;
+        if (numusers === 1) {
+            hideUserPickerRequiredError();
+        }
+    }
+
+    $(document).on("click", "#adhocassetshare-members .remove", function() {
+        var member = $(this).closest("tr");
+        if (member) {
+            member.remove();
+            var numusers = $("#adhocassetshare-members").find(".avatar").length;
+            if (numusers <= 0) {
+                showUserPickerRequiredError();
+                var members = $("#adhocassetshare-members");
+                if ($(members).find("tbody").length > 0) {
+                    $(members).find("tbody").html("");
+                    // Adding attribute role (presentation) for empty table
+                    $(members).attr("role", "presentation");
+                }
+                checkSubmit();
+            }
+        }
+    });
+
+    var assetShareLink = "";
+    // Get the share link to display in the modal, so that the user can also copy the link
+    $(document).on("click", ".cq-damadmin-admin-actions-adhocassetshare-activator", function(e) {
+        if ($(".cq-damadmin-admin-actions-adhocassetshare-activator")
+            .closest(".foundation-toggleable")[0] !== undefined) {
+            $(".cq-damadmin-admin-actions-adhocassetshare-activator").closest(".foundation-toggleable")[0].hide();
+        }
+        var data = ":operation=generateShareLink";
+        var url = $($(".foundation-selections-item")[0]).data("foundation-collection-item-id");
+        if (url === undefined) {
+            url = $($(".foundation-content-path")).data("foundation-content-path");
+            if (url === undefined) {
+                url = "/content/dam";
+            } else {
+                data += "&path=" + (encodeURIComponent(url));
+            }
+        } else {
+            $(".foundation-selections-item").each(function() {
+                data += "&path=" + (encodeURIComponent($(this).data("foundation-collection-item-id")));
+            });
+        }
+        url = url + ".adhocassetshare.html";
+        data += "&_charset_=utf-8";
+        $.ajax({
+            type: "POST",
+            data: data,
+            async: false,
+            url: Granite.HTTP.externalize(url),
+            success: function(html) {
+                html = Granite.UI.Foundation.Utils.sanitizeHtml(html);
+                if ($(html).find(".foundation-form-response-status-message").next().text().length > 0) {
+                    assetShareLink = $(html).find(".foundation-form-response-status-message").next().text();
+                    assetShareLink = assetShareLink.substr(assetShareLink.indexOf("Share link:") + 11);
+                    $(document).trigger("asset-share-link-fetched");
+                }
+            }
+        });
+    });
+
+    $(document).on("asset-share-link-fetched", function(e) {
+        // Fix this, avoid setTimeOut
+        setTimeout(function() {
+            $(".copy-share-link-button").removeAttr("disabled");
+            $(".adhocassetshare-share-link").val(assetShareLink);
+            $("#expirationDate")[0].valueAsDate = new Date(moment().add(1, "days"));
+            $("#sharelink").attr("readonly", "true");
+            // retain the textbox border..
+            $("#sharelink").css({
+                "border-width": "1px",
+                "border-style": "solid",
+                "border-color": "#d0d0d0"
+            });
+            $("#adhocassetshare-userpicker input[is='coral-textfield']").attr("aria-required", "true");
+        }, 3000);
+    });
+
+    $(document).on("blur", "#adhocassetshare-userpicker input[is='coral-textfield']", function(e) {
+        var numusers = $("#adhocassetshare-members").find(".avatar").length;
+        if (numusers <= 0) {
+            hideUserPickerRequiredError();
+            showUserPickerRequiredError();
+        }
+    });
+
+    $(document).on("click", ".copy-share-link-button", function(e) {
+        var input = document.querySelector('input[name="shareLink');
+        var isCopyToClipboardSuccess = copyToClipboard(input.value);
+        if (isCopyToClipboardSuccess) {
+            showToast(Granite.I18n.get("Link copied."), "success");
+        } else {
+            showToast(Granite.I18n.get("Unable to copy link."), "error");
+        }
+    });
+
+    function isEmailValid(email) {
+        // eslint-disable-next-line  no-useless-escape
+        var re = /^([\w-\+]+(?:\.[\w-]+)*)@((?:[\w-]+\.)*\w[\w-]{0,66})\.([a-z]{2,6}(?:\.[a-z]{2})?)$/i;
+
+        return re.test(email);
+    }
+
+    function checkSubmit() {
+        var $sharejobname = $(sharejobname);
+        var $expirationDate = $(expirationDate);
+        var $submit = $(submit);
+        var name = $sharejobname.val().trim();
+        var exDate = $expirationDate.val().trim();
+        var numusers = $("#adhocassetshare-members").find(".avatar").length;
+
+        // renditions checkbox may not be present.  if it is, verify originals or renditions has been checked.
+        var allowRenditions = $("#adhocassetshare-allowRenditions");
+        var filesSelected = true;
+        if ($(allowRenditions).length > 0) {
+            filesSelected = $("#adhocassetshare-allowOriginal").prop("checked") || $(allowRenditions).prop("checked");
+        }
+
+        if (name === "" || exDate === "" || numusers <= 0 || !filesSelected) {
+            $submit.attr("disabled", "disabled");
+        } else {
+            $submit.removeAttr("disabled");
+        }
+    }
+
+    function showUserPickerRequiredError() {
+        var $userPickerEl = $(userPickerEl);
+        $userPickerEl.find("input[is='coral-textfield']").addClass("is-invalid");
+        if (!userPickerErrorToolTip) {
+            userPickerErrorToolTip = new Coral.Tooltip().set({
+                variant: "error",
+                content: {
+                    innerHTML: Granite.I18n.get("Please fill out this field.")
+                },
+                target: "#adhocassetshare-adduser input",
+                placement: "bottom",
+                id: "user-picker-fielderror-tooltip",
+                open: true,
+                interaction: "off"
+            });
+            $userPickerEl.prepend(userPickerErrorToolTip);
+            $("#adhocassetshare-userpicker input[is='coral-textfield']")
+                .attr("aria-describedby", userPickerErrorToolTip.id);
+        }
+    }
+
+    function hideUserPickerRequiredError() {
+        var $userPickerEl = $(userPickerEl);
+        $userPickerEl.find("input[is='coral-textfield']").removeClass("is-invalid");
+        $userPickerEl.css("padding-top", "0");
+        $userPickerEl.find("#user-picker-fielderror-tooltip").remove();
+        userPickerErrorToolTip = null;
+    }
+
+    function copyToClipboard(copytext) {
+        try {
+            if (window.clipboardData && window.clipboardData.setData) {
+                // Internet Explorer-specific code path to prevent textarea being shown while dialog is visible.
+                return window.clipboardData.setData("Text", copytext);
+            } else if (document.queryCommandSupported && document.queryCommandSupported("copy")) {
+                var textarea = document.createElement("textarea");
+                textarea.textContent = copytext;
+                textarea.style.position = "fixed"; // Prevent scrolling to bottom of page in Microsoft Edge.
+                document.body.appendChild(textarea);
+                textarea.select();
+                return document.execCommand("copy"); // Security exception may be thrown by some browsers.
+            } else {
+                return false;
+            }
+        } catch (ex) {
+            return false;
+        } finally {
+            document.body.removeChild(textarea);
+        }
+    }
+
+    function showToast(message, variant) {
+        var toast = new Coral.Toast().set({
+            variant: variant,
+            content: {
+                textContent: message
+            }
+        });
+        toast.show();
+    }
+})(document, Granite.$);

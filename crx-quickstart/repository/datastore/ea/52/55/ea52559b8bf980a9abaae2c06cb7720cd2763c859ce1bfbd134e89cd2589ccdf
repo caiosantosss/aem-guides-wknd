@@ -1,0 +1,578 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.MediaBrowseDialog
+ * @extends CQ.Dialog
+ * The MediaBrowseDialog is a dialog for browsing the media library.
+ * @constructor
+ * Creates a new MediaBrowseDialog.
+ * @param {Object} config The config object
+ * @deprecated Use {@link CQ.wcm.ContentFinder Content Finder} to browse media instead.
+ */
+CQ.MediaBrowseDialog = CQ.Ext.extend(CQ.Dialog, {
+
+    /**
+     * @cfg {CQ.Ext.tree.TreeNode} treeLoader
+     * The config options for the tree loader in the browse dialog.
+     * See {@link CQ.Ext.tree.TreeLoader} for possible options.
+     */
+
+    /**
+     * @cfg {CQ.Ext.tree.TreeNode} treeRoot
+     * The config options for the tree root node in the browse dialog.
+     * See {@link CQ.Ext.tree.TreeNode} for possible options.
+     */
+
+    /**
+     * The delete button to remove media.
+     * @private
+     * @type CQ.Ext.Toolbar.Button
+     */
+    deleteButton: null,
+
+    /**
+     * Returns the path of the selected tree node (or an empty string if no
+     * tree node has been selected yet).
+     * @return {String} The path
+     */
+    getSelectedPath: function() {
+        try {
+            return this.tree.getSelectionModel().getSelectedNode().getPath();
+        } catch (e) {
+            return "";
+        }
+    },
+
+    /**
+     * Selects the specified path in the tree.
+     * @param {String} path The path to select
+     */
+    loadContent: function(path) {
+        if (typeof path == "string") {
+            this.path = path;
+            this.tree.selectPath(path);
+        }
+    },
+
+    constructor: function(config) {
+        var dlg = this;
+
+        // initialize config defaults
+        if (!config) config = new Object();
+        CQ.Ext.applyIf(config, {
+            title:CQ.I18n.getMessage("Select a media item")
+        });
+
+        // initialize media view
+        this.mediaView = new CQ.Ext.DataView({
+            cls:'cq-media-view',
+            loadingText: CQ.I18n.getMessage("Loading media..."),
+            templates: {
+                thumbs:{
+                    itemSelector:'.thumb-wrap',
+                    tpl:new CQ.Ext.XTemplate(
+                            '<tpl for=".">',
+                            '<div class="thumb-wrap">',
+                            '<div class="thumb">',
+                            '<img src="{[CQ.HTTP.externalize(values.path + values.img140Postfix)]}"',
+                            ' qtip="{qtipTitle}: {name}<br/>',
+                            '{qtipSize}: {sizeString}<br/>',
+                            '{qtipCreated}: {createdString}<br/>',
+                            '{qtipModified}: {modifiedString}"/>',
+                            '</div>',
+                            '<span>{shortName}</span>',
+                            '</div>',
+                            '</tpl>',
+                            '<div class="x-clear"></div>'
+                            )
+                },
+                details:{
+                    itemSelector:'.detail-wrap',
+                    tpl:new CQ.Ext.XTemplate(
+                            '<tpl for=".">',
+                            '<div class="detail-wrap">',
+                            '<div class="detail">',
+                            '<img src="{[CQ.HTTP.externalize(values.path + values.img70Postfix)]}"/>',
+                            '<div><span class="bold">{qtipTitle}:</span> {name}</div>',
+                            '<div><span class="bold">{qtipSize}:</span> {sizeString}</div>',
+                            '<div><span class="bold">{qtipCreated}:</span> {createdString}</div>',
+                            '<div><span class="bold">{qtipModified}:</span> {modifiedString}</div>',
+                            '</div>',
+                            '</div>',
+                            '<div class="x-clear"></div>',
+                            '</tpl>'
+                            )
+                }
+            },
+            multiSelect: false,
+            singleSelect: true,
+            overClass:'x-view-over',
+            emptyText:CQ.I18n.getMessage("No media items to display"),
+
+            prepareData: function(data) {
+                data.qtipTitle = CQ.I18n.getMessage("Title");
+                data.shortName = CQ.Ext.util.Format.ellipsis(data.name, 15);
+
+                data.qtipSize = CQ.I18n.getMessage("Size");
+                data.sizeString = CQ.Ext.util.Format.fileSize(data.size);
+
+                data.qtipCreated = CQ.I18n.getMessage("Created");
+                data.createdString = data.created.format(CQ.themes.MediaBrowseDialog.MEDIA_DATE);
+
+                data.qtipModified = CQ.I18n.getMessage("Last Modified");
+                data.modifiedString = data.lastmod.format(CQ.themes.MediaBrowseDialog.MEDIA_DATE);
+
+                data.img140Postfix = ".thumb.100.140.png";
+                data.img70Postfix = ".thumb.50.70.png";
+                return data;
+            },
+            listeners: {
+                render: function(comp) {
+                    comp.loadMask = new CQ.Ext.LoadMask(comp.getEl(),
+                    { store:this.store });
+
+                    comp.dragZone = new CQ.MediaBrowseDialog.DragZone(comp, {
+                        containerScroll:true
+                    });
+
+                    //TODO case of dropping a media on a paragraph
+                    //comp.dragZone.addToGroup(CQ.wcm.EditBase.DD_GROUP);
+                    //TODO take group from component
+                    comp.dragZone.addToGroup(CQ.wcm.EditBase.DD_GROUP_ASSET);
+                    comp.dragZone.removeFromGroup(CQ.wcm.EditBase.DD_GROUP_DEFAULT);
+                },
+                selectionchange: function(dataView, selections) {
+                    if (!dlg.deleteButton) {
+                        dlg.deleteButton = dlg.findByType("panel")[1].getTopToolbar().items.get(1);
+                    }
+                    if (selections.length == 0) {
+                        dlg.deleteButton.disable();
+                    }
+                    else {
+                        dlg.deleteButton.enable();
+                    }
+                }
+            }
+        });
+        this.mediaView.tpl = this.mediaView.templates["thumbs"].tpl;
+        this.mediaView.itemSelector = this.mediaView.templates["thumbs"].itemSelector;
+
+        // initialize tree
+        if (!config.treeRoot) config.treeRoot = new Object();
+        this.treeRootConfig = CQ.Ext.applyIf(config.treeRoot, {
+            name:'content/dam',
+            text: CQ.I18n.getMessage("Media"),
+            draggable: false,
+            expanded:true
+        });
+
+        if (!config.treeLoader) config.treeLoader = new Object();
+        this.treeLoaderConfig = CQ.Ext.applyIf(config.treeLoader, {
+            baseParams: {
+                predicate:'hierarchy'
+            },
+            requestMethod:'GET',
+            dataUrl:'/content/dam.ext.json',
+            baseAttrs: {
+                singleClickExpand:true,
+                draggable:false
+            },
+            listeners: {
+                beforeload: function(loader, node) {
+                    this.dataUrl = node.getPath() + ".ext.json";
+                }
+            }
+        });
+        this.tree = new CQ.Ext.tree.TreePanel({
+            lines:false,
+            animate: true,
+            enableDD: false,
+            containerScroll: true,
+            autoScroll:true,
+        // split disabled because of a bug in IE:
+        // #17931 - Browse Media Widget dumps innerHTML tag to page bottom
+            split:true,
+            region: 'north',
+            height:115,
+            loader: new CQ.Ext.tree.TreeLoader(this.treeLoaderConfig),
+            root: new CQ.Ext.tree.AsyncTreeNode(this.treeRootConfig),
+            listeners: {
+                click: function(node, event) {
+                    dlg.loadMedia.call(dlg, node.getPath());
+                }
+            }
+        });
+
+        config = CQ.Util.merge(config, {
+            closable: true,
+            cls:'cq-mediabrowse',
+            height:CQ.themes.MediaBrowseDialog.HEIGHT,
+            minHeight:CQ.themes.MediaBrowseDialog.MIN_HEIGHT,
+            width:CQ.themes.MediaBrowseDialog.WIDTH,
+            minWidth:CQ.themes.MediaBrowseDialog.MIN_WIDTH,
+            autoHeight:false,
+            autoWidth:false,
+            resizable:CQ.themes.MediaBrowseDialog.RESIZABLE,
+            resizeHandles:CQ.themes.MediaBrowseDialog.RESIZE_HANDLES,
+            items: {
+                xtype:'panel',
+                layout:'border',
+                autoScroll:false,
+                border:false,
+                items: [
+                        this.tree,
+                        new CQ.Ext.Panel({
+                            autoEl:'div',
+                            region:'center',
+                            autoScroll:true,
+                            collapsible:true,
+                            items: [ this.mediaView ],
+                            tbar: [
+                            {
+                                text:CQ.I18n.getMessage("Upload"),
+                                tooltip: {
+                                    title:CQ.I18n.getMessage("Upload Media"),
+                                    text:CQ.I18n.getMessage("Allows uploading media items to the selected location"),
+                                    autoHide:true
+                                },
+                                handler:function() {
+                                    var flashVersion = CQ.utils.Util.getFlashVersion();
+                                    var useSwfUpload = (flashVersion != null) && (flashVersion[0] >= 9);
+                                    var uploadDlg;
+
+                                    // Bug #18604
+                                    // disable SWF upload since it does not work with encoded filenames.
+                                    // this is a problem of the sling post servlet mechanism that moves
+                                    // the tmp file and not of SWFUpload itself.
+                                    useSwfUpload = false;
+
+                                    if (useSwfUpload) {
+                                        uploadDlg = {
+                                            "jcr:primaryType": "cq:Dialog",
+                                            "title":CQ.I18n.getMessage("Upload Media to") + ": " + dlg.getSelectedPath(),
+                                            "formUrl":dlg.getSelectedPath(),
+                                            "items": {
+                                                "jcr:primaryType": "cq:Panel",
+                                                "items": {
+                                                    "jcr:primaryType": "cq:WidgetCollection",
+                                                    "file": {
+                                                        "xtype":"html5smartfile",
+                                                        "allowUploadOnly":true,
+                                                        "simpleUpload":true,
+                                                        "fieldLabel":CQ.I18n.getMessage("File"),
+                                                        "autoUploadDelay":"-1",
+                                                        "sizeLimit":"1000",
+                                                        "name":"./*",
+                                                        "uploadUrl":"/tmp/media_upload" + dlg.getSelectedPath()
+                                                    }
+                                                }
+                                            }
+                                        };
+                                    } else {
+                                        uploadDlg = {
+                                            "jcr:primaryType": "cq:Dialog",
+                                            "title":CQ.I18n.getMessage("Upload Media to") + ": " + dlg.getSelectedPath(),
+                                            "formUrl":dlg.getSelectedPath(), //.replace("/content/dam", "/var/dam"),
+                                            "fileUpload":true,
+                                            "items": {
+                                                "jcr:primaryType": "cq:Panel",
+                                                "items": {
+                                                    "jcr:primaryType": "cq:WidgetCollection",
+                                                    "file": {
+                                                        "xtype":"fileuploadfield",
+                                                        "fieldLabel":CQ.I18n.getMessage("File"),
+                                                        "name":"./*"
+                                                    }
+                                                }
+                                            }
+                                        };
+                                    }
+                                    var dialog = CQ.WCM.getDialog(uploadDlg);
+                                    dialog.failure = function() {
+                                        CQ.Ext.Msg.alert(
+                                                CQ.I18n.getMessage("Error"),
+                                                CQ.I18n.getMessage("Could not upload media."));
+                                    };
+                                    dialog.success = function() {
+                                        if (dlg.mediaView.store != null) {
+                                            dlg.mediaView.store.reload();
+                                        }
+                                    };
+                                    dialog.show();
+                                }
+                            },{
+                                text:CQ.I18n.getMessage("Delete"),
+                                disabled: true,
+                                tooltip: {
+                                    title:CQ.I18n.getMessage("Delete Media"),
+                                    text:CQ.I18n.getMessage("Deletes the selected media"),
+                                    autoHide:true
+                                },
+                                handler:function() {
+                                    var msg = CQ.I18n.getMessage("You are going to delete the following media: ") + "<br/>";
+
+                                    var mediaView = dlg.mediaView;
+                                    var selectedRecords = mediaView.getSelectedRecords();
+                                    var selectedNodes = mediaView.getSelectedNodes();
+                                    for (var i=0; i<selectedRecords.length; i++) {
+                                        msg += (selectedRecords[i].data.name ? selectedRecords[i].data.name :
+                                                selectedRecords[i].data.path) + "<br/>";
+                                    }
+                                    msg += "<br/>" + CQ.I18n.getMessage("Are you sure?");
+
+                                    var title = CQ.I18n.getMessage("Delete Page?");
+
+                                    var admin = this;
+                                    CQ.Ext.Msg.show({
+                                        "title":title,
+                                        "msg":msg,
+                                        "buttons":CQ.Ext.Msg.YESNO,
+                                        "icon":CQ.Ext.MessageBox.QUESTION,
+                                        "fn":function(btnId) {
+                                            if (btnId == "yes") {
+                                                // collect necessary information
+                                                var paths = [];
+                                                var nodes = [];
+                                                for (var i=0; i<selectedRecords.length; i++) {
+                                                    var record = selectedRecords[i];
+                                                    paths.push(record.data.path);
+                                                }
+                                                // send request for deletion
+                                                CQ.HTTP.post("/bin/wcmcommand",
+                                                    function(options, success, response) {
+                                                        if (success) {
+                                                            // remove media from media view
+                                                            for (var i=0; i<selectedNodes.length; i++) {
+                                                                var node = selectedNodes[i];
+                                                                mediaView.deselect(node);
+                                                                node.style.display = "none";
+                                                            }
+                                                        }
+                                                        else {
+                                                            CQ.Ext.Msg.alert(
+                                                                CQ.I18n.getMessage("Error"),
+                                                                CQ.I18n.getVarMessage(response.message));
+                                                        }
+                                                    },{
+                                                        "path":paths,
+                                                        "_charset_":"utf-8",
+                                                        "cmd":"deletePage",
+                                                        "deep":true
+                                                    }
+                                                );
+                                            }
+                                        },
+                                        "scope":this
+                                    });
+                                }
+                            },"->",{
+                                text:CQ.I18n.getMessage("Thumbnails"),
+                                toggleGroup:"view",
+                                view:"thumbs",
+                                enableToggle:true,
+                                toggleHandler:dlg.switchView,
+                                scope:dlg,
+                                pressed: true,
+                                allowDepress:false,
+                                tooltip: {
+                                    title:CQ.I18n.getMessage("Thumbnails View"),
+                                    text:CQ.I18n.getMessage("Switch to thumbnails view"),
+                                    autoHide:true
+                                }
+                            },{
+                                text:CQ.I18n.getMessage("Details"),
+                                toggleGroup:"view",
+                                view:"details",
+                                enableToggle:true,
+                                toggleHandler:dlg.switchView,
+                                scope:dlg,
+                                pressed: false,
+                                allowDepress:false,
+                                tooltip: {
+                                    title:CQ.I18n.getMessage("Details View"),
+                                    text:CQ.I18n.getMessage("Switch to details view"),
+                                    autoHide:true
+                                }
+                            }
+                                    ]
+                        })
+                        ]
+            }
+        });
+        CQ.MediaBrowseDialog.superclass.constructor.call(this, config);
+        this.tree.selectPath(this.tree.getRootNode().id);
+        this.loadMedia(this.tree.getRootNode().getPath());
+    },
+
+    loadMedia: function(path) {
+        var store = new CQ.Ext.data.JsonStore({
+            url:path + '.media.json', root:'items',
+            fields:[
+                    'name', 'path', {name:'size', type: 'float'},
+            {name:'created', type:'date', dateFormat:'timestamp'},
+            {name:'lastmod', type:'date', dateFormat:'timestamp'}
+                    ]
+        });
+        this.mediaView.setStore(store);
+        this.mediaView.store.reload();
+    },
+
+    switchView: function(button, pressed) {
+        if (pressed) {
+            this.mediaView.tpl = this.mediaView.templates[button.view].tpl;
+            this.mediaView.itemSelector = this.mediaView.templates[button.view].itemSelector;
+        }
+        if (this.mediaView.store != null) {
+            this.mediaView.refresh();
+        }
+    }
+});
+CQ.Ext.reg('mediabrowsedialog', CQ.MediaBrowseDialog);
+
+CQ.MediaBrowseDialog.DragZone = CQ.Ext.extend(CQ.Ext.dd.DragZone, {
+    constructor: function(view, config) {
+        this.view = view;
+        CQ.MediaBrowseDialog.DragZone.superclass.constructor.call(this, view.getEl(), config);
+    },
+
+    getDragData : function(e) {
+        var target = e.getTarget(this.view.itemSelector);
+        if (target) {
+            var view = this.view;
+            if (!view.isSelected(target)) {
+                view.onClick(e);
+            }
+            var selNodes = view.getSelectedNodes();
+            var selRecords = view.getSelectedRecords()
+            var dragData = {
+                nodes:selNodes,
+                records:selRecords
+            };
+            if (selNodes.length == 1) {
+                dragData.ddel = target.firstChild.firstChild; // the img element
+                dragData.single = true;
+            } else {
+                var div = document.createElement('div'); // create the multi element drag "ghost"
+                div.className = 'multi-proxy';
+                for (var i = 0, len = selNodes.length; i < len; i++) {
+                    div.appendChild(selNodes[i].firstChild.firstChild.cloneNode(true));
+                    if ((i+1) % 2 == 0) {
+                        div.appendChild(document.createElement('br'));
+                    }
+                }
+                dragData.ddel = div;
+                dragData.multi = true;
+            }
+            return dragData;
+        }
+        return false;
+    },
+
+// the default action is to "highlight" after a bad drop
+// but since an image can't be highlighted, let's frame it
+    afterRepair:function() {
+        for (var i = 0, len = this.dragData.nodes.length; i < len; i++) {
+            CQ.Ext.fly(this.dragData.nodes[i]).frame('#8db2e3', 1);
+        }
+        this.dragging = false;
+    },
+
+// override the default repairXY with one offset for the margins and padding
+    getRepairXY : function(e) {
+        if(!this.dragData.multi){
+            var xy = CQ.Ext.Element.fly(this.dragData.ddel).getXY();
+            xy[0]+=3;xy[1]+=3;
+            return xy;
+        }
+        return false;
+    },
+
+    notifyDropDT: function(dropTarget, e, data) {
+        if (this.isDropAllowed(dropTarget)) {
+            if (dropTarget.groups) {
+                //TODO case of dropping a media on a paragraph
+                /*if (dropTarget.groups[CQ.wcm.EditBase.DD_GROUP]) {
+                    dropTarget.editComponent.hideTargetLine();
+                    return dropTarget.editComponent.insertNew(this);
+                }*/
+                if (dropTarget.groups[CQ.wcm.EditBase.DD_GROUP_ASSET]) {
+                    return dropTarget.editComponent.updateParagraph(dropTarget.propertyName, data.records[0].data.path, dropTarget.postParams);
+                }
+            } else {
+                return dropTarget.editComponent.updateParagraph(dropTarget.propertyName, data.records[0].data.path, dropTarget.postParams);
+            }
+        }
+        return false;
+    },
+
+    notifyEnterDT: function(dropTarget, e, data) {
+        /*
+        if (this.isDropAllowed(dropTarget)) {
+            //TODO case of dropping a media on a paragraph
+            if(dropTarget.groups[CQ.wcm.EditBase.DD_GROUP]) {
+                dropTarget.editComponent.showTargetLine();
+            }
+        }*/
+        return '';
+    },
+
+    notifyOutDT: function(dropTarget, e, data) {
+        /*if (this.isDropAllowed(dropTarget)) {
+            //TODO case of dropping a media on a paragraph
+            if(dropTarget.ddGroup==CQ.wcm.EditBase.DD_GROUP) {
+                dropTarget.editComponent.hideTargetLine();
+            }
+        }*/
+        return '';
+    },
+
+    notifyOverDT : function(dropTarget, e, data) {
+        if (this.isDropAllowed(dropTarget)) {
+            return this.dropAllowed;
+        } else {
+            return this.dropNotAllowed;
+        }
+    },
+
+    isDropAllowed: function(dropTarget) {
+        if(dropTarget && dropTarget.groups && CQ.Util.isIntersecting(this.groups,dropTarget.groups)) {
+            //TODO case of dropping a media on a paragraph
+            /*if(dropTarget[CQ.wcm.EditBase.DD_GROUP]) {
+                //drop can only be done on edit bar with an INSERT option
+                return (dropTarget.editComponent.controls.indexOf(CQ.wcm.EditBase.INSERT)!=-1);
+            } else {
+                return true;
+            }*/
+            return true;
+        }
+        return false;
+    }
+
+    //private
+    /*hasGroup: function(dropTarget) {
+        if (dropTarget.ddGroup && (this.groups[dropTarget.ddGroup])) {
+            return true;
+        }
+        for (var extGroup in dropTarget.groups) {
+            if (dropTarget.groups[extGroup]) {
+                for (var intGroup in this.groups) {
+                    if ((this.groups[intGroup])
+                        && (extGroup == intGroup)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    return false;
+    }*/
+});

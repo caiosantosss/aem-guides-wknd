@@ -1,0 +1,1099 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+    /**
+     * {@link editables} module is available after this event
+     *
+     * @event Document#cq-editables-loaded
+     */
+
+    /**
+     * The content frame has been loaded
+     *
+     * @event Document#cq-content-frame-loaded
+     */
+
+    /**
+     * The content frame unloads current content. Use this event to clean up any references to the iframe document to avoid possible memory leaks.
+     *
+     * @event Document#cq-content-frame-unload
+     */
+
+    /**
+     * A data type has been set on the content
+     *
+     * @event Document#cq-contentframe-datatype-set
+     */
+
+    var JSON_DATA_TYPE = "JSON";
+
+    /**
+     * Name of the path field located in a page model object
+     *
+     * @type {string}
+     */
+    var PN_PAGEMODEL_PATH = ":path";
+
+    /**
+     * Delimiter used to split path into page path and content path.
+     *
+     * @type {string}
+     */
+    var CONTENT_PATH_DELIMITER = '/jcr:content/';
+
+    /**
+     * Custom function that extracts a list of  {@link Granite.author.Editable}s
+     */
+    var findEditablesFunction;
+
+    /**
+     * Constructor responsible for instantiating a {@link Granite.author.Editable}
+     */
+    var editableConstructor;
+
+    /**
+     * Cached path of the root page model (App data) of SPA content
+     */
+    var pageModelRootPathCache;
+
+    /**
+     * Returns the higher height of the document between the scrollHeight and the offsetHeight
+     *
+     * @param {HTMLDocument} doc
+     * @returns {number}
+     */
+    var getDocumentHeight = function (doc) {
+        if (doc.body) {
+            return Math.max(doc.body.scrollHeight, doc.documentElement.scrollHeight,
+                doc.body.offsetHeight, doc.documentElement.offsetHeight);
+        } else {
+            // it can happen that the document contains only the head but not the body
+            return 0;
+        }
+    };
+
+    /**
+     * Add the provided {@link Granite.author.Editable} at the right position in the list of {@link Granite.author.Editable}s
+     *
+     * @param {Granite.author.Editable} editable        - Editable to be added
+     * @param {Granite.author.Editable[]} editables     - List of Editables
+     */
+    function addEditable(editable, editables) {
+        if (!editable || !editables) {
+            return;
+        }
+
+        // If the editable is a container it will be inserted before any of its children
+        if (editable.isContainer()) {
+            var containerPath = editable.path + "/";
+            var firstChild =
+                editables.filter(function (e) {
+                    return e.path.indexOf(containerPath) === 0;
+                })[0];
+
+            if (firstChild) {
+                // Insert container before its first child
+                var index = editables.indexOf(firstChild);
+                editables.splice(index, 0, editable);
+            } else {
+                // Should be unlikely due to the way we fetch the <cq> elements (children before parent)
+                editables.push(editable);
+            }
+        } else {
+            // If the editable is not a container, simply push it at the end of the array
+            editables.push(editable);
+        }
+    }
+
+    /**
+     * Reloads the given editable based on the provided editContext. resolves
+     * @param {Granite.author.Editable} editable    - Editable to be reloaded
+     */
+    function _reloadEditable(editable) {
+        var editableEditContext;
+        var editables;
+        // Update DOM property, and recreate the overlay (will automatically destroy children overlays)
+        var $dom = ns.ContentFrame.getEditableNode(editable.path);
+
+        if (JSON_DATA_TYPE === ns.ContentFrame.dataType) {
+            editableEditContext = ns.editContext.getEditContext(editable.path);
+        } else {
+            var configNode = ns.ContentFrame.getEditableConfigNode(editable.path);
+
+            if (configNode) {
+                editableEditContext = ns.configParser(configNode.data('config'));
+            }
+        }
+
+        if (editableEditContext) {
+            editable.updateConfig(editableEditContext);
+        }
+
+        editable.dom = $dom;
+
+        editables = [editable];
+
+        var newChildren;
+        if (JSON_DATA_TYPE === ns.ContentFrame.dataType) {
+            // The SPA contract is based on the presence of a data attribute containing a path
+            newChildren = ns.ContentFrame.getEditables(editable.path);
+        } else {
+            // The backend contract is based on the presence of DOM elements
+            newChildren = ns.ContentFrame.getEditables(editable.dom);
+        }
+
+        newChildren = newChildren.filter(function (newEditable) {
+            return newEditable.path !== editable.path;
+        });
+
+        channel.trigger($.Event("cq-editables-update", {
+            editables: editables,
+            children: [newChildren]
+        }));
+
+        channel.trigger($.Event("cq-overlays-create", {
+            editables: editables
+        }));
+    }
+
+    /**
+     * ContentFrame module responsible for the edited content by opposition to the content of the [EditorFrame]{@link Granite.author.EditorFrame}
+     *
+     * <i>An iframe embeds the content of the page to be edited</i>
+     *
+     * Initialized by {@link Granite.author.init}
+     *
+     * @namespace
+     * @alias Granite.author.ContentFrame
+     * @type {{}}
+     */
+    ns.ContentFrame = (function () { // AdobePatentID="3496US01"
+        var self = {};
+
+        /**
+         * Container for the content of the edited page and what lives close to it
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias wrapper
+         * @type {jQuery}
+         * @ignore
+         */
+        self.wrapper = $('#ContentWrapper');
+
+        /**
+         * Scrollview container that has the ContentWrapper and the OverlayWrapper as direct children
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias scrollView
+         * @type {jQuery}
+         * @ignore
+         */
+        self.scrollView = $('#ContentScrollView');
+
+        /**
+         * The iframe object of the outer document.
+         *
+         * It embeds the page to edit
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias iframe
+         * @type {jQuery}
+         */
+        self.iframe = $('iframe#ContentFrame');
+
+        /**
+         * Mask to be displayed on top of the ContentFrame when the content should be visible but not accessible for UI interactions
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias mask
+         * @type {jQuery}
+         * @ignore
+         */
+        self.mask = $("#FullScreenMask");
+
+        /**
+         * Header HTMLElement also known as GlobalBar
+         *
+         * <i>e.g. Used to auto update the top offset</i>
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias panelHeader
+         * @type {jQuery}
+         * @see Granite.author.ui.globalBar
+         * @ignore
+         */
+        self.panelHeader = $('.js-editor-PanelHeader');
+
+        /**
+         * The window of the iframe
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias contentWindow
+         * @type {window}
+         * @ignore
+         */
+        self.contentWindow;
+
+        /**
+         * Initial offset of the iframe from the top of the window (equal
+         * to the height of the authoring toolbar)
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias topOffset
+         * @ignore
+         */
+        self.topOffset;
+
+        /**
+         * Keeps track of the URL of the content that is currently loaded in the iframe
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias location
+         */
+        self.location = null;
+
+        /**
+         * Type of data expected by the content page
+         * @memberOf Granite.author.ContentFrame
+         * @alias dataType
+         */
+        self.dataType = "HTML";
+
+        /**
+         * Namespace that contains internal functionalities related to the management of editables
+         *
+         * @type {{}}
+         * @private
+         */
+        self._EditableUtils = {
+            /**
+             * Filters the provided editable from the list of editables considered by the editor
+             *
+             * @param {Granite.author.Editable} editable    - the Editable to be evaluated
+             * @return {boolean}
+             * @private
+             */
+            shouldFilterEditable: function (editable) {
+                return !!editable && !editable.isStructureLocked();
+            }
+        };
+
+        /**
+         * Initialize the ContentFrame by loading the content page, and subscribing to messages sent by the iframe.
+         * NB: This interacts with the scripts included by the content page (defined in <code>cq.authoring.page</code>)
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias init
+         * @fires Document#cq-contentframe-layout-change
+         * @fires Document#cq-contentframe-datatype-set
+         */
+        self.init = function () {
+            // Load iframe content here in order to make sure that the above listener
+            // is registered before the iframe content finished loading (see CQ-13550)
+
+            var iframeEl = self.iframe.get(0);
+            var offset = self.iframe.offset();
+            self.contentWindow =  iframeEl && iframeEl.contentWindow;
+            self.topOffset = offset && self.iframe.offset().top;
+
+            ns.editContext.initializeCache();
+
+            // assemble content url
+            const remoteURL = ns.util.getValidURL(iframeEl.getAttribute('data-remoteurl'));
+
+            if (remoteURL) {
+                remoteURL.searchParams.append("cq:wcmmode", "edit");
+
+                self.isRemoteApp = true;
+                self.contentURL = remoteURL.href;
+                self.contentOrigin = remoteURL.origin;
+            } else {
+                self.contentURL = window.location.pathname.replace(ns.EditorFrame.editorVanityRegex, "/");
+
+                if (window.location.search) {
+                    self.contentURL += window.location.search;
+                }
+            }
+
+            // shows fullscreen mask to prevent non-desired user interaction with the iframe
+            // (it is up to a given layer to hide it depending on its own internal logic)
+            self.showFullScreenMask(true);
+
+            // load url into the iframe
+            self.load(self.contentURL);
+
+            self.messageChannel = new ns.MessageChannel('cqauthor', self.contentWindow, self.contentOrigin);
+
+            // When a mutation is observed in the content frame
+            self.messageChannel.subscribeRequestMessage("cq-contentframe-layout-change", $.debounce(100, function () {
+                // Propagate the message as an event
+                channel.trigger("cq-contentframe-layout-change");
+            }));
+
+            /**
+             * When authoring the content of an SPA,
+             * the cq-pagemodel-loaded and the cq-pagemodel-route-changed messages are posted concurrently
+             * when initializing the PageModelManager. The order in which they are received is random.
+             * Ensure that in both cases we trigger the storage of editables followed by the generation of overlays
+             */
+
+            // When the page model changes (only valid for JSON data type)
+            self.messageChannel.subscribeRequestMessage("cq-pagemodel-loaded", function (detail) {
+                // Propagate the message as an event
+                channel.trigger($.Event("cq-pagemodel-loaded", {
+                    pageModel: detail.data.model
+                }));
+            });
+
+            // When the page model route changes (only valid for JSON data type)
+            self.messageChannel.subscribeRequestMessage("cq-pagemodel-route-changed", function (detail) {
+                channel.trigger($.Event("cq-pagemodel-route-changed", {
+                    pagePath: detail.data.model[PN_PAGEMODEL_PATH],
+                    title: detail.data.model.title
+                }));
+            });
+
+            // When page model is fetched asynchronously and SPA components have been loaded (only valid for JSON data type)
+            self.messageChannel.subscribeRequestMessage("cq-async-content-loaded", function () {
+                channel.trigger($.Event("cq-async-content-loaded"));
+            });
+
+            // subscribe to changes in the content frame's fragment identifier (hash)
+            channel.one('cq-editor-loaded', function () {
+                // only subscribe when the enableFragmentIdentifier property on pageInfo is true
+                if (ns.pageInfo && ns.pageInfo.enableFragmentIdentifier === true) {
+                    self.executeCommand(null, 'requestFragmentIdentifierChanges', null);
+
+                    self.messageChannel.subscribeRequestMessage('cq-contentframe-fragment-identifier-change', function (event) {
+                        // propagate the message as a 'cq-content-frame-loaded' event
+                        channel.trigger($.Event('cq-content-frame-loaded', {
+                            frame: self,
+                            title: self.getTitle(),
+                            linkElements: self.getLinkElements(),
+                            location: self.contentWindow.location.pathname,
+                            fragmentIdentifierPath: event.data.path
+                        }));
+                    });
+                }
+            });
+        };
+
+        /**
+         * Make the iframe load the given URL
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias load
+         *
+         * @param {string} url - URL to be loaded
+         *
+         */
+        self.load = function (url) {
+            var pathname = (ns.util.isValidPath(url) || ns.util.getValidURL(url)) ? url : "";
+            self.location = pathname;
+            self.iframe.attr('src', pathname);
+            self.iframe.attr('role', 'presentation');
+        };
+
+        /**
+         * Reloads the current URL
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias reload
+         */
+        self.reload = function () {
+            this.load(this.location);
+        };
+
+        /**
+         * Returns the current location of the iframe
+         * NB: To get the actual content path of the resource loaded in the Editor, refer to {@link Granite.author.ContentFrame.getContentPath}
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias currentLocation
+         */
+        self.currentLocation = function () {
+            return self.location;
+        };
+
+        /**
+         * Returns the content path of the resource opened in the Editor
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias getContentPath
+         */
+        self.getContentPath = function () {
+            // Remove possible selector and extension
+            return self.location.replace(/\..*/, "");
+        };
+
+        /**
+         * Returns the current document of the iframe
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias getDocument
+         *
+         * @return {jQuery} - the iframe's document
+         */
+        self.getDocument = function () {
+            return $(self.iframe.get(0).contentDocument);
+        };
+
+        /**
+         * Returns the HTML node in the iframe corresponding to the Editable for a given path
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias getEditableNode
+         *
+         * @param {string} path - data-path attribute value of the editable
+         * @returns {jQuery}
+         */
+        self.getEditableNode = function (path) {
+            if (!path) {
+                return null;
+            }
+
+            if (JSON_DATA_TYPE === self.dataType) {
+                var element = self.getDocument().get(0).querySelector('[data-cq-data-path="' + path + '"]');
+
+                if (element) {
+                    return $(element);
+                }
+
+                // Consider removing after CQ-4251260
+                // Fallback to previous data representation model using two data attributes
+                var chunks = path.split(new RegExp(CONTENT_PATH_DELIMITER));
+                var pagePath = chunks.shift();
+                var contentPath = chunks.join(CONTENT_PATH_DELIMITER);
+                var selector = '[data-cq-page-path="' + pagePath + '"] [data-cq-data-path="' + contentPath + '"]';
+
+                return $(self.getDocument().get(0).querySelector(selector));
+            }
+
+            var node = self.getEditableConfigNode(path);
+
+            return node ? node.parent() : null;
+        };
+
+        /**
+         * Returns the HTML node corresponding to the Editable config in the iframe for a given path
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias getEditableConfigNode
+         *
+         * @param {string} path - data-path attribute value of the editable
+         * @returns {jQuery}
+         */
+        self.getEditableConfigNode = function (path) {
+            var node = self.getDocument().find('cq[data-path="' + path + '"]');
+            return node.length ? node : null;
+        };
+
+        /**
+         * Provides a function to be used when exploring the DOM for {@link Granite.author.Editable}s
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias setFindEditablesFunction
+         * @see ContentFrame.getEditables
+         *
+         * @param {function} func - The function responsible for providing a list of {@link Granite.author.Editable}
+         */
+        self.setFindEditablesFunction = function(func) {
+            findEditablesFunction = func;
+        };
+
+        /**
+         * Provides the {@link Granite.author.Editable}s constructor function
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias setEditableConstructor
+         * @see ContentFrame.getEditables
+         *
+         * @param {function} cons - The constructor function used to instantiate {@link Granite.author.Editable}s
+         */
+        self.setEditableConstructor = function (cons) {
+            editableConstructor = cons;
+        };
+
+        /**
+         * Returns all the [Editables]{@link Granite.author.Editable} present in the iframe document
+         * The Editables returned should be ordered according to the structure of the page
+         *
+         * The logic here could be customized at two different levels, by either setting:
+         * - a findEditables function that will override the whole behavior of the method
+         * - a editableConstructor function that will only override the way Editables are instantiated
+         * This could be achieved by calling ContentFrame.setFindEditablesFunction() or ContentFrame.setEditableConstructor() prior to this method.
+         *
+         * This method is data type sensitive:
+         * - for HTML data type, the editables are derived from the <cq> elements in the iframe
+         * - for JSON data type, the editables are derived from the editContextObj previously fetched
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias getEditables
+         *
+         * @param {jQuery|string} [root] - Either the DOM  where to find editables, or the root edit context path under which the editables will be derived.
+         * @returns {Granite.author.Editable[]} An ordered array of Editables
+         */
+        self.getEditables = function (root) {
+            var editables = [];
+
+            if (findEditablesFunction && typeof findEditablesFunction === "function") {
+                // In case the findEditables function has been overridden, then it overrides the whole behavior
+                return findEditablesFunction.call(self, root);
+            }
+
+            // In case the editableConstructor function has been overridden
+            var editableConstruct = editableConstructor || ns.Editable;
+
+            if (JSON_DATA_TYPE !== self.dataType) {
+                // HTML data type: look for <cq> elements in the content DOM, and then instantiate the Editables
+                root = root instanceof jQuery ? root : self.getDocument();
+                root.find("cq").each(function (i, element) {
+                    var editable = new editableConstruct(element);
+                    // Editables don't need to be filtered. As when they are structure locked, the cq node is not added to the DOM
+                    addEditable(editable, editables);
+                });
+            } else {
+                // JSON data type: the editables are derived from the edit context object
+                root = typeof root === "string" ? root : "/";
+
+                if (ns.editContext.isCacheEmpty()) {
+                    return editables;
+                }
+
+                // Respect the order in which the node elements are appearing in the DOM
+                // Get all the HTMLElements that have a cqDataPath attribute
+                var elements = self.getDocument().get(0).querySelectorAll('[data-cq-data-path]');
+
+                // Either we return the current node or its children
+                var rootRegExp = new RegExp('^' + root + '(?:\/.*)?$');
+
+                for (var i = 0, length = elements.length; i < length; i++) {
+                    var element = elements[i];
+                    var path = element.dataset.cqDataPath;
+
+                    if (!path) {
+                        continue;
+                    }
+
+                    var editContext = ns.editContext.getEditContext(path);
+
+                    // fetch editcontext of virtual component
+                    // todo refactor to not use synchronous call
+                    // running tests causes side effects as then
+                    // being called on the next async breakup (after the test finishes).
+                    if (!editContext && element.dataset.cqResourceType) {
+                        ns.editContext.fetch(path, true, { resourceType: element.dataset.cqResourceType }, true);
+                        editContext = ns.editContext.getEditContext(path);
+                    }
+
+                    // If the path is not one of the properties of the cached edit contexts or
+                    // if the root path isn't the actual root
+                    // if the path is not under the provided root,
+                    // continue the iteration
+                    if (!editContext || (root !== '/' && !path.match(rootRegExp))) {
+                        continue;
+                    }
+
+                    var editable = new editableConstruct(editContext, $(element));
+
+                    // If the editable is filtered, continue the iteration
+                    if (self._EditableUtils.shouldFilterEditable(editable)) {
+                        addEditable(editable, editables);
+                    }
+                }
+            }
+
+            return editables;
+        };
+
+        /**
+         * Reloads the given editable with the latest values from the DOM and the EditContext
+         *
+         * @param {Granite.author.Editable} editable - The editable to be reloaded
+         *
+         * @returns {$.Promise} if successful resolves with the updated editable
+         */
+        self.reloadEditable = function (editable) {
+            if (!editable || !editable.path) {
+                return $.Deferred().reject().promise();
+            }
+
+            if (JSON_DATA_TYPE === self.dataType) {
+                // for reload the edit context of the current editable
+                return ns.editContext.fetch(editable.path, true)
+                    .then(function (editContext) {
+                        _reloadEditable(editable);
+                        return editable;
+                    });
+            } else {
+                _reloadEditable(editable);
+                return editable;
+            }
+        };
+
+        /**
+         * Loads all the [Editables]{@link Granite.author.Editable}.
+         *
+         * This method delegates the computation of the editables to {@link Granite.author.ContentFrame.getEditables} and then broadcasts the editables.
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias loadEditables
+         * @fires Document#cq-editables-loaded
+         *
+         * @returns {Granite.author.Editable[]} An array of all {@link Granite.author.Editable}s in the content frame
+         */
+        self.loadEditables = function () {
+            // No root is passed to getEditables to get all editables
+            var editables = self.getEditables();
+
+            channel.trigger($.Event("cq-editables-loaded", {
+                editables: editables
+            }));
+
+            return editables;
+        };
+
+        /**
+         * Loads all the [Editables]{@link Granite.author.Editable} and returns a promise that resolves when the editables are loaded.
+         *
+         * This method has a data type sensitive behavior, contrary to {@link Granite.author.ContentFrame.loadEditables}:
+         * - for HTML data type, the editables are actually synchronously loaded via {@link Granite.author.ContentFrame.loadEditables}
+         * - for JSON data type, this method first waits for the page model change and layout changed events before fetching the edit context.
+         *   and then delegates to {@link Granite.author.ContentFrame.loadEditables}
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias loadEditablesAsync
+         * @fires Document#cq-editables-loaded
+         *
+         * @param {boolean} [forceReloadEditContext] - should the edit context be reloaded
+         *
+         * @returns {$.Promise} An array of all {@link Granite.author.Editable}s in the content frame
+         */
+        self.loadEditablesAsync = function (forceReloadEditContext) {
+            if (JSON_DATA_TYPE !== self.dataType) {
+                return $.Deferred().resolve(self.loadEditables()).promise();
+            } else {
+                // JSON data type: make sure both the page model and content DOM have been updated before computing the editables
+                var layoutChangedDeferred = $.Deferred();
+
+                if (pageModelRootPathCache) {
+                    layoutChangedDeferred.resolve();
+                } else {
+                    // Wait for the path to page model root to be defined
+                    channel.one("cq-pagemodel-loaded", function () {
+                        if (pageModelRootPathCache) {
+                            layoutChangedDeferred.resolve();
+                        }
+                    });
+                }
+
+                return layoutChangedDeferred.then(function () {
+                    // Remove possible selector and extension
+                    var contentPath = self.getContentPath();
+                    let promises = []
+
+                    // Eventually fetch the edit context of the root model path
+                    if (pageModelRootPathCache && pageModelRootPathCache.length > 0 && pageModelRootPathCache !== contentPath) {
+                        var pageModelPathDeferred = ns.editContext.fetch(pageModelRootPathCache, forceReloadEditContext);
+                        promises.push(pageModelPathDeferred);
+                    }
+
+                    // Re-compute the edit context of the whole page every time page model changes
+                    var contentPathDeferred = ns.editContext.fetch(undefined, forceReloadEditContext);
+                    promises.push(contentPathDeferred);
+
+                    return $.when.apply(this, promises).then(function () {
+                        // Re-load the editables based on the new edit context (locally saved in editContextObj)
+                        return ns.ContentFrame.loadEditables();
+                    });
+                });
+            }
+        };
+
+        /**
+         * Returns the title of the iframe document
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias getTitle
+         *
+         * @return {String} the title of the current document
+         * @ignore
+         */
+        self.getTitle = function () {
+            return self.getDocument().get(0).title;
+        };
+
+        /**
+         * Returns the list of link HTMLElements
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias getLinkElements
+         *
+         * @returns {jQuery[]} the attributes of link tags in the document
+         * @ignore
+         */
+        self.getLinkElements = function () {
+            // proxy title, feeds and favicon from document
+            var links = self.getDocument().find('link'),
+                ret = [], l, rel;
+
+            for (var i = 0; i < links.length; i++) {
+                l = links[i];
+                rel = l.rel ? l.rel.toLowerCase() : '';
+
+                if (rel.indexOf('icon') !== -1 || rel.indexOf('alternate') !== -1) {
+                    ret.push({
+                        rel: l.rel,
+                        href: l.href,
+                        type: l.type,
+                        title: l.title
+                    });
+                }
+            }
+
+            return ret;
+        };
+
+        /**
+         * Resets the height of the ContentWrapper and ContentFrame; used to adjust the iframe height when a change occurs inside of the content page
+         * This is called on cq-contentframe-layout-change event
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @param {boolean} [autoHeight]         - Allow a deep computation of the iFrame inner content height. The inner content is entirely redrawn before the inner document height is applied to the iFrame
+         * @alias resetContentHeight
+         */
+        self.resetContentHeight = function (autoHeight) {
+            var document = self.getDocument().get(0);
+
+            // Require a boolean to avoid confusion with a potential event parameter
+            if (autoHeight === true) {
+                // Forces the re-computation of the iFrame height
+                self.iframe[0].style.height = 'auto';
+            }
+
+            if (document) {
+                self.iframe[0].contentWindow.requestAnimationFrame(function () {
+                    var currentHeight = self.iframe.height();
+                    // Height of the iframe content
+                    var iFrameContentHeight = getDocumentHeight(document);
+                    // Height of the editor (window - toolbar)
+                    var editorHeight = $(window).height() - self.topOffset;
+
+                    if (iFrameContentHeight < editorHeight) {
+                        iFrameContentHeight = editorHeight;
+                    }
+
+                    if (currentHeight !== iFrameContentHeight) {
+                        self.wrapper.height(iFrameContentHeight);
+                        self.iframe.height(iFrameContentHeight);
+                    }
+                });
+            }
+        };
+
+        /**
+         * Sets the size of the iframe
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias setSize
+         *
+         * @param {Number} width    - Expressed in pixel
+         * @param {Number} height   - Expressed in pixel
+         * @ignore
+         */
+        self.setSize = function (width, height) {
+            self.setWidth(width);
+            self.setHeight(height);
+        };
+
+        /**
+         * Sets the width of the iframe
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias setWidth
+         *
+         * @param {Number} width    - Expressed in pixel
+         * @ignore
+         */
+        self.setWidth = function (width) {
+            window.requestAnimationFrame(function () {
+                self.iframe.width(width);
+            });
+        };
+
+        /**
+         * Sets the height of the iframe
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias setHeight
+         *
+         * @param {Number} height   - Expressed in pixel
+         * @ignore
+         */
+        self.setHeight = function (height) {
+            window.requestAnimationFrame(function () {
+                self.iframe.height(height);
+            });
+        };
+
+        /**
+         * Repositions the ScrollView relative to the height of the global bar
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias updateTopOffset
+         * @ignore
+         */
+        self.updateTopOffset = function () {
+            self.setTopOffset(self.panelHeader.height());
+        };
+
+        /**
+         * Sets the top offset of the ScrollView
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias setTopOffset
+         *
+         * @param {string|Number} topOffset - Top position
+         * @ignore
+         */
+        self.setTopOffset = function (topOffset) {
+            self.topOffset = topOffset;
+
+            self.scrollView.css('top', topOffset);
+        };
+
+        /**
+         * Sends a message to the ContentFrame in order to execute the given command
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias executeCommand
+         *
+         * @param {string} path         - Path to the resource
+         * @param {string} command      - Name of the command to execute
+         * @param {*} data              - Data to be passed to the command function. Depending of the context may be either a string representation of an html element or a configuration object
+         * @return {$.Promise}
+         * @ignore
+         */
+        self.executeCommand = function (path, command, data) {
+            var def = $.Deferred();
+
+            // we wrap the answer in the old command format
+            var promise = self.messageChannel.postMessage('cqauthor-cmd', {
+                path: path,
+                cmd: command,
+                cmdData: data,
+                dataType: self.dataType
+            });
+
+            function fwdMsg(d, action) {
+                def[action](d.req, {
+                    'cqauthor': d.res.id,
+                    'cmd': d.res.data.cmd,
+                    'path': d.res.data.path,
+                    'data': d.res.data.cmdData,
+                    'dataType': self.dataType
+                }, d.res.data.cmdData);
+            }
+
+            promise.then(function (data) {
+                    fwdMsg(data, 'resolve');
+                },
+                function (data) {
+                    fwdMsg.bind('reject');
+                });
+
+            return def.promise();
+        };
+
+        /**
+         * Toggle all the placeholders elements of the iframe
+         *
+         * NB: This causes a full rendering of the inner document
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias showPlaceholder
+         *
+         * @param {boolean} condition - Should the placeholders be displayed
+         */
+        self.showPlaceholder = function (condition) {
+            ns.ContentFrame.executeCommand(null, 'toggleClass', {
+                className: 'aem-Author--hidePlaceholder',
+                condition: condition === false
+            }).always(function () {
+                self.resetContentHeight(true);
+            });
+        };
+
+        /**
+         * Shows/hide the fullscreen mask. Goal is to prevent unwanted user interaction with the iframe content
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias showFullScreenMask
+         * @ignore
+         */
+        self.showFullScreenMask = function (condition) {
+            self.mask.toggle(condition);
+        };
+
+        /**
+         * Returns the User id as exposed by the content of the iframe
+         *
+         * @memberOf Granite.author.ContentFrame
+         * @alias getUserID
+         *
+         * @returns {String} The current user ID
+         * @ignore
+         */
+        self.getUserID = function () {
+            // TODO CQ-82282 - implement instead access to user info in the context of the editor itself.
+            // TODO Deprecate and remove this function from the context of the ContentFrame or just use it for specific comparison task between the editor and the page content if only required
+            return self.contentWindow &&
+                self.contentWindow.CQ &&
+                self.contentWindow.CQ.shared &&
+                self.contentWindow.CQ.shared.User &&
+                self.contentWindow.CQ.shared.User.data &&
+                self.contentWindow.CQ.shared.User.data.userID;
+        };
+
+        /**
+         * @ignore
+         * @private
+         *
+         * @fires Document#cq-content-frame-unload
+         * @fires Document#cq-content-frame-loaded
+         */
+        self._onLoad = function (ev) {
+            // to allow cleaning up the iframe document references
+            self.iframe[0].contentWindow.onunload = function () {
+                channel.trigger('cq-content-frame-unload');
+            };
+
+            var samePage = (self.location === self.contentWindow.location.pathname);
+
+            try {
+                self.location = self.contentWindow.location.pathname;
+            } catch (ex) {
+                // the user most likely left the local site for an external
+                ns.ui.helpers.notify({
+                    content: Granite.I18n.get('It seems like you are trying to edit an external site. We will redirect back to the referencing site.'),
+                    type: ns.ui.helpers.NOTIFICATION_TYPES.ERROR
+                });
+                self.load(self.currentLocation());
+            }
+
+            self.resetContentHeight();
+
+            if (!samePage) {
+                // Reset the scrolling position
+                self.scrollView.scrollTop(0);
+            }
+
+            // Detect possible data type set at the content frame level
+            var dataTypeHintElement = self.iframe.get(0).contentDocument.querySelector('meta[property="cq:datatype"]');
+            if (dataTypeHintElement) {
+                self.dataType = dataTypeHintElement.content;
+                // Broadcast the data type so that other modules can adjust their behavior
+                channel.trigger($.Event('cq-contentframe-datatype-set', {
+                    dataType: self.dataType
+                }));
+            }
+
+            channel.trigger($.Event('cq-content-frame-loaded', {
+                frame: self,
+                title: self.getTitle(),
+                linkElements: self.getLinkElements(),
+                location: self.contentWindow.location.pathname
+            }));
+        };
+
+        /**
+         * @ignore
+         * @private
+         * Reloads all editables and refreshes overlays
+         */
+        self._reloadEditables = (pagePath) =>{
+            var editables = self.getEditables(pagePath);
+
+            // Override the list of editables
+            channel.trigger($.Event("cq-editables-loaded", {
+                editables: editables
+            }));
+
+            // Ensure the overlays are either created or recreated
+            channel.trigger($.Event("cq-overlays-create", {
+                editables: editables
+            }));
+        };
+
+        /**
+         * Is fired every time the url of the iframe is changed (e.g. click on a inner link)
+         *
+         * @fires Document#cq-content-frame-loaded
+         */
+        self.iframe.on('load', self._onLoad);
+
+        /**
+         * Listen to changes on the iframe content layout to adapt the content frame size
+         */
+        channel.on("cq-contentframe-layout-change", function () {
+            // Previously, we were listening on "cq-overlays-repositioned" (before we changed the overlay observation routine to use mutation obsevers)
+            self.resetContentHeight();
+        });
+
+        /**
+         * Refresh the content of the iFrame with the new location
+         */
+        channel.on('cq-editor-content-location-changed', function (event) {
+            if (event && event.location && event.location !== self.currentLocation()) {
+                ns.ContentFrame.load(event.location);
+            }
+        });
+
+        /**
+         * The page model has been loaded
+         */
+        channel.on("cq-pagemodel-loaded", function (data) {
+            var pageModel = data && data.pageModel;
+            pageModelRootPathCache = pageModel && pageModel[PN_PAGEMODEL_PATH] && Granite.HTTP.getPath(pageModel[PN_PAGEMODEL_PATH]);
+        });
+
+        /**
+         * Reload the editables given that the content changed
+         */
+        channel.on('cq-pagemodel-route-changed', function (event) {
+            if (event.pagePath) {
+                self.location = event.pagePath + ".html";
+                ns.EditorFrame.refreshUrlFromIframe(self.location, event.title)
+            }
+            ns.editContext.fetch(event.pagePath).then(function () {
+                self._reloadEditables(event.pagePath);
+            });
+        });
+
+        /**
+         * Reload the editables once SPA content for asynchronously fetched page model is available
+         */
+        channel.on('cq-async-content-loaded', function () {
+            self._reloadEditables();
+        });
+
+        return self;
+    }());
+
+}(jQuery, Granite.author, jQuery(document), this));

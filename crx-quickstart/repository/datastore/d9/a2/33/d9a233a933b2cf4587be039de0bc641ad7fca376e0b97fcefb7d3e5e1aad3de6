@@ -1,0 +1,503 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE: All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any. The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function( $ ){
+    
+    /*
+     Retrieve data members from $this to configure the object to be 
+     used in constructor initialization of the parameters and modifiers 
+     for the OOTB Interactive Video Viewer with preset (config=).
+     */
+
+    "use strict";
+
+    window.s7prepareInteractiveVideoOptions = function($this) {
+        var asset = $(".dm-setup-info").data("assetPath");
+        var assetAVS = $(".dm-setup-info").data("scene7fileavs");
+        var s7preset = $this.data("s7preset");
+        var aemMode = "1";
+        var s7host = $this.data('s7host');
+		var isDMS7Enabled = $this.data("isdms7enabled");
+
+        if (assetAVS){
+            aemMode = "0";
+            asset = assetAVS;
+        }
+
+        //check to make sure that s7asset and s7host are defined
+        if( asset && s7host && s7preset) {
+            var containerId = $this.attr('id');
+
+            /*
+            For hobbes tests, want to achieve video playback without DMCS setup or video encoding by overriding the
+            contenturl, videoserverurl and VideoPlayer.contentserverurl.
+
+            "params" : {
+                "serverurl" : "http://wyleung-w7.s7hp-branch-delivery.corp.adobe.com:8080/is/image",
+                "contenturl" : "/",
+                "videoserverurl": "http://s7athens.macromedia.com:9090/DMGateway/public/VideoCo",
+                "VideoPlayer.contenturl": "http://wyleung-w7.s7hp-branch-delivery.corp.adobe.com:8080/is/content"
+            }
+             */
+
+            var serverUrl = Granite.HTTP.externalize("/is/image/");
+
+            var videoServerUrl = $this.data("s7-preview-videoserverurl");
+
+            // Hobbes test asset shall have production videoserverurl set, imageserverurl is optional across versions
+            if ($this.data("s7-production-videoserverurl")) {
+                videoServerUrl = $this.data("s7-production-videoserverurl");
+                if ($this.data("s7-imageserverurl")) {
+                    var imageServerUrl = $this.data("s7-imageserverurl");
+                    // endsWith is not supported in IE11
+                    if (imageServerUrl.charAt(imageServerUrl.length - 1) === "/") {
+                        imageServerUrl = imageServerUrl.substring(0, imageServerUrl.length - 1);
+                    }
+                    serverUrl = imageServerUrl + "/is/image";
+                }
+            }
+
+            // mute volume to allow playback in automated execution by browser minion
+            var muteVolume = $this.data("s7-mutevolume");
+
+            // object for constructor initialization of OOTB InteractiveVideoViewer
+            var isTenant = $('#asset-info').data('isTenant');
+            var membersAreProducts = $('#asset-info').data('swatchMembersAreProducts');
+            var previewConfig = (isTenant || !membersAreProducts)? "1" : "0";
+			var contentUrlString = "/";  // default for DM runmode
+			if (isDMS7Enabled) {
+                contentUrlString = serverUrl.replace("is/image/", "is/content/");
+			}
+			//contentUrl = Granite.HTTP.externalize(contentUrl);
+            var inObj = {
+                containerId: containerId,
+                params: {
+                    'ControlBar.transition': "none, -1",
+                    'MediaSet.asset': asset,
+                    videoserverurl: videoServerUrl,
+                    config: s7preset,
+                    serverUrl: serverUrl,
+                    progressivebitrate:"20000",
+                    contentUrl: Granite.HTTP.externalize(contentUrlString),
+                    posterimage: asset,
+                    preview: previewConfig,
+                    playback: 'progressive',
+                    aemmode: aemMode
+                }
+            };
+
+            // Hobbes test shall apply mutevolume=1 to VideoPlayer to support playback in automated execution (browser-minion)
+            if (muteVolume) {
+                inObj.params["VideoPlayer.mutevolume"] = muteVolume;
+            }
+
+            return inObj;
+        }
+        return null;
+    }
+
+    window.s7disposeInteractiveViewer = function($this) {
+        var viewer = $this.data("viewer");
+        if (viewer) {
+            viewer.dispose();
+            $this.data("viewer", null);
+        }
+    }
+
+    $(document).on('webkitfullscreenchange mozfullscreenchange msfullscreenchange', function(e)
+    {
+        if ((document.webkitIsFullScreen !== undefined && !document.webkitIsFullScreen) || (document.mozFullScreen !== undefined && !document.mozFullScreen)){
+            var $addToCartDialog = $('.add-to-cart-image-dialog');
+            if ($addToCartDialog !== undefined) {
+                var $addToCartDialogElement = $addToCartDialog.parent();
+                $addToCartDialogElement.detach();
+                $addToCartDialogElement.appendTo('body');
+            }
+        }
+    });
+
+})( Granite.$ );
+
+(function (document, $) {
+    "use strict";
+
+    // DOM element
+    var SV_PREVIEW = '#svideo-presetpreview';
+
+    // event
+    var SV_PRESET_PREVIEW_READY = 'sv-preset-preview-ready';
+    var SV_PRESET_SHOW_PREVIEW = 'sv-preset-show-preview';
+
+    //Translate JCR platform type to s7ondemand viewer type
+    var PLATFORM_TO_VIEWERTYPE = {
+        'HTML5' : 'html5',
+        'FLASH_SDK' : 'flash'
+    }
+    //Translate JCR viewer type to s7ondemand template type
+    var VIEWERTYPE_TO_TEMPLATETYPE = {
+        'IMAGE_SET' : 'zoom',
+        'ZOOM' : 'basiczoom',
+        'FLYOUT_ZOOM' : 'flyout',
+        'VIDEO' : 'video',
+        'SPIN_SET' : 'spin',
+        'MIXED_MEDIA': 'mixedmedia',
+        'AS3' : 'generic',
+        'INTERACTIVE_IMAGE' : 'interactiveimage',
+        'INTERACTIVE_VIDEO' : 'interactivevideo',
+        'VERTICAL_ZOOM' : 'verticalzoom'
+    }
+
+    var PREVIEWPATH ={
+        'html5' : {
+            'basiczoom' : 'html5/BasicZoomViewer.html',
+            'zoom' : 'html5/ZoomViewer.html',
+            'flyout' : 'html5/FlyoutViewer.html',
+            'spin' : 'html5/SpinViewer.html',
+            'video' : 'html5/VideoViewer.html',
+            'mixedmedia' : 'html5/MixedMediaViewer.html',
+            'interactiveimage' : 'html5/InteractiveImage.html',
+            'interactivevideo' : 'html5/InteractiveVideoViewer.html',
+            'verticalzoom' : 'html5/ZoomVerticalViewer.html'
+        }
+    }
+
+    // NOTE: determineSharedLink and buildURL could be moved into a component for use in common by another component for previewing.
+    // Embed code is not included in this initial version, as it is not needed by InteractiveVideoViewer
+
+    // determine shared link
+    function determineSharedLink(preset, settings, uri, val){
+        var previewVideoServerUrl = val.data("s7-preview-videoserverurl");
+
+        var ts = new Date().getTime();//timestamp to fix cache issue
+        //add cache=off to asset to bypass caching for preview except video
+        var previewUrl = "";
+        var extraParams = "";
+        var serverURL = location.protocol + "//" + location.host;
+		var isTenant = $('#asset-info').data('isTenant');
+        var membersAreProducts = $('#asset-info').data('swatchMembersAreProducts');
+        if (preset.category === 'VIDEO'
+            || preset.category ==='MIXED_MEDIA'
+            || preset.category === 'INTERACTIVE_VIDEO') {
+            var atype = val.data('s7type');
+            if (preset.category === 'INTERACTIVE_VIDEO') {
+                var vttPath = val.data('vtt');
+                if (vttPath != '') {
+                    extraParams += '&interactivedata=' + vttPath;
+                    if (isTenant || !membersAreProducts) { 
+                        // To use the default quickview when it is AoD or the swatches are not products
+                        extraParams += "&preview=1";
+                    }
+                }
+            }
+            //TODO: this is workaround to force progressive playback for non-AVS video for 6.0
+            if (atype.toUpperCase() === 'VIDEO') {
+                extraParams += '&playback=native';
+            }
+            //force posterimage to use full asset path
+            if (preset.category === 'VIDEO') {
+                extraParams += '&posterimage=' + settings.s7asset;
+            }
+            previewUrl = buildURL(preset.platform,
+                preset.category,
+                uri,
+                settings.s7asset,
+                serverURL,
+                'ts=' + ts + extraParams,
+                settings.s7viewerpath,
+                previewVideoServerUrl);
+        }
+        else {
+            if (preset.category === 'INTERACTIVE_IMAGE' && (isTenant || !membersAreProducts)) {
+                extraParams = "&preview=1";
+            }
+            previewUrl = buildURL(preset.platform,
+                preset.category,
+                uri,
+                settings.s7asset +  '%3Fcache%3Doff',
+                serverURL,
+                'ts=' + ts + extraParams,
+                settings.s7viewerpath,
+                previewVideoServerUrl);
+        }
+
+        return previewUrl;
+    }
+
+    function buildURL(platformType, viewerType, preset, asset, serverURL, modifiers, viewerPath, previewVideoServerUrl){
+        var s7viewerType = PLATFORM_TO_VIEWERTYPE[platformType];
+        if(s7viewerType === 'flash'){
+            viewerType = 'as3';
+        }
+        var s7templateType = VIEWERTYPE_TO_TEMPLATETYPE[viewerType];
+        var previewPath = PREVIEWPATH[s7viewerType];
+        if ( previewPath ){
+            previewPath = previewPath[s7templateType];
+        }
+        if (previewPath) {
+
+            if (serverURL.lastIndexOf('/') === serverURL.length - 1) {
+               //remove extra trailing /
+                serverURL = serverURL.substring(0, serverURL.length - 1);
+            }
+            previewPath = serverURL + viewerPath + previewPath;
+
+            previewPath += '?asset=' + asset + '&config=' + preset;
+            // use dynamic path
+            previewPath += '&serverUrl=' + encodeURIComponent(Granite.HTTP.externalize('/is/image/'));
+            // content url for CSS
+            previewPath += '&contenturl=' + encodeURIComponent(Granite.HTTP.externalize('/'));
+            // content url for VTT
+            previewPath += '&VideoPlayer.contenturl=' + encodeURIComponent(Granite.HTTP.externalize('/is/content'));
+
+            if (viewerType === 'FLYOUT_ZOOM') {
+                previewPath += '&stagesize=260,500';
+            }
+
+            if (previewVideoServerUrl) {
+                previewPath += '&videoServerUrl=' + encodeURIComponent(previewVideoServerUrl);
+            }
+
+            if (modifiers) {
+                previewPath += '&' + modifiers;
+            }
+        }
+        return previewPath;
+    }
+
+    /**
+     * Preview Interactive Video with specific interactive data cues.  The InteractiveVideoViewer is created
+     * the first time this function is executed.
+     * @param {String} id Id of the parent container of the InteractiveVideoViewer
+     * @param {Object} preset InteractiveVideoViewer preset
+     * @param {s7viewers.s7sdk.common.WebVtt} WebVtt object representing interactive data for various segments/swatches
+     */
+    function previewInteractiveVideo(id, preset, interactiveDataCues) {
+
+        // find the container <div> for InteractiveVideoViewer
+        var divVideo = $("#"+ id);
+        function getStyle(style) {
+            return s7viewers.s7sdk.Util.getStyle(divVideo[0], style);
+        }
+
+        // get Viewer and VideoPlayer component
+        var viewer = divVideo.data("viewer") ? divVideo.data("viewer") : null;
+        var videoPlayer = (viewer) ? viewer.getComponent("videoPlayer") : null;
+
+        // preset path
+        var presetPath = preset ? preset.uri : null;
+
+        // create interactive video viewer and attach the video player to the viewer div as a data member
+        function createInteractiveVideoViewer() {
+            // initialize video viewer and register event listeners to buttons if not already setup
+            var initCompleteHandler = function(event) {
+                if (viewer) {
+                    // store viewer as data of the container div, 
+                    // for subsequent updates on interactive data
+                    divVideo.data("viewer", viewer);
+
+                    var videoPlayer = viewer.getComponent("videoPlayer");
+
+                    // apply interactive data
+                    if (interactiveDataCues) {
+                        videoPlayer.setInteractiveDataCues(interactiveDataCues);
+                    }
+
+                    // update social share links
+                    var link = determineSharedLink(divVideo.data('presetDefinition'), divVideo.data(), presetPath, divVideo);
+                    var linkShare = viewer.getComponent("linkShare");
+                    linkShare.setContentUrl(link);
+                    var twitterShare = viewer.getComponent("twitterShare");
+                    twitterShare.setContentUrl(link);
+                    var facebookShare = viewer.getComponent("facebookShare");
+                    facebookShare.setContentUrl(link);
+
+                 	// If it's AEM or the swatches are not products, to add event handlers, which will prepare the commerce quickview
+	                var isTenant = $('#asset-info').data('isTenant');
+                    var membersAreProducts = $('#asset-info').data('swatchMembersAreProducts');
+    	            if (!isTenant && membersAreProducts) {
+                        var interactiveSwatches = viewer.getComponent("interactiveSwatches");
+                        interactiveSwatches.addEventListener(s7viewers.s7sdk.event.InteractiveSwatchesEvent.SWATCH_QUICKVIEW_ACTIVATED, interactiveSwatchActivateHandler, false);
+    
+                        var callToAction = viewer.getComponent("callToAction");
+                        callToAction.addEventListener(s7viewers.s7sdk.event.InteractiveSwatchesEvent.SWATCH_QUICKVIEW_ACTIVATED, interactiveSwatchActivateHandler, false);
+                    }
+
+                    // trigger event to resize viewer if necessary
+                    $(document).trigger({ type: SV_PRESET_PREVIEW_READY, viewer: viewer, width : getStyle("width"), height : getStyle("height") });
+                } // if (viewer)
+            } // initCompleteHandler
+
+            // dispose previously instantiated viewer
+            if (viewer) {
+                viewer.dispose();
+                viewer = null;
+                divVideo.data("viewer", null);
+            }
+
+            divVideo.data("s7preset", presetPath);
+            divVideo.data('presetDefinition', preset['presetDefinition']);
+
+            var inObj = s7prepareInteractiveVideoOptions(divVideo);
+            inObj = inObj ? inObj : {};
+            if (!inObj.params) inObj.params = {};
+            if (!inObj.handlers) inObj.handlers = {};
+
+            // additional parameters, if necessary
+            $.extend( inObj.params, {
+                autoplay: "0"
+            } );
+
+            // additional handlers, if necessary
+            $.extend( inObj.handlers, {
+                initComplete: initCompleteHandler
+            } );
+
+            document.querySelector(SV_PREVIEW).show();
+
+            // instantiate the OOTB InteractiveVideoViewer with parameters and modifiers specified by inObj
+            viewer = new s7viewers.InteractiveVideoViewer(inObj);
+            if (typeof s7sdk_i18n != 'undefined')  {
+                viewer.setLocalizedTexts($.sv.getLocalizedText());
+            }
+            viewer.init();
+            divVideo.data("viewer", viewer);
+        }
+
+        if (!viewer || $(divVideo).data("s7preset") != presetPath) {
+            createInteractiveVideoViewer();
+        } else {
+            // update interactive data
+            videoPlayer.setInteractiveDataCues(interactiveDataCues);
+        }
+
+    }
+
+    function interactiveSwatchActivateHandler(event){
+        var inData = event.s7event.data
+
+        if(typeof(inData.fragment) != "undefined" && inData.fragment.length != 0) {
+            s7dmQuickviewFragment.callCommercePlugin(inData);
+            return;
+        }
+        
+        var pagePath = $('#asset-preview-info').data("path");
+    
+        if ($('.add-to-cart-image-dialog')) {
+            $('.add-to-cart-image-dialog').remove();
+        } 
+    
+        // create the quickview dialog
+        var addToCartDialog = $('<div></div>', {
+                    'class': 'add-to-cart-image-dialog'
+                }).appendTo('body');
+    
+        var params = {
+                'pagePath': pagePath,
+                'showProductAsset': true,
+                'showProductPrice': true,
+                'showProductForm': false
+        }
+    
+        var addToCartUrl = inData.reservedVal_productPath + ".addtocart.html";
+        var ww;
+        var hh;
+		function checkSize() {
+			if($('.add-to-cart-image-dialog:visible').length == 0) {
+				return;
+			}
+			var w = $('.add-to-cart-image-dialog').width();
+			var h = $('.add-to-cart-image-dialog').height();
+			if(ww != w || hh != h) {
+				ww = w;
+				hh = h;
+				$('.add-to-cart-image-dialog').parent().position({my:"center", at:"center", of:window});
+			}
+			setTimeout(checkSize, 500);
+		}
+    	
+        $.get(addToCartUrl, params, function(html) {
+            $('.add-to-cart-image-dialog').dialog({
+                autoOpen: false,
+                modal: true,
+                width: 'auto',
+                height: 'auto',
+                zIndex: 90000,
+                dialogClass:'quickview_dialog',
+            	draggable:false,
+            	resizable:false,
+                show:'fade',
+                hide:'fade',
+                open: function() {
+                    $('.ui-widget-overlay').addClass('quickview_dialog_overlay');
+                    $('.quickview_dialog_overlay').off('click');
+                    $('.quickview_dialog_overlay').on('click', function (e) {
+                        $('.add-to-cart-image-dialog').parent().find("a.ui-dialog-titlebar-close").trigger("click");
+                    });
+                    checkSize();
+               },
+                close: function() {
+                    $('.ui-widget-overlay').removeClass('quickview_dialog_overlay');
+        	    	var viewer = $('#asset-preset-preview').data("viewer");
+        	    	var videoPlayer = viewer.getComponent("videoPlayer");//sv_preview_viewer
+		    		if (viewer.storedPlayingState) {
+            			videoPlayer.play();
+            			viewer.storedPlayingState = false;
+        	    	}
+                }                        
+                
+            });
+    
+            $('.add-to-cart-image-dialog').parent().find("a.ui-dialog-titlebar-close").on("click", onQuickviewClose);
+    
+            $('.add-to-cart-image-dialog').html(html).dialog("open");
+
+            // to check fullscreen mode
+            if (window.innerWidth == screen.width) {
+                var $addToCartDialog = $('.add-to-cart-image-dialog');
+                if ($addToCartDialog !== undefined) {
+                    var $addToCartDialogElement = $addToCartDialog.parent();
+                    var s7viewer                = $("#asset-preset-preview").data("viewer");
+
+                    if (s7viewer !== undefined) {
+                        var inner_container_id  = s7viewer.getComponent("container").getInnerContainerId();
+                        var $inner_container    = $("#" + inner_container_id)
+
+                        $addToCartDialogElement.detach();
+                        $addToCartDialogElement.appendTo($inner_container);
+                    }
+                }
+            }
+
+            // redirect to current page when closing the dialog
+            $("input[name=redirect]").val(pagePath);
+        });
+    }
+    
+    function onQuickviewClose(event) {
+        var viewer = $('#asset-preset-preview').data("viewer");
+        var videoPlayer = viewer.getComponent("videoPlayer");//sv_preview_viewer
+        if (viewer.storedPlayingState) {
+            videoPlayer.play();
+            viewer.storedPlayingState = false;
+        }
+    }
+
+    /** display preview with interactive data and viewer preset from the event */
+    $(document).on(SV_PRESET_SHOW_PREVIEW, function(e) {
+        previewInteractiveVideo(e.id, e.preset, e.interactiveData);
+    });
+})(document, Granite.$);

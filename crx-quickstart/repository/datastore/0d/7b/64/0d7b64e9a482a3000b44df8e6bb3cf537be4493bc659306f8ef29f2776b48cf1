@@ -1,0 +1,473 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2020 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, window, Granite, Coral) {
+    'use strict';
+
+    const $window = $(window);
+    const ALLOWED_MODELS_TARGET_CLASS = "allowed-models-target";
+    const ALLOWED_MODELS_TOOLTIP_CLASS = "allowed-models-tooltip";
+    const REFERENCE_TO_VALIDATE_SELECTOR = ".field-fragment-reference";
+    const _fragmentDataCache = {};
+
+    function registerValidator() {
+        const registry = $window.adaptTo("foundation-registry");
+
+        registry.register("foundation.validation.validator", {
+            selector: REFERENCE_TO_VALIDATE_SELECTOR,
+            validate: function (el) {
+                // no value to test
+                if (!el.value) {
+                    return;
+                }
+
+                // Valid fragment was just created via iframe wizard, so we skip AJAX-based validation.
+                // Use .contains() as el may be an item within multifield newFragmentEl.
+                if (newFragmentEl && newFragmentEl.contains(el)) {
+                    return;
+                }
+
+                const fragmentData = getFragmentData(el.value);
+
+                if (!fragmentData.isContentFragment) {
+                    return Granite.I18n.get("Provided resource is not a content fragment.");
+                }
+
+                const allowedModels = getAllowedModelsForElement(el);
+                if (!fragmentData.contentFragmentModelPath || allowedModels.indexOf(fragmentData.contentFragmentModelPath) === -1) {
+                    addAllowedModelsTooltip(el);
+                    return Granite.I18n.get(`Provided resource does not match list of <a class="${ALLOWED_MODELS_TARGET_CLASS}">allowed content fragment models</a>.`);
+                }
+
+                var $editor = $("#Editor");
+                var cfPath = $editor.data("path");
+                if(cfPath === el.value) {
+                    return Granite.I18n.get("Content Fragment is referencing itself.");
+                }
+            }
+        });
+    }
+
+    /**
+     * Retrieve relevant fragment data from cfm.validation endpoint.
+     *
+     * @param {string} path
+     * @returns {object}
+     */
+    function getFragmentData(path) {
+        let isContentFragment = false;
+        let contentFragmentModelPath = null;
+        let contentFragmentModelTags = null;
+
+        if (!_fragmentDataCache[path]) {
+            try {
+                $.ajax({
+                    url: path + ".cfm.validation.json",
+                    async: false,
+                    success: function(data) {
+                        if (data) {
+                            isContentFragment = data.isContentFragment;
+                            contentFragmentModelPath = data.contentFragmentModelPath;
+                            contentFragmentModelTags = data.contentFragmentModelTags;
+                        }
+                    }
+                });
+            } catch (err) {
+                console.warn("Fragment Reference: Not a valid path.");
+            }
+
+            _fragmentDataCache[path] = {
+                isContentFragment: isContentFragment,
+                contentFragmentModelPath: contentFragmentModelPath,
+                contentFragmentModelTags: contentFragmentModelTags
+            };
+        }
+
+        return Object.assign({}, _fragmentDataCache[path]);
+    }
+
+    function _updateParameterInURL(pickerSrc, parameterToUpdate, newValue) {
+        var startIndex = pickerSrc.indexOf(parameterToUpdate);
+        var lastIndex = startIndex;
+
+        if (startIndex === -1) {
+            return;
+        }
+
+        for (var i = startIndex; i < pickerSrc.length; i++) {
+            if (pickerSrc[i] === '&') {
+                break;
+            }
+            lastIndex++;
+        }
+
+        var firstPart = pickerSrc.substring(0, startIndex);
+        var secondPart = pickerSrc.substring(lastIndex);
+
+        return firstPart + parameterToUpdate + "=" + newValue + secondPart;
+    }
+
+    function addAllowedModelsTooltip(el) {
+        const wrapper = el.closest("coral-multifield-item-content, .coral-Form-fieldwrapper");
+        if (!wrapper) return;
+
+        let allowedModelsTooltip = wrapper.querySelector(`.${ALLOWED_MODELS_TOOLTIP_CLASS}`);
+        // tooltip already exists
+        if (allowedModelsTooltip) {
+            updateTooltipTarget(allowedModelsTooltip, wrapper);
+            return;
+        }
+
+        const allowedModels = getAllowedModelsForElement(el);
+
+        allowedModelsTooltip = new Coral.Tooltip().set({
+            content: {
+                innerHTML: `<p>${Granite.I18n.get("Allowed Models")}:</p>
+                <ul>${
+                    allowedModels.reduce((list, model) => `${list}<li>${model}</li>`, "")
+                }</ul>`
+            }
+        });
+
+        allowedModelsTooltip.classList.add(ALLOWED_MODELS_TOOLTIP_CLASS);
+
+        wrapper.append(allowedModelsTooltip);
+        updateTooltipTarget(allowedModelsTooltip, wrapper);
+    }
+
+    function updateTooltipTarget(tooltip, wrapper) {
+        if (!wrapper.id) {
+            wrapper.id = Coral.commons.getUID();
+        }
+
+        const targetSelector = `#${wrapper.id} .${ALLOWED_MODELS_TARGET_CLASS}`;
+
+        // We need to use timeout as label (including target) added after tooltip is added.
+        setTimeout(() => {
+            tooltip.target = targetSelector;
+        });
+    }
+
+    $(document).on('foundation-contentloaded', function (evt) {
+        var $container = $(evt.target);
+
+        // add exclude parameter to fragment references pickerSrc
+        var $editor = $("#Editor");
+        var fragmentPath = $editor.data("path");
+
+        var fragmentReferenceItems = $editor.find('foundation-autocomplete.field-fragment-reference');
+
+        // change the pickerSrc to include the current excluded content fragment
+        fragmentReferenceItems.each(function (index, fragmentReference) {
+            var oldPickerSrc = $(fragmentReference).attr('pickersrc');
+            var newPickerSrc;
+
+            // check to see if picker string doesn't have a exclude substring
+            if (oldPickerSrc.indexOf('exclude=') === -1) {
+                newPickerSrc = oldPickerSrc + "&exclude=" + _g.XSS.getXSSValue(fragmentPath);
+            } else {
+                newPickerSrc = _updateParameterInURL(oldPickerSrc, 'exclude', _g.XSS.getXSSValue(fragmentPath));
+            }
+
+            $(fragmentReference).attr('pickersrc', newPickerSrc);
+
+            var suggestionElement = $(fragmentReference).find("coral-overlay")[0];
+            var oldSuggestionSrc = $(suggestionElement).attr("data-foundation-picker-buttonlist-src");
+            var newSuggestionSrc;
+
+            if (oldSuggestionSrc.indexOf('exclude=') === -1) {
+                newSuggestionSrc = oldSuggestionSrc + "&exclude=" + _g.XSS.getXSSValue(fragmentPath);
+            } else {
+                newSuggestionSrc = _updateParameterInURL(oldSuggestionSrc, 'exclude', _g.XSS.getXSSValue(fragmentPath));
+            }
+
+            $(suggestionElement).attr("data-foundation-picker-buttonlist-src", newSuggestionSrc);
+
+        });
+
+        var isReadOnly = $editor.data("isReadOnly") || $("[data-status-type=\"is-read-only\"]").length > 0;
+
+        if (isReadOnly) {
+            $editor.find('.edit-content-fragment, .new-content-fragment').remove();
+        } else {
+            $editor.find('.edit-content-fragment').each(function (index, editLink) {
+                refreshEditLinkVisibility(editLink);
+            });
+        }
+
+        $editor.find('.field-fragment-reference, .multifield-fragment-reference').each(function (index, formField) {
+            $(formField).off('change.fragment-reference');
+            $(formField).on('change.fragment-reference', function(e) {
+                var $field = $(this);
+                if($field.is('.multifield-fragment-reference')) {
+                    $field.find('.edit-content-fragment').each(function (index, editLink) {
+                        refreshEditLinkVisibility(editLink);
+                    });
+                } else {
+                    var editLink = $field.parent().next();
+                    if(editLink && editLink.length >= 0) {
+                        refreshEditLinkVisibility(editLink);
+                    }
+                }
+            });
+        });
+
+        registerValidator();
+    });
+
+}(jQuery, window, Granite, Coral));
+
+let newFragmentEl = null;
+var currentIframe;
+var savedCurrentIframe = false;
+var _allowedModelsForDirectoryCache = {};
+
+/**
+ *
+ * @param {HTMLElement} el - Element with data-allowed-models attribute
+ *                           (fallback to pickersrc query string)
+ * @returns {string[]}
+ */
+function getAllowedModelsForElement(el) {
+    let allowedModelString;
+    let allowedModels = [];
+
+    if (el && el.dataset && el.dataset.allowedModels) {
+        allowedModelString = el.dataset.allowedModels;
+    } else if (el && el.getAttribute("pickersrc")) {
+        const pickersrc = el.getAttribute("pickersrc");
+        const pickersrcArr = pickersrc.split("?");
+        if (pickersrcArr.length > 1) {
+            const params = new URLSearchParams(pickersrcArr[1]);
+            allowedModelString = params.get("model");
+        }
+    }
+
+    if (allowedModelString) {
+        allowedModels = allowedModelString
+            .trim()
+            .replace(/(^\[|\]$)/g, "") // remove [ from start and ] from end, if they are there
+            .split(",")
+            .map(i => decodeURIComponent(i));
+
+    }
+
+    return allowedModels;
+}
+
+function getAllowedModelsForDirectory(path) {
+    if (!path) return [];
+
+    _allowedModelsForDirectoryCache = _allowedModelsForDirectoryCache || {};
+
+    if (!_allowedModelsForDirectoryCache[path]) {
+        var allowedModels = [];
+
+        $.ajax({
+            url: path + ".cfm.allowedmodels.json",
+            async: false,
+            success: function(data) {
+                if (data) {
+                    allowedModels = data.allowedModels;
+                }
+            }
+        });
+
+        _allowedModelsForDirectoryCache[path] = allowedModels;
+    }
+
+    return _allowedModelsForDirectoryCache[path];
+}
+
+function contentFragmentClose() {
+    if(currentIframe) {
+        currentIframe.remove();
+        savedCurrentIframe = false;
+    }
+}
+
+function newContentFragment(e,a) {
+    e.preventDefault();
+    const $editor = $("#Editor");
+    const parentPath = $editor.data("parentPath");
+    const $newContentLink = $(a);
+    const href = a.href;
+    const allowedModelsForField = getAllowedModelsForElement(a);
+    const allowedModelsForDirectory = getAllowedModelsForDirectory(parentPath);
+    let src = href;
+
+    // get intersection (models allowed for reference field AND parent directory)
+    const allowedModels = allowedModelsForField.filter(function(model) {
+        return allowedModelsForDirectory.indexOf(model) > -1;
+    });
+
+    if (allowedModels.length > 0) {
+        src = href + (href.indexOf("?") ? "&" : "?") + "path=" + parentPath;
+    }
+
+    const iframe = $('<iframe>', {
+        src: src,
+        frameborder: 0,
+        scrolling: 'yes',
+        allowTransparency: 'false',
+        style: "display:block; position:absolute; top:0px; left:0px; width:100%; height:100%; z-index:20000;"
+    });
+    currentIframe = $newContentLink.before(iframe).prev();
+    hideCheckboxesForNonDirectories();
+    savedCurrentIframe = false;
+}
+
+function hideCheckboxesForNonDirectories() {
+    /* collect items of coral-collection inside iframe to check item-type */
+    $(currentIframe[0]).load(function() {
+        var innerDoc = currentIframe[0].contentDocument || currentIframe[0].contentWindow.document;
+        var $items = $(innerDoc.body).find('#cq-dam-cfm-destination-collection .foundation-collection-item');
+
+        $.each( $items, function() {
+            checkItemType($(this));
+        });
+
+        $(innerDoc)
+          .off('coral-collection:add')
+          .on('coral-collection:add', function () {
+            $items = $(innerDoc.body).find('#cq-dam-cfm-destination-collection .foundation-collection-item');
+
+            $.each( $items, function() {
+                checkItemType($(this));
+            });
+        });
+    });
+}
+
+function checkItemType($item) {
+    /* if itemType is not directory, hide its checkbox */
+    var itemType = $item.data('itemType');
+    var checkbox = $item.find('coral-checkbox')[0];
+
+    if (itemType && itemType !== "directory") {
+        $(checkbox).css('visibility', 'hidden');
+    }
+}
+
+function contentFragmentSave(path) {
+    /* only save data from currentIframe once */
+    if(savedCurrentIframe) {
+        return;
+    }
+    if(!currentIframe) {
+        console.error('Cannot save new fragment, iframe does not exist');
+        return;
+    }
+    try {
+        if(currentIframe.prev().is('.edit-content-fragment')) {
+            /* handle single reference, go back two to find the input */
+            var $field = currentIframe.prev().prev().find('.field-fragment-reference');
+            newFragmentEl = $field[0];
+            var pathField = $field.adaptTo('foundation-field');
+            if(pathField) {
+                pathField.setValue(path);
+                $field.trigger('foundation-field-change');
+                $field.trigger('change');
+            }
+        } else {
+            /* we are adding to a multifield */
+            var $field = currentIframe.prev().find('.multifield-fragment-reference');
+            newFragmentEl = $field[0];
+            var pathField = $field.adaptTo('foundation-field');
+            if(pathField) {
+                var curValues = pathField.getValues();
+                curValues.push(path);
+                pathField.setValues(curValues);
+                $field.trigger('foundation-field-change');
+                $field.trigger('change');
+            }
+        }
+        savedCurrentIframe = true;
+    } catch (err) {
+        console.error('Caught exception saving data from new content fragment');
+        console.error(err);
+    } finally {
+        newFragmentEl = null;
+    }
+}
+
+function getFragmentPathFromEditLink(a) {
+    var $link = $(a);
+    var $field = $link.prev().find('.field-fragment-reference');
+    var pathField = $field.adaptTo('foundation-field');
+    var path = '';
+    if (pathField) {
+        path = pathField.getValue();
+    } else {
+        /* must be in a multifield */
+        pathField = $link.parents('.multifield-fragment-reference').first().adaptTo('foundation-field');
+        var $fieldItem = $link.parents('[aria-posinset]').first();
+        if( pathField && $fieldItem ) {
+            var idx = $fieldItem.attr('aria-posinset');
+            var values = pathField.getValues();
+            if (values && values.length >= idx) {
+                /* the posinset attribute is 1-indexed not 0-indexed */
+                path = values[idx-1];
+            }
+        }
+    }
+    return path;
+}
+
+function refreshEditLinkVisibility(editLink) {
+    var editPath = getFragmentPathFromEditLink(editLink);
+    if (editPath && editPath !== '' && editPath.startsWith('/')) {
+        $(editLink).attr('href', Granite.HTTP.externalize('/editor.html'+editPath)).show();
+    } else {
+        $(editLink).hide();
+    }
+}
+function saveLastModifiedInfo() {
+    $.ajax({
+        url: window.Dam.CFM.EditSession.fragment.urlBase + ".cfm.edit.json",
+        type: "POST",
+        dataType: "json",
+        data: {
+            ":operation": "apply"
+        }
+    })
+}
+function editContentFragment(e, a) {
+    var path = getFragmentPathFromEditLink(a);
+    var $link = $(a);
+    if (path && path !== '' && path.startsWith('/')) {
+
+        var url = Granite.HTTP.externalize('/editor.html' + path);
+        //e.preventDefault();
+        $link.removeAttr('href');
+        $link.removeAttr("target");
+        if (window.Dam.CFM.EditSession.isDirty()) {
+            saveLastModifiedInfo();
+        }
+        jQuery(document).trigger(window.Dam.CFM.constants.EVENT_CONTENT_FRAGMENT_BLOCK, {
+            unloadHandling: true
+        });
+
+        window.Dam.CFM.editor.Page.notifyNavigation(function (isSuccess) {
+            // execute redirect
+            if (isSuccess) {
+                document.location.href = url;
+            }
+        });
+    } else {
+        e.preventDefault();
+    }
+}

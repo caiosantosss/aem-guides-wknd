@@ -1,0 +1,497 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2011 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+
+
+/**
+ * @class CQ.mcm.MCMAdmin
+ * @extends CQ.security.SecurityAdmin
+ * The Marketing Campaigns Managment console.
+ * @constructor
+ * Creates a new MCM Admin.
+ * @param {Object} config The config object
+ * @since 5.4
+ */
+CQ.mcm.MCMAdmin = CQ.Ext.extend(CQ.security.SecurityAdmin, {
+
+    createUserDialogPath: "/libs/mcm/content/tools/createleaddialog",
+
+    createGroupDialogPath: "/libs/mcm/content/tools/createlistdialog",
+
+    editUserDialogPath: "/libs/mcm/content/tools/editleaddialog",
+
+    editGroupDialogPath: "/libs/mcm/content/tools/editlistdialog",
+
+    membersDialogPath: "/libs/mcm/content/tools/membersdialog",
+
+    constructor: function(config) {
+    
+        var body = CQ.Ext.getBody();
+        body.setStyle("margin", "0");
+        if (CQ.Ext.isIE) {
+            body.dom.scroll = "no";
+        }
+        else {
+            body.setStyle("overflow", "hidden");
+        }
+
+        var admin = this;
+
+        config = CQ.Util.applyDefaults(config, {
+            "id": "cq-security"
+        });
+
+        this.id = config.id;
+        window.CQ_SecurityAdmin = this;
+
+        var items = [];
+        var navItems = [];
+        var counter = 0;
+        var activeItem = config.deck.activeItem ? config.deck.activeItem : 0;
+        
+        this.navButtons = {};
+
+        for (var i = 0; i < config.items.length; i++) {
+            try {
+                // a panel is put to the deck panel and a nav link is created using
+                // the title of the item
+                var title = config.items[i].title ? config.items[i].title : "";
+                delete config.items[i].title;
+                var widget = CQ.Util.build(config.items[i]);
+                items.push(widget);
+                var item = {
+                    "text": title,
+                    cls: "cq-mcmadmin-main-nav-item", 
+                    cardItemId: widget.id
+                };
+                if(config.items[i].nonLeaf) {
+                    item.leaf = false;
+                    item.singleClickExpand = true;
+                    item.name = "campaigns";
+                    item["sling:resourceType"] = "mcmadmin/deck"
+                    
+                    this.campaignCardId = item.cardItemId;
+                } else {
+                    item.leaf = true;
+                    item.name = widget.name;
+                    item["sling:resourceType"] = "mcmadmin/nav"
+                }
+                if (config.items[i].id) {
+                    this.navButtons[config.items[i].id] = item;
+                    var pathName = item.name;
+                    this.navButtons[config.items[i].id].toggle = function() {
+                        CQ.event.EventAdmin.sendEvent( new CQ.event.Event( "com/day/mcm/SELECTIONCHANGE", {
+                                path: "/content/" + pathName, 
+                                resourceType: "mcmadmin/nav"
+                            }) );
+                    };
+                }
+                navItems.push(item);
+                counter++;
+            }
+            catch (e) {}
+        }
+        delete config.items;
+        
+        this.navTree = new CQ.Ext.tree.TreePanel( {
+                    "xtype":"treepanel",
+                    "id":id + "-tree",
+                    "cls":"cq-mcmadmin-tree",
+                    border: false,
+                    "animate":true,
+                    rootVisible: false,
+                    "loader": new CQ.Ext.tree.TreeLoader({
+                        "requestMethod":"GET",
+                        // uiProviders: { campaign: CQ.mcm.CampaignTreeNodeUI },  // official way, but we do it in own createNode
+                        "dataUrl":"/libs/mcm/tree.json",
+                        "baseParams": {
+                            "ncc": 1,
+                            "_charset_": "utf-8"
+                        },
+                        "baseAttrs": {
+//                            "autoExpandMax":autoExpandMax,
+                            "singleClickExpand":true
+                        },
+                        "listeners": {
+                            "beforeload": function(loader, node) {
+//                                console.log("before load", node, node.getPath("id"));
+
+                                loader.dataUrl = CQ.HTTP.externalize(node.getPath("name") + ".mcmtree.json?");
+                            }
+                        },
+                        createNode : function(attr) {
+//                            console.log("create node", attr);
+                            if (this.baseAttrs) {
+                                CQ.Ext.applyIf(attr, this.baseAttrs);
+                            }
+                            
+                            attr.label = attr.text;
+                            
+                            if(attr.type == "campaign" && attr.experiences != 0) {
+                                attr.uiProvider = CQ.mcm.CampaignTreeNodeUI;
+                            }
+                            
+                            var node;
+                            if (attr.leaf) {
+                                
+                                node = new CQ.Ext.tree.TreeNode(attr);
+                            } else {
+                                attr.singleClickExpand = true;
+                                node = new CQ.Ext.tree.AsyncTreeNode(attr);
+                            }
+                            return node;
+                        }
+                    }),
+                    "root": {
+                        nodeType: 'async',
+                        text: 'invisible root',
+                        expanded: true,
+                        draggable: false,
+                        name: 'content',
+                        children: navItems
+                    },
+                    "listeners": {
+                        selectionchange: function(tree) {
+                            // show the correct panel for the selected tree node
+                            var node = tree.getSelectionModel().getSelectedNode();
+                            if(node.attributes["sling:resourceType"] == "mcmadmin/deck" || node.attributes["sling:resourceType"] == "mcmadmin/nav") { // we have one of the top level nodes
+                                var cardItem = CQ.Ext.getCmp(node.attributes.cardItemId);
+                                admin.deck.layout.setActiveItem( cardItem );
+                                
+                                // unhighlight the 'Campaigns' node if it is not selected
+                                if(node.attributes["sling:resourceType"] == "mcmadmin/nav")
+                                    tree.getRootNode().lastChild.getUI().removeClass("x-tree-selected");
+                                
+                            }else {
+                                admin.deck.layout.setActiveItem(admin.campaignCardId);
+                                // highlight the 'Campaigns' node as well
+                                tree.getRootNode().lastChild.getUI().addClass("x-tree-selected");
+                            }
+                            
+                            var eventPath = node.getPath("name");
+                            if(admin.dontTriggerEvent != true) {
+                                
+                                if (eventPath == "/content/") {
+                                    // only root part, not a real path. Better send null.
+                                    eventPath = null;
+                                }
+                                CQ.event.EventAdmin.sendEvent( new CQ.event.Event( "com/day/mcm/SELECTIONCHANGE", {
+                                    path: eventPath,
+                                    label: node.attributes.label,
+                                    resourceType: node.attributes["sling:resourceType"]
+                                }) );
+                            }
+                            admin.dontTriggerEvent = false;
+
+                            if (eventPath != null) {
+                                CQ.Ext.History.add(eventPath);
+                            }
+                            
+                        }
+                    }
+            
+        });
+        
+        this.deck =  CQ.Util.build(CQ.Util.applyDefaults(config.deck, {
+            "xtype": "panel",
+            "layout": "card",
+            "id": this.id + "-deck",
+            "activeItem": 0,
+            "region": "center",
+            "border": false,
+            "items": items
+        }));
+        delete config.deck;
+
+        config = CQ.Util.applyDefaults(config, {
+            "id": this.id,
+            "layout": "border",
+            "renderTo": CQ.Util.ROOT_ID,
+            "items": [
+                {
+                    "id": "cq-header",
+                    "xtype": "container",
+                    "cls": this.id + "-header",
+                    "autoEl": "div",
+                    "region": "north",
+                    "items": {
+                        "xtype": "panel",
+                        "border": false,
+                        "layout": "column",
+                        "cls": "cq-header-toolbar",
+                        "items": [
+                            new CQ.Switcher({}),
+                            new CQ.UserInfo({}),
+                            new CQ.HomeLink({})
+                        ]
+                    }
+                },
+                // todo: read from config (security/mcm)
+                {
+                    "id": this.id + "-nav",
+                    "cls": "cq-security-nav",
+                    "xtype": "panel",
+                    "region": "west",
+                    "width": CQ.security.themes.SecurityAdmin.NAV_WIDTH,
+                    "layout": "border",
+                    "border": false,
+                    "items": {
+                        "xtype": "panel",
+                        "region": "center",
+                        "autoScroll":true,
+                        "margins": CQ.security.themes.SecurityAdmin.NAV_MARGINS,
+                        "items": [this.navTree]
+                    }
+                },
+                this.deck
+            ]
+        });
+
+        // init component by calling super constructor
+        CQ.security.SecurityAdmin.superclass.constructor.call(this, config);
+
+        CQ.event.EventAdmin.registerEventHandler("com/day/mcm/REQSELECTIONCHANGE", this.reqSelectionChange, this);
+        CQ.event.EventAdmin.registerEventHandler("com/day/mcm/SELECTIONCHANGE", this.selectionChange, this);
+        CQ.event.EventAdmin.registerEventHandler("com/day/mcm/REFRESH", this.refresh, this);
+        
+        this.historyForm = CQ.Ext.get(CQ.Util.ROOT_ID).createChild({
+            tag:    'form',
+            action: '#',
+            cls:    'x-hidden',
+            id:     'mcm-history-form',
+            children: [
+              {
+                tag: 'div',
+                children: [
+                  {
+                    tag:  'input',
+                    id:   CQ.Ext.History.fieldId,
+                    type: 'hidden'
+                  },
+                  {
+                    tag:  'iframe',
+                    id:   CQ.Ext.History.iframeId
+                  }
+                ]
+              }
+            ]
+        });
+
+        CQ.Ext.History.init();
+        CQ.Ext.History.on("change", this.historyChange, this);
+
+        var anchor = CQ.HTTP.getAnchor(document.location.href);
+        if (anchor && (anchor != '/content' && anchor != '/content/') ) {
+            this.navTree.selectPath(anchor, "name");
+            if(anchor == '/content/campaigns') {
+                this.navTree.getRootNode().childNodes[3].expand();
+            }
+        }else {
+            this.navTree.getRootNode().childNodes[0].select();
+
+        }
+
+    },
+    callOnNodeForPath: function(path, callback, scope) {
+        // calls the callback with the node found under path, expanding not yet expanded nodes on the go
+        var pathSegments = path.replace("/content/", "").split("/");
+        
+        var recFunc = null;
+        recFunc = function(node) {
+            var done = false;
+
+            if(node.findChild("name", pathSegments[0]) != null) {
+                node = node.findChild("name", pathSegments[0]);
+                pathSegments.shift();
+            } else { 
+                done = true;
+            }
+            if (!done && pathSegments.length ) {
+                if (node.isExpandable() && !node.isExpanded()) {
+                    node.expand(false, true, recFunc);
+                } else {
+                    recFunc(node);
+                }
+            } else {
+                done = true;
+            }
+            
+            if (done) {
+                if (scope != null) {
+                    scope.callback(node);
+                } else {
+                    callback(node);
+                }
+            }
+        }
+        var rootNode = this.navTree.getRootNode();
+        if (pathSegments) {
+            if (rootNode.isExpandable() && !rootNode.isExpanded()) {
+                rootNode.expand(false, true, recFunc);
+            } else {
+                recFunc(rootNode);
+            }
+        } else {
+            if (scope != null) {
+                scope.callback(rootNode);
+            } else {
+                callback(rootNode);
+            }
+        }
+    },
+    reqSelectionChange: function(event) {
+        // this handler uses the path from the event and the node data to
+        // raise a selectionChange event. This is helpful because subviews
+        // don't have the type data stored in the nodes. On the other hand this
+        // is required to react to selection changes.
+        this.callOnNodeForPath(event.properties.path, function(node) {
+        
+            CQ.event.EventAdmin.sendEvent( new CQ.event.Event( "com/day/mcm/SELECTIONCHANGE", {
+                path: node.getPath("name"),
+                label: node.attributes.label,
+                resourceType: node.attributes["sling:resourceType"]
+            }) );
+        });
+    },
+    selectionChange: function(event) {
+        if ( (! this.navTree.getSelectionModel().getSelectedNode()) 
+                || this.navTree.getSelectionModel().getSelectedNode().getPath() != event.properties.path) {
+            
+            // this is called via the event, thus prevent to send it again.
+            this.dontTriggerEvent = true;
+            this.navTree.selectPath(event.properties.path, "name");
+        }
+    },
+    historyChange: function(token) {
+        if (this.navTree.getSelectionModel().getSelectedNode()) {
+            if(this.navTree.getSelectionModel().getSelectedNode().getPath() != token) {
+                this.navTree.selectPath(token, "name");
+            }
+        }
+    },
+    refresh: function(event) {
+        if (this.refreshing) return;
+        this.refreshing = true;
+        
+        var selectedPath = null;
+        if (this.navTree.getSelectionModel().getSelectedNode()) {
+            selectedPath = this.navTree.getSelectionModel().getSelectedNode().getPath();
+        }
+        
+        var node = this.navTree.root;
+        if (event.properties.path) {
+            var pathSegments = event.properties.path.replace("/content/", "").split("/");
+            for(var i=0; i < pathSegments.length; i++) {
+                if(node.findChild("name", pathSegments[i]) != null)
+                    node = node.findChild("name", pathSegments[i]);
+            }
+        }
+        
+        var that = this;
+        var finalizer = function(){
+            if (selectedPath) {
+                that.navTree.selectPath(selectedPath, "name");
+            }
+            that.refreshing = false;
+        };
+        if (node.reload) {            
+            node.reload(finalizer);
+        } else {
+            if (node.parentNode.reload) {
+                node.parentNode.reload(finalizer);
+            } else {
+                that.refreshing = false;
+            }
+        }
+    },
+
+    // private
+    getMsg: function(msg, snippets) {
+        switch(msg) {
+            // add to group
+            case this.ADD_TO_GROUP_TITLE:            return CQ.I18n.getMessage("Add to List", [], "marketing terminology");
+            case this.ADD_THE_FOLLOWING_USER:        return CQ.I18n.getMessage("Add the following lead ...", [], "marketing terminology");
+            case this.ADD_THE_FOLLOWING_X_USERS:     return CQ.I18n.getMessage("Add the following {0} leads ...", snippets, "marketing terminology");
+            case this.ADD_THE_FOLLOWING_GROUP:       return CQ.I18n.getMessage("Add the following list ...");
+            case this.ADD_THE_FOLLOWING_X_GROUPS:    return CQ.I18n.getMessage("Add the following {0} lists ...", snippets);
+            case this.TO_THE_FOLLOWING_GROUP:        return CQ.I18n.getMessage("... to the following list:", [], "Add lead X to the following list / marketing terminology");
+            case this.MERGE_THE_FOLLOWING_GROUP:     return CQ.I18n.getMessage("Merge the following list ...", [], "marketing terminology");
+            case this.WITH_GROUP:                    return CQ.I18n.getMessage("... with list {0}", snippets, "Merge list X with list Y");
+
+            // quick views
+            case this.X_NOT_MEMBER_OF_ANY:           return CQ.I18n.getMessage("{0} is not member of any list.", snippets, "marketing terminology");
+            case this.X_IS_MEMBER_OF:                return CQ.I18n.getMessage("{0} is member of the following list:", snippets, "marketing terminology");
+            case this.X_IS_MEMBER_OF_Y_GROUPS:       return CQ.I18n.getMessage("{0} is member of the following {1} lists:", snippets, "marketing terminology");
+
+            case this.GROUP_X_NOT_MEMBER_OF_ANY:     return CQ.I18n.getMessage("The list {0} is not member of any other list.", snippets, "marketing terminology");
+            case this.GROUP_X_IS_MEMBER_OF:          return CQ.I18n.getMessage("The list {0} is member of the following list:", snippets, "marketing terminology");
+            case this.GROUP_X_IS_MEMBER_OF_Y_GROUPS: return CQ.I18n.getMessage("The list {0} is member of the following {1} lists:", snippets, "marketing terminology");
+
+            case this.REMOVE_MEMBERSHIP_TITLE:       return CQ.I18n.getMessage("Remove List Membership");
+            case this.REMOVE_USER_FROM_GROUP:        return CQ.I18n.getMessage("Are you sure to remove lead {0} from list {1}?", snippets);
+            case this.REMOVE_GROUP_FROM_GROUP:       return CQ.I18n.getMessage("Are you sure to remove list {0} from list {1}?", snippets);
+
+            // actions
+            case this.DELETE_USERS_TITLE:            return CQ.I18n.getMessage("Delete Lead", [], "marketing terminology");
+            case this.DELETE_USER:                   return CQ.I18n.getMessage("You are going to delete the following lead:", [], "marketing terminology");
+            case this.DELETE_USERS:                  return CQ.I18n.getMessage("You are going to delete the following leads:", [], "marketing terminology");
+
+            case this.DELETE_GROUPS_TITLE:           return CQ.I18n.getMessage("Delete Lists", [], "marketing terminology");
+            case this.DELETE_GROUP:                  return CQ.I18n.getMessage("You are going to delete the following list:", [], "marketing terminology");
+            case this.DELETE_GROUPS:                 return CQ.I18n.getMessage("You are going to delete the following lists:", [], "marketing terminology");
+
+            case this.ACTIVATE_USERS_TITLE:          return CQ.I18n.getMessage("Activate Lead", [], "marketing terminology");
+            case this.ACTIVATE_USER:                 return CQ.I18n.getMessage("You are going to activate the following lead:", [], "marketing terminology");
+            case this.ACTIVATE_USERS:                return CQ.I18n.getMessage("You are going to activate the following leads:", [], "marketing terminology");
+
+            case this.ACTIVATE_GROUPS_TITLE:         return CQ.I18n.getMessage("Activate Lists", [], "marketing terminology");
+            case this.ACTIVATE_GROUP:                return CQ.I18n.getMessage("You are going to activate the following list:", [], "marketing terminology");
+            case this.ACTIVATE_GROUPS:               return CQ.I18n.getMessage("You are going to activate the following lists:", [], "marketing terminology");
+
+            case this.DEACTIVATE_USERS_TITLE:        return CQ.I18n.getMessage("Deactivate Leads", [], "marketing terminology");
+            case this.DEACTIVATE_USER:               return CQ.I18n.getMessage("You are going to deactivate the following lead:", [], "marketing terminology");
+            case this.DEACTIVATE_USERS:              return CQ.I18n.getMessage("You are going to deactivate the following leads:", [], "marketing terminology");
+
+            case this.DEACTIVATE_GROUPS_TITLE:       return CQ.I18n.getMessage("Deactivate Lists", [], "marketing terminology");
+            case this.DEACTIVATE_GROUP:              return CQ.I18n.getMessage("You are going to deactivate the following list:", [], "marketing terminology");
+            case this.DEACTIVATE_GROUPS:             return CQ.I18n.getMessage("You are going to deactivate the following lists:", [], "marketing terminology");
+
+            case this.MEMBERS_TITLE:                 return CQ.I18n.getMessage("Leads of List {0}", snippets);
+            case this.REMOVE_MEMBER:                 return CQ.I18n.getMessage("You are going to remove the following lead from {0}", snippets);
+            case this.REMOVE_MEMBERS:                return CQ.I18n.getMessage("You are going to remove the following leads from {0}", snippets);
+
+            case this.FAILED_TO_CREATE_USER:         return CQ.I18n.getMessage("Failed to create lead", [], "marketing terminology");
+            case this.FAILED_TO_CREATE_GROUP:        return CQ.I18n.getMessage("Failed to create list", [], "marketing terminology");
+            case this.EMAIL_OR_ID_MISSING:           return CQ.I18n.getMessage("Either Mail or ID should be specified while creation.");
+
+            default: return "";
+        }
+    }
+
+});
+
+CQ.Ext.reg("mcmadmin", CQ.mcm.MCMAdmin);
+
+
+
+CQ.mcm.MCMAdmin.LIST_DETAILS_ROWS = {
+    "csv": {
+        "id": "csv",
+        "label": "Imported CSV"
+    }
+
+};

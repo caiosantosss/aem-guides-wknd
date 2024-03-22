@@ -1,0 +1,586 @@
+/*
+ ADOBE CONFIDENTIAL
+
+ Copyright 2015 Adobe Systems Incorporated
+ All Rights Reserved.
+
+ NOTICE:  All information contained herein is, and remains
+ the property of Adobe Systems Incorporated and its suppliers,
+ if any.  The intellectual and technical concepts contained
+ herein are proprietary to Adobe Systems Incorporated and its
+ suppliers and may be covered by U.S. and Foreign Patents,
+ patents in process, and are protected by trade secret or copyright law.
+ Dissemination of this information or reproduction of this material
+ is strictly forbidden unless prior written permission is obtained
+ from Adobe Systems Incorporated.
+ */
+(function(document, $, AssetReferences, Promise) {
+    "use strict";
+
+    var DeleteAction = {
+        /**
+         * Delete collection is 3 step process.
+         * 1. Conform delete by showing user a confirm dialog.
+         * 2. Delete the collection(s).
+         * 3. Reload page.
+         */
+        deleteCollection: function() {
+            Promise.resolve({ type: "collection" })
+                .then(confirmDelete)
+                .then(deleteCollections)
+                .then(loadPage)
+                .catch(function(err) {
+                    if (err) {
+                        throw err;
+                    }
+                    // do nothing, delete cancelled
+                });
+        },
+
+        /**
+         * Delete Asset(s) and/or Folder(s) is 5 step process.
+         * 1. Conform delete by showing user a confirm dialog.
+         * 2. Show references/activations info to user and confirm force delete if references/activations are present.
+         * 3. Delete the asset(s) and/or folder(s).
+         * 4. Post delete cleanup. Doesn't apply to async delete.
+         * 5. Reload page.
+         */
+        deleteAssets: function(bulkDeleteData) {
+            Promise.resolve(
+                {
+                    type: "asset",
+                    bulkDeleteData: bulkDeleteData
+                })
+                .then(confirmDelete)
+                .then(confirmReferencesDelete)
+                .then(deleteAsset)
+                .then(function(deleteData) {
+                    if (deleteData.isAsync) {
+                    // we don't need post cleanup for async delete
+                        return Promise.resolve(deleteData);
+                    } else {
+                        return postDeleteCleanup(deleteData);
+                    }
+                })
+                .then(loadPage)
+                .catch(function(err) {
+                    if (err) {
+                        throw err;
+                    }
+                // do nothing, delete cancelled
+                });
+        }
+    };
+
+    $(document).on("foundation-contentloaded", function(e) {
+        var deleteActivator = ".cq-damadmin-admin-actions-delete-activator";
+
+        $(document).off("click", deleteActivator).on("click", deleteActivator, function(e) {
+            var activator = $(this);
+            var type = "asset";
+            if (activator.data("type")) {
+                type = activator.data("type").split(" ")[0];
+            }
+            if (type === "collection") {
+                DeleteAction.deleteCollection();
+            } else {
+                var bulkDeleteData = getBulkDeleteData(activator.data("foundationCollectionAction"));
+                DeleteAction.deleteAssets(bulkDeleteData);
+            }
+        });
+    });
+
+    function getBulkDeleteData(config) {
+        var bulkDeleteData;
+        var exceptPath = [];
+        if (config && config.target && config.activeSelectionCount === "bulk") {
+            var $collection = $(config.target);
+            if ($collection.length && $collection[0].dataset.foundationSelectionsSelectallMode === "true") {
+                var paginationAPI = $collection.adaptTo("foundation-collection").getPagination();
+                if (paginationAPI && paginationAPI.hasNext) {
+                    $collection.find(".foundation-collection-item:not(.foundation-selections-item)").each(function() {
+                        var itemPath = this.dataset.foundationCollectionItemId;
+                        if (itemPath) {
+                            exceptPath.push(itemPath);
+                        }
+                    });
+                    bulkDeleteData = {
+                        sourceParentPath: $collection[0].dataset.foundationCollectionId,
+                        exceptPath: exceptPath
+                    };
+                }
+            }
+        }
+        return bulkDeleteData;
+    }
+
+    /**
+     * Uses data - type, bulkDeleteData
+     * Sets data - paths
+     */
+    function confirmDelete(deleteData) {
+        return new Promise(function(next, cancel) {
+            var selectedItems = $(".foundation-selections-item");
+            var paths = [];
+            selectedItems.each(function() {
+                paths.push($(this).get(0).getAttribute("data-foundation-collection-item-id"));
+            });
+
+            deleteData.paths = paths;
+
+            var headerText = Granite.I18n.get("Delete Asset");
+            if (deleteData.type === "collection") {
+                headerText = Granite.I18n.get("Delete Collection");
+            }
+
+            var dialog = new Coral.Dialog().set({
+                id: "deleteAssetDialog",
+                header: {
+                    innerHTML: headerText
+                }
+            });
+            document.body.appendChild(dialog);
+            var footer = dialog.footer;
+            var cancelBtn = new Coral.Button();
+            cancelBtn.label.textContent = Granite.I18n.get("Cancel");
+            footer.appendChild(cancelBtn).on("click", function() {
+                dialog.hide();
+                dialog.remove();
+                cancel();
+            });
+            var deleteButton = new Coral.Button();
+            deleteButton.label.textContent = Granite.I18n.get("Delete");
+            deleteButton.variant = "warning";
+            footer.appendChild(deleteButton).on("click", function() {
+                dialog.hide();
+                dialog.remove();
+                next(deleteData);
+            });
+            deleteButton.setAttribute("trackingfeature", "aem:assets:asset:delete");
+
+            var dialogContent = dialog.content;
+            dialogContent.innerHTML = "";
+            dialogContent.appendChild(getDeleteMessageParagraph(selectedItems, deleteData));
+            dialogContent.appendChild(function() {
+                var para = document.createElement("p");
+                $.each(selectedItems, function(i, item) {
+                    var title = $(item)
+                        .find(".foundation-collection-assets-meta")
+                        .data("foundation-collection-meta-title");
+                    if (!title) {
+                        title = $(item).data("foundation-collection-item-id");
+                        if (title !== undefined) {
+                            title = title.substring(title.lastIndexOf("/") + 1);
+                        }
+                    }
+                    para.appendChild(document.createTextNode(title));
+                    para.appendChild(document.createElement("br"));
+                });
+                para.appendChild(document.createElement("br"));
+                return para;
+            }());
+            dialog.show();
+        });
+    }
+
+    /* Uses data - paths, bulkDeleteData
+     * Sets data - none
+     */
+    function confirmReferencesDelete(deleteData) {
+        return new Promise(function(next, cancel) {
+            var hiddenPaths = [];
+            var refsPromise;
+            if (deleteData.bulkDeleteData) {
+                refsPromise = AssetReferences.fetchFromSourceParent(
+                    deleteData.bulkDeleteData.sourceParentPath,
+                    deleteData.bulkDeleteData.exceptPath,
+                    AssetReferences.REF_MODE.ALL);
+            } else {
+                refsPromise = AssetReferences.fetchFromPaths(deleteData.paths, AssetReferences.REF_MODE.ALL);
+            }
+
+            refsPromise.then(function(references) {
+                if (references.localRefs) {
+                    $.each(references.localRefs, function(index, value) {
+                        // These folders contain hidden files that
+                        // are created when interactive image and
+                        // video assets are modified.
+                        if (value.startsWith("/content/dam/_VTT")) {
+                            hiddenPaths.push(value);
+                        }
+                    });
+                }
+                deleteData.hiddenPaths = hiddenPaths;
+                if (references.localRefs.length <= 0 &&
+                    references.activations.found === false &&
+                    references.remoteRefs.status === AssetReferences.REMOTE_REFS_STATUS.SUCCESS &&
+                    references.remoteRefs.count <= 0
+                ) {
+                    // no references
+                    next(deleteData);
+                } else {
+                    showReferencesDialog(references, function() {
+                        next(deleteData);
+                    }, cancel);
+                }
+            }, function() {
+                showDeleteErrorDialog(Granite.I18n.get("Failed to get references."));
+                cancel();
+            });
+        });
+    }
+
+    /**
+     * This function confirms if user want to delete resources with references and activations.
+     */
+    function showReferencesDialog(references, next, cancel) {
+        var dialog = new Coral.Dialog().set({
+            id: "forceDelDialog",
+            variant: "error",
+            header: {
+                innerHTML: Granite.I18n.get("Force Delete")
+            },
+            content: {
+                innerHTML: getForceDeleteMessage(references)
+            }
+        });
+
+        var footer = dialog.footer;
+        var cancelBtn = new Coral.Button();
+        cancelBtn.label.textContent = Granite.I18n.get("Cancel");
+        footer.appendChild(cancelBtn).on("click", function() {
+            dialog.hide();
+            dialog.remove();
+            cancel();
+        });
+        var deleteButton = new Coral.Button();
+        deleteButton.label.textContent = Granite.I18n.get("Delete");
+        deleteButton.variant = "warning";
+        footer.appendChild(deleteButton).on("click", function() {
+            dialog.hide();
+            dialog.remove();
+            next();
+        });
+
+        document.body.appendChild(dialog);
+        dialog.show();
+    }
+
+    /* Uses data - paths, bulkDeleteData, hiddenPaths
+     * Sets data - collection, pageId, isAsync
+     */
+    function deleteAsset(deleteData) {
+        return new Promise(function(next, cancel) {
+            var url;
+            var data = {};
+            var collection;
+            var pageId = "";
+            var selectedItems = $(".foundation-selections-item");
+            // async delete doesn't support bulk data.
+            var isAsyncDelete = deleteData.bulkDeleteData ? false : isAsync(selectedItems);
+            deleteData.isAsync = isAsyncDelete;
+            collection = document.querySelector(".cq-damadmin-admin-childpages");
+            if (!collection) {
+                collection = document.querySelector("#granite-omnisearch-result");
+            }
+            pageId = collection.getAttribute("data-foundation-collection-id");
+            deleteData.collection = collection;
+            deleteData.pageId = pageId;
+            url = "/bin/wcmcommand";
+            data = {
+                force: true,
+                "_charset_": "utf-8"
+            };
+            if (deleteData.bulkDeleteData) {
+                url = deleteData.bulkDeleteData.sourceParentPath + ".bulkassets.delete";
+                Object.assign(data, deleteData.bulkDeleteData);
+            } else {
+                Object.assign(data, {
+                    cmd: "deletePage",
+                    path: isAsyncDelete ? deleteData.paths.concat(deleteData.hiddenPaths) : deleteData.paths
+                });
+            }
+            if (isAsyncDelete) {
+                url = "/bin/asynccommand";
+                data["operation"] = "DELETE";
+                if (deleteData.paths.length === 1) {
+                    data.description = "Deleting " + deleteData.paths[0] + " from " + pageId;
+                }
+
+                if (deleteData.paths.length > 1) {
+                    data.description = "Deleting " + deleteData.paths.length + " items from " + pageId;
+                }
+            }
+            // hack for omnisearch. can't figure a better way right now
+            var omnisearchResult = document.querySelector("#granite-omnisearch-result");
+            if (omnisearchResult) {
+                collection = omnisearchResult;
+            }
+            var ui = $(window).adaptTo("foundation-ui");
+            if (!isAsyncDelete) {
+                ui.wait();
+            }
+
+            $.ajax({
+                url: url,
+                type: "post",
+                data: data,
+                success: function() {
+                    if (isAsyncDelete) {
+                        var successMessage = Granite.I18n.get("Your deletion task has been initiated. You will be notified on successful completion.");// eslint-disable-line max-len
+                        ui.prompt(Granite.I18n.get("Success"), successMessage, "success", [{
+                            text: Granite.I18n.get("OK"),
+                            primary: true
+                        }]);
+                    }
+                    next(deleteData);
+                },
+                error: function(response) {
+                    ui.clearWait();
+                    showDeleteErrorDialog(Granite.I18n.get("Failed to delete."));
+                    cancel();
+                }
+            });
+        });
+    }
+
+    function showDeleteErrorDialog(message) {
+        var $errDialog = $("delErrorDialog");
+        var errDialog;
+        if ($errDialog.length <= 0) {
+            errDialog = new Coral.Dialog().set({
+                id: "delErrorDialog",
+                variant: "error",
+                header: {
+                    innerHTML: Granite.I18n.get("Error")
+                },
+                content: {
+                    innerHTML: $("<p></p>").text(message)[0].outerHTML
+                },
+                footer: {
+                    innerHTML: $('<button is="coral-button" variant="primary" ' +
+                                    'coral-close size="M"></button>').text(Granite.I18n.get("Ok"))[0].outerHTML
+                }
+            });
+            document.body.appendChild(errDialog);
+        } else {
+            errDialog = $errDialog[0];
+        }
+        errDialog.show();
+    }
+
+    /**
+     * Force removal of hidden assets.
+     *
+     * Uses data - hiddenPaths
+     * Sets data - none
+     */
+    function postDeleteCleanup(deleteData) {
+        return new Promise(function(next, cancel) {
+            var ui = $(window).adaptTo("foundation-ui");
+            if (deleteData.hiddenPaths && deleteData.hiddenPaths.length > 0) {
+                // Force delete hidden paths before returning to user.
+                var url = "/bin/wcmcommand";
+                var data = {
+                    cmd: "deletePage",
+                    path: deleteData.hiddenPaths,
+                    force: true
+                };
+                $.ajax(url, { "data": data,
+                    type: "post",
+                    "_charset_": "utf-8",
+                    complete: function() {
+                        ui.clearWait();
+                        next(deleteData);
+                    } });
+            } else {
+                ui.clearWait();
+                next(deleteData);
+            }
+        });
+    }
+
+    /**
+     * Uses data - pageId
+     * Sets data - none
+     */
+    function loadPage(deleteData) {
+        return new Promise(function(next, cancel) {
+            $(deleteData.collection).adaptTo("foundation-collection").load(deleteData.pageId);
+            next(deleteData);
+            $(deleteData.collection).adaptTo("foundation-collection").reload();
+        });
+    }
+
+    /**
+     * Uses data - none
+     * Sets data - collection, pageId
+     */
+    function deleteCollections(deleteData) {
+        return new Promise(function(next, cancel) {
+            var url;
+            var data = {};
+            var collection;
+            var pageId = "";
+
+            var ui = $(window).adaptTo("foundation-ui");
+            ui.wait();
+            collection = document.querySelector(".cq-damadmin-admin-childcollections");
+            // hack for omnisearch. can't figure a better way right now
+            var omnisearchResult = document.querySelector("#granite-omnisearch-result");
+            if (omnisearchResult) {
+                collection = omnisearchResult;
+            }
+            if (!collection) {
+                collection = document.querySelector("#granite-omnisearch-result");
+            }
+            pageId = collection.getAttribute("data-foundation-collection-id");
+            deleteData.collection = collection;
+            deleteData.pageId = pageId;
+            url = Granite.HTTP.externalize(deleteData.paths[0] + ".collection.html");
+            data = {
+                ":operation": "deleteCollection",
+                "path": deleteData.paths,
+                "_charset_": "utf-8"
+            };
+
+            $.ajax({
+                url: url,
+                type: "post",
+                data: data,
+                success: function() {
+                    ui.clearWait();
+                    next(deleteData);
+                },
+                error: function(response) {
+                    ui.clearWait();
+                    showDeleteErrorDialog(Granite.I18n.get("Failed to delete."));
+                    cancel();
+                }
+            });
+        });
+    }
+
+    // returns the paragraph element to show on delete confirmation dialog.
+    function getDeleteMessageParagraph($selectedItems, deleteData) {
+        var para = document.createElement("p");
+        if ($selectedItems.length === 1) {
+            if (deleteData.type === "collection") {
+                para.innerHTML = Granite.I18n.get("You are going to delete the following collection:");
+            } else {
+                para.innerHTML = Granite.I18n.get("You are going to delete the following asset:");
+            }
+            return para;
+        } else if ($selectedItems.length > 1) {
+            if (deleteData.type === "collection") {
+                para.innerHTML = Granite.I18n.get("You are going to delete the following {0} collections:",
+                    $selectedItems.length);
+            } else {
+                if (deleteData.bulkDeleteData) {
+                    para.innerHTML = Granite.I18n.get("You are going to delete all assets (except deselected ones) from the current location {0}.", deleteData.bulkDeleteData.sourceParentPath);// eslint-disable-line max-len
+                } else {
+                    para.innerHTML = Granite.I18n.get("You are going to delete the following {0} assets:",
+                        $selectedItems.length);
+                }
+            }
+            return para;
+        }
+    }
+
+    function getForceDeleteMessage(references) {
+        var hasLocalRefsOrActivations = (references.localRefs.length > 0 || references.activations.found === true);
+        var hasRemoteRefs = (references.remoteRefs.status === AssetReferences.REMOTE_REFS_STATUS.SUCCESS &&
+            references.remoteRefs.count > 0);
+        var remoteRefsFailed = (references.remoteRefs.status === AssetReferences.REMOTE_REFS_STATUS.FAILED);
+        var remoteRefsPending = (references.remoteRefs.status === AssetReferences.REMOTE_REFS_STATUS.PENDING);
+        var message;
+        if (hasLocalRefsOrActivations) {
+            if (hasRemoteRefs) {
+                message = Granite.I18n.get("One or more item(s) has local references and {0} remote references and/or activated.", references.remoteRefs.count); // eslint-disable-line max-len
+            } else if (remoteRefsPending) {
+                message = Granite.I18n.get("One or more item(s) has local references and/or activated. Remote references are still being retrieved."); // eslint-disable-line max-len
+            } else if (remoteRefsFailed) {
+                message = Granite.I18n.get("One or more item(s) has local references and/or activated. Remote references could not be retrieved."); // eslint-disable-line max-len
+            } else {
+                message = Granite.I18n.get("One or more item(s) has local references and/or activated.");
+            }
+        } else {
+            if (remoteRefsPending) {
+                message = Granite.I18n.get("Remote references for one or more item(s) are still being retrieved.");
+            } else if (remoteRefsFailed) {
+                message = Granite.I18n.get("Remote references for one or more item(s) could not be retrieved.");
+            } else if (hasRemoteRefs) {
+                message = Granite.I18n.get("One or more item(s) have {0} remote references and/or are activated.", references.remoteRefs.count); // eslint-disable-line max-len
+            }
+        }
+        return message;
+    }
+
+    function getTotalCounts(selectedItems) {
+        var total = selectedItems.length;
+        var folders = [];
+        for (var i = 0; i < selectedItems.length; i++) {
+            var type = $(selectedItems[i]).find("div.foundation-collection-assets-meta")
+                .data("foundationCollectionMetaType");
+            if (type === "directory") {
+                var item = $(selectedItems[i]);
+                var path = item.data("foundationCollectionItemId") || item.data("path");
+                folders.push(path);
+            }
+        }
+        // query to get total assets/folders count under these folders
+        if (folders.length > 0) {
+            total = total + getAssetAndFolderCount(folders);
+        }
+        return total;
+    }
+
+    function getAssetAndFolderCount(folders) {
+        var count = 0;
+        // count number of assets
+        $.ajax({
+            async: false,
+            url: Granite.HTTP.externalize("/bin/numberofentitiesinfolders.json"),
+            type: "POST",
+            data: {
+                "folderpaths": folders
+            },
+            success: function(response) {
+                count = response.entitycount;
+            },
+            error: function() {
+                count = 0;
+            }
+        });
+        return count;
+    }
+
+    /**
+     * Method to check if current delete operation should be processed async
+     * @param selectedItems items to delete
+     * @param folderDelete is any of the items to delete a folder
+     * @returns {boolean} {@code true} if operation should be async, {@code false} otherwise
+     */
+    function isAsync(selectedItems) {
+        var count = getTotalCounts(selectedItems);
+        var isAsyncDel = false;
+        $.ajax({
+            async: false,
+            url: Granite.HTTP.externalize("/bin/asynccommand"),
+            type: "GET",
+            data: {
+                "assetCount": count,
+                "operation": "DELETE",
+                "optype": "CHKASYN"
+            },
+            success: function(resp) {
+                var jsonRes = resp;
+                if (typeof resp === "string" || resp instanceof String) {
+                    jsonRes = $.parseJSON(resp);
+                }
+                isAsyncDel = jsonRes.isasync;
+            }
+        });
+        return isAsyncDel;
+    }
+})(document, Granite.$, Dam.AssetReferences, window.Promise);

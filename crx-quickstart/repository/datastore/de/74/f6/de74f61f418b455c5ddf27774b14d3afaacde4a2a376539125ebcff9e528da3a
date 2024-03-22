@@ -1,0 +1,537 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2020 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+
+(function ($, $document, $window) {
+    "use strict";
+
+    const CA_CONFIG_NAME = 'com.adobe.aem.wcm.site.manager.config.SiteConfig';
+    const SUCCESS_HANDLER_NAME = 'site-manager.dashboard-update';
+
+    const ui = $window.adaptTo("foundation-ui");
+    const contextPath = window.Granite.HTTP.getContextPath();
+
+    let frontEndPipelineEnabled = false;
+
+    function initDashboard() {
+        if (!Granite.Toggles.isEnabled("ft-cq-4297727") ) {
+            $(showFeatureIsNotEnabled);
+            return;
+        }
+
+        const $settingsDialog = $(".theme-settings__update_settings_dialog");
+        const $settingsForm = $('.update_settings_dialog__settings_form');
+
+        $window.adaptTo("foundation-registry").register("foundation.form.response.ui.success", {
+            name: SUCCESS_HANDLER_NAME,
+            handler: updateDashboard
+        });
+
+        $document.on('foundation-form-submitted', '.update_settings_dialog__settings_form', (evt, success, xhr) => {
+            ui.notify(success ? "Update successful" : xhr.statusText);
+            if (success) {
+                $settingsDialog.adaptTo("foundation-toggleable").hide();
+            }
+        });
+
+        $settingsForm.data('foundation-form-response-ui-success', { name: SUCCESS_HANDLER_NAME });
+
+        $(".theme-settings__button").on("click", () => {
+            updateDashboard();
+            $settingsDialog.adaptTo("foundation-toggleable").show();
+        });
+
+        $document.on("foundation-selections-change", ".cq-siteadmin-admin-childpages", updateDashboard);
+
+        updateDashboard();
+    }
+
+    function displayFrontEndPipelineEnabledErrorDialog(error) {
+        if (error) {
+            let errorHTML = "<p>" + Granite.I18n.get(error) + "</p></p><ul>";
+            const errorDialog = new Coral.Dialog().set({
+                header: {
+                    innerHTML: Granite.I18n.get("Error")
+                },
+                content: {
+                    innerHTML: errorHTML
+                }
+            });
+            const closeButton = new Coral.Button().set({
+                variant: "primary",
+                label: {
+                    textContent: Granite.I18n.get("Close")
+                }
+            });
+            closeButton.classList.add("frontend-pipeline-error__button");
+            closeButton.on("click", function() {
+                errorDialog.hide();
+            });
+            errorDialog.footer.appendChild(closeButton);
+            document.body.appendChild(errorDialog);
+            errorDialog.show();
+        }
+
+    }
+
+   function updateDashboard() {
+        const $selectedItems = $(".foundation-selections-item");
+
+        const $empty = $(".cq-siteadmin-sitedashboard__empty");
+        const $container = $(".cq-siteadmin-sitedashboard__container");
+
+        if ($selectedItems.size() === 1) {
+            const siteName = $selectedItems.data("foundation-collection-item-id").split("/")[2];
+
+            updateThemeDeploymentStatuses(siteName);
+
+            $(".frontend-pipeline-enable__button").off("click").on("click", () => {
+
+                // display a dialog that explains what the button does and confirm
+                const confirmMessage = Granite.I18n.get("This action will have following effects:") +
+                    "<ul>" +
+                    "<li>" + Granite.I18n.get("All pages of the site will include one additional CSS and JS file, which can be modified by deploying updates through a dedicated Cloud Manager front end pipeline.") + "</li>" +
+                    "<li>" + Granite.I18n.get("The added CSS and JS files will initially be empty, but a \"theme sources\" folder can be downloaded to bootstrap the folder structure that allows to deploy CSS and JS code updates via that pipeline.") + "</li>" +
+                    "<li>" + Granite.I18n.get("This change can only be undone by a developer, by deleting the SiteConfig and HtmlPageItemsConfig nodes that this operation creates below /conf/SITENAME/sling:configs") + ".</li>" +
+                    "<li>" + Granite.I18n.get("This action won't automatically convert the existing client libraries of the site to use the font end pipeline. Moving these sources from the client library folder to the front end pipeline folder is a task that requires manual work by a front end developer.") + "</li>" +
+                    "</ul>";
+                const confirmDialog = new Coral.Dialog().set({
+                    header: {
+                        innerHTML: Granite.I18n.get("Enable Front End Pipeline Confirmation")
+                    },
+                    content: {
+                        innerHTML: confirmMessage
+                    }
+                });
+                const cancelButton = new Coral.Button().set({
+                    variant: "secondary",
+                    label  : {
+                        textContent: Granite.I18n.get("Cancel")
+                    }
+                });
+                const confirmButton = new Coral.Button().set({
+                    variant: "primary",
+                    label: {
+                        textContent: Granite.I18n.get("Confirm")
+                    }
+                });
+                confirmButton.classList.add("frontend-pipeline-confirm__button");
+                cancelButton.on("click", function () {
+                    confirmDialog.hide();
+                });
+                confirmButton.on("click", function() {
+                    confirmDialog.hide();
+                    $.ajax({
+                        type: "POST",
+                        url: getEnableProntEndPipelineUrl(siteName)
+                    }).done(function(data, textStatus, jqXHR) {
+                        ui.notify(textStatus);
+                        updateDashboard();
+                    }).fail(function( jqXHR, textStatus, errorThrown ) {
+                        ui.notify(textStatus);
+                        displayFrontEndPipelineEnabledErrorDialog(jqXHR.responseJSON);
+                    });
+                });
+                confirmDialog.footer.appendChild(cancelButton);
+                confirmDialog.footer.appendChild(confirmButton);
+                document.body.appendChild(confirmDialog);
+                confirmDialog.show();
+            });
+
+            ui.wait();
+
+            const requests = [
+                fetch(getConfigUrl(siteName))
+                    .then(response => {
+                        if (response.ok) {
+                            response.json()
+                                .then(({siteTemplatePath}) => {
+
+                                    frontEndPipelineEnabled = (typeof siteTemplatePath !== "undefined");
+
+                                    $(".theme-download__button").off("click").on("click", () => {
+                                        window.open(getDownloadThemeUrl(siteName), "_blank");
+                                    });
+
+                                })
+                        } else {
+                            frontEndPipelineEnabled = false;
+                        }
+                    }),
+                fetch(getSiteTemplateFileDownloadsUrl(siteName))
+                    .then(checkStatus)
+                    .then(response => response.text())
+                    .then(html => {
+                        const $fileDownloads = $('.cq-siteadmin-sitedashboard__fileDownloads');
+                        if ($fileDownloads.length) {
+                            $fileDownloads.replaceWith(html);
+                            $('.cq-siteadmin-sitedashboard__files').prop('hidden', !$('.cq-siteadmin-sitedashboard__fileDownload').length);
+                        }
+                    })
+            ];
+            Promise.all(requests).then(() => {
+                toggleButtons(frontEndPipelineEnabled);
+                $container.prop('hidden', false);
+                $empty.hide();
+                ui.clearWait();
+            }).catch(error => {
+                $container.prop("hidden", true);
+                $empty.show();
+                console.warn(error);
+                ui.clearWait();
+            });
+        }
+
+        $container.prop("hidden", true);
+        $empty.show();
+    }
+
+    function updateThemeDeploymentStatuses(siteName) {
+        const $themeDeploymentStatusesContainer = $(".cq-siteadmin-sitedashboard__themeDeploymentStatuses");
+        fetch(getCurrentThemeDeploymentUrl(siteName))
+            .then(checkStatus)
+            .then(response => response.text())
+            .then(html => {
+                const $deployments = $(".cq-siteadmin-sitedashboard__deployments");
+                if ($deployments.length) {
+                    $deployments.replaceWith(html);
+                    const $deployment = $(".cq-siteadmin-sitedashboard__deployment");
+                    $themeDeploymentStatusesContainer.prop("hidden", !$deployment.length);
+                    if ($deployment.length) {
+                        const $themePackageName = $(".cq-siteadmin-sitedashboard__themePackageName");
+                        $themePackageName.text($deployment.attr("themePackageName"));
+                        $(".theme-download__label").hide();
+                        $(".theme-download__button").hide();
+                        getThemeDeployments(siteName, $themePackageName.text())
+                    }
+                }
+            })
+            .catch(error => {
+                console.warn(error);
+                $themeDeploymentStatusesContainer.prop("hidden", true);
+            })
+    }
+
+    function getThemeDeployments(siteName, themePackageName) {
+        const $themeDeploymentStatusesContainer = $(".cq-siteadmin-sitedashboard__themeDeploymentStatuses");
+        const $selectDeploymentVersionButton = $(".cq-siteadmin-sitedashboard__selectDeploymentVersion");
+        fetch(getConfigUrl(siteName))
+            .then(response => {
+                if (response.ok) {
+                    response.json()
+                        .then(({themeArtifact}) => {
+                            fetch(getThemeDeploymentsUrl(themePackageName))
+                                .then(checkStatus)
+                                .then(response => response.json())
+                                .then(response => {
+                                    const orderedThemeDeployments = Object.entries(response).filter(
+                                        property => property[1]["buildTime"]).sort(
+                                        (a, b) => new Date(b[1].buildTime) - new Date(a[1].buildTime));
+                                    toggleAuthorTierNewDeploymentAvailableIcon(orderedThemeDeployments, themeArtifact);
+                                    $selectDeploymentVersionButton.on("click", () => {
+                                        showSelectThemeDeploymentDialog(siteName, themePackageName, orderedThemeDeployments, themeArtifact);
+                                    });
+                                })
+                                .catch(error => {
+                                    console.warn(error);
+                                    $themeDeploymentStatusesContainer.prop("hidden", true);
+                                })
+                        })
+                        .catch(error => {
+                            console.warn(error);
+                            $themeDeploymentStatusesContainer.prop("hidden", true);
+                        })
+                }
+            })
+            .catch(error => {
+                console.warn(error);
+                $themeDeploymentStatusesContainer.prop("hidden", true);
+            })
+    }
+
+    function showSelectThemeDeploymentDialog(siteName, themePackageName, orderedThemeDeployments, themeArtifact) {
+        let descriptionHtml = Granite.I18n.get(
+            `<p>On the <strong>author</strong> tier, change the version of the <strong>"${themePackageName}"</strong> frontend module that is used by the <strong>"${siteName}"</strong> site to the following one:</p>`);
+        let deploymentItemsHtml = "";
+        orderedThemeDeployments.forEach(deployment => {
+            const formattedBuildTimeDate = getThemeDeploymentDateAndTime(deployment[1].buildTime);
+            deploymentItemsHtml +=
+                `<coral-selectlist-item ${deployment[0] === themeArtifact ? 'selected active-deployment' : ''} deployment-id=${deployment[0]}>
+                    <div class="cq-siteadmin-sitedashboard__deploymentDetails">
+                        <p><strong>v${deployment[1].version} (#${deployment[1].commitId})</strong></p>
+                        <p><strong>${formattedBuildTimeDate}</strong></p>
+                    </div>
+                    <coral-radio ${deployment[0] === themeArtifact ? 'checked' : ''}></coral-radio>
+                  </coral-selectlist-item>`
+        });
+        const deploymentsSelectListHtml =
+            `<coral-selectlist>
+                ${deploymentItemsHtml}
+             </coral-selectlist>`;
+        const selectThemeDeploymentDialog = new Coral.Dialog().set({
+            id     : "cq-siteadmin-sitedashboard__selectDeploymentDialog",
+            header : {
+                innerHTML: Granite.I18n.get("Select Frontend Module Version")
+            },
+            content: {
+                innerHTML: deploymentsSelectListHtml
+            },
+        });
+
+        const cancelButton = new Coral.Button().set({
+            variant: "secondary",
+            label  : {
+                textContent: Granite.I18n.get("Cancel")
+            }
+        });
+
+        const applyButton = new Coral.Button().set({
+            variant: "primary",
+            label  : {
+                textContent: Granite.I18n.get("Apply")
+            },
+            disabled: true
+        });
+
+        cancelButton.on("click", function () {
+            selectThemeDeploymentDialog.hide();
+        });
+
+        applyButton.on("click", function (e) {
+            ui.wait();
+            fetch(getCsrfTokenUrl()).then(response => {
+                if (response.status === 200) {
+                    return response.json()
+                }
+            }).then(response => {
+                const selectedThemeDeploymentId = getSelectedThemeDeploymentDetails().themeDeploymentId;
+                const selectedThemeDeploymentVersion = getSelectedThemeDeploymentDetails().themeDeploymentVersion;
+                fetch(getUpdateThemeDeploymentUrl(siteName, selectedThemeDeploymentId, themePackageName), {
+                    method : "POST",
+                    headers: {
+                        "CSRF-Token": response ? response.token : ""
+                    }
+                })
+                    .then(checkStatus)
+                    .then(response => {
+                        selectThemeDeploymentDialog.hide();
+                        ui.clearWait();
+                        showUpdateThemeDeploymentStatusDialog("success", siteName, themePackageName, selectedThemeDeploymentVersion);
+                    })
+                    .catch(error => {
+                        selectThemeDeploymentDialog.hide();
+                        ui.clearWait();
+                        showUpdateThemeDeploymentStatusDialog("error", siteName, themePackageName, selectedThemeDeploymentVersion);
+                        console.warn(error);
+                    })
+            });
+        });
+        selectThemeDeploymentDialog.footer.appendChild(cancelButton);
+        selectThemeDeploymentDialog.footer.appendChild(applyButton);
+        document.body.appendChild(selectThemeDeploymentDialog);
+        const $selectDeploymentDialogHeader = $("#cq-siteadmin-sitedashboard__selectDeploymentDialog ._coral-Dialog-header");
+        $selectDeploymentDialogHeader.after(descriptionHtml);
+        handleSelectThemeDeploymentDialogEvents(selectThemeDeploymentDialog, applyButton);
+
+        selectThemeDeploymentDialog.show();
+    }
+
+    function handleSelectThemeDeploymentDialogEvents(dialog, applyButton) {
+        const $selectDeploymentBoxes = $("#cq-siteadmin-sitedashboard__selectDeploymentDialog ._coral-Menu-item");
+        const $radioButtons = $("#cq-siteadmin-sitedashboard__selectDeploymentDialog ._coral-Radio");
+
+        dialog.on("coral-overlay:open", () => {
+            const $activeThemeDeploymentBox = $("#cq-siteadmin-sitedashboard__selectDeploymentDialog ._coral-Menu-item[active-deployment]")[0];
+            $activeThemeDeploymentBox.scrollIntoView();
+        });
+
+        dialog.on("coral-overlay:close", () => {
+            document.body.removeChild(dialog);
+        });
+
+        $selectDeploymentBoxes.on("click", function (e) {
+            e.stopPropagation();
+            const indexOfClickedBox = $selectDeploymentBoxes.index(this);
+            for (let i = 0; i < $selectDeploymentBoxes.length; i++) {
+                $selectDeploymentBoxes[i].selected = indexOfClickedBox === i;
+                $radioButtons[i].checked = indexOfClickedBox === i;
+            }
+            applyButton.set("disabled", $selectDeploymentBoxes[indexOfClickedBox].hasAttribute("active-deployment") && $selectDeploymentBoxes[indexOfClickedBox].selected);
+        });
+    }
+
+    function showUpdateThemeDeploymentStatusDialog(status, siteName, themePackageName, selectedThemeDeploymentVersion) {
+        const updateThemeDeploymentStatusHtml = status === "success" ? "<p>" + Granite.I18n.get(`The version of the <strong>"${themePackageName}"</strong> frontend module that is used by the <strong>"${siteName}"</strong>
+            site will be updated to <strong>"${selectedThemeDeploymentVersion}"</strong> and then replicated to the <strong>publish</strong> tier.`) + "</p>" :
+            "<p>" + Granite.I18n.get(`An error occurred while trying to update the version of the <strong>"${themePackageName}"</strong> frontend module that is used by the <strong>"${siteName}"</strong> site`) + "</p>";
+
+        const updateThemeDeploymentStatusDialog = new Coral.Dialog().set({
+            header : {
+                innerHTML: status === "success" ? Granite.I18n.get("Update Successful") : Granite.I18n.get("Update Error")
+            },
+            content: {
+                innerHTML: updateThemeDeploymentStatusHtml
+            },
+            variant: status === "success" ? "success" : "error"
+        });
+        const closeButton = new Coral.Button().set({
+            variant: "primary",
+            label  : {
+                textContent: Granite.I18n.get("Close")
+            }
+        });
+        let isCloseButtonClicked = false;
+        closeButton.on("click", function () {
+            isCloseButtonClicked = true;
+            updateThemeDeploymentStatusDialog.hide();
+            updateThemeDeploymentStatuses(siteName);
+        });
+
+        updateThemeDeploymentStatusDialog.on("coral-overlay:beforeclose", function(event) {
+            if (!isCloseButtonClicked) {
+                event.preventDefault();
+            }
+        });
+
+        updateThemeDeploymentStatusDialog.footer.appendChild(closeButton)
+        document.body.appendChild(updateThemeDeploymentStatusDialog);
+        updateThemeDeploymentStatusDialog.show();
+    }
+
+    function getSelectedThemeDeploymentDetails() {
+        const $selectedThemeDeploymentBox = $("#cq-siteadmin-sitedashboard__selectDeploymentDialog ._coral-Menu-item[selected]")[0];
+        const selectedThemeDeploymentVersion = $($selectedThemeDeploymentBox).find($("._coral-Menu-itemLabel .cq-siteadmin-sitedashboard__deploymentDetails > p:first-child")).text();
+        const selectedThemeDeploymentId = $selectedThemeDeploymentBox.getAttribute("deployment-id");
+        return {
+            themeDeploymentId: selectedThemeDeploymentId,
+            themeDeploymentVersion: selectedThemeDeploymentVersion
+        }
+    }
+
+    function getThemeDeploymentDateAndTime(buildTime) {
+        const date = new Date(buildTime * 1000);
+        const options = {
+            weekday: "short", month: "short", day: "numeric", year: "numeric", hour: 'numeric',
+            minute : 'numeric', hour12: true
+        };
+        const formatter = new Intl.DateTimeFormat("en-US", options);
+
+        return formatter.formatToParts(date).map(({type, value}, index) => {
+            switch (type) {
+                case 'dayPeriod':
+                    return value.toLowerCase();
+                case 'literal':
+                    switch (index) {
+                        case 1 || 3:
+                            return " ";
+                        case 7:
+                            return " at ";
+                        case 11:
+                            return "";
+                    }
+                default :
+                    return value;
+            }
+        }).join('');
+    }
+
+    function toggleAuthorTierNewDeploymentAvailableIcon(orderedThemeDeployments, themeArtifact) {
+        const activeDeployment = orderedThemeDeployments.find(deployment => deployment[0] === themeArtifact);
+        const $newDeploymentIcon = $("#newDeploymentAvailableIcon_Author");
+        if (orderedThemeDeployments.indexOf(activeDeployment) !== 0) {
+            $newDeploymentIcon.show();
+            return;
+        }
+        $newDeploymentIcon.hide();
+    }
+
+    function checkStatus(response) {
+        if (!response.ok) {
+            throw Error(response.statusText);
+        }
+        return response;
+    }
+
+    function getConfigUrl(siteName) {
+        return `${contextPath}/conf/${siteName}/sling:configs/${CA_CONFIG_NAME}.json`;
+    }
+
+    function getDownloadThemeUrl(siteName) {
+        return `${contextPath}/conf/${siteName}.downloadtheme.html`;
+    }
+
+    function getThemeDeploymentsUrl(packageName) {
+        return `${contextPath}/conf/global/frontend/deployments/${packageName}.1.json`;
+    }
+
+    function getUpdateThemeDeploymentUrl(siteName, themeDeploymentId, themePackageName) {
+        return `${contextPath}/conf/${siteName}.changethemedeployment.json?themeDeploymentName=${themeDeploymentId}&themePackageName=${themePackageName}`;
+    }
+
+    function getCurrentThemeDeploymentUrl(siteName) {
+        const themeDeploymentStatuses = document.getElementsByClassName('cq-siteadmin-sitedashboard__themeDeploymentStatuses');
+        if (themeDeploymentStatuses.length) {
+            const src = themeDeploymentStatuses[0].dataset['src'];
+            return Granite.URITemplate.expand(src, {siteName});
+        }
+    }
+
+    function getSiteTemplateFileDownloadsUrl(siteName) {
+        const files = document.getElementsByClassName('cq-siteadmin-sitedashboard__files');
+        if (files.length) {
+            const src = files[0].dataset['src'];
+            return Granite.URITemplate.expand(src, { siteName });
+        }
+    }
+
+    function showFeatureIsNotEnabled() {
+        const ui = $window.adaptTo("foundation-ui");
+        ui.notify("Site Templates feature is not enabled.");
+    }
+
+    function getEnableProntEndPipelineUrl(siteName) {
+        return `${contextPath}/conf/${siteName}.enablefrontendpipeline.html`;
+    }
+
+    function toggleButtons(featureEnabled) {
+        if (featureEnabled) {
+            // don't show the Download Theme Sources button and its label if there's already a theme deployment
+            const $deployment = $(".cq-siteadmin-sitedashboard__deployment");
+            if ($deployment.length) {
+                $(".theme-download__label").hide();
+                $(".theme-download__button").hide();
+            } else {
+                $(".theme-download__label").show();
+                $(".theme-download__button").show();
+            }
+            $(".frontend-pipeline-enable__label").hide();
+            $(".frontend-pipeline-enable__button").hide();
+        } else {
+            $(".theme-download__label").hide();
+            $(".theme-download__button").hide();
+            $(".frontend-pipeline-enable__label").show();
+            $(".frontend-pipeline-enable__button").show();
+        }
+    }
+
+    function getCsrfTokenUrl() {
+        return `${contextPath}/libs/granite/csrf/token.json`
+    }
+
+    $document.on("foundation-contentloaded", initDashboard);
+
+}(jQuery, jQuery(document), jQuery(window)));

@@ -1,0 +1,481 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2013 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function(document, $) {
+    "use strict";
+
+    var MINUTES_IN_DAY = 24 * 60;
+    var DAILY = "daily";
+    var WEEKLY = "weekly";
+    var MONTHLY = "monthly";
+
+    /**
+     * Change listener for the cadence radio group (day / week / month)
+     */
+    $(document).on("change", "coral-radio[name='recurrence']", function (e) {
+        var schedule =  $(this).val();
+        updateUIBasedOnSchedule(schedule);
+        checkWindowOverlap();
+    });
+
+    /**
+     * Change listener for the window start time
+     */
+    $(document).on("change", "coral-datepicker", function (e) {
+        checkWindowOverlap();
+    });
+
+    $(document).on("change", "#weekDay", function(e) {
+        checkWindowOverlap();
+    });
+
+    $(document).on("change", "#weekDayEnd", function(e) {
+        checkWindowOverlap();
+    });
+
+    /**
+     * Computes the windowEndTime value in minutes, relative to the start of the week (day 0, time 0)
+     * @param current - current window
+     */
+    function computeWindowScheduleFromStartOfWeek(current) {
+        var diff = current.weekDayEnd - current.weekDay;
+        // the end day might be in the next week
+        if(current.weekDay > current.weekDayEnd ||
+            (current.weekDay === current.weekDayEnd &&
+                current.windowStartTime > current.windowEndTime)) {
+            diff = diff + 7;
+        }
+        current.windowStartTime += MINUTES_IN_DAY * current.weekDay;
+        current.windowEndTime += MINUTES_IN_DAY * current.weekDay + diff * MINUTES_IN_DAY; // convert the day diff to minutes
+    }
+
+    function checkWindowOverlap() {
+        var windows = $("coral-card");
+        var currentWindowPath = $("#windowPath").val();
+
+        var current = getCurrentWindowProperties();
+        current.windowStartTime = timeStringToMinutes(current.windowStartTime);
+        current.windowEndTime = timeStringToMinutes(current.windowEndTime);
+
+        var conflicting = false, window;
+
+        var other;
+
+        for(var i = 0; i < windows.length; i++) {
+            window = $(windows[i]);
+
+            // only compare the window to other windows
+            if(window.data("path") !== currentWindowPath) {
+                other = new Array();
+                other.windowSchedule = window.data("windowschedule");
+                other.windowStartTime =  timeStringToMinutes(window.data("starttime"));
+                other.windowEndTime = timeStringToMinutes(window.data("endtime"));;
+                other.weekDay = window.data("weekday");;
+                other.weekDayEnd = window.data("weekdayend");
+
+                // for the weekly schedule the start and end day might be the same
+                if(other.weekDayEnd.length == 0) {
+                    other.weekDayEnd = other.weekDay;
+                }
+
+                if(current.windowSchedule === DAILY) {
+
+                    current.windowStartTime += other.weekDay * MINUTES_IN_DAY;
+                    current.windowEndTime += other.weekDay * MINUTES_IN_DAY;
+
+                    computeWindowScheduleFromStartOfWeek(other);
+
+                    if(other.windowSchedule !== DAILY) {
+                        // daily schedules could overlap multiple times with a longer weekly / monthly window
+                        // It's enough to slide the daily window another 24 hours to check if there's an overlap
+                        if (current.windowStartTime < other.windowEndTime && !conflicting) {
+                            conflicting = conflicting || checkintervalOverlap(current.windowStartTime, current.windowEndTime,
+                                    other.windowStartTime, other.windowEndTime);
+
+                            current.windowStartTime += MINUTES_IN_DAY;
+                            current.windowEndTime += MINUTES_IN_DAY;
+                        }
+                    }
+                } else if(other.windowSchedule === DAILY) {
+
+                    other.windowStartTime += current.weekDay * MINUTES_IN_DAY;
+                    other.windowEndTime += current.weekDay * MINUTES_IN_DAY;
+
+                    computeWindowScheduleFromStartOfWeek(current);
+
+                    // daily schedules could overlap multiple times with a longer weekly / monthly window
+                    // It's enough to slide the daily window another 24 hours to check if there's an overlap
+                    if(other.windowStartTime < current.windowEndTime && !conflicting) {
+                        conflicting = conflicting || checkintervalOverlap(current.windowStartTime, current.windowEndTime,
+                            other.windowStartTime, other.windowEndTime);
+
+                        other.windowStartTime += MINUTES_IN_DAY;
+                        other.windowEndTime += MINUTES_IN_DAY;
+                    }
+                } else {
+                    // one of them is weekly, the other is monthly.
+                    // We need to take the time diff into consideration for both of them
+                    computeWindowScheduleFromStartOfWeek(current);
+                    computeWindowScheduleFromStartOfWeek(other);
+
+                    var first, second;
+                    if(current.windowEndTime < other.windowEndTime) {
+                        first = current;
+                        second = other;
+                    } else {
+                        first = other;
+                        second = current;
+                    }
+                    // slide the earliest window another week to make sure we get the possible overlaps
+                    if(first.windowStartTime < second.windowEndTime && !conflicting) {
+                        conflicting = conflicting || checkintervalOverlap(first.windowStartTime, first.windowEndTime,
+                                second.windowStartTime, second.windowEndTime);
+
+                        first.windowStartTime += 7 * MINUTES_IN_DAY;
+                        first.windowEndTime += 7 * MINUTES_IN_DAY;
+                    }
+                }
+
+                // having computed these
+                conflicting = conflicting || checkintervalOverlap(current.windowStartTime, current.windowEndTime,
+                    other.windowStartTime, other.windowEndTime);
+            }
+        }
+        // show an alert notifying the user that the schedule conflicts with the schedule of other windows
+        toggleItemVisibility("#conflictingWindowsAlert", conflicting)
+    }
+
+    function checkintervalOverlap(start1, stop1, start2, stop2) {
+        return start1 < stop2 &&  stop1 > start2;
+    }
+
+     /* Updates the UI from the "Configure window" dialog based of the schedule
+     * @param schedule - daily, weekly or monthly
+     */
+    function updateUIBasedOnSchedule(schedule) {
+        var weekDaySelectVisible = false,
+            weekDayEndSelectVisible = false,
+            firstLastSelectVisible = false;
+        switch (schedule) {
+            case DAILY:
+                // all dropdowns should remain hidden
+                break;
+            case WEEKLY:
+                weekDaySelectVisible = true;
+                weekDayEndSelectVisible = true;
+                break;
+            case MONTHLY:
+                weekDaySelectVisible = true;
+                weekDayEndSelectVisible = true;
+                firstLastSelectVisible = true;
+                break;
+        }
+
+        toggleFieldVisibility("#weekDay", weekDaySelectVisible);
+        toggleFieldVisibility("#weekDayEnd", weekDayEndSelectVisible);
+        toggleFieldVisibility("#windowFirstLastStartDay", firstLastSelectVisible);
+    }
+
+    /**
+     * Shows / hides and enables / disables a form item
+     * @param id - id of the form item
+     * @param show - true if the item should be shown
+     */
+    function toggleFieldVisibility(id, show) {
+
+        if(id != null && $.trim(id).length > 0) {
+
+            var formField = $(id);
+
+            if(formField.length > 0) {
+                if(show) {
+                    formField.removeProp("hidden");
+                    formField.removeProp("disabled");
+                } else {
+                    formField.prop("hidden", true);
+                    formField.prop("disabled", true);
+                }
+            }
+        }
+    }
+
+    /**
+     * Handler for "Save" window configuration button
+     */
+    $(document).on("click", "#saveWindowConfigBtn", function (e) {
+
+        var path = $("#windowPath").val();
+
+        var properties = getCurrentWindowProperties();
+
+        //for daily cadence, we need the start time to precede the end time
+        if (properties.windowSchedule === DAILY && properties.name === "Weekly Maintenance Window" &&
+            timeStringToMinutes(properties.windowStartTime) >= timeStringToMinutes(properties.windowEndTime)) {
+            var message = Granite.I18n.get("The start time must precede (be less than) the end time.");
+            var alert = document.querySelector("#configurationError");
+
+            if(alert !== null) {
+                alert.content.innerHTML = message;
+                $(alert).removeProp("hidden");
+            }
+            return;
+        }
+
+        updateWindowConfig(path, properties);
+    });
+
+    function getCurrentWindowProperties() {
+        var properties = new Array();
+
+        properties.name = document.querySelector("#windowName").value;
+        properties.windowStartTime = document.querySelector("#startTime").value;
+        properties.windowEndTime = document.querySelector("#endTime").value;
+        properties.windowSchedule = $("coral-radio[name='recurrence'][checked]").val();
+
+        //we take the start and end weekday into consideration only for weekly and monthly cadence
+        if (properties.windowSchedule === WEEKLY || properties.windowSchedule === MONTHLY) {
+            properties.weekDay = document.querySelector("#weekDay").value;
+            properties.weekDayEnd = document.querySelector("#weekDayEnd").value;
+        }
+
+        //for monthly cadence, we need to also know if the start day is the first or last weekday of the month
+        if(properties.windowSchedule === MONTHLY) {
+            properties.windowFirstLastStartDay = document.querySelector("#windowFirstLastStartDay").value;
+        }
+
+        return properties;
+    }
+
+    /**
+     * Updates the window with the given path, using the properties provided
+     * @param path - maintenance window path
+     * @param properties - new window properties
+     */
+    function updateWindowConfig(path, properties) {
+        var day1 = (properties.weekDay != undefined) ? properties.weekDay : null;
+        var day2 = (properties.weekDayEnd != undefined) ? properties.weekDayEnd : null;
+		var dayArray;
+        var weekDayField;
+        var firstLastField;
+
+        // can't write to /libs or /apps
+        if (path.indexOf("/libs") == 0
+            || path.indexOf("/apps") == 0) {
+            path = path.replace(/.*?(\/settings.*)/g, "/conf/global$1");
+        }
+
+        var postData = {
+            "_charset_": "utf-8",
+            "name": properties.name,
+            "windowStartTime": properties.windowStartTime,
+            "windowEndTime": properties.windowEndTime,
+            "windowSchedule": properties.windowSchedule,
+            "sling:configPropertyInherit": "true",
+            "sling:configCollectionInherit": "true"
+        };
+
+        //don't send the day for daily scheduling - we want to reset this in case it was set before by mistake
+        if(properties.windowSchedule === DAILY || day1 == null || day2 == null) {
+            dayArray = null;
+            weekDayField = "windowScheduleWeekdays@Delete"; // delete weekday field
+        } else {
+            dayArray = [day1, day2];
+            weekDayField = "windowScheduleWeekdays";
+            firstLastField = (properties.windowSchedule === MONTHLY) ?
+                "windowFirstLastStartDay" : "windowFirstLastStartDay@Delete"; // delete the first / last day field if it's not a monthly schedule
+            postData[firstLastField] = properties.windowFirstLastStartDay;
+        }
+
+        postData[weekDayField] = dayArray;
+
+        function updateMaintenanceWindowProperties() {
+            $.ajax({
+                type: "POST",
+                url: Granite.HTTP.externalize(path),
+                data: postData
+            }).success(function(data) {
+                toggleConfigureModal(false);
+                window.location.reload();
+            }).error(function (data) {
+                showError(Granite.I18n.get("Error while saving the window configuration."));
+            });
+        }
+
+        // make sure the parent container under conf is configured for collection and property inheritance
+        var parentPath = path.substring(0, path.lastIndexOf("/"));
+        $.ajax({
+            url: Granite.HTTP.externalize(parentPath),
+            type: "POST",
+            data: {
+                "sling:configPropertyInherit": "true",
+                "sling:configCollectionInherit": "true"
+            },
+            timeout: 60000,
+            success: function (data) {
+                updateMaintenanceWindowProperties();
+            },
+            error: function (xmlhttprequest, textStatus, msg) {
+                showError(Granite.I18n.get("Error while saving the window configuration."));
+            }
+        });
+    }
+
+    function showError(errorMessage) {
+        var alert = document.querySelector("#configurationError");
+        if(alert != null) {
+            alert.content.innerHTML = errorMessage;
+            toggleItemVisibility("#configurationError", true);
+        }
+    }
+
+    /**
+     * From a time string in the "HH:mm" format, it extracts the number of minutes
+     * @param time
+     * @returns {number}
+     */
+    function timeStringToMinutes(time) {
+        if(time != undefined && $.trim(time).length > 0) {
+            var col = time.indexOf(":");
+            if (col != -1) {
+                return parseInt(time.substring(0, col)) * 60 + parseInt(time.substring(col + 1));
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Shows the "Configure window" modal and populates it with the data of the selected window
+     * @param item - coral-card item associated with the current window
+     */
+    function showWindowConfigurationModal(item) {
+        // !!Important - we are doing this here too because the radio isn't set properly in nextFrame
+		toggleConfigureModal(true, function() {
+		    // Window schedule (montly / weekly / daily)
+            var windowSchedule = item.data("windowschedule");
+            document.querySelector("coral-radio[name='recurrence'][value='" + windowSchedule + "']").checked = true;
+        });
+
+        // This is to avoid CUI-4543
+        Coral.commons.nextFrame(function(){
+          // Window path
+            $("#windowPath").val(item.data("path"));
+
+            // Window name
+            setInputValue(item, "#windowName", "name");
+
+            // Window start time
+            setInputValue(item, "#startTime", "starttime");
+
+            // Window end time
+            setInputValue(item, "#endTime", "endtime");
+
+            // Window schedule (montly / weekly / daily)
+            var windowSchedule = item.data("windowschedule");
+            document.querySelector("coral-radio[name='recurrence'][value='" + windowSchedule + "']").checked = true;
+            updateUIBasedOnSchedule(windowSchedule);
+
+            // start week day dropdown
+            setInputValue(item, "#weekDay", "weekday", 7);
+
+            // end week day dropdown
+            setInputValue(item, "#weekDayEnd", "weekdayend", 7);
+
+            //selector for first / last day of the month
+            setInputValue(item, "#windowFirstLastStartDay", "windowfirstlaststartday", 0);
+
+            checkWindowOverlap();
+        });
+    }
+
+    /**
+     * Shows / hides the "Configure window" modal
+     * @param show
+     */
+    function toggleConfigureModal(show, callbackListener) {
+        var configureModal = document.getElementById("modalConfigureWindow");
+        if(configureModal) {
+            if(show) {
+                toggleItemVisibility("#configurationError", false);
+
+                // execute the listener only once per show event
+                $(configureModal).one('coral-overlay:open', function(event) {
+                    if(callbackListener) {
+                        callbackListener();
+                    }
+                });
+                configureModal.show();
+            } else {
+                configureModal.hide();
+            }
+        }
+    }
+
+    /**
+     * Sets the value of a input field with data taken from a "data" attribute of a coral-card provided through the
+     * item attribute
+     * @param item - DOM element whose data attributes we will use to populate the input
+     * @param fieldId
+     * @param dataSelector
+     * @param defaultValue
+     */
+    function setInputValue(item, fieldId, dataSelector, defaultValue) {
+        var input = document.querySelector(fieldId);
+        if(input != null && item != null) {
+            var data = item.data(dataSelector);
+
+            if(!data || data === "") {
+				data = defaultValue;
+            }
+
+            input.value = data;
+        }
+    }
+
+    $(document).on("click", "#configureWindowButton", function(e) {
+      	var item = $(".granite-maintenance-windows-collection").find(".foundation-selections-item");
+        if(item.length > 0) {
+			showWindowConfigurationModal(item.find("coral-card"));
+        }
+    });
+
+    $(document).on("click", ".configureWindowQuickAction", function(e) {
+        showWindowConfigurationModal($(this));
+    });
+
+
+    function toggleItemVisibility(itemId, show) {
+        var item = $(itemId);
+        if(item.length > 0) {
+            if (show) {
+                item.removeProp("hidden");
+            } else {
+                item.prop("hidden", true);
+            }
+        }
+    }
+})(document, Granite.$);
+
+
+var reload = 0;
+function reload_page() {
+    reload++;
+    if (reload == 1) {
+        setTimeout(function () {
+            window.location.reload();
+        }, 5000);
+    }
+}

@@ -1,0 +1,653 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2020 Adobe
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe.
+ */
+
+(function($) {
+    "use strict";
+
+    var overlayMessage;
+    var ui = $(window).adaptTo("foundation-ui");
+
+    /**
+     * Translates parameters intended for the older "assetdownload.zip"
+     * servlet into parameters valid for the newer "downloadbinaries.json"
+     * servlet.
+     *
+     * @param {string}
+     *            path The path of the item being downloaded. Will be used
+     *            unless the parameters have a "path" array containing
+     *            paths.
+     * @param {string}
+     *            fileName The file name to use for the target zip file.
+     * @param {object}
+     *            parameters Name/value pairs that would be sent to the
+     *            "assetdownload.zip" servlet.
+     * @returns {object} An object containing parameter name/value pairs
+     *          that can be provided to the "downloadbinaries.json" servlet.
+     */
+    function _getDownloadServiceParameters(path, fileName, parameters) {
+        var targets = [];
+        var paths = parameters.path;
+
+        if (!paths.length) {
+            paths = [ path ];
+        }
+
+        for (var i = 0; i < paths.length; i += 1) {
+            path = decodeURIComponent(paths[i]);
+
+            _extractAssetTarget(path, fileName, parameters, targets);
+            _extractDynamicrenditionTarget(path, fileName, parameters, targets);
+            _extractSmartcropTarget(path, fileName, parameters, targets);
+        }
+
+        var downloadParameters = {
+            targets: targets
+        };
+
+        if (parameters.email) {
+            downloadParameters.emailUserIds = parameters.email;
+        }
+
+        return downloadParameters;
+    }
+
+    /**
+     * If the passed parameters require use of 'asset' DownloadTargetProcessor,
+     * add an appropriate target and configuration. If the passed parameters do
+     * not require this processor, no target will be added.
+     *
+     * @param {string}
+     *            path The path of the target item (asset, collection or
+     *            folder).
+     * @param {string}
+     *            fileName The filename of the target.
+     * @param {object}
+     *            parameters The parameters from the UI.
+     * @param {array}
+     *            targets The array of targets.
+     */
+    function _extractAssetTarget(path, fileName, parameters, targets) {
+        var targetParams = {};
+
+        var includeAssetTarget = true;
+
+        if (parameters.downloadAssets === "false") {
+            targetParams.excludeOriginalRendition = "true";
+            includeAssetTarget = false;
+        }
+
+        if (parameters.downloadRenditions === "true") {
+            targetParams.includeAllRenditions = "true";
+            includeAssetTarget = true;
+        }
+
+        if (parameters.downloadSubassets === "true") {
+            targetParams.includeSubAssets = "true";
+            includeAssetTarget = true;
+        }
+
+        if (includeAssetTarget) {
+            _addGenericTargetParams(path, fileName, parameters, targetParams);
+
+            targets.push({
+                parameters : targetParams
+            });
+        }
+
+    }
+
+    /**
+     * If the passed parameters require use of 'dynamicrendition'
+     * DownloadTargetProcessor, add an appropriate target and configuration. If
+     * the passed parameters do not require this processor, no target will be
+     * added.
+     *
+     * @param {string}
+     *            path The path of the target item (asset, collection or
+     *            folder).
+     * @param {string}
+     *            fileName The filename of the target.
+     * @param {object}
+     *            parameters The parameters from the UI.
+     * @param {array}
+     *            targets The array of targets.
+     */
+    function _extractDynamicrenditionTarget(path, fileName, parameters, targets) {
+        var targetParams = {};
+
+        var includeDynamicRenditionTarget = false;
+        targetParams.assetTarget = "dynamicrendition";
+
+        if (parameters.downloadRenditions === "true") {
+            targetParams.includeEncodedRenditions = true;
+            includeDynamicRenditionTarget = true;
+        }
+
+        if (parameters.s7exportsettings) {
+
+            // S7 setting string will be something like this:
+            // {modifier:printRes=72&wid=100&hei=100&fmt=jpeg,RGB},{smartcrop:true}
+            // ...so can't be tokenized on comma
+            var settings = decodeURIComponent(parameters.s7exportsettings);
+            settings = settings.substring(1, settings.length - 1).split('},{');
+
+            for (var i = 0; i < settings.length; i++) {
+
+                var setting = settings[i].split(':');
+
+                if (setting[0] === 'smartcrop') {
+                    targetParams.includeSmartCropRenditions = true
+                    includeDynamicRenditionTarget = true;
+
+                } else if (setting[0] === 'imagepreset') {
+                    targetParams.imagePreset = setting[1];
+                    includeDynamicRenditionTarget = true;
+
+                } else if (setting[0] === 'modifier') {
+                    targetParams.modifier = setting[1];
+                    includeDynamicRenditionTarget = true;
+
+                }
+            }
+        }
+
+        if (includeDynamicRenditionTarget) {
+            _addGenericTargetParams(path, fileName, parameters, targetParams);
+
+            targets.push({
+                parameters : targetParams
+            });
+        }
+    }
+
+    /**
+     * If the passed parameters require use of 'smartcrop'
+     * DownloadTargetProcessor, add an appropriate target and configuration. If
+     * the passed parameters do not require this processor, no target will be
+     * added.
+     *
+     * @param {string}
+     *            path The path of the target item (asset, collection or
+     *            folder).
+     * @param {string}
+     *            fileName The filename of the target.
+     * @param {object}
+     *            parameters The parameters from the UI.
+     * @param {array}
+     *            targets The array of targets.
+     */
+    function _extractSmartcropTarget(path, fileName, parameters, targets) {
+        var targetParams = {};
+        var includeSmartCropRenditions = false;
+        targetParams.assetTarget = "smartcrop";
+
+        if (parameters.s7exportsettings) {
+            // S7 setting string will be something like this:
+            // {modifier:printRes=72&wid=100&hei=100&fmt=jpeg,RGB},{smartcrop:true}
+            // ...so can't be tokenized on comma
+            var settings = decodeURIComponent(parameters.s7exportsettings);
+            settings = settings.substring(1, settings.length - 1).split('},{');
+
+            for (var i = 0; i < settings.length; i++) {
+
+                var setting = settings[i].split(':');
+
+                if (setting[0] === 'smartcrop') {
+                    includeSmartCropRenditions = true;
+                }
+            }
+        }
+
+        if(includeSmartCropRenditions) {
+            _addGenericTargetParams(path, fileName, parameters, targetParams);
+
+            targets.push({
+                parameters : targetParams
+            });
+        }
+    }
+
+    /**
+     * Add standard params to passed targetParams object.
+     *
+     * @param {string}
+     *            path The path of the target item (asset, collection or
+     *            folder).
+     * @param {string}
+     *            fileName The filename of the target.
+     * @param {object}
+     *            parameters The parameters from the UI.
+     * @param {object}
+     *            targetParams The target params to add to.
+     */
+    function _addGenericTargetParams(path, fileName, parameters, targetParams) {
+
+        targetParams.path = path;
+
+        if (parameters.flatStructure === "false") {
+            targetParams.createAssetFolders = "true";
+        }
+
+        if (fileName) {
+            targetParams.archiveName = fileName;
+        }
+    }
+
+    /**
+     * Converts an object containing name/value parameter pairs into an HTTP
+     * query string.
+     *
+     * @param {object}
+     *            toConvert Name/value pairs to convert.
+     * @param {string}
+     *            initialSeparator The initial character to use when separating
+     *            the parameter values. For a valid query string, the separator
+     *            should be either "?" or "&".
+     * @returns {string} Querystring containing the provided parameters.
+     */
+    function _objectToQueryStringParameters(toConvert, initialSeparator) {
+        var queryString = "";
+        Object.keys(toConvert).forEach(function(key) {
+            if (queryString) {
+                queryString += "&";
+            } else {
+                queryString += initialSeparator;
+            }
+            queryString += key + "=" + toConvert[key];
+        });
+        return queryString;
+    }
+
+    /**
+     * Builds a correctly externalized URL that can be used to submit a request.
+     * @param {string} path Sling path to which the request should be submitted.
+     * @param {string} suffix Will be appended to the path to create a URL.
+     */
+    function _createUrl(path, suffix) {
+        var encodedPath = Granite.HTTP.encodePath(path);
+
+        return Granite.HTTP.externalize(encodedPath + suffix);
+    }
+
+    /**
+     * Determines if the given url contains a parameter string, and removes it
+     * if it does.
+     * @param {string} url URL from which the query string should be removed.
+     * @returns {string} The URL without its query string.
+     */
+    function _stripQueryString(url) {
+        if (url && url.indexOf) {
+            var queryStart = url.indexOf("?");
+            if (queryStart > 0) {
+                return url.substr(0, queryStart);
+            }
+        }
+        return url;
+    }
+
+    /**
+     * Determines if the given url contains a query string, and returns it
+     * if it does.
+     * @param {string} url URL from which the query string will be retrieved.
+     * @returns {string} The URL's query string, or an empty string if there was none.
+     */
+    function _getQueryString(url) {
+        if (url && url.indexOf) {
+            var queryStart = url.indexOf("?");
+            if (queryStart > 0 && queryStart < url.length - 1) {
+                return url.substr(queryStart + 1);
+            }
+        }
+        return "";
+    }
+
+    /**
+     * Parses the query string portion of a URL and returns its parameters as
+     * a simple object.
+     * @param {string} url URL whose query parameters should be retrieved.
+     * @returns {object} Object whose keys are parameter names and whose values
+     *  are the parameter's value.
+     */
+    function _getUrlParameters(url) {
+        var match,
+        pl     = /\+/g,  // Regex for replacing addition symbol with a space
+        search = /([^&=]+)=?([^&]*)/g,
+        query  = _getQueryString(url),
+        decode = function (s) { return decodeURIComponent(s.replace(pl, " ")); };
+
+        var urlParams = {};
+        while (match = search.exec(query)) {
+            urlParams[decode(match[1])] = decode(match[2]);
+        }
+        return urlParams;
+    }
+
+    /**
+     * Submits a request to the "assetdownload.zip" servlet as a form
+     * POST so that the user is prompted to download the zip file.
+     * @param {string} url Full URL that will be the target of the form submission.
+     * @param {object} parameters Name/value pairs that will be submitted with the form
+     * @param {string} method The method to use when submitting the form.
+     * @param {string} target Value to use for the form's "target" attribute. If empty
+     *  then no target will be added.
+     */
+    function _submitForm(url, parameters, method, target) {
+        var form = $("<form></form>");
+        form.attr("method", method);
+        form.attr("action", url);
+        if (target) {
+            form.attr("target", target);
+        }
+        $.each(parameters, function(key, value) {
+            if ($.isArray(value)) {
+                $.each(value, function(keyArray, valueArray) {
+                    var field = $("<input></input>");
+                    field.attr("type", "hidden");
+                    field.attr("name", key);
+                    field.attr("value", valueArray);
+                    form.append(field);
+                });
+            } else {
+                var field = $("<input></input>");
+                field.attr("type", "hidden");
+                field.attr("name", key);
+                field.attr("value", value);
+                form.append(field);
+            }
+        });
+        // The form needs to be a part of the document in
+        // order for us to be able to submit it.
+        $(document.body).append(form);
+        form.submit();
+    }
+
+    /**
+     * Retrieves the URI for a download given its progress data. Returns an empty
+     * string if no URI is found.
+     * @param {object} downloadProgressData Progress information for a download.
+     */
+    function _getArtifactUri(downloadProgressData) {
+        var artifacts = downloadProgressData.artifacts || [];
+        if (artifacts.length) {
+            return artifacts[0].uri;
+        }
+        return "";
+    }
+
+    /**
+     * Attempts to retrieve the artifact URI from the given progress data. If
+     * a URI is present then the method will create a hidden iframe initiate
+     * with which to initiate a download of the URI.
+     * If not present then the method will invoke the given success callback.
+     * If the download failed then the method will invoke the failure callback.
+     * @param {object} downloadProgressData Download progress information for
+     *  the current download.
+     * @param {function} successCallback Will be invoked if the progress
+     *  information does not contain an artifact uri.
+     * @param {function} failureCallback Will be invoked if the progress
+     *  information indicates that the download failed to generate.
+     */
+    function _initiateArtifactDownload(downloadProgressData, successCallback, failureCallback) {
+        if (downloadProgressData.status === "FAILED") {
+            if (downloadProgressData.totalCount === 0 || downloadProgressData.totalSize === 0) {
+                _noFilesDownload();
+            } else {
+                failureCallback();
+            }
+            return;
+        }
+        var uri = _getArtifactUri(downloadProgressData);
+
+        if (uri) {
+
+            if (!$("#downloadFrame").length) {
+
+                $("<iframe>", {
+                    id: "downloadFrame",
+                    style: "display: none;"
+                }).appendTo("body");
+            }
+            $("#downloadFrame").attr('src', uri);
+
+        } else {
+            successCallback();
+        }
+    }
+
+    function _noFilesDownload() {
+        var actFailureModal = new Coral.Dialog().set({
+            id: "downloadasset-failed",
+            variant: "error",
+            closable: "on",
+            header: {
+                innerHTML: Granite.I18n.get("Download")
+            },
+            content: {
+                innerHTML: Granite.I18n.get("The request contains no files")
+            },
+            footer: {
+                innerHTML: '<button is="coral-button" class="closeExport" variant="default" ' +
+                    "coral-close>" + Granite.I18n.get("Close") + "</button>"
+            }
+        });
+        actFailureModal.show();
+    }
+
+    /**
+     * Displays the application-level "wait" indicator, if specified
+     * to do so by the options.
+     */
+    function _showWaitOverlay(options) {
+        if (options.showWait) {
+            var ui = $(window).adaptTo("foundation-ui");
+            if (ui) {
+                if (!overlayMessage) {
+                    overlayMessage = $(
+                        '<div class="asset-download-overlay-message">' +
+                        Granite.I18n.get("Please wait while your download is generated. This may take several seconds.") +
+                        "</div>"
+                    );
+                    overlayMessage.appendTo("body");
+                }
+                overlayMessage.show();
+                ui.wait();
+            }
+        }
+    }
+
+    /**
+     * Hides the application-level "wait" indicator, if specified
+     * to do so by the options.
+     */
+    function _hideWaitOverlay(options) {
+        if (options.showWait) {
+            var ui = $(window).adaptTo("foundation-ui");
+            if (ui) {
+                if (overlayMessage) {
+                    overlayMessage.hide();
+                }
+                ui.clearWait();
+            }
+        }
+    }
+
+    /**
+     * Displays a "toast" UI element, which will fly in from the right of the screen, display
+     * for 5 seconds, then fly out the right side of the screen. Shows a message indicating
+     * that a user's requested download has started.
+     */
+    function _showDownloadAsyncToast() {
+        var inboxURL = Granite.HTTP.externalize("/aem/inbox");
+        var aTag = "<a class=\"coral-Link--overBackground\" href=\"" + inboxURL + "\">"
+        var aTagEnd = "</a>"
+        ui.notify(
+            Granite.I18n.get("Download"),
+            Granite.I18n.get("Your download is being generated and will appear in your {0}AEM Inbox{1} when ready.", [aTag, aTagEnd]),
+            "success"
+        );
+    }
+
+    /**
+     * Submits a request to the "downloadbinaries.json" servlet. Converts parameters intended
+     * for the "assetdownload.zip" servlet into the correct format for the target servlet.
+     * @param {object} options Controls how the method behaves.
+     * @param {string} options.path The sling path to which the request will be submitted.
+     * @param {string} options.fileName The file name to use for the target zip file.
+     * @param {object} options.parameters Name/value pairs that will be passed to the servlet. Expected
+     *  to be parameters for the "assetdownload.zip" servlet.
+     * @param {function} [options.failureCallback] Invoked if the operation fails.
+     * @param {function} [options.showWait] If provided, the method will display a screen-blocking
+     *  "wait" indicator while the request is processing.
+     */
+    function _postDownloadBinariesServlet(options) {
+        var path = options.path;
+        var parameters = options.parameters;
+        var fileName = options.fileName;
+        var failureCallback = options.failureCallback || function() {};
+
+        _showWaitOverlay(options);
+        $.ajax({
+            type: "POST",
+            contentType: "application/json; charset=utf-8",
+            data: JSON.stringify(_getDownloadServiceParameters(path, fileName, parameters)),
+            dataType: "json",
+            timeout: 60000,
+            url: _createUrl(path, ".downloadbinaries.json"),
+            success: function(data) {
+                _hideWaitOverlay(options);
+                if (!data.status) {
+                    _showDownloadAsyncToast();
+                } else {
+                    _initiateArtifactDownload(data, _showDownloadAsyncToast, failureCallback);
+                }
+            },
+            error: function(data, status) {
+                _hideWaitOverlay(options);
+
+                if (status == "timeout") {
+                    _showDownloadAsyncToast();
+                } else if (data && data.responseText && isJson(data.responseText) && JSON.parse(data.responseText).error
+                && JSON.parse(data.responseText).error.noEmailUsers) {
+                    var noEmailUsers = JSON.parse(data.responseText).error.noEmailUsers;
+                    failureCallback(false, noEmailUsers);
+                } else {
+                    failureCallback();
+                }
+            }
+        });
+    }
+
+    function isJson(str) {
+        try {
+            JSON.parse(str);
+        } catch (e) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Submits a request to the "assetdownload.zip" servlet.
+     * @param {object} options Options for controlling how the operation behaves.
+     * @param {string} options.path The sling path to which the request will be submitted.
+     * @param {string} options.fileName The file name to use for the target zip file.
+     * @param {object} options.parameters Name/value pairs that will be passed to the servlet. Expected
+     *  to be parameters for the "assetdownload.zip" servlet.
+     * @param {function} [options.asyncSuccessCallback] Invoked with the operation is asyncronous and was
+     *  initiated successfully.
+     * @param {function} [options.failureCallback] Invoked if the operation fails.
+     */
+    function _postAssetDownloadServlet(options) {
+        var path = options.path;
+        var parameters = options.parameters;
+        var fileName = options.fileName;
+        var asyncSuccessCallback = options.asyncSuccessCallback || function() {};
+        var failureCallback = options.failureCallback || function() {};
+
+        var selector = ".assetdownload.zip";
+        var email = parameters.email;
+
+        if (fileName) {
+            // When email option is selected, we do not need any encoding of filename as it is only
+            // used in email sent to the recipient with all the special characters, including spaces, truncated.
+            if (email) {
+                fileName = encodeURIComponent(fileName.replace(/ /g, "").replace(/\(|\)/g, ""));
+            } else {
+                fileName = encodeURIComponent(fileName).replace(/%2F/g, "/");
+            }
+
+            selector += "/" + fileName;
+        }
+
+        var url = _createUrl(path, selector);
+        if (email) {
+            $.ajax({
+                type: "POST",
+                url: url,
+                data: parameters,
+                success: function() {
+                    asyncSuccessCallback();
+                },
+                error: function(data) {
+                    if (data && data.responseText) {
+                        var noEmailUsers = JSON.parse(data.responseText).noEmailUsers;
+                        failureCallback(false, noEmailUsers);
+                    } else {
+                        failureCallback();
+                    }
+                }
+            });
+        } else {
+            _submitForm(url, parameters, "post", "_blank");
+        }
+    }
+
+    window.Dam = window.Dam || {};
+    Dam.Util = Dam.Util || {};
+    Dam.Util.Download = Dam.Util.Download || {};
+
+    /**
+     * Posts information to the appropriate download servlet in order to initiate the process
+     * of downloading one or more assets.
+     * @param {object} options Values controlling how the method will behave.
+     * @param {string} options.path The sling path to which the request will be submitted.
+     * @param {object} options.parameters Name/value pairs that will be passed to a servlet.
+     *  Expected to be parameters for the "assetdownload.zip" servlet.
+     * @param {string} [options.fileName] If specified, the file name that the download
+     *  artifact should be created as.
+     * @param {function} [options.asyncSuccessCallback] If provided, will be invoked if
+     *  the operation is successful, AND the download artifact was generated asyncronously as
+     *  part of the submission.
+     * @param {function} [options.failureCallback] If provided, will be invoked if the operation
+     *  failed.
+     * @param {function} [options.showWait] If provided, the method will display a screen-blocking
+     *  "wait" indicator while the request is processing.
+     */
+    Dam.Util.Download.createAssetDownload = function(options) {
+        if (options) {
+            var path = options.path;
+            var parameters = options.parameters;
+            var failureCallback = options.failureCallback || function() {};
+
+            if (!path || !parameters) {
+                failureCallback();
+            }
+
+            _postDownloadBinariesServlet(options);
+        }
+    }
+})(Granite.$);

@@ -1,0 +1,900 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproducxtion of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(window, document, Granite, $) {
+    "use strict";
+
+    var DATA_STATE_KEY = "sv-states",
+        DATA_STATE_IDX_KEY = "sv-current-index",
+        DATA_PENDING_STATE = "sv-pending-state",
+        DATA_SV_METADATA_KEY = "shoppablevideo",
+        DATA_PRESET_METADATA_KEY = "shoppablevideo_viewerpreset",
+        DEFAULT_VTT_EXTENSION = ".svideo.vtt",
+        DATA_RESERVEDVAL_PRODUCTTHUMBNAIL 	= "reservedVal_productThumbnail",
+        DATA_RESERVEDVAL_PRODUCTPATH 		= "reservedVal_productPath";
+
+    //DOM
+    var ASSET_INFO_ID = '#asset-info';
+    var BTN_UNDO = "#btn-undo";
+    var BTN_REDO = "#btn-redo";
+
+    //events
+    var EVENT_DATA_READY = 'sv-data-ready',
+        SV_EVENT_SEGMENT_DATA_CHANGED = 'sv-data-change',
+        EVENT_MODIFY_DATA = "sv-modify-segment",
+        EVENT_DELETE_DATA = "sv-delete-segment",
+        EVENT_MODIFY_SWATCH = "sv-modify-swatch",
+        EVENT_VALIDATE_SWATCH = "sv-validate-swatches",
+        EVENT_UNDO_STAGE = "sv-undo",
+        EVENT_REDO_STAGE = "sv-redo",
+        EVENT_SUBMIT_DATA = "sv-submit-data",
+        EVENT_REMOVE_DATA = "sv-delete-data",
+        EVENT_SAVE_SUCCESS = "sv-save-success",
+        EVENT_SAVE_FAIL = "sv-save-fail",
+        EVENT_HISTORY_POSITION_CHANGE = "sv-history-position-change";
+
+
+    var assetPath = "";
+    var areAllMembersProducts = $('#asset-info').data('swatchMembersAreProducts');
+
+    $(document).one("foundation-contentloaded", function(e) {
+        assetPath =  $(ASSET_INFO_ID).data('path');
+        initDataState();
+        $.sv = $.sv || svUtils;
+        /*
+         sv-modify-segment
+         sample:
+         $(document).trigger({type:"sv-modify-segment","id":2,
+         "segment":{ "t0":1600,
+         "t1":2200,
+         "products":[{ "asset" : "/content/dam/mc/aodpremium/Penguins.jpg", "href" : "http://google.com", "target" : "_blank", "vars" : [{"evar1":"test2"}]}]
+         }
+         });
+         */
+        $(document).on(EVENT_MODIFY_DATA, modifyData);
+        /*
+         sv-delete-segment
+         $(document).trigger({type:"sv-delete-segment","id":1});
+         */
+        $(document).on(EVENT_DELETE_DATA, deleteSegmentData);
+        /*
+         sv-undo
+         $(document).trigger("sv-undo");
+         */
+        $(document).on(EVENT_UNDO_STAGE, back);
+        /*
+         sv-redo
+         $(document).trigger("sv-redo");
+         */
+        $(document).on(EVENT_REDO_STAGE, forward);
+        /*
+         sv-submit-data
+         $(document).trigger("sv-submit-data");
+         */
+        $(document).on(EVENT_SUBMIT_DATA, submit);
+
+        /*
+         sv-delete-data
+         $(document).trigger("sv-delete-data");
+         */
+        $(document).on(EVENT_REMOVE_DATA, deleteData);
+
+        /**
+         * sv-validate-swatches
+         * $(document).trigger("sv-product-row-deleted");
+         */
+        $(document).on(EVENT_VALIDATE_SWATCH, validateMixedQuickviewSwatches);
+
+        /*
+         sv-modify-swatch
+         $(document).trigger("sv-modify-swatch");
+         */
+        $(document).on(EVENT_MODIFY_SWATCH, validateMixedQuickviewSwatches);
+
+        /**
+         * Warn user when attempting to leave authoring page after changes made
+         */
+        window.onbeforeunload = function() {
+            //check to see if initiated by user
+            if($.sv.hasPendingData() && !$.sv.userInitiatedAction) {
+                return Granite.I18n.get("Your changes have not been saved.");
+            }
+            $.sv.userInitiatedAction = false;
+        };
+
+    });
+    //Data Utility function
+    var svUtils = {
+        /**
+         * @param id ID of the segment for the current page load
+         * @return JSON representing the segment
+         */
+        getSegmentByID: function(id){
+            var currentState = $.parseJSON(JSON.stringify(peek()));
+            if (currentState.length >= id-1) {
+                return currentState[id];
+            }
+            return {};
+        },
+        /**
+         * @return array of all segment JSON in the current page state
+         */
+        getCurrentState: function(){
+            return $.parseJSON(JSON.stringify(peek()));
+        },
+        /**
+         * @return segment count for current page state
+         */
+        getSegmentCount: function(){
+            var currentState = peek();
+            if (currentState != null) {
+                return currentState.length;
+            }
+            return 0;
+        },
+        /**
+         * @param sid segment ID
+         * @param purl product URL - asset jcr path
+         * @return product JSON
+         */
+        getProductByID: function(sid, purl){
+            var segment = this.getSegmentByID(sid);
+            if (segment) {
+                if (segment.products) {
+                    var products = segment.products;
+                    for (var i = 0; i < products.length; i++) {
+                        if (products[i].asset === purl) {
+                            return products[i];
+                        }
+                    }
+                }
+            }
+            return {};
+
+        },
+        /**
+         * Build a single segment
+         * @param t0 start TS in ms
+         * @param t1 stop TS in ms
+         * @param products array of products
+         * @return JSON for a segment
+         */
+        buildSegment : function(t0, t1, products) {
+            return { "t0" : t0,
+                "t1" : t1,
+                "products" : products };
+        },
+        /**
+         * Build a product
+         * @param asset path to JCR
+         * @param href link or quickview:<product ID>
+         * @param target empty or _blank or _self
+         * @param vars array of custom variable
+         * @param label for the swatch
+         * @return JSON for product
+         */
+        buildProduct : function(asset, href, target, vars, label) {
+            return { "asset" : asset,
+                "label" : label,
+                "href" : href,
+                "target" : target,
+                "vars" : vars };
+        },
+
+        /**
+         * Build a basic product definition. This is used when first adding
+         * a product to the timeline. Also for comparitive checks to determine
+         * dirty state.
+         * @param asset path to JCR
+         * @param title jcr title
+         */
+        buildBasicProduct : function(asset, title) {
+            return $.sv.buildProduct(asset, "", "_blank", [], title);
+        },
+
+        /**
+         * Build a custom variable item
+         * @param key key of custom variable
+         * @param val value of custom variable
+         * @return JSON for custom variable
+         */
+        buildVar : function(key, val) {
+            return { "id" : key,
+                "val" : val };
+        },
+        /**
+         * @return JSON of swatch data
+         */
+        buildSwatchData : function() {
+            var currentState = $.parseJSON(JSON.stringify(this.getCurrentState()));
+            var submitData = sanitizeState(currentState);
+            for (var i = 0; i < submitData.length; i++) {
+                var swatches = [];
+                for (var j = 0; j < submitData[i].products.length; j++) {
+                    swatches.push(buildVTTSwatch(submitData[i].products[j]));
+                }
+                submitData[i]['swatches'] = { "swatches" : { "item" : swatches } };
+            }
+
+            return submitData;
+        },
+        /**
+         * @return string representing JSON of submit data
+         */
+        buildSwatchDataStr: function() {
+            return JSON.stringify(this.buildSwatchData());
+        },
+        /**
+         * splitSegment is the entry point API for splitting a
+         * segment.
+         * @param id
+         */
+        splitSegment: function(id){
+            var seg = $.sv.getSegmentByID(id);
+            if (seg) {
+                $.sv.resolveSegmentSplit(seg, id);
+            }
+        },
+        /**
+         * resolveSegmentSplit does the underlying segmentation split
+         * and resolves the times across segA == segB/segC and any rounding
+         * of time that needs to happen
+         * @param segment
+         * @param id
+         */
+        resolveSegmentSplit: function(seg, id){
+            //split the segment here
+            var totalTime = (seg.t1 - seg.t0);
+            var s1Time = (totalTime * .5) + seg.t0;
+            var newEnd = seg.t1;
+            var newId = (id + 1);
+            //increase remaining segments id's
+            $.sv.adjustSegmentIds(newId, 1);
+            var newseg = $.sv.buildSegment(s1Time, newEnd, []);
+
+            $(document).trigger({ type:EVENT_MODIFY_DATA, "id":newId, "segment":newseg });
+
+            seg.t1 = s1Time;
+            $(document).trigger({ type:EVENT_MODIFY_DATA, "id":id, "segment":seg, "override": true });
+            //we need to increment the id from the starting point
+        },
+        /**
+         * adjustSegmentIds is used to increase the segment ids starting
+         * at the index specified in startId
+         * @param startId - which index to start incrementing/decrementing from
+         * @param amount - increase/decrease each index by value of amount
+         */
+        adjustSegmentIds: function(startId, amount){
+            var segs = $.sv.getCurrentState();
+            for (var i = startId; i <= segs.length; i++){
+                if (segs[i]){
+                    $(document).trigger({ type:EVENT_MODIFY_DATA, "id":(i + amount), "segment":segs[i], "override": true });
+                }
+            }
+        },
+        removeSegmentIds: function(startId, endId){
+            for (var i = startId; i <= endId; i++){
+                if ($.sv.getCurrentState()[i]){
+                    $(document).trigger({ type:EVENT_DELETE_DATA,"id":i, "override": true });
+                }
+            }
+        },
+        getSegmentProducts: function(startId, endId){
+            var products = {};
+            var segs = $.sv.getCurrentState();
+            for (var i = startId; i <= endId; i++){
+                if (segs[i]){
+                    var pds = segs[i].products;
+                    if (pds.length > -1){
+                        products[i] = pds;
+                    }
+                }
+            }
+            return products;
+        },
+        /**
+         * mergeSegments is used to combine 1+n number of sequential segments together into one complete
+         * new segment that begins with the first selected segment in sequence and ending with the end time
+         * of the last segment in sequence
+         * @param id
+         */
+        mergeSegments: function(firstSegmentId, lastSegmentId){
+
+            var segment = $.sv.getSegmentByID(firstSegmentId);
+            var segment2 = $.sv.getSegmentByID(lastSegmentId);
+            var newseg = $.sv.buildSegment(segment.t0, segment2.t1, []);
+            //just make the first segment in the merge end on the last segment in the merge end
+            //get all the products from first segment's next until the last segment to merge
+            var products = $.sv.getSegmentProducts(firstSegmentId, lastSegmentId);
+            segment.t1 = segment2.t1;
+            //get all the products
+            for (var i in products){
+                for (var y in products[i]){
+                    newseg.products.push(products[i][y]);
+                }
+            }
+            newseg.products = unique(newseg.products);
+            //for now, i'm sorting to unique products
+            //since, well, no reason to have duplicates at this point, the viewer would be odd as well
+            //showing duplicate product entries in the interactive swatches
+            function unique(arr) {
+                var a = [];
+                var l = arr.length;
+                for(var i=0; i<l; i++) {
+                    for(var j=i+1; j<l; j++) {
+                        // If a[i] is found later in the array
+                        if (arr[i].asset === arr[j].asset)
+                            j = ++i;
+                    }
+                    a.push(arr[i]);
+                }
+                return a;
+            };
+
+            $(document).trigger({ type:EVENT_MODIFY_DATA, "id":firstSegmentId, "segment":newseg });
+            $.sv.removeSegmentIds(firstSegmentId + 1, lastSegmentId);
+        },
+        /**
+         * Used when toggling asset from content panel into segment / on/off
+         * @param segmentId
+         * @param productId
+         */
+        deleteProductFromSegment: function(segmentId, productId){
+            var seg = $.sv.getSegmentByID(segmentId);
+            if (seg){
+                var prods = seg.products;
+                if (prods){
+                    var newseg = $.sv.buildSegment(seg.t0, seg.t1, []);
+                    for (var i = 0; i < prods.length; i ++){
+                        if (prods[i].asset === productId){
+                            prods.splice(i, 1);
+                        }
+                    }
+                    newseg.products = prods;
+                    $(document).trigger({ type:EVENT_MODIFY_DATA, "id":segmentId, "segment":newseg });
+                }
+            }
+        },
+        /**
+         * Construct WebVtt representation of interactive data for previewing with InteractiveVideoViewer.
+         * @param title Title of video
+         * @param duration Length of video in milliseconds
+         * @param isRemote is used when previewing remote assets - need to change from path to IPS id
+         * @return {s7viewers.s7sdk.common.WebVtt} WebVtt object of InteractiveData
+         */
+        buildInteractiveDataCues: function(title, duration, isRemote, company) {
+            var items = [];
+            var data = this.buildSwatchData();
+            // add global properties for title
+            var globalProps = { properties: { title: title } };
+            items.push(new s7viewers.s7sdk.common.WebVttItem(0, duration, globalProps, null, null));
+
+            // add segments info
+            if (data && data.length > 0) {
+                if (isRemote) this.updatePreviewPaths(data, company);
+                for (var i = 0; i < data.length; i++) {
+                    items.push(new s7viewers.s7sdk.common.WebVttItem(data[i].t0, data[i].t1, data[i].swatches, null, null));
+                }
+            }
+
+            return new s7viewers.s7sdk.common.WebVtt(s7viewers.s7sdk.common.WebVtt.TYPE_METADATA, items);
+        },
+        updatePreviewPaths: function(data, company){
+
+            if (data && data.length > 0) {
+                for (var i = 0; i < data.length; i++) {
+                    if (data[i].swatches.swatches.item){
+                        this.updateSwatchesPaths(data[i].swatches.swatches.item, company);
+                    }
+                }
+            }
+
+        },
+        updateSwatchesPaths:function(data, company){
+            if (data && data.length > 0){
+                for (var i = 0; i < data.length; i++){
+                    if (data[i].s.n){
+                        var str = data[i].s.n;
+                        var s = str.substr(str.lastIndexOf("/") +1, str.length);
+                        s = s.substr(0, s.indexOf("."));
+                        data[i].s.n = company + "/" + s;
+                    }
+                }
+            }
+        },
+        buildAuthorStr: function(){
+            var currentState = $.parseJSON(JSON.stringify(this.getCurrentState()));
+            var submitData = sanitizeState(currentState);
+            return JSON.stringify(submitData);
+        },
+        listAssets: function(){
+            var currentState = this.getCurrentState();
+            return buildAssetList(sanitizeState(currentState));
+        },
+        listAssetsStr: function(){
+            return JSON.stringify(this.listAssets());
+        },
+        viewerPresetUri: function() {
+            var preset = $(document).data(DATA_PRESET_METADATA_KEY);
+            return preset ? preset : "";
+        },
+        hasPendingData: function() {
+            return $(document).data(DATA_PENDING_STATE);
+        },
+
+        /**
+         * Get localized text for viewer from s7sdk_i18n.localizedText
+         * @return JSON for localized text
+         */
+        getLocalizedText: function() {
+            var localizedText = {};
+            localizedText[Granite.I18n.getLocale()] = formatLocalizedText(s7sdk_i18n.localizedText);
+            localizedText['defaultLocale'] = Granite.I18n.getLocale();
+            return localizedText;
+        }
+
+    }
+    //this is a hack for the window unload
+    svUtils.userInitiatedAction = false;
+
+
+
+    /**
+     * Initial data load
+     */
+    function initDataState() {
+        var url = assetPath + '/jcr:content/metadata.json?ts=' + new Date().getTime();
+
+        $.getJSON(Granite.HTTP.externalize(url), function(res){
+            // CQ-76931: [AEM][Interactive Video] Copied edited Video Asset handled inconsistently
+            // video should not be considered as a Shoppable Video asset if the expected related VTT path is not present
+            var hadVTTNode = false;
+
+            if (res[DATA_SV_METADATA_KEY]) {
+                // shoppable video data exist, validate if expected related VTT also exist
+                var vttUrl = assetPath + '/jcr:content/related/vtt/sling:members.children.3.json?ts=' + new Date().getTime();
+
+                $.getJSON(Granite.HTTP.externalize(vttUrl), function(vttRes) {
+                    //Calculate VTT path for interactive data
+                    var assetFileName = assetPath.substring(assetPath.lastIndexOf("/"));
+                    var vttNodePath = assetPath + "/jcr:content/related/vtt/sling:members" + assetFileName + DEFAULT_VTT_EXTENSION;
+
+                    // validate VTT URI to consider the video is a valid shoppable video asset
+                    for (var idx = 0; idx < vttRes.length; idx++) {
+                        if (vttRes[idx].uri && vttRes[idx].uri == vttNodePath) {
+                            hadVTTNode = true;
+                            break;
+                        }
+                    }
+
+                    var svData = null;
+                    var preset = null;
+
+                    // parse SV data only if expected VTT node also exists
+                    if (hadVTTNode) {
+                        svData = res[DATA_SV_METADATA_KEY];
+                        preset = res[DATA_PRESET_METADATA_KEY];
+                    } else {
+                        // clean up invalid data
+                        deleteData(null);
+                    }
+
+                    buildView(svData, preset);
+                }).fail(function(vttRes) {
+                    // fail-safe handling - build from scratch
+                    buildView(null, null);
+                });
+            } else {
+                // shoppable video data does not exist
+                buildView(null, null);
+            }
+        });
+    }
+
+    /**
+     * Helper function that complete initialization
+     * @param svData Shoppable video data
+     * @param preset Shoppable video preset
+     */
+    function buildView(svData, preset) {
+        svData = svData ? $.parseJSON(svData) : [];
+
+        //initial index
+        $(document).data(DATA_STATE_IDX_KEY, -1);
+        push(svData, true);
+        $(document).data(DATA_PENDING_STATE, false);
+
+        preset = preset ? preset : "";
+
+        $(document).trigger({"type" : EVENT_DATA_READY, "segments" : svData, "viewerpreset" : preset});
+    }
+
+    //Action for event
+
+    function modifyData(e){
+		e.stopPropagation();
+		mergeData(e.id, e.segment, e.override);
+	}
+    //implement merge multiple data - merge all the state objects of the same id
+
+    function deleteSegmentData(e){
+        e.stopPropagation();
+        mergeData(e.id, null, e.override);
+
+        // trigger swatch validation as swatches might have been removed along with the segment
+        $(document).trigger(EVENT_VALIDATE_SWATCH);
+    }
+
+    //State management
+    /**
+     *
+     * @param state
+     * @param blockEvent
+     */
+    function push(state, blockEvent) {
+        var states = $(document).data(DATA_STATE_KEY) || [];
+        states = $.parseJSON(JSON.stringify(states));
+        var currentIdx =  $(document).data(DATA_STATE_IDX_KEY);
+        if (states.length > currentIdx + 1) {
+            var newStates = [];
+            for (var i = 0; i < currentIdx + 1; i++) {
+                newStates.push(states[i]);
+            }
+            states = newStates;
+        }
+        states.push(state);
+        currentIdx++ ;
+        $(document).data(DATA_STATE_KEY, states);
+        $(document).data(DATA_STATE_IDX_KEY, currentIdx);
+        //data change
+        $(document).data(DATA_PENDING_STATE, true);
+        //added block event to prevent event from being thrown at screen initializing
+        //CQ-88275 - we needed a way to block the event during initialization
+        if (!blockEvent) {
+            $(document).trigger({"type" : SV_EVENT_SEGMENT_DATA_CHANGED, "segments" : state});
+        }
+        updateStateTraversalButtons();
+
+    }
+
+    function back(){
+        var states = $(document).data(DATA_STATE_KEY);
+        states = $.parseJSON(JSON.stringify(states));
+        var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+        if (currentIdx > 0) {
+            currentIdx-- ;
+        }
+        else {
+            //for undo at 0 - then no pending data
+            $(document).data(DATA_PENDING_STATE, false);
+        }
+        $(document).data(DATA_STATE_IDX_KEY, currentIdx);
+        var currentState = peek();
+        //data for whole page is changed
+        $(document).trigger({"type" : EVENT_HISTORY_POSITION_CHANGE, "segments" : currentState});
+        updateStateTraversalButtons();
+    }
+
+    function forward(){
+        var states = $(document).data(DATA_STATE_KEY);
+        states = $.parseJSON(JSON.stringify(states));
+        var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+        if (currentIdx + 1 < states.length) {
+            currentIdx++ ;
+        }
+        $(document).data(DATA_STATE_IDX_KEY, currentIdx);
+        var currentState = peek();
+        //data for whole page is changed
+        $(document).trigger({"type" : EVENT_HISTORY_POSITION_CHANGE, "segments" : currentState});
+        updateStateTraversalButtons();
+    }
+
+    function updateStateTraversalButtons() {
+        var states = $(document).data(DATA_STATE_KEY);
+        states = $.parseJSON(JSON.stringify(states));
+        var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+
+        toggleStateTraversalButton(BTN_UNDO, (currentIdx === 0));
+        toggleStateTraversalButton(BTN_REDO, ((currentIdx + 1) === states.length));
+    }
+
+    function toggleStateTraversalButton(button, disabled) {
+        $(button).prop('disabled', disabled);
+    }
+
+    function peek(){
+        var states = $(document).data(DATA_STATE_KEY);
+        var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+        var peekData = [];
+        if (states.length > 0) {
+            peekData = states[ currentIdx ];
+        }
+        return peekData;
+
+    }
+    /**
+     * Merge current data with the segment based on ID
+     * @param id ID of segment to be merged
+     * @param segment JSON of segment to be merged
+     * @param override boolean is used to merge the state data without creating a new state
+     */
+    function mergeData(id, segment, override){
+
+        var state = $.parseJSON(JSON.stringify(peek())); // need to do this to clone array
+        //we just keep changing the existing segment
+        if (override && segment != null){
+            var newState = $.extend(state[id], segment, false);
+            var nData = peek();
+            nData[id] = newState;
+            return;
+        }
+        //new segment history at end of state
+        if (state.length <= id) {
+            state.push(segment); //add new segment
+        }
+        else if (segment == null) {
+            //if we are deleting a segment object and we don't want to update
+            //the state / keep the state history the same as the current segment state
+            if (override){
+                var nData = peek();
+                nData[id] = null;
+                return;
+            }
+            state[id] = null; //delete segment
+        }
+        else {
+            if (state[id] == null) {
+                state[id]  = segment;
+            }
+            else {
+                $.extend(state[id], segment, false); //merge segment
+            }
+        }
+        push(state);
+    }
+
+    /**
+     * Submit data
+     */
+    function submit(event){
+
+
+        // stop saving if there is any mixed swatches
+        if (!validateMixedQuickviewSwatches(event) ){
+            return;
+        }
+        //if we have only 1 segment and that segment is null, delete the vtt file
+        if ($.sv.getCurrentState().length == 1){
+            if (!$.sv.getCurrentState()[0]){
+                deleteData();
+                return;
+            }
+        }
+
+        //return if no segments
+        if ($.sv.getCurrentState().length <= 0){
+            return;
+        }
+
+        var postURL = Granite.HTTP.externalize(assetPath + '.shoppablevideo.json');
+        var postParams = { "operation" : "modify" };
+        postParams["segments"] = encodeURI($.sv.buildSwatchDataStr());
+        postParams["author"] = encodeURI($.sv.buildAuthorStr());
+        postParams["assets"] = encodeURI($.sv.listAssetsStr());
+        postParams["viewerpreset"] = $.sv.viewerPresetUri();
+        postParams["areAllMembersProducts"] = areAllMembersProducts;
+        $.post(postURL, postParams).done(function(res){
+                $(document).trigger(EVENT_SAVE_SUCCESS);
+                $(document).data(DATA_PENDING_STATE, false);
+            })
+            .fail(function(res){
+                $(document).trigger(EVENT_SAVE_FAIL);
+            });
+    }
+
+
+    /**
+     * Remove all shopppable video related data.
+     * @param evt Event that triggers delete data.  evt is null for internal usage to clean up invalid shoppable video
+     * data that may have been copied from a source video, success or failure to delete data will not trigger handler
+     * that may navigate away from the page or display an error message.
+     */
+    function deleteData(evt){
+        var postURL = Granite.HTTP.externalize(assetPath + '.shoppablevideo.json');
+        var postParams = { "operation" : "delete" };
+        $.post(postURL, postParams).done(function(res) {
+            if (evt) {
+                $(document).trigger(EVENT_SAVE_SUCCESS);
+            }
+            $(document).data(DATA_PENDING_STATE, false);
+        })
+        .fail(function(res){
+            if (evt) {
+                $(document).trigger(EVENT_SAVE_FAIL);
+            }
+        });
+    }
+
+    //For VTT construction
+    /**
+     * @param product product item of authoring data
+     * @return JSON of swatch item for VTT
+     */
+    function buildVTTSwatch(product) {
+        var sItem = { "n" : product.asset,
+            "l" : product.label,
+            "href" : buildVTTHref(product.href, product.vars),
+            "target" : product.target };
+        return { "s" : sItem } ;
+
+    }
+    /**
+     * @param href HREF for quickview or link
+     * @param vars array of additional variables
+     * @return string for full href for VTT
+     */
+    function buildVTTHref(href, vars) {
+
+        var vttHref = '';
+        var quickviewEnabled = href.split('quickview:').length>1;
+
+        for (var i = 0; i < vars.length; i++) {
+
+            if(quickviewEnabled) {
+                vttHref += '&' + vars[i].id + '=' + vars[i].val;
+            }
+            else {
+                vttHref += (vttHref == '' ? '?' : '&') + vars[i].id + '=' + vars[i].val;
+            }
+        }
+        vttHref = href + vttHref;
+
+        return vttHref;
+    }
+
+    function buildAssetList(state) {
+        var assets = [];
+        for (var i = 0; i < state.length; i++) {
+            var swatches = [];
+            for (var j = 0; j < state[i].products.length; j++) {
+                assets.push(state[i].products[j].asset);
+            }
+        }
+        return assets;
+    }
+
+    function sanitizeState(state) {
+        var currentState = $.parseJSON(JSON.stringify(state));
+        var sanitizedData = [];
+        for (var i = 0; i < currentState.length; i++) {
+            if (currentState[i] != null) {
+                sanitizedData.push(currentState[i]);
+            }
+        }
+        return sanitizedData;
+    }
+
+    /**
+     * Format localized text into a correct viewer format
+     * @param localizedText localized text parsed from s7sdk
+     * @return formatted localized text with correct key for viewer
+     */
+    function formatLocalizedText(localizedText) {
+        var formatTexts = {};
+        for (var compKey in localizedText) {
+            var compObj = localizedText[compKey];
+            for (var symbolKey in compObj) {
+                var modKey = compKey + '.' + symbolKey;
+                var symbolVal = compObj[symbolKey];
+                formatTexts[modKey] = symbolVal;
+            }
+        }
+        return formatTexts;
+    }
+
+    function validateMixedQuickviewSwatches(event) {
+        var QV_MODE_SET_BY_MANUAL				= 0;
+        var QV_MODE_FROM_PRODUCT 				= 1;
+        var QV_MODE_MIXED		 				= -1;
+
+        var rawData				 				= peek();
+        var qvMode				 				= '';
+
+        for (var i = 0; i < rawData.length; i++) {
+            // products in time sections
+            if (!rawData[i]) continue;
+            var products = rawData[i].products;
+
+            for (var j = 0; j < products.length; j++) {
+                var href = products[j].hasOwnProperty("href") ? products[j].href : "";
+                var quickviewSKU = href.split("=")[1];
+
+                if (quickviewSKU !== "" && quickviewSKU !== undefined) {
+                    var vars = products[j].hasOwnProperty("vars") ? products[j].vars : "";
+
+                    if (vars.length === 0 && qvMode === QV_MODE_FROM_PRODUCT ){
+                        // if "vars" is not set, by defaul
+                        qvMode = QV_MODE_MIXED;
+                    } else {
+                        $.map(vars, function(n) {
+                            if (! n.hasOwnProperty("id")) {
+                                return;
+                            }
+
+                            if (n.id == DATA_RESERVEDVAL_PRODUCTPATH ){
+                                if (n.val !== "" && n.val !== undefined) {
+                                    // commerce quickview should work as long as there is product path
+                                    if (qvMode === '' || qvMode === QV_MODE_FROM_PRODUCT) {
+                                        qvMode = QV_MODE_FROM_PRODUCT;
+                                    } else {
+                                        qvMode = QV_MODE_MIXED;
+                                        return;
+                                    }
+                                } else {
+                                    // swatch is manually set
+                                    if (qvMode === '' || qvMode === QV_MODE_SET_BY_MANUAL) {
+                                        qvMode = QV_MODE_SET_BY_MANUAL;
+                                    } else {
+                                        qvMode = QV_MODE_MIXED;
+                                        return;
+                                    }
+                                }
+                            }
+                        })
+                    }
+
+                    if (qvMode === QV_MODE_MIXED) {
+                        var ui = $(window).adaptTo("foundation-ui");
+                        if (event.type === EVENT_MODIFY_SWATCH) {
+                            // load the warning modal
+                            if (ui != undefined) {
+                                var msg = "You have associated thumbnail images with SKUs using two methods: some SKU values are associated with AEM products and others are not. You must only use one of the two methods to add all SKUs.";
+                                ui.alert(Granite.I18n.get("Mixed Swatches Warning"), Granite.I18n.get(msg), "notice");
+                            }
+                        } else if (event.type !== EVENT_VALIDATE_SWATCH) { // suppress warning when validating after deleting segment or swatch
+                            if (ui != undefined) {
+                                var msg = "You have associated thumbnail images with SKUs using two methods: some SKU values are associated with AEM products and others are not. Before you save, you must only use one of the two methods to add all SKUs.";
+                                ui.alert(Granite.I18n.get("Mixed Swatches Error"), Granite.I18n.get(msg), "error");
+                            }
+                        }
+                        // disable save button for mixed swatches
+                        if (event.type === EVENT_MODIFY_SWATCH) {
+                            $('#btn-save').attr("disabled", true);
+                        }
+
+                        areAllMembersProducts = (qvMode === QV_MODE_FROM_PRODUCT);
+                        $('#asset-info').data('swatchMembersAreProducts', areAllMembersProducts); // update the data for runtime preview
+
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // re-enable save button if no mixed swatches
+        if (event.type === EVENT_MODIFY_SWATCH || event.type === EVENT_VALIDATE_SWATCH) {
+            if ($('#btn-save').attr("disabled")) {
+                $('#btn-save').attr("disabled", false);
+            }
+        }
+
+        areAllMembersProducts = (qvMode === QV_MODE_FROM_PRODUCT);
+        $('#asset-info').data('swatchMembersAreProducts', areAllMembersProducts); // update the data for runtime preview
+
+        return true;
+    }
+
+}(window, document, Granite, Granite.$));

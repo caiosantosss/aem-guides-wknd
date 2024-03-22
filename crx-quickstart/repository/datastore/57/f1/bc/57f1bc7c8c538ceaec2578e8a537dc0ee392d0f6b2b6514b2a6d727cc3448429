@@ -1,0 +1,366 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2017 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(window, document, Granite, $) {
+    "use strict";
+
+    var ns = ".cq-damadmin-admin-createreport-reportcard";
+    Granite.UI = Granite.UI || {};
+    var propertyMap = {
+        assetadditionreport: "jcr:created",
+        assetdownloadreport: "jcr:created",
+        assetexpiryreport: "jcr:content/metadata/prism:expirationDate",
+        assetmodificationreport: "jcr:content/jcr:lastModified",
+        assetpublishreport: "jcr:content/cq:lastReplicated",
+        assetbrandportalpublishreport: "jcr:content/dam:portalReplicationDate"
+    };
+
+    function createDialog() {
+        var newDialog = new Coral.Dialog().set({
+            id: "successDialog",
+            header: {
+                innerHTML: Granite.I18n.get("Success")
+            },
+            content: {
+                innerHTML: "<p>" +
+                Granite.I18n
+                    .get("Report Generation has been initiated. You will be notified on successful completion.") +
+                    "</p>"
+            },
+            variant: "success"
+        });
+        var footer = newDialog.footer;
+        var closeButton = new Coral.Button().set({
+            variant: "primary",
+            label: {
+                innerHTML: Granite.I18n.get("Ok")
+            }
+        });
+
+        footer.appendChild(closeButton);
+
+        closeButton.on("click", function() {
+            window.location = Granite.HTTP.externalize("/mnt/overlay/dam/gui/content/reports/reportlist.html");
+        });
+
+        return newDialog;
+    }
+
+    function showDateWarningDialog(warningMsg) {
+        var warningDialog = new Coral.Dialog().set({
+            id: "warningDialog",
+            header: {
+                innerHTML: Granite.I18n.get("Date Field Error")
+            },
+            content: {
+                innerHTML: "<p>" + warningMsg + "</p>"
+            },
+            footer: {
+                innerHTML: '<button is="coral-button" variant="primary" coral-close>Ok</button>'
+            },
+            variant: "error"
+        });
+        document.body.appendChild(warningDialog);
+        warningDialog.show();
+    }
+
+
+    var successDialog;
+
+    var ExportReportWizard = function(wizardElement) {
+        var self = this;
+
+        this.formElement = $("#cq-damadmin-createreport-form");
+        this.wizardElement = wizardElement;
+        this.wizard = this.wizardElement.adaptTo("foundation-wizard");
+        this.submitButton = this.wizardElement
+            .find("button[data-foundation-wizard-control-action='next'][type='submit']");
+        this.cancelButton = this.wizardElement
+            .find("a[coral-wizardview-previous][data-foundation-wizard-control-action='cancel']");
+
+        this.ui = $(window).adaptTo("foundation-ui");
+
+        this.submitButton.off("click").on("click", function(e) {
+            e.preventDefault();
+            self.submitWizard();
+        }.bind(this));
+
+        // validate schedule report time not empty if user choses to schedult it later.
+        this.wizardElement.on("change", ".schedule-report-options-radiogroup", function() {
+            var eleScheduleLater = $("coral-radio[name='reportSchedule'][value='later']", $(this))[0];
+            var $eleScheduleDatePicker = $("coral-datepicker.schedule-report-datepicker");
+            if (eleScheduleLater.checked) {
+                $eleScheduleDatePicker.attr("disabled", false);
+            } else {
+                $eleScheduleDatePicker.attr("disabled", true);
+            }
+            // trigger validation for date-picker
+            var api = $eleScheduleDatePicker.adaptTo("foundation-validation");
+            if (api) {
+                api.checkValidity();
+                api.updateUI();
+            }
+        });
+
+        this.wizardElement.on("foundation-wizard-stepchange" + ns, function(e, el) {
+            var step = $(el);
+
+            var self = this;
+            setTimeout(function() {
+                if (step.is(".cq-damadmin-admin-reports-configure-columns")) {
+                    // Thumbnail in Configure Columns
+                    // Step should be identical to
+                    // thumbnail in report details page
+                    var uploadedImg = $(".cq-damadmin-admin-reports-details .cq-dam-assetthumbnail" +
+                    " coral-card coral-card-asset img")[0];
+                    if (uploadedImg !== undefined) {
+                        var newImg = $("<img class=' show-grid'>").attr({
+                            src: uploadedImg.src,
+                            width: uploadedImg.width,
+                            height: uploadedImg.height
+                        });
+                        $(".cq-damadmin-admin-reports-configure-columns .cq-dam-assetthumbnail " +
+                        "coral-card coral-card-asset coral-icon")
+                            .replaceWith(newImg);
+                    }
+                    var defaultIcon = $(".cq-damadmin-admin-reports-details .cq-dam-assetthumbnail" +
+                    " coral-card coral-card-asset coral-icon")[0];
+                    if (defaultIcon !== undefined) {
+                        var newIcon = new Coral.Icon().set({
+                            icon: defaultIcon.icon,
+                            size: defaultIcon.size
+                        });
+                        $(newIcon).addClass("reportdetail-icon");
+                        $(".cq-damadmin-admin-reports-configure-columns .cq-dam-assetthumbnail" +
+                        " coral-card coral-card-asset img")
+                            .replaceWith(newIcon);
+                    }
+
+                    // make path column default for all report
+                    self.formElement.find("input[value='path']").attr("onclick", "return false");
+                    self.formElement.find("input[value='Path']").attr("onclick", "return false");
+
+                    // brand portal publish column in
+                    // configure columns page should
+                    // show only for brand portal
+                    // publish report
+                    if ($("coral-card input[value='assetbrandportalpublishreport']").is(":enabled")) {
+                        self.formElement.find("input[value='brandportalpublished']").parent().show();
+                        self.formElement.find("input[value='brandportalpublished']").parent().attr("checked", "true");
+                        self.formElement.find("input[value='brandportalpublished']").attr("onclick", "return false");
+                    } else {
+                        self.formElement.find("input[value='brandportalpublished']").parent().hide();
+                        self.formElement.find("input[value='brandportalpublished']").parent().removeAttr("checked");
+                        self.formElement.find("input[value='brandportalpublished']").removeAttr("onclick");
+                    }
+                    // add default column for Upload Report
+                    if ($("coral-card input[value='assetadditionreport']").is(":enabled")) {
+                        self.formElement.find("input[value='added']").parent().attr("checked", "true");
+                        self.formElement.find("input[value='added']").attr("onclick", "return false");
+                    } else {
+                        self.formElement.find("input[value='added']").parent().removeAttr("checked");
+                        self.formElement.find("input[value='added']").removeAttr("onclick");
+                    }
+                    // add default column for Publish Report
+                    if ($("coral-card input[value='assetpublishreport']").is(":enabled")) {
+                        self.formElement.find("input[value='published']").parent().attr("checked", "true");
+                        self.formElement.find("input[value='published']").attr("onclick", "return false");
+                    } else {
+                        self.formElement.find("input[value='published']").parent().removeAttr("checked");
+                        self.formElement.find("input[value='published']").removeAttr("onclick");
+                    }
+                    // add default column for Modification Report
+                    if ($("coral-card input[value='assetmodificationreport']").is(":enabled")) {
+                        self.formElement.find("input[value='modified']").parent().attr("checked", "true");
+                        self.formElement.find("input[value='modified']").attr("onclick", "return false");
+                    } else {
+                        self.formElement.find("input[value='modified']").parent().removeAttr("checked");
+                        self.formElement.find("input[value='modified']").removeAttr("onclick");
+                    }
+                    // add default column for Expiration Report
+                    if ($("coral-card input[value='assetexpiryreport']").is(":enabled")) {
+                        self.formElement.find("input[value='expires']").parent().attr("checked", "true");
+                        self.formElement.find("input[value='expires']").attr("onclick", "return false");
+                    } else {
+                        self.formElement.find("input[value='expires']").parent().removeAttr("checked");
+                        self.formElement.find("input[value='expires']").removeAttr("onclick");
+                    }
+                }
+
+                // hide last(configure columns) step if disk-usage/linkshare report is selected
+                if (step.is(".cq-damadmin-admin-reports-details")) {
+                    // set Submit button if disk usage or linkshare report is selected
+                    if ($("coral-card input[value='foldersizeandstrengthreport']").is(":enabled") ||
+                            $("coral-card input[value='linksharereport']").is(":enabled") ||
+                            $("coral-card input[value='smarttagstrainingreport']").is(":enabled")) {
+                        self.setSubmitButton(self);
+                    } else {
+                        self.setNextButton(self);
+                    }
+                }
+            }, 500);
+        }.bind(this));
+    };
+
+    ExportReportWizard.prototype.setSubmitButton = function(self) {
+        var detailsStepNext = $("coral-panel[selected] button[data-foundation-wizard-control-action='next']");
+        detailsStepNext[0].label.textContent = Granite.I18n.get("Create");
+        detailsStepNext[0].off("click").on("click", function(event) {
+            self.wizardElement.adaptTo("foundation-wizard")
+                .remove($(".cq-damadmin-admin-reports-configure-columns"));
+            self.submitWizard();
+        }.bind(self));
+    };
+
+    ExportReportWizard.prototype.setNextButton = function(self) {
+        var stepNext = $("coral-panel[selected] button[data-foundation-wizard-control-action='next']");
+        stepNext[0].label.textContent = Granite.I18n.get("Next");
+        stepNext[0].off("click");
+    };
+
+    ExportReportWizard.prototype.submitWizard = function() {
+        var linkShareBasePath = "/var/dam/share";
+        var currReportPath = this.formElement.find("input[name='dam-asset-report-type'] ").val();
+        var currReportName = currReportPath.substring(currReportPath.lastIndexOf("/") + 1);
+
+        var lowerBoundDate = this.formElement
+            .find("input[name='0_daterange.lowerBound'],input[name='startDate']").first().val();
+        var upperBoundDate = this.formElement
+            .find("input[name='0_daterange.upperBound'],input[name='endDate']").first().val();
+
+        // check for empty date fields or if start date & end date values are swapped
+        if (currReportName !== "foldersizeandstrengthreport" && currReportName !== "foldercontentreport") {
+            if (lowerBoundDate === "" && upperBoundDate === "") {
+                showDateWarningDialog(Granite.I18n.get("Please ensure that the date range fields are not blank."));
+                return;
+            } else if (lowerBoundDate !== "" && upperBoundDate !== "" && lowerBoundDate > upperBoundDate) {
+                showDateWarningDialog(Granite.I18n
+                    .get("Please ensure that the Start Date value is of a earlier date than End Date."));
+                return;
+            }
+        }
+        // for folder content report set the end date as today's date
+        if (currReportName === "foldercontentreport") {
+            this.formElement.find("input[name='0_daterange.upperBound']").attr("value", (new Date()).toISOString());
+        }
+
+        // remove the type hints
+        this.formElement.find("input[name*='@Delete']").remove();
+        this.formElement.find("input[name='dam-asset-report-type']").attr("value", currReportName);
+        this.formElement.find("input[name*='0_daterange.property']").attr("value", propertyMap[currReportName]);
+        $(this.formElement.find("input[name*='orderby']")[0]).attr("value", "@" + propertyMap[currReportName]);
+        this.formElement.find("input[name*='0_relativedaterange.property']").attr("value", propertyMap[currReportName]);
+
+        if (currReportName === "linksharereport") {
+            this.formElement.find(".general-predicates").find("input").removeAttr("disabled");
+            this.formElement.find("input[name='type']").attr("value", "nt:unstructured");
+            this.formElement.append("<input type='hidden' name='path' value='" + linkShareBasePath + "'/>");
+            this.formElement.find("input[name='orderby']").attr("disabled", "disabled");
+            this.formElement.find("input[name='orderby.sort']").attr("disabled", "disabled");
+        } else {
+            this.formElement.find(".general-predicates").find("input").removeAttr("disabled");
+        }
+        var url = this.formElement.attr("action");
+        // check for empty path
+        if (this.formElement.find("input[name='path']").val() === "") {
+            this.formElement.find("input[name='path']").attr("value", "/content/dam");
+        }
+        this.formElement.find("input[value='path']").attr("disabled", false);
+
+        // add check for empty custom columns, remove such entries from form
+        var columns = this.formElement.find("input[name='column']");
+        for (var i = 0; i < columns.length; i++) {
+            if (columns[i].value === "") {
+                $(columns[i]).closest("coral-multifield-item").remove();
+            }
+        }
+        var customProperties = this.formElement.find("input[name='customproperties']");
+        for (i = 0; i < customProperties.length; i++) {
+            if (customProperties[i].value === "") {
+                $(customProperties[i]).closest("coral-multifield-item").remove();
+            }
+        }
+        var HTML5enabled = window.FormData !== undefined;
+        var data;
+        if (HTML5enabled) {
+            data = new FormData(document
+                .getElementById("cq-damadmin-createreport-form"));
+            // FormData not completely supported in IE. Sends corrupted request
+            // for some special cases. Following is a workaround.
+            data.append("dummyParam", "dummyValue");
+        } else {
+            data = this.formElement.serialize();
+        }
+        var processData = true;
+        var contentType = $(".foundation-wizard").enctype;
+        if (HTML5enabled) {
+            processData = false;
+            contentType = false;
+        }
+        var self = this;
+        $.ajax({
+            url: url,
+            type: "POST",
+            data: data,
+            processData: processData,
+            contentType: contentType,
+            sendBearerImsToken: true,
+            success: function(response) {
+                if (successDialog === undefined) {
+                    successDialog = createDialog();
+                    document.body.appendChild(successDialog);
+                }
+                successDialog.show();
+            },
+            error: function(xhr, textStatus, errorThrown) {
+                if (xhr.status === 401) {
+                    self.ui.notify(
+                        Granite.I18n.get("ERROR"),
+                        Granite.I18n.get("Your user profile is not authorized to create this type of report"),
+                        "error"
+                    );
+                } else if (xhr.status === 503) {
+                    self.ui.notify(
+                        Granite.I18n.get("ERROR"),
+                        Granite.I18n.get("This report type cannot be created at this time. Please try again later."),
+                        "error"
+                    );
+                } else {
+                    self.ui.notify(
+                        Granite.I18n.get("ERROR"),
+                        Granite.I18n.get("An internal server error prevented the report from being created."),
+                        "error"
+                    );
+                }
+            }
+        });
+    };
+
+    $(document).on("foundation-selections-change" + ns, ".foundation-collection", function(e) {
+        var collection = $(this);
+        collection.find(".foundation-collection-item").each(function() {
+            var el = $(this);
+            var isSelected = el.is(".foundation-selections-item");
+            var input = el.find("input.reportinput[type=hidden]");
+            input.prop("disabled", !isSelected);
+        });
+    });
+
+    $(document).one("foundation-contentloaded.cq-damadmin-createreport-wizard", function(e) {
+        var wizardElement = $(".foundation-wizard", e.target);
+        new ExportReportWizard(wizardElement);
+    });
+})(window, document, Granite, Granite.$);

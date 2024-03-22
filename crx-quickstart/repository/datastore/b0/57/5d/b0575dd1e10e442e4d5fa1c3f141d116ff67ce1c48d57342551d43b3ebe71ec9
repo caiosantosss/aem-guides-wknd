@@ -1,0 +1,542 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function(document, $) {
+    'use strict';
+
+    /**
+     * @typedef {"DESTINATION"|"MODEL"|"PROPERTIES"} WizardStepName
+     */
+
+    /**
+     * @typedef {Object} WizardUI
+     * @property {Element|null} cancelButton - unique cancel button
+     * @property {Element|null} prevButton - generic prev button
+     * @property {Element|null} nextButton - generic next button
+     * @property {Element|null} submitButton - unique submit button
+     * @property {Coral.StepList|null} stepList
+     * @property {Coral.PanelStack|null} controlsPanelStack
+     * @property {Coral.PanelStack|null} contentsPanelStack
+     */
+
+    /**
+     * @typedef {Object} WizardStepState
+     * @property {boolean} isSkipped - step should be skipped (/hidden from from UI)
+     * @property {Coral.Step|null} step - respective coral-step element within the wizard's StepList
+     * @property {Coral.Panel|null} contentsPanel - respective coral-panel element within the wizard's contents PanelStack
+     * @property {Coral.Panel|null} controlsPanel - respective coral-panel element within the wizard's controls PanelStack
+     */
+
+    /**
+     * @typedef {Object} WizardState
+     * @property {Element} el - the wizard element itself
+     * @property {WizardUI} ui
+     * @property {Object.<WizardStepName, WizardStepState>} steps
+     */
+
+    /**
+     * @enum {WizardStepName}
+     */
+    const STEPS = Object.freeze({
+        DESTINATION: "DESTINATION",
+        MODEL: "MODEL",
+        PROPERTIES: "PROPERTIES"
+    });
+
+    const SELECTORS = Object.freeze({
+        FORM: "form.new-content-fragment",
+        WIZARD: "form.new-content-fragment > .foundation-wizard",
+        MODEL_INPUT: "form.new-content-fragment input[name=\"model\"]",
+        PARENT_PATH_INPUT: "form.new-content-fragment input[name=\"parentPath\"]",
+        [STEPS.DESTINATION]: ".foundation-wizard-step.new-content-fragment-destination",
+        [STEPS.MODEL]: ".foundation-wizard-step.new-content-fragment-template",
+        [STEPS.PROPERTIES]: ".foundation-wizard-step.new-content-fragment-properties",
+        ACTIVE_STEP: ".foundation-wizard-step.foundation-wizard-step-active",
+        CANCEL_BUTTON: ".foundation-wizard-control[data-foundation-wizard-control-action=\"cancel\"]",
+        PREV_BUTTON: ".foundation-wizard-control[data-foundation-wizard-control-action=\"prev\"]",
+        NEXT_BUTTON: ".foundation-wizard-control[data-foundation-wizard-control-action=\"next\"][type=\"button\"]",
+        SUBMIT_BUTTON: ".foundation-wizard-control[data-foundation-wizard-control-action=\"next\"][type=\"submit\"]"
+    });
+
+    const NON_VALID_JCR_CHARS = "%/\\:*?\"[]|\n\t\r. ";
+    const OTHER_NON_VALID_CHARS = '#{}^;+';
+    const NON_VALID_CHARS = NON_VALID_JCR_CHARS + OTHER_NON_VALID_CHARS;
+    const MODEL_STEP_SRC = "/mnt/overlay/dam/cfm/admin/content/v2/createfragment/template.html";
+
+    let modelInputFallback;
+    let modelDeleteInputFallback;
+    let modelStepQueryString = "";
+
+    const _allowedModelsForDirectoryCache = {};
+
+    /**
+     * @type {WizardState}
+     */
+    const wizardState = {
+        el: null,
+        ui: {},
+        steps: {}
+    };
+
+    var replaceRestrictedCodes = function(name) {
+        var value = (name || '').split('');
+
+        for (var x = 0, ln = value.length; x < ln; x++) {
+            if (isInvalidChar(value[x])) {
+                value[x] = '-';
+            }
+        }
+
+        return value.join('');
+    };
+
+    $(document).on('foundation-contentloaded', function(e) {
+        const $wizard = $(SELECTORS.WIZARD);
+        if ($wizard.length === 0) return;
+
+        bindToFields();
+
+        const allowedModelsForFieldStr = $(SELECTORS.MODEL_INPUT).val();
+        const allowedModelsForField = allowedModelsForFieldStr === "" ? [] : allowedModelsForFieldStr.split(",");
+
+        const wizardEl = $wizard[0];
+
+        initWizardState(wizardEl);
+
+        const activeStepName = getActiveStepName(wizardEl);
+
+        const wizardAdapter = $wizard.adaptTo("foundation-wizard");
+
+        let wizardInIframe = false;
+        let cancelClicked = false;
+
+        if (activeStepName === STEPS.DESTINATION) {
+            if (allowedModelsForField.length === 0) {
+                toggleStep(wizardAdapter, STEPS.DESTINATION, false);
+            } else {
+                // if model is defined, then we are in an iframe creating a new fragment
+                wizardInIframe = true;
+
+                // if there is no comma, there is only one model, so skip the model selection step
+                if (allowedModelsForField.length === 1) {
+                    toggleModelInputFallback(allowedModelsForField[0])
+                    toggleStep(wizardAdapter, STEPS.MODEL, false);
+                } else {
+                    // if there is a comma, add the filter to the model step data source
+                    modelStepQueryString = "?filterModels=" + allowedModelsForFieldStr;
+                }
+            }
+        }
+
+        if (wizardInIframe) {
+            $wizard.find(SELECTORS.CANCEL_BUTTON).click(function () {
+                cancelClicked = true;
+            });
+
+            $(window).bind('beforeunload', function(){
+                if(!cancelClicked) {
+                    var parentPath = $(window.document).find(SELECTORS.PARENT_PATH_INPUT).val();
+                    var fragmentName = $(window.document).find('form input[name="name"]').val();
+                    window.parent.contentFragmentSave(parentPath+'/'+fragmentName);
+                }
+            });
+
+            $(window).bind('unload', function(){
+                window.parent.contentFragmentClose();
+            });
+        }
+    });
+
+    /* 'content-fragment.name' field validator */
+    $(window).adaptTo('foundation-registry').register('foundation.validation.validator', {
+        selector: "[data-validation~='content-fragment.name']",
+        validate: function(el) {
+            var value = el.value;
+
+            for (var i = 0, ln = value.length; i < ln; i++) {
+                if (isInvalidChar(value[i])) {
+                    return Granite.I18n.get('The name must not contain {0}, so replaced by {1}',
+                        [ NON_VALID_CHARS.toString().replace(/[,]/g, ' '), '-']);
+                }
+            }
+        }
+    });
+
+    /* destination path validator */
+    $(window).adaptTo("foundation-registry").register("foundation.validation.validator", {
+        selector: ".new-content-fragment-destination-container",
+
+        // When there is an error, an error tooltip *is* added/updated in the DOM,
+        // however, Coral CSS rules are hiding it.
+        // .granite-coral-spectrum body.foundation-layout-util-maximized-alt .foundation-layout-wizard2 .foundation-layout-wizard2-contents .foundation-advancedselect+coral-tooltip[variant=error] {
+        //     display: none;
+        // }
+        // If error messages are to be displayed (currently TBD), this should be fixed/overridden.
+
+        validate: function () {
+            const $destinationStepContainer = $(".new-content-fragment-destination-container");
+            if ($destinationStepContainer.length === 0) {
+                return ;
+            }
+            var selectedItem = $destinationStepContainer.find(".foundation-advancedselect-collection")[0].selectedItem;
+            if (!selectedItem || !selectedItem.dataset || selectedItem.dataset.itemType !== "directory") {
+                console.warn("A valid destination must be selected. (Tooltip currently hidden.)");
+                return "A valid destination must be selected.";
+            } else if (selectedItem) {
+                var path = selectedItem.dataset.foundationCollectionItemId;
+
+                var allowedModelsForFieldStr = $(SELECTORS.MODEL_INPUT).val();
+                var allowedModelsForField = allowedModelsForFieldStr === "" ? [] : allowedModelsForFieldStr.split(",");
+                var allowedModelsForDirectory = getAllowedModelsForDirectory(path);
+
+                // get intersection (models allowed for reference field AND selected directory)
+                var allowedModels = allowedModelsForField.filter(function(model) {
+                    return allowedModelsForDirectory.indexOf(model) > -1;
+                });
+
+                if (allowedModels.length === 0) {
+                    const destinationWarning = Granite.I18n.get("Provided destination does not permit any of the allowed content fragment models.");
+                    console.warn(destinationWarning);
+                    return destinationWarning;
+                }
+
+                //update parentPath parameter
+                $(SELECTORS.PARENT_PATH_INPUT).val(path);
+
+                const $wizard = $destinationStepContainer.closest(SELECTORS.WIZARD);
+                const wizardAdapter = $wizard.adaptTo("foundation-wizard");
+
+                if (allowedModels.length === 1) {
+                    toggleModelInputFallback(allowedModels[0]);
+                    toggleStep(wizardAdapter, STEPS.MODEL, false);
+                } else {
+                    toggleModelInputFallback();
+                    toggleStep(wizardAdapter, STEPS.MODEL, true);
+                    modelStepQueryString = "?filterModels=" + allowedModels.join(",");
+
+                    //update models datasource parameters
+                    const newLazycontainerSrc = MODEL_STEP_SRC + path + modelStepQueryString;
+                    $(SELECTORS[STEPS.MODEL])[0].dataset.foundationWizardLazycontainerSrc = newLazycontainerSrc;
+                }
+            }
+        }
+    });
+
+    /* bindToField handler (copies value to another form field */
+    function bindToFields() {
+        $('input[data-bindtofield]').each(function(index, srcField) {
+            const $srcField = $(srcField);
+            const targetFieldName = $srcField.data('bindtofield');
+            const $targetField = $('input[name=' + targetFieldName + ']');
+
+            $srcField.off('keyup.replace-restricted-codes')
+            $srcField.on('keyup.replace-restricted-codes', function() {
+                let value = $srcField.val().toLowerCase().trim();
+                value = replaceRestrictedCodes(value);
+
+                $targetField.val(value);
+                $targetField.trigger('change');
+            });
+        });
+    }
+
+    /**
+     * @param {Element} wizardEl
+     * @returns {WizardStepName|null}
+     */
+    function getActiveStepName(wizardEl) {
+        const activeStep = wizardEl.querySelector(SELECTORS.ACTIVE_STEP);
+
+        if (activeStep) {
+            for (const property in STEPS) {
+                const stepName = STEPS[property];
+                const wizardStep = wizardEl.querySelector(SELECTORS[stepName]);
+
+                if (wizardStep === activeStep) {
+                    return stepName;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    function getAllowedModelsForDirectory(path) {
+        if (!path) return [];
+
+        if (!_allowedModelsForDirectoryCache[path]) {
+            var allowedModels = [];
+
+            $.ajax({
+                url: path + ".cfm.allowedmodels.json",
+                async: false,
+                success: function(data) {
+                    if (data) {
+                        allowedModels = data.allowedModels;
+                    }
+                }
+            });
+
+            _allowedModelsForDirectoryCache[path] = allowedModels;
+        }
+
+        return _allowedModelsForDirectoryCache[path];
+    }
+
+    /**
+     * @param {Element} wizardEl
+     * @returns {WizardUI} wizardUI
+     */
+    function getWizardUI(wizardEl) {
+        return {
+            cancelButton: wizardEl.querySelector(SELECTORS.CANCEL_BUTTON), // unique
+            prevButton: wizardEl.querySelector(SELECTORS.PREV_BUTTON), // generic
+            nextButton: wizardEl.querySelector(SELECTORS.NEXT_BUTTON), // generic
+            submitButton: wizardEl.querySelector(SELECTORS.SUBMIT_BUTTON), // unique
+            stepList: wizardEl.querySelector(".foundation-layout-wizard2-steplist"),
+            controlsPanelStack: wizardEl.querySelector(".foundation-layout-wizard2-controls"),
+            contentsPanelStack: wizardEl.querySelector(".foundation-layout-wizard2-contents")
+        };
+    };
+
+    /**
+     * @param {Element} wizardEl
+     */
+    function initWizardState(wizardEl) {
+        // Exit if already initialized.
+        if (wizardState.el && wizardState.el === wizardEl) {
+            return;
+        }
+
+        const wizardUI = getWizardUI(wizardEl);
+
+        wizardState.el = wizardEl;
+        wizardState.ui = wizardUI;
+        wizardState.steps = wizardState.steps || {};
+
+        const stepListSteps = wizardUI.stepList.items.getAll();
+        const contentsPanels = wizardUI.contentsPanelStack.items.getAll();
+        const controlsPanels = wizardUI.controlsPanelStack.items.getAll();
+
+        for (const property in STEPS) {
+            const stepName = STEPS[property];
+            const wizardStep = wizardEl.querySelector(SELECTORS[stepName]);
+            if (!wizardStep) continue;
+
+            const contentsPanel = wizardStep.closest("coral-panel");
+            if (!contentsPanel) continue;
+
+            const index = contentsPanels.indexOf(contentsPanel);
+            const step = stepListSteps[index];
+            const controlsPanel = controlsPanels[index];
+            if (!step || !controlsPanel) continue;
+
+            wizardState.steps[stepName] = wizardState.steps[stepName] || {};
+            wizardState.steps[stepName].controlsPanel = controlsPanel;
+            wizardState.steps[stepName].contentsPanel = contentsPanel;
+            wizardState.steps[stepName].step = step;
+        }
+    };
+
+    /**
+     * Verifies if the character is invalid
+     *
+     * @param {String} char - a single character.
+     * @returns {boolean} - true if it's invalid
+     */
+    var isInvalidChar = function(char) {
+        var charCode = char.charCodeAt(0);
+        // Checks if it's a specific character
+        // or the character code is out of the range 34-126
+        return (NON_VALID_CHARS.indexOf(char) !== -1 || charCode < 33 || charCode >= 127);
+    }
+
+    /**
+     * Creates a Tag.
+     *
+     * @param {String} name - the tag name.
+     * @returns {Promise<String>} - a Promise fetching the #Path text.
+     */
+    var createTag = function(name) {
+        return $.post(Granite.HTTP.externalize('/bin/tagcommand'), {
+            cmd: 'createTagByTitle',
+            tag: name,
+            locale: 'en',
+            '_charset_': 'utf-8'
+        }).then(function(html) {
+            return $(html).find("#Path").text();
+        });
+    };
+
+    /**
+     * Creates Tags programmatically.
+     *
+     * @param {Event} event - the javascript event.
+     */
+    var createAllTags = function(event) {
+        var form = $(event.currentTarget);
+        var tags = form.find('input[type="hidden"][name="tags"]');
+
+        $.when.apply(null, tags.map(function() {
+            var el = this;
+            var tagName = $(this).val();
+
+            // Don't create existing tag as it can duplicate the tag
+            if (tagName.indexOf(":") >= 0) {
+                return;
+            }
+
+            return createTag(tagName).then(function(tag) {
+                el.value = tag;
+            });
+        })).done(function() {
+            form.submit();
+        });
+    };
+
+    /**
+     * @param {FoundationWizard} wizardAdapter
+     * @param {WizardStepName} stepName
+     * @param {boolean=} show
+     */
+    function toggleStep(wizardAdapter, stepName, show) {
+        const stepToToggle = wizardState.steps[stepName];
+
+        // Exit early if no step to toggle
+        if (!stepToToggle || !stepToToggle.step) return;
+
+        // Exit early if show flag defined and will have no effect.
+        if (show === true && !stepToToggle.isSkipped) return;
+        if (show === false && stepToToggle.isSkipped) return;
+
+        const step = stepToToggle.step;
+        const contentsPanel = stepToToggle.contentsPanel;
+        const controlsPanel = stepToToggle.controlsPanel;
+
+        show = (show === true) || stepToToggle.isSkipped;
+
+        // show/add step
+        if (show) {
+            let relativeStep = null;
+            let relativeContentsPanel = null;
+            let relativeControlsPanel = null;
+
+            // if adding destination step, it should go at the beginning
+            if (stepName === STEPS.DESTINATION) {
+                relativeStep = wizardState.ui.stepList.items.first();
+                relativeContentsPanel = wizardState.ui.contentsPanelStack.items.first();
+                relativeControlsPanel = wizardState.ui.controlsPanelStack.items.first();
+            // if adding model step, it should go before last (properties) step
+            } else if (stepName === STEPS.MODEL) {
+                relativeStep = wizardState.ui.stepList.items.last();
+                relativeContentsPanel = wizardState.ui.contentsPanelStack.items.last();
+                relativeControlsPanel = wizardState.ui.controlsPanelStack.items.last();
+            }
+            // adding properties step should not happen, but if so, it will be added at the end
+
+            wizardState.ui.stepList.items.add(step, relativeStep);
+            wizardState.ui.contentsPanelStack.items.add(contentsPanel, relativeContentsPanel);
+            wizardState.ui.controlsPanelStack.items.add(controlsPanel, relativeControlsPanel);
+        // hide/remove step
+        } else {
+            // if removing current step, move to next one
+            if (wizardState.ui.stepList.selectedItem === step) {
+                wizardAdapter.next();
+            }
+
+            wizardState.ui.stepList.items.remove(step);
+            wizardState.ui.contentsPanelStack.items.remove(contentsPanel);
+            wizardState.ui.controlsPanelStack.items.remove(controlsPanel);
+        }
+
+
+        updateControls();
+
+        stepToToggle.isSkipped = !show;
+    }
+
+    /**
+     * Append to/Remove from form, hidden inputs containing model value.
+     *
+     * Used if model step removed.
+     *
+     * @param {string=} model
+     */
+    function toggleModelInputFallback(model) {
+        const wizardForm = document.querySelector(SELECTORS.FORM);
+
+        if (!wizardForm) return;
+
+        if (!modelInputFallback) {
+            modelInputFallback = document.createElement("input");
+            modelInputFallback.type = "hidden";
+            modelInputFallback.name = "template";
+            modelDeleteInputFallback = document.createElement("input");
+            modelDeleteInputFallback.type = "hidden";
+            modelDeleteInputFallback.name = "template@Delete";
+        }
+
+        // if model value, use fallback
+        if (model) {
+            modelInputFallback.value = model;
+            wizardForm.appendChild(modelInputFallback);
+            wizardForm.appendChild(modelDeleteInputFallback);
+        } else if (wizardForm.contains(modelInputFallback)) {
+            modelInputFallback.value = "";
+            wizardForm.removeChild(modelInputFallback);
+            wizardForm.removeChild(modelDeleteInputFallback);
+        }
+    }
+
+    var updateControls = function() {
+        if (!wizardState.ui || !wizardState.ui.controlsPanelStack) return;
+
+        const controlsPanels = wizardState.ui.controlsPanelStack.items.getAll();
+
+        for (let i = 0; i < controlsPanels.length; i++) {
+            const currentPanel = controlsPanels[i];
+
+            const currentPanelCancel = currentPanel.querySelector(SELECTORS.CANCEL_BUTTON);
+            const currentPanelPrev = currentPanel.querySelector(SELECTORS.PREV_BUTTON);
+            const currentPanelNext = currentPanel.querySelector(SELECTORS.NEXT_BUTTON);
+            const currentPanelSubmit = currentPanel.querySelector(SELECTORS.SUBMIT_BUTTON);
+
+            // if first panel, ensure "back" action is cancel - otherwise clone generic prev
+            if (i === 0 && currentPanelPrev) {
+                currentPanelPrev.replaceWith(wizardState.ui.cancelButton);
+            } else if (i > 0 && currentPanelCancel) {
+                currentPanelCancel.replaceWith(wizardState.ui.prevButton.cloneNode(true));
+            }
+
+            // if last panel, ensure "forward" action is submit - otherwise generic next
+            if (i === controlsPanels.length - 1 && currentPanelNext) {
+                currentPanelNext.replaceWith(wizardState.ui.submitButton);
+            } else if (i < controlsPanels.length - 1 && currentPanelSubmit) {
+                currentPanelSubmit.replaceWith(wizardState.ui.nextButton.cloneNode(true));
+            }
+        }
+    }
+
+    $(function() {
+        $('form.new-content-fragment').one('submit', function(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            createAllTags(event);
+        });
+    });
+
+})(document, Granite.$);

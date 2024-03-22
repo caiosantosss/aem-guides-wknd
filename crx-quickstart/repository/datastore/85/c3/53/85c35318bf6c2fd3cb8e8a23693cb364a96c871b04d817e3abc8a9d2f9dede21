@@ -1,0 +1,1193 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function (window, document, Granite, $)  {
+    "use strict";
+    var MSG_ERROR_NUMERIC = "Input value should be a numeric.";
+
+    var IS_PROFILES_PATH = '/conf/global/settings/dam/adminui-extension/imageprofile.children.3.json?props=crop,banner,crop_type,swatch,usmAmount,usmRadius,usmThreshold,usmMonochrome,preserveCrop';
+
+     var FT_MAX_SMARTCROPS = "FT_ASSETS-20261";
+
+    //crop options
+    var CROP_PIXEL 	= 'crop_pixel',
+        CROP_SMART  = 'crop_smart',
+        BANNER_DEFAULTS = {banner:Granite.I18n.get('Large')+',1260,720|'+Granite.I18n.get('Medium')+',700,525|'+Granite.I18n.get('Small')+',400,400',crop_type:'crop_smart',preserveCrop:'true'},
+        NEW_BREAKPOINT = Granite.I18n.get('New breakpoint'),
+        NAME_LABEL  = Granite.I18n.get('Name'),
+        WIDTH_LABEL  = Granite.I18n.get('Width'),
+        HEIGHT_LABEL  = Granite.I18n.get('Height');
+
+    var SMARTCROP_SAME_DIMENSION_FT="FT_ASSETS-16997";
+    var resourcePath = '';//resource path
+    var profileQueryPath = "";//profile query URL to get data to edit profile
+    var profileName = '';
+
+    var dialog = new Coral.Dialog().set({
+        id: "LimitDialog",
+        header: {
+            innerHTML: Granite.I18n.get("Limit Breach")
+        },
+        content: {
+            innerHTML: Granite.I18n.get("Smart Crop limit reached. Maximum 100 are allowed.")
+        },
+        footer: {
+            innerHTML: "<button is=\"coral-button\" variant=\"primary\" coral-close=\"\">Ok</button>"
+        },
+        variant: "warning"
+    });
+
+    //list of existing names that will not be allowed
+    var existingNameList = {};
+
+    var existingcropNames = {};
+
+    //original name (in editor mode)
+    var originalName = "";
+
+    //CREATE|UPDATE
+    var mode;
+
+    var maxSmartCrops = 100;
+
+    var saveBtnId = '#btn-save',
+        cropLeftId = '#cropleft',
+        cropTopId = '#croptop',
+        cropRightId = '#cropright',
+        cropBottomId = '#cropbottom',
+        profileNameId = '#profileName',
+        amountId = '#amount > input',
+        radiusId = '#radius > input',
+        thresholdId = '#threshold > input',
+        sameNameTooltip = '#sameNameErrorTooltip',
+        aspectRatioTooltip = '#aspectRatioErrorTooltip',
+        imageProcessingEditorId = '#image-processing-editor-setup',
+        bannerCropSelector = '.crop-tool.crop_smart',
+        setpropertyId = '#setproperty',
+        commonpropertyId = '.profile-row.common',
+        newProfileLabel = '#newProfileLabel',
+        editProfileLabel = '#editProfileLabel',
+        converstionActionId = '#conver_action',
+        renderIntentId = '#renderintent',
+        blkpointId = "#blackpoint",
+        ditherId = "#dithering",
+        colorSpaceId = "#colorspace",
+        bp_counter = 1,
+        preserveCropId = "#preservecrop";
+
+
+    var registry = $(window).adaptTo("foundation-registry");
+    registry.register("foundation.validation.validator", {
+        selector: "[data-validation='imgprofile.numinp']",
+        validate: function(el_) {
+            var el = $(el_);
+            if(el.find('input').get(0).validity.valid) {
+                if(el.find('input').hasClass('error')) {
+                    var row=$($(el_).parent().parent());
+                    correctCSS(row);
+                    el.find('input').removeClass('error');
+                }
+
+            }
+            validateForm();
+            if(el.attr('id') == "threshold" && el.find('input').get(0).validity.stepMismatch){
+                el.find('input').addClass('error');
+                validateForm();
+                return Granite.I18n.get("Value must be an integer with a minimum value of 0 and a maximum value of 255");
+            } else {
+                if(el.is("coral-numberinput") && el.get(0).valueAsNumber != el.val()) {
+                    el.parent.find('input').addClass('error');
+                    validateForm();
+
+                    $($(el_).parent().parent()).css({'height' : 'auto'});
+                    return MSG_ERROR_NUMERIC;
+                }
+            }
+
+            if($('#croptype').val() === "crop_smart" && (($(el_).parent().parent()).attr('class') === "breakpoint-row" || ($(el_).parent().parent()).attr('class') === "breakpoint-row bp-first-row") && el.val()<50) {
+                el.find('input').addClass('error');
+                validateForm();
+                // change height to auto so that error msg gets displayed
+                $($(el_).parent().parent()).css({'height' : 'auto'});
+                return Granite.I18n.get("Value must be greater than or equal to 50.");
+            }
+
+            if(Granite.Toggles.isEnabled(SMARTCROP_SAME_DIMENSION_FT) == true) {
+                if($(el_).is(":visible") && !validateDuplicateSmartCropDimension(el_)) {
+                    el.find('input').addClass('error');
+                    validateForm();
+                    // change height to auto so that error msg gets displayed
+                    $($(el_).parent().parent()).css({'height' : 'auto'});
+                    return Granite.I18n.get("Smart crop with same width and height is not allowed.");
+                }
+            }
+
+            if(el.find('input').hasClass('error')) {
+                var row=$($(el_).parent().parent());
+                correctCSS(row);
+                el.find('input').removeClass('error');
+            }
+            validateForm();
+        }
+    });
+
+    registry.register("foundation.validation.validator", {
+        selector: "[data-validation='imgprofile.textinp']",
+        validate: function(el) {
+            var $el = $(el);
+
+            if($el.hasClass('error')) {
+                $el.removeClass('error');
+                var row=$($(el).parent().parent());
+                correctCSS(row);
+            }
+
+            validateForm();
+
+            if($el.val() && $el.val().toLowerCase() === "swatch") {
+                $el.addClass('error');
+                validateForm();
+                $($(el).parent().parent()).css({'height' : 'auto'});
+                return Granite.I18n.get("Invalid value as 'Swatch' is a keyword.");
+            }
+
+
+            if(!validateDuplicateSmartCropName(el)) {
+                $el.addClass('error');
+                validateForm();
+                $($(el).parent().parent()).css({'height' : 'auto'});
+                return Granite.I18n.get("Name must be unique");
+            }
+
+            if($el.hasClass('error')) {
+                $el.removeClass('error');
+                var row=$($(el).parent().parent());
+                correctCSS(row);
+            }
+            validateForm();
+        }
+    });
+
+    $(document).one("foundation-contentloaded", function (e) {
+        $(sameNameTooltip).hide();
+
+        //hide crop options
+        $('.crop-tool').hide();
+
+        //set switch for banner control enablement to true
+        $('#banner-controls').attr('checked','checked');
+        $('.ui-banner-controls').show();
+        $('.ui-swatch-controls').hide();
+
+        function initWhenReady(){
+            // change validation for coral-numberinput
+            var registry = $(window).adaptTo("foundation-registry");
+            var rg = registry.get("foundation.validation.validator");
+            for(var i=0; i< rg.length; i++){
+                var cur=rg[i];
+                if(cur.selector == "coral-numberinput") {
+                    cur.validate = function(el_) {
+                        var el = el_;
+                        if (el.max !== null && el.valueAsNumber > el.max) {
+                            return Granite.I18n.get("Please enter a value that is no more than {0}.", [ el.max ], "{0}=max number");
+                        }
+
+                        if (el.min !== null && el.valueAsNumber < el.min) {
+                            return Granite.I18n.get("Please enter a value that is no less than {0}.", [ el.min ], "{0}=min number");
+                        }
+                    }
+                }
+            }
+
+            var imageProcessingEditor = $(imageProcessingEditorId);
+            mode = imageProcessingEditor.data('mode');
+            resourcePath = imageProcessingEditor.data('resource-path');
+            profileQueryPath = imageProcessingEditor.data('profile-query-path');
+            profileName = imageProcessingEditor.data('profile-name')
+            originalName = profileName;
+
+            if (mode === 'UPDATE') { //only populate fields for update mode
+
+                $('#profile-label').html(Granite.I18n.get('Edit Profile'));
+
+                populateFields(profileQueryPath || IS_PROFILES_PATH, profileName);
+            }
+            else {
+                $('#profile-label').html(Granite.I18n.get('New Profile'));
+
+                //add defaults for banner crop
+                populateFieldsWithEditedData(BANNER_DEFAULTS);
+
+                // initialize unsharp mask defaults
+                $(amountId).val(1.75);
+                $(radiusId).val(0.2);
+                $(thresholdId).val(2);
+            }
+
+            $('#amount').off('keypress');
+            $('#amount').on('keypress', noZeroForFirstCharFilterKeypress);
+            $('#radius').off('keypress');
+            $('#radius').on('keypress', noZeroForFirstCharFilterKeypress);
+            $('#threshold').off('keypress');
+            $('#threshold').on('keypress', noZeroForFirstCharFilterKeypress);
+
+            function noZeroForFirstCharFilterKeypress(evt){
+                var period = true;
+                if(evt.currentTarget.id != 'threshold') {
+                    period = evt.currentTarget.value.length != 0 && evt.currentTarget.value.indexOf('.') != -1;
+                }
+                return noZeroForFirstCharFilterKeypress_(evt, period);
+            }
+
+            function noZeroForFirstCharFilterKeypress_(evt, period){
+
+                evt = evt || window.event;
+                // block period for chrome ie FF
+                if(period && (evt.keyCode == 46 || evt.keyCode == 0) && evt.key == '.') {
+                    return false;
+                }
+                //allow backspace, arrows and TAB
+                if(/^(8|37|39|127|46|9)$/i.test(evt.keyCode)) {
+                    return;
+                }
+
+                var charCode = evt.keyCode || evt.which;
+                var charStr = String.fromCharCode(charCode);
+                var selectionStart = evt.currentTarget.selectionStart
+
+                /*
+                 * "" is allowed - it removes the value from the jcr. values of zero are
+                 * generally not allowed and should be handled separately
+                 */
+                if (!evt.shiftKey) {
+                    if(evt.keyCode == 0 && evt.key == '.') { // period FF
+                        return true;
+                    }
+
+                    if (evt.currentTarget.value.length == 0 || selectionStart == 0) {
+                        //0 for first char is not allowed. also if the user has part of the field selected and the zeroth char is
+                        //selected we dont allow zero to be entered
+                        return /[1-9]/i.test(charStr);
+                    } else {
+                        //0 after first char is allowed
+                        return /[0-9]/i.test(charStr);
+                    }
+                }
+            }
+
+            $('#amount').off('keyup change');
+            $('#amount').on('keyup change', validateUnsharpenFieldChange);
+            $('#radius').off('keyup change');
+            $('#radius').on('keyup change', validateUnsharpenFieldChange);
+            $('#threshold').off('keyup change');
+            $('#threshold').on('keyup change', validateUnsharpenFieldChange);
+            $('#swatch-width').on('keyup change', validateSwatchAspectRatio);
+            $('#swatch-height').on('keyup change', validateSwatchAspectRatio);
+
+            $('#amount').focusout(function(){
+                forceValidate($(this));
+            });
+            $('#radius').focusout(function(){
+                forceValidate($(this));
+            });
+            $('#threshold').focusout(function(){
+                forceValidate($(this));
+            });
+
+            $(cropLeftId).on('keyup', validateNumeric);
+            $(cropTopId).on('keyup', validateNumeric);
+            $(cropRightId).on('keyup', validateNumeric);
+            $(cropBottomId).on('keyup', validateNumeric);
+            $(profileNameId).on('capture:change input', validateProfileName);
+            $(saveBtnId).on('click', submitChanges);
+            $(setpropertyId).find('input').on('change keyup focusout', validateForm);
+
+            $('.activation-switch').on('change', function(e) {
+
+                if($(this).attr('id') === 'swatch-controls') {
+                    if($(this).attr('checked')) {
+                        $('.ui-swatch-controls').show()
+                    }
+                    else {
+                        $('.ui-swatch-controls').hide()
+                    }
+                }
+                else if ($(this).attr('id') === 'banner-controls') {
+
+                    if($(this).attr('checked')) {
+                        $('.ui-banner-controls').show()
+                    }
+                    else {
+                        $('.ui-banner-controls').hide()
+                    }
+                }
+                validateForm();
+            })
+
+            //add listener for crop type selection
+            $('#croptype').on('change', function(e) {
+
+                if($('#croptype').val() === "crop_pixel") {
+                    $('#banner-crop-wrapper').hide();
+                    $('#swatch-crop-wrapper').hide();
+                    $('.crop_pixel').show();
+                }
+                else {
+                    $('#banner-crop-wrapper').show();
+                    $('#swatch-crop-wrapper').show();
+                    $('.crop_pixel').hide();
+                }
+
+                $('.coral-Form-fieldwrapper .swatchSize').parent().css('width', '100px');
+                $('.swatchSize').parent().css('float', 'left');
+                $('.coral-Form-fieldwrapper .swatchSize').parent().css('margin-right', '65px');
+
+                //set timeout
+                validateAllSmartCrops();
+                setTimeout(validateForm(), 1000);
+
+            });
+
+            //set defaults
+            $('.crop-tool input[value=image]').prop('checked','checked');
+            $('#croptype').val(CROP_PIXEL);
+            $('#croptype').trigger('change');
+
+            //add listener for add breakpoint button
+            $('#btn-add-breakpoint').on('click', addBannerCropBreakpoint);
+
+            $("#conver_action").on("change selected", function(e) {
+                if($("#conver_action").val() === "convert") {
+                    $("#colorspaceWrapper").removeClass("hide");
+                } else {
+                    $("#colorspaceWrapper").addClass("hide");
+                }
+
+            });
+
+            $(sameNameTooltip).hide();
+
+            getNames();
+
+            $(profileNameId).focus();
+
+            validateForm();
+            Coral.commons.nextFrame(function() {
+                $("#amount").find("input").attr('step','any');
+                $("#radius").find("input").attr('step','any');
+                $(".number-field").find("button").removeAttr('disabled');
+            });
+        }
+        var isReadyToUse = false;
+        function tryInit(){
+            var selectComp = $("#amount").get(0);
+            Coral.commons.ready(selectComp, function() {
+                isReadyToUse = true;
+            });
+            if(!isReadyToUse) {
+                setTimeout(tryInit, 20);
+                return;
+            }
+            initWhenReady();
+        }
+
+        tryInit();
+    });
+
+    function correctCSS(row) {
+        if(row.hasClass("breakpoint-row bp-first-row")) {
+            row.css({'height' : '4.4rem'});
+        } else if(row.hasClass("breakpoint-row")) {
+            row.css({'height' : '2.8rem'});
+        }
+    }
+
+    function isNameColumn(i) {
+        return i%3==0
+    }
+
+    function validateAllSmartCrops() {
+        //if crop type is smart crop
+        if($('#croptype').val() === "crop_smart") {
+            var smartCropRows = $(".breakpoint-row input");
+            for(var i=0; i<smartCropRows.length; i++) {
+                var api = $(smartCropRows[i]).adaptTo("foundation-validation");
+                if(!isNameColumn(i)) {
+                    api = $(smartCropRows[i]).parent().adaptTo("foundation-validation");
+                }
+                if (api) {
+                    api.checkValidity();
+                    api.updateUI();
+                }
+            }
+        }
+        validateForm();
+    }
+
+    function validateDuplicateSmartCropName(el) {
+        var $el = $(el);
+        if($el.val() && $('#croptype').val() === "crop_smart") {
+            existingcropNames = {};
+
+            var smartCropRows = document.getElementsByClassName("breakpoint-row");
+            for(var i=0; i<smartCropRows.length; i++) {
+                var smartCropName = smartCropRows[i].getElementsByClassName("coral-Form-fieldwrapper bp-name-field")[0].getElementsByClassName("coral-Form-field breakpoint-field breakpoint-name")[0].getAttribute("value")
+                if(smartCropName in existingcropNames) {
+                    existingcropNames[smartCropName]++;
+                } else {
+                    existingcropNames[smartCropName]=1;
+                }
+            }
+
+            var originalName = el.getAttribute("value");
+            var newName = $el.val();
+
+            if(newName !== originalName) {
+                existingcropNames[newName]++;
+                existingcropNames[originalName]--;
+                el.setAttribute("value", newName);
+            }
+
+            if(existingcropNames[$el.val()]>1) {
+                return false;
+            }
+            return true;
+        }
+    }
+
+    function validateDuplicateSmartCropDimension(el) {
+        var smartCropVal = {};
+
+        var val = $(el).val();
+        el.setAttribute("value", val);
+
+        var bp_row=$(el).parent().parent();
+
+        var width = $(bp_row[0]).find('input[type="number"]')[0].value;
+        var height = $(bp_row[0]).find('input[type="number"]')[1].value;
+
+        var originalCrop=[];
+        originalCrop.push(width);
+        originalCrop.push(height);
+
+        var smartCropRows = document.getElementsByClassName("breakpoint-row");
+
+        for(var i=0; i<smartCropRows.length; i++) {
+            var wd = $(smartCropRows[i]).find('input[type="number"]')[0].value;
+            var ht = $(smartCropRows[i]).find('input[type="number"]')[1].value;
+
+            var crop=[];
+            crop.push(wd);
+            crop.push(ht);
+
+            if(crop in smartCropVal) {
+                smartCropVal[crop]++;
+            } else {
+                smartCropVal[crop] = 1;
+            }
+        }
+        if(smartCropVal[originalCrop]>1){
+            $($(bp_row[0]).find('input[type="number"]')[0]).addClass('error');
+            $($(bp_row[0]).find('input[type="number"]')[1]).addClass('error');
+            return false;
+        }
+
+        return true;
+    }
+
+    function forceValidate(el){
+        var api = el.adaptTo("foundation-validation");
+        if (api) {
+            api.checkValidity();
+            api.updateUI();
+        }
+    }
+
+    function validateUnsharpenFieldChange(evt) {
+        forceValidate($(evt.currentTarget));
+        validateForm();
+    }
+
+    function addBannerCropBreakpoint() {
+
+        var markup 	= ($('.breakpoint-row').length < 1)? '<div class="breakpoint-row bp-first-row">' : '<div class="breakpoint-row">';
+
+        if(Granite.Toggles.isEnabled(FT_MAX_SMARTCROPS) == true && $('#croptype').val() === "crop_smart") {
+            var smartCropRows = document.getElementsByClassName("breakpoint-row");
+            var smartCrops = smartCropRows.length;
+
+            if(smartCrops >= maxSmartCrops) {
+                dialog.show();
+                return;
+            }
+        }
+
+    	var markup 	= ($('.breakpoint-row').length < 1)? '<div class="breakpoint-row bp-first-row">' : '<div class="breakpoint-row">';
+
+        var nameLabel,
+            widthLabel,
+            heightLabel,
+            widthAria = "Width",
+            heightAria = "Height";
+
+        if( $('.breakpoint-row').length < 1) {
+            nameLabel	= NAME_LABEL + ' *',
+                widthLabel	= WIDTH_LABEL + ' *',
+                heightLabel	= HEIGHT_LABEL + ' *';
+        }
+
+        markup		+= createBreakpointNameField(NEW_BREAKPOINT, nameLabel);
+        markup		+= createNumberInputField(50, widthLabel, widthAria);
+        markup		+= createNumberInputField(50, heightLabel, heightAria);
+        markup		+= createBpDeleteButton($('.breakpoint-row').length < 1);
+        markup 		+= '</div>';
+
+        bp_counter++;
+
+        //add row to DOM
+        $('#breakpoints-wrapper').append(markup);
+
+        //add listeners for breakpoint delete
+        $('.btn-bp-remove').on('click', removeBannerCropBreakpoint);
+
+        //remove/add validation listeners for banner fields
+        $(bannerCropSelector).find('input').off('change keyup focusout', validateForm);
+        $(bannerCropSelector).find('input').on('change keyup focusout', validateForm);
+
+        //remove/add listener to breakpoint rows
+        $('#breakpoints-wrapper').off('change keyup focusout', validateAllSmartCrops);
+        $('#breakpoints-wrapper').on('change keyup focusout', validateAllSmartCrops);
+
+        if( $('.breakpoint-row').length < 2) {
+            $('.breakpoint-row').css('height', '72px');
+        }
+
+        //position add button
+        $('#btn-add-breakpoint').css('margin-top', '20px');
+
+        adjustBreakpointRowSizes();
+
+        //add illegal character handler
+        bannerIllegalCharacterHandler();
+
+        validateAllSmartCrops();
+
+        // shift focus to added element
+	setTimeout(function() {
+          $('.breakpoint-row:last').find('input:first').focus();
+    	}, 5);
+
+        validateForm();
+
+    }
+
+    function bannerIllegalCharacterHandler() {
+        // add validation for break point name field
+        $('#breakpoints-wrapper input[type=text]').off();
+        $('#breakpoints-wrapper input[type=text]').on('keyup', 	function(e) {
+            var field = $(this);
+            cleanIllegalCharacter(field);
+        });
+    }
+
+    function adjustBreakpointRowSizes() {
+
+        setTimeout(function() {
+            //format
+            $('.bp-name-field').css('width', '60%');
+            $('.breakpointsizewrapper').css('width', '20%');
+            $('.breakpointsizewrapper input').css('min-width', '80px');
+            $('.breakpointsizewrapper input').css('width', '20%');
+        },1);
+    }
+
+    function removeBannerCropBreakpoint() {
+
+        $(this).off('click', removeBannerCropBreakpoint);
+        $(this).parent().parent().find('input').off('change keyup focusout', validateForm);
+        $(this).parent().parent().remove();
+        validateForm();
+    }
+
+    function getBannerCropBreakpointData() {
+
+        var i = 0;
+        var len = $('.breakpoint-row').length;
+        var str = '';
+        var smartCropNames = {};
+        var smartCropVal = {};
+
+        for(i=0;i<len;i++) {
+
+            var name = $($('.breakpoint-row')[i]).find(".bp-name-field>input[is='coral-textfield']").val();
+            var width = $($($('.breakpoint-row')[i]).find('coral-numberinput')[0]).val();
+            var height = $($($('.breakpoint-row')[i]).find('coral-numberinput')[1]).val();
+            var crop = [];
+
+            //Check if a smart crop with same name exists
+            if(smartCropNames[name]) {
+                continue;
+            } else {
+                smartCropNames[name] = true;
+            }
+
+            //Do not persist if value is less than 1
+            if(width<50 || height <50) {
+                continue;
+            }
+
+            if(str.length > 1) {
+                str += '|';
+            }
+
+            //create string
+            str += name +',' + width +','+height;
+        }
+        return str;
+    }
+
+    function createBreakpointNameField(value, label) {
+        var nameField   = '<div class="coral-Form-fieldwrapper bp-name-field" style="width:260px;">';
+        var text 		= (value!=undefined)? value : '';
+        if(label != undefined) {
+            nameField += '<label class="coral-Form-fieldlabel" id="breakpoint">'+label+'</label>';
+        }
+
+        nameField       += '<input is="coral-textfield" class="coral-Form-field breakpoint-field breakpoint-name" type="text" id="bp_row'+ bp_counter +'" aria-labelledby="breakpoint" data-foundation-validation="imgprofile.textinp" data-validation="imgprofile.textinp" value="'+text+'" >';
+        nameField       += '</div>';
+
+        return nameField;
+    }
+
+    function createNumberInputField(value, label, ariaLabel) {
+
+        var field   = '<div class="coral-Form-fieldwrapper breakpointsizewrapper">';
+        var val		= (value != undefined) ? value : '100';
+        if(label != undefined) {
+            field += '<label class="coral-Form-fieldlabel" id="'+ariaLabel+'">'+label+'</label>';
+        }
+
+        field  += '<coral-numberinput class="coral-Form-field breakpointsize breakpoint-field" labelledby="bp_row'+ bp_counter +' ' +ariaLabel+'" value="'+val+'" min="50" data-foundation-validation="imgprofile.numinp" data-validation="imgprofile.numinp" role="group" type="number" required></coral-numberinput>';
+        field	+= '</div>';
+
+        return field;
+    }
+
+    function createBpDeleteButton(alignBottom) {
+        var deleteBtn;
+
+        if(alignBottom) {
+            deleteBtn = '<div class="bp-btn-container-bottom multi"><button autocomplete="off" is="coral-button" aria-label="'+Granite.I18n.get('delete')+'" icon="delete" id="del_row'+bp_counter+'" aria-labelledby="del_row'+bp_counter+' bp_row'+bp_counter+'" class="alignBottom btn-bp-remove" iconsize="M"></button></div>';
+        }
+        else {
+            deleteBtn = '<div class="bp-btn-container-bottom"><button autocomplete="off" is="coral-button" aria-label="'+Granite.I18n.get('delete')+'" icon="delete" aria-labelledby="del_row'+ bp_counter +' bp_row'+bp_counter+'" id="del_row'+bp_counter+'" class="alignRight btn-bp-remove" iconsize="M"></button></div>';
+        }
+        return deleteBtn;
+    }
+
+
+    function populateFields(profilesPath, profileName) {
+        $.ajax({
+            url: profilesPath,
+            cache: false
+        }).done(function(data) {
+            for (var i = 0; i < data.length; i++) {
+                if (data[i]["id"] == profileName) {
+                    populateFieldsWithEditedData(data[i]);
+                    validateForm();
+                    // break;
+                } else {
+                    existingNameList[data[i]["id"]] = "true";
+                }
+            }
+        });
+    }
+
+    /**
+     * Load name to be used to prevent submit existing name
+     */
+    function getNames() {
+        $.getExistingProfileNames(IS_PROFILES_PATH)
+            .done(function (response) {
+                if (response) {
+                    for (var i = 0; i < response.length; i++) {
+                        existingNameList[response[i].id] = "true";
+                    }
+                }
+            });
+    }
+
+    /** Validate and display image processing settings on page */
+    function populateFieldsWithEditedData(settings) {
+
+        var cropType = settings['crop_type'];
+        var cropValues;
+        var cropSwatchValues;
+        var usmAmount;
+        var usmRadius;
+        var usmThreshold;
+        var usmMonochrome;
+        var action;
+        var colorspace;
+        var intent;
+        var blackpoint;
+        var dithering;
+        var preserveCrop = "true";
+
+        if (settings['crop']) {
+            cropValues = settings['crop'].split(',');
+        }
+        if (settings['swatch']) {
+            cropSwatchValues = settings['swatch'].split(',');
+        }
+        if (settings['usmAmount']) {
+            usmAmount = settings['usmAmount'];
+        }
+        if (settings['usmRadius']) {
+            usmRadius = settings['usmRadius'];
+        }
+        if (settings['usmThreshold']) {
+            usmThreshold = settings['usmThreshold'];
+        }
+        if (settings['usmMonochrome']) {
+            usmMonochrome = settings['usmMonochrome'];
+        }
+        if (settings['preserveCrop']) {
+            preserveCrop = settings['preserveCrop'];
+        }
+
+        //only set this if the name exists
+        if(settings['id']) {
+            originalName = settings['id'];
+            $(profileNameId).val(originalName);
+        }
+
+        //handle crop functionality
+        if (cropType) {
+
+            switch(cropType) {
+                case CROP_SMART:
+                    setBannerCropUIFields(settings['banner']);
+                    setSwatchCropUIFields(cropSwatchValues);
+                    addToggleButtonLabel();
+                    var preserveCropElem = $(preserveCropId)[0];
+                    if (preserveCropElem && preserveCrop === "true") {
+                        preserveCropElem.checked = true;
+                    }
+
+                    break;
+                case CROP_PIXEL:
+                    setPixelCropUIFields(cropValues);
+                    break;
+            }
+        }
+        else if (cropValues && cropValues.length === 4) {
+            cropType = CROP_PIXEL;
+            setPixelCropUIFields(cropValues);
+        }
+
+        //add defaults for banner crop if banner crop is not defined.
+        if(cropType !== CROP_PIXEL && cropType !== CROP_SMART) {
+            populateFieldsWithEditedData(BANNER_DEFAULTS);
+        }
+
+        //setup crop type
+        if(cropType) {
+            $('#croptype').val(cropType);
+            $('#croptype').trigger('change');
+        }
+
+        // default values are based on common IPS usage
+        (usmAmount !== undefined) && $(amountId).val(usmAmount);
+        (usmRadius !== undefined) && $(radiusId).val(usmRadius);
+        (usmThreshold !== undefined) && $(thresholdId).val(usmThreshold);
+
+        //adjust ui
+        adjustBreakpointRowSizes();
+        validateAllSmartCrops();
+    }
+
+    // function to add label to smart crop toggle element
+    function addToggleButtonLabel() {
+        var elems = $('.section-head-wrapper');
+        $.each( elems, function( index, value ){
+            var labelText = $(value).find('.section-head-primary').text();
+            $(value).find('.section-head-secondary > coral-switch').prop('labelled', labelText);
+        });
+    }
+
+    function setBannerCropUIFields(values) {
+        var arr = values.split('|');
+        var i = 0;
+        var len = arr.length;
+
+        //add default values if applicable and bail.
+        if(!values) {
+            populateFieldsWithEditedData(BANNER_DEFAULTS);
+
+            if(mode === 'UPDATE') {
+                $('#banner-controls').removeAttr('checked');
+                $('#banner-controls').trigger('change');
+            }
+            return;
+        }
+
+        for(i=0;i<len;i++) {
+            var varStrArr = arr[i].split(',');
+
+            var markup 	= ($('.breakpoint-row').length < 1)? '<div class="breakpoint-row bp-first-row">' : '<div class="breakpoint-row">';
+
+            var nameLabel,
+                widthLabel,
+                heightLabel,
+                widthAria = "Width",
+                heightAria = "Height";
+
+            if( i < 1) {
+                nameLabel	= NAME_LABEL + ' *';
+                widthLabel	= WIDTH_LABEL + ' *';
+                heightLabel	= HEIGHT_LABEL + ' *';
+            }
+            else {
+                nameLabel	= undefined;
+                widthLabel	= undefined;
+                heightLabel	= undefined;
+            }
+
+            markup		+= createBreakpointNameField(varStrArr[0], nameLabel);
+            markup		+= createNumberInputField(varStrArr[1], widthLabel, widthAria);
+            markup		+= createNumberInputField(varStrArr[2], heightLabel, heightAria);
+            markup		+= createBpDeleteButton($('.breakpoint-row').length < 1);
+            markup 		+= '</div>';
+            bp_counter++;
+            $('#breakpoints-wrapper').append(markup);
+
+            //format
+            adjustBreakpointRowSizes();
+            $('#breakpoints-wrapper').on('change keyup focusout', validateAllSmartCrops);
+            //add illegal character handler
+            bannerIllegalCharacterHandler();
+        }
+
+        //add listener for deleting breakpoint
+        if(len>0) {
+            $('.btn-bp-remove').on('click', removeBannerCropBreakpoint);
+            //add validation listeners for banner fields
+            $(bannerCropSelector).find('input').on('change keyup focusout', validateForm);
+        }
+
+        if(mode === 'UPDATE') {
+            validateForm();
+        }
+	}
+
+
+    function setPixelCropUIFields(values) {
+        $(cropLeftId).val(values[0]);
+        $(cropTopId).val(values[1]);
+        $(cropRightId).val(values[2]);
+        $(cropBottomId).val(values[3]);
+    }
+
+    function setSwatchCropUIFields(values) {
+
+        if(!values) {
+            return;
+        }
+        var radioSelector = 'input[value='+values[0]+']';
+
+        $(radioSelector).prop('checked','checked');
+        $(radioSelector).trigger('change');
+
+        $('#swatch-width').val(values[1]);
+        $('#swatch-height').val(values[2]);
+
+        //set switch for banner control enablement to true
+        $('#swatch-controls').attr('checked','checked');
+        $('#swatch-controls').trigger('change');
+
+        validateSwatchAspectRatio();
+    }
+
+    function populateColorProfiles() {
+        var optionList = [];
+        var overrides = {};
+        for(var key in ICC_PROFILE_MAP) {
+            if(ICC_PROFILE_MAP.hasOwnProperty(key)) {
+                optionList.push(key);
+                overrides[key] = key;
+            }
+        }
+        optionList.sort(); //just easier for users to read through... should have a filter though.
+        rebuildSelectControl("#colorspace", optionList, null, overrides);
+    }
+
+    function rebuildSelectControl(selectId, optionList, optionLabelOverrides, optionValueOverrides) {
+        var selectComp = $(selectId).get(0);
+        var oldSelected = selectComp.selectedItem;
+        if(selectComp.selectedItem){
+            selectComp.selectedItem.selected = false;
+        }
+
+        selectComp.items.clear();
+        var oldexists = false;
+        var defaultselect;
+        if (optionList != undefined && optionList.length > 0) {
+            for (var i = 0; i < optionList.length; i++) {
+                var item = {content: { innerHTML: optionList[i]}};
+                item.value = optionValueOverrides && optionValueOverrides[optionList[i]] ? optionValueOverrides[optionList[i]] : optionList[i].toLowerCase();
+                if(i == 0) {
+                    defaultselect = item.value;
+                }
+                selectComp.items.add(item);
+                if(oldSelected && item.value == oldSelected.value){
+                    oldexists = true;
+                }
+            }
+            selectComp.value = oldexists ? oldSelected.value : defaultselect;
+        }
+    }
+
+    /**
+     * check for numeric field to allow number only
+     */
+    function validateNumeric(e) {
+        var val = $(e.target).val();
+        if ( ! /^([1-9][0-9]*|0)$/.test($.trim(val)) ) {
+            //if el already has error just bail
+            if($(e.target).hasClass('error')) {
+                return;
+            }
+
+            $(e.target).addClass('error');
+            $(e.target).css('borderColor', '#ff0000');
+        }
+        else {
+            $(e.target).removeClass('error');
+            $(e.target).css('borderColor', '#b9b9b9');
+        }
+    }
+
+    /**
+     * validate profile name to make sure that it doesn't use an existing name
+     * also replace illegal character with -
+     */
+    function validateProfileName(e) {
+        var field = $(e.target);
+        cleanIllegalCharacter(field);
+        //make sure we aren't comparing against the original asset name
+        if (field.val() !== originalName) {
+            if (existingNameList[field.val()]) {
+                field.addClass("error");
+                $(sameNameTooltip).attr("open", "true");
+                $(sameNameTooltip).show();
+            } else {
+                field.removeClass("error");
+                $(sameNameTooltip).hide();
+            }
+        }
+    }
+
+    function validateSwatchAspectRatio(e) {
+        if (!Granite.Toggles.isEnabled("FT_CQ-4311217")) {
+            return;
+        }
+        var swatchWidthField = $('#swatch-width input');
+        var swatchHeightField = $('#swatch-height input');
+        swatchWidthField.removeClass('error');
+        swatchHeightField.removeClass('error');
+        $(aspectRatioTooltip).hide();
+        if (!isAspectRatioValid()) {
+            swatchWidthField.addClass('error');
+            swatchHeightField.addClass('error');
+            $(aspectRatioTooltip).attr("open", "true");
+            $(aspectRatioTooltip).show();
+        }
+        validateForm();
+    }
+
+    function isAspectRatioValid() {
+        var swatchWidth = $('#swatch-width').val();
+        var swatchHeight = $('#swatch-height').val();
+        if (swatchWidth.length === 0 || swatchHeight.length === 0) {
+            return true;
+        }
+        if (swatchHeight === 0) {
+            return false;
+        }
+        var swatchAspectRatio = swatchWidth / swatchHeight;
+        return (swatchAspectRatio >= 0.1 && swatchAspectRatio <= 10);
+    }
+
+    function cleanIllegalCharacter(field) {
+        var name = field.val();
+        // illegal character for JCR ", ', *, /, :, [, \, ], |
+        // other non-valid characters %, ?, \n, \t, \r, ., #, {, }, ^, ;, +, &, <, >, comma(,)
+        var newnm = name.replace(/[\"\'\*\/\:\[\\\]\|%?\n\t\r. #{}^;+&<>!@$()_=,]/g, "-");
+
+        if(newnm != name) {
+            var start = field.get(0).selectionStart;
+            var end = field.get(0).selectionEnd;
+
+            field.val(newnm);
+
+            field.get(0).setSelectionRange(start, end);
+        }
+    }
+
+    $.getExistingProfileNames =  (function getExistingProfileNames($url) {
+        return $.ajax({
+            dataType: "json",
+            url: $url
+        }).pipe(function (response) {
+            return response;
+        });
+    });
+
+    function validateForm() {
+        var isValid = true;
+
+        $(commonpropertyId).find('input').each( function(){
+            if ($(this).hasClass('error') || ($.trim($(this).val()) === '')) {
+                isValid = false;
+            }
+        });
+
+        if($('#croptype').val()==CROP_SMART && $($('.activation-switch')[0]).attr('checked')) {
+            if($('.breakpoint-row').size()==0) {
+                isValid=false;
+            }
+        }
+
+        if($('#croptype').val()==CROP_SMART) {
+            if(!($($('.activation-switch')[0]).attr('checked')=='checked') && !($($('.activation-switch')[1]).attr('checked')=='checked')) {
+                isValid=false;
+            }
+        }
+
+
+        //validate other fields
+        $('.crop-tool.'+$('#croptype').val()).find('input').each( function(){
+            //ignore inputs that have unecessary fields
+            if(!$(this).hasClass('foundation-field-related')) {
+                if ($(this).hasClass('error')) {
+                    isValid = false;
+                }
+            }
+        });
+
+        $('.crop-tool.crop_swatch').find('input').each( function(){
+            //ignore inputs that have unecessary fields
+            if(!$(this).hasClass('foundation-field-related')) {
+                if ($(this).hasClass('error')) {
+                    isValid = false;
+                }
+            }
+        });
+
+
+        $(saveBtnId).prop('disabled', !isValid);
+
+    }
+
+    function submitChanges() {
+        var postUrl = resourcePath;
+        var url = '';
+
+        postUrl = postUrl + '.imageprocessingprofiles';
+
+        if (mode === "CREATE") {
+            url += ':operation=create';
+        } else {
+            url = ':operation=update';
+        }
+
+        url += '&oldname=' + encodeURIComponent(originalName);
+        url += '&name=' + encodeURIComponent($.trim($(profileNameId).val()));
+        url += '&modifier=' + encodeURIComponent(generateModifierURLString());
+        url += '&_charset_=utf-8';
+
+        //disable save button for form submission
+        $(saveBtnId).prop('disabled', true);
+
+        $.post(postUrl, url, function(args) {
+            document.location.assign(Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/processingprofilepage/imageprocessingprofiles.html/conf/global/settings/dam/adminui-extension/imageprofile'));
+        })
+            .fail(function(args) {
+                //if check for duplicate name on failure from server response, if so show error
+                if(args.responseText === 'duplicate name'){
+                    $(profileNameId).addClass('error');
+                    $(sameNameTooltip).show();
+                    $('#modal-save-fail-duplicate')[0].show();
+                } else {
+                    //re-enable save button post save
+                    $(saveBtnId).prop('disabled', false);
+                }
+            });
+    }
+
+    function generateModifierURLString() {
+
+        var cropType = $('#croptype').val();
+
+        var serializedData = 'usmAmount='
+            + $(amountId).val()
+            + '&usmRadius='
+            + $(radiusId).val()
+            + '&usmThreshold='
+            + $(thresholdId).val()
+            + '&usmMonochrome=0';
+
+        //add crop options if applicable
+        if(cropType.length > 0) {
+            serializedData += '&crop_type='+cropType;
+            switch(cropType) {
+                case CROP_SMART:
+
+                    if($('.ui-banner-controls').is(":visible")) {
+                        serializedData += '&banner='+ getBannerCropBreakpointData();
+                    }
+                    else {
+                        serializedData += '&banner=';
+                    }
+
+
+                    if($('.ui-swatch-controls').is(":visible")) {
+                        var swatchType = $('input[name=swatch-type][value=image]').is(':checked')? 'image' : 'color';
+                        serializedData += '&swatch='+ swatchType + ',' + $('#swatch-width').val()+ ','+ $('#swatch-height').val();
+                    }
+                    else {
+                        serializedData += '&swatch=';
+                    }
+
+                    if ($(preserveCropId).is(":visible")) {
+                        var preserveCrop = $(preserveCropId)[0].checked;
+                        serializedData += '&preserveCrop=' +  preserveCrop;
+                    }
+                    break;
+                case CROP_PIXEL:
+                    serializedData += '&crop='+ $(cropLeftId).val() + ',' + $(cropTopId).val()+ ',' + $(cropRightId).val()+ ','+ $(cropBottomId).val();
+                    break;
+            }
+        }
+
+        return serializedData;
+    }
+
+
+
+})(window, document, Granite, Granite.$);

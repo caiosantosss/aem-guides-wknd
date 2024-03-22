@@ -1,0 +1,486 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+
+    /**
+     *
+     * Dependencies
+     *
+     */
+
+    var I18n = Granite.I18n;
+    var externalize = Granite.HTTP.externalize;
+    var CardView = CUI.CardView;
+    var sidePanel = ns.ui.SidePanel.$el;
+    var Fragments = ns.CFM.Fragments;
+
+    /**
+     *
+     * Constants
+     *
+     */
+
+    var ASSETS_TAB_HEADING = I18n.get("Assets");
+    var ASSOCIATED_CONTENT_TAB_HEADING = I18n.get("Associated Content");
+
+    /**
+     * @const Path to the "Associated Content" tab content node structure
+     */
+    var ASSOCIATED_CONTENT_TAB_PATH = "/mnt/overlay/wcm/core/content/editor/_jcr_content/sidepanels/plugin/associatedcontent";
+
+    var GRID_LAYOUT_SETTINGS = {
+        colWidth: 145,
+        gutterX: 14,
+        selector: "coral-card.card-asset" // We are specific here, as assets card may contain nested <article> tags, see paragraph asset type.
+    };
+
+    /**
+     *
+     * Internal functions
+     *
+     *
+     */
+
+    /**
+     * Returns the path property of the passed element
+     * @param element
+     * @returns {String}
+     */
+    function toPath(element) {
+        return element && element.path;
+    }
+
+    /**
+     * Removes duplicates from the associated assets tab.
+     *
+     * @param associatedAssetsTab
+     */
+    function removeDuplicateAssets(associatedAssetsTab) {
+        var $tab = $(associatedAssetsTab);
+        var $assets = $tab.find('.associatedassets-content-container .card-asset[data-path]');
+        var lookup = {};
+
+        $.each($assets, function(idx, asset) {
+            var path = $(asset).data('path');
+
+            if (lookup[path]) {
+                $(asset).remove();
+            } else {
+                lookup[path] = true;
+            }
+        });
+
+        return $tab.html();
+    }
+
+    /**
+     * Adds the passed in tab to the Sidepanel
+     * @param sidePanel
+     * @param associatedContentTab
+     * @retuns {HTMLElement|jQuery} The tab HTML element that has been added
+     */
+    function addTab(sidePanel, associatedContentTab) {
+        var sidePanelTabs = sidePanel.find('coral-tabview coral-tablist');
+        var sidePanelStack = sidePanel.find('coral-tabview coral-panelstack');
+        var tabs = sidePanelTabs[0].items.getAll();
+        var panels = sidePanelStack[0].items.getAll();
+        var $associatedContentTab = $(associatedContentTab);
+        var tabIcon = $associatedContentTab.find(".cq-AssociatedAssets-icon");
+        var iconName = tabIcon.attr('class').match(/coral-Icon--([^ ]+)/) || ['', ''];
+        var tabIconContainer = tabIcon.parent();
+        var tabSection = $associatedContentTab.find(".cq-AssociatedAssets");
+        var tabContent = tabSection.children();
+
+        // Append the new tab (update with https://jira.corp.adobe.com/browse/CQ-50058)
+        if (sidePanelTabs.length && sidePanelStack.length) {
+            sidePanelTabs[0].items.add({
+                title: I18n.get('Associated Content'),
+                icon: iconName[1],
+                invalid: false,
+                disabled: false,
+                selected: false
+            }, tabs[tabs.length - 1]);
+
+            var tabId = 'coral-id-' + (100 + sidePanelTabs[0].items.length);
+            var newPanel = new Coral.Panel();
+            var wrapper = $('<div>').addClass('sidepanel-tab sidepanel-tab-associatedassets').append(tabContent);
+
+            newPanel.content.appendChild(wrapper[0]);
+            sidePanelStack[0].items.add(newPanel, panels[panels.length - 1]);
+
+            /* assign tab to panel */
+            $(sidePanelTabs[0].items.getAll()).filter('[title="' + ASSOCIATED_CONTENT_TAB_HEADING + '"]').attr('aria-controls', tabId);
+            $(newPanel).attr('id', tabId);
+        }
+
+        var newTabSection = $(newPanel).find('.sidepanel-tab');
+        var newTabIconContainer = tabIcon.parent();
+
+        // Adjust icon container class and title attribute
+        newTabIconContainer.addClass(tabIconContainer.attr("class"));
+        newTabIconContainer.attr("title", tabIconContainer.attr("title"));
+
+        // Adjust tab class and data-headertitle attributes
+        newTabSection.addClass(tabSection.attr("class"));
+        newTabSection.removeClass('coral-TabPanel-pane');
+        newTabSection.attr("data-headertitle", tabSection.attr("data-headertitle"));
+
+        return newTabSection;
+    }
+
+    /**
+     * Adds the "Associated Content" tab in the Sidepanel
+     * @param {HTMLElement|jQuery} sidePanel The Sidepanel UI element where the associated content tab is added
+     * @param {Fragment[]} fragments The fragments to be used to display their associated content
+     */
+    function addAssociatedContentTab(sidePanel, fragments) {
+        // Fetch the tab
+        return $.ajax({
+            type: "GET",
+            url: externalize(ASSOCIATED_CONTENT_TAB_PATH + ".html"),
+            dataType: "html",
+            data: {
+                fragments: fragments.map(toPath)
+            }}).then(function (associatedContentTab) {
+
+            channel.trigger("foundation-contentloaded");
+            associatedContentTab = removeDuplicateAssets(associatedContentTab);
+
+            var $associatedContentTab = addTab(sidePanel, associatedContentTab);
+
+            // When switching to the associated asset tabs
+            channel
+                .off("cq-sidepanel-tab-switched.cfm-associatedcontent")
+                .on("cq-sidepanel-tab-switched.cfm-associatedcontent", function (event) {
+
+                    if (event.tabName === "sidepanel-tab-associatedassets") {
+                        var fragments = ns.CFM.Fragments.getFragments({ withAssociatedContentOnly: true });
+                        renderAssociatedContentTab($associatedContentTab, fragments);
+                    }
+                });
+
+            // Update the results according to the filters
+            $associatedContentTab
+                .on("change.cfm-associatedcontent", ".cq-AssociatedAssets-fragmentSelect", handleFragmentChange)
+                .on("change.cfm-associatedcontent", ".cq-AssociatedAssets-collectionSelect", handleCollectionChange);
+
+        });
+    }
+
+    /**
+     * Removes the associated content tab element if present
+     * @param sidePanel
+     */
+    function removeAssociatedContentTab(sidePanel) {
+        var sidePanelTabs = sidePanel.find("coral-tablist");
+        var tab = sidePanelTabs.find("coral-tab[title='" + ASSOCIATED_CONTENT_TAB_HEADING + "']");
+
+        if (tab.length > 0) {
+            var sidePanelStack = sidePanel.find('coral-panelstack');
+            var panel = sidePanelStack.find('coral-panel#' + tab.attr('aria-controls'));
+
+            sidePanelTabs[0].items.remove(tab[0]);
+
+            if (panel.length > 0) {
+                sidePanelStack[0].items.remove(panel[0]);
+            }
+        }
+    }
+
+    /**
+     * Returns the associated content tab jQuery element if present
+     * @param sidePanel
+     * @returns {jQuery} The associated content tab jQuery element
+     */
+    function getAssociatedContentTab(sidePanel) {
+        return sidePanel && sidePanel.find(".sidepanel-tab-associatedassets").eq(0);
+    }
+
+
+    /**
+     * Display the "Associated Content" tab in the Sidepanel. The rendering depends on the params passed in the config
+     * The "Associated Content" tab is displayed as soon as there is one Content Fragment component used in the Page
+     * NB: This function only replaces the current HTML tab element with the new one from the server;
+     * the filters and the grid will be both initialized when opening the tab itself.
+     * @param {HTMLElement|jQuery} associatedContentTab The Associated Content Tab UI element where the results are shown
+     * @param {Object} [filters] The filters configuration object
+     * @param {Fragment[]} filters.fragments List of the fragments used to render the associated content
+     * @param {String} [filters.collection] Path of the collection (associated content) to render
+     *
+     */
+    function updateAssociatedContentTab(associatedContentTab, filters) {
+        var fragments;
+        var collection;
+
+        if (!filters || !filters.fragments) {
+            fragments = Fragments.getFragments();
+        } else if (filters) {
+            fragments = filters.fragments;
+            collection = filters.collection;
+        }
+
+        if (!fragments || fragments.length == null || fragments.length === 0) {
+            return;
+        }
+
+        // Ask the tab content to the server (pass filters values as GET parameters)
+        return $.ajax({
+            type: "GET",
+            url: externalize(ASSOCIATED_CONTENT_TAB_PATH + ".html"),
+            dataType: "html",
+            data: {
+                fragments: fragments.map(toPath),
+                collection: collection
+            }}).then(function (newAssociatedContentTab) {
+                newAssociatedContentTab = removeDuplicateAssets(newAssociatedContentTab);
+                updateGrid(associatedContentTab, newAssociatedContentTab);
+        });
+    }
+
+    /**
+     * Updates the current grid (showing the associated assets) with the new version fetched from the server
+     * @param associatedContentTab
+     * @param newAssociatedContentTab
+     */
+    function updateGrid(associatedContentTab, newAssociatedContentTab) {
+        var $associatedContentTab = $(associatedContentTab);
+        var $newAssociatedContentTab = $(newAssociatedContentTab);
+
+        var grid = $associatedContentTab.find(".associatedassets-content-container.grid");
+        grid.empty();
+
+        var grid0 = $("<div class='grid-0'></div>");
+        var assets = $newAssociatedContentTab.find(".card-asset");
+
+        grid0.append(assets);
+        grid.append(grid0);
+
+        initializeGrid(associatedContentTab);  // CoralUI 2 grid specific stuff
+    }
+
+    /**
+     * Renders the Associated Content tab by populating the filters and then initializing the grid containing the associated assets
+     * @param associatedContentTab
+     * @param fragments
+     */
+    function renderAssociatedContentTab(associatedContentTab, fragments) {
+        populateFilters(associatedContentTab, fragments);
+        initializeGrid(associatedContentTab);
+    }
+
+    /**
+     * Renders / initialize the grid (CoralUI 2 specific). Without calling this function, the grid won't adapt to the available space.
+     * @param associatedContentTab
+     */
+    function initializeGrid(associatedContentTab) {
+        var gridContainer = $(associatedContentTab).find(".associatedassets-content-container.grid");
+        var cardView = CardView.get(gridContainer);
+
+        // Following is copied from setCardView
+        cardView.setDisplayMode(CardView.DISPLAY_GRID);
+        // adapt the grid layout
+        if (ns.device.isDesktop()) {
+            cardView.layout(GRID_LAYOUT_SETTINGS);
+        } else {
+            cardView.layout($.extend({}, GRID_LAYOUT_SETTINGS, {"colWidth": 200}));
+        }
+        // disable the link on cards label
+        gridContainer.find('a.label').on('click', function(event) {
+            event.preventDefault();
+        });
+
+        // Following is copied from setContentPanelHeight (allow scrolling)
+        var contentPanel = gridContainer.parent();
+        contentPanel.height(Math.round($(window).height() - contentPanel.offset().top));
+    }
+
+    /**
+     * Populates the filters using the fragments present on the page
+     */
+    function populateFilters(associatedContentTab, fragments) {
+        if (fragments.length > 0) {
+            populateFragmentSelector(associatedContentTab, fragments);
+            populateCollectionSelector(associatedContentTab);
+        }
+    }
+    /**
+     * Populates the fragment selector filter with on the passed fragments models
+     * @param {HTMLElement|jQuery} tabContent - The Associated Content tab html element
+     * @param {Fragment[]} [fragments] - All fragments on the page that have associated content
+     */
+    function populateFragmentSelector(tabContent, fragments) {
+        var fragmentSelector = $(tabContent).find(".cq-AssociatedAssets-fragmentSelect").get(0);
+        var allPaths = [];
+
+        if (fragmentSelector) {
+            fragmentSelector.items.clear();
+
+            fragments.forEach(function (fragment) {
+                fragmentSelector.items.add({
+                    content: { innerHTML: fragment.title },
+                    value: fragment.path
+                });
+
+                allPaths.push(fragment.path);
+            });
+        }
+
+        // Add default option for "all" fragments
+        fragmentSelector.items.add({
+            content: { innerHTML: I18n.get("All Fragments") },
+            value:  allPaths
+        }, /*insertBefore*/ fragmentSelector.items.first());
+
+        fragmentSelector.items.first().selected = true;
+    }
+
+    /**
+     * Populates the collection selector filter depending on the passed fragment (associated collection is derived from the fragment)
+     * @param {HTMLElement|jQuery} tabContent - The Associated Content tab html element
+     * @param {Fragment} [fragment] - The fragment entity object where we should get the associated content from. If omitted, the filter is simply reset
+     */
+    function populateCollectionSelector(tabContent, fragment) {
+        var collectionSelector = $(tabContent).find(".cq-AssociatedAssets-collectionSelect").get(0);
+
+        if (collectionSelector) {
+            collectionSelector.items.clear();
+
+            // Add default option for "all" collections
+            collectionSelector.items.add({
+                content: { innerHTML: I18n.get("All Collections") },
+                value:  "all"
+            });
+
+            // Add an option for each associated content
+            if (fragment && fragment.associatedContent) {
+                $(fragment.associatedContent).each(function () {
+                    collectionSelector.items.add({
+                        content: { innerHTML: this.title },
+                        value: this.path
+                    });
+                });
+            }
+            collectionSelector.items.first().selected = true;
+        }
+    }
+
+    /**
+     * Updates the status (enabled/disabled) of the collection selector, depending on the
+     * current status of the fragment selector.
+     */
+    function updateSelectorState(contentTab) {
+        var fragmentSelector = contentTab.find(".cq-AssociatedAssets-fragmentSelect").get(0);
+        var collectionSelector = contentTab.find(".cq-AssociatedAssets-collectionSelect").get(0);
+
+        var fragmentPath = fragmentSelector.value;
+        // enable filter only if there's only one (or none) fragments in the selector
+        collectionSelector.disabled = (fragmentPath.indexOf(",") !== -1);
+    }
+
+    /**
+     * Handle change event on the "fragment select" filter
+     * Updates the associated content view according to current filters
+     */
+    function handleFragmentChange(event) {
+        var associatedContentTab = getAssociatedContentTab(sidePanel);
+        var collectionSelector = associatedContentTab.find(".cq-AssociatedAssets-collectionSelect").get(0);
+        var fragmentSelector = event.target;
+
+        var fragmentPath = fragmentSelector.value;
+
+        var filters = {
+            fragments: [ { path: fragmentPath } ]
+        };
+
+        updateAssociatedContentTab(sidePanel, filters);
+
+        // In addition, enable collection filter only if is a single fragment is selected
+        if (fragmentPath.indexOf(",") === -1) {
+            collectionSelector.disabled = false;
+
+            var fragment = Fragments.getFragments().filter(function (frag) {
+                return frag.path === fragmentPath;
+            })[0];
+
+            populateCollectionSelector(associatedContentTab, fragment);
+
+        } else {
+            collectionSelector.disabled = true;
+            populateCollectionSelector(associatedContentTab);
+        }
+    }
+
+    /**
+     * Handle change event on the "collection select" filter
+     * Updates the associated content view according to current filters
+     */
+    function handleCollectionChange(event) {
+        var associatedContentTab = getAssociatedContentTab(sidePanel);
+        var fragmentSelector = associatedContentTab.find(".cq-AssociatedAssets-fragmentSelect").get(0);
+        var collectionSelector = event.target;
+
+        var fragmentPath = fragmentSelector.value;
+        var collectionPath = collectionSelector.value;
+
+        if (fragmentSelector && collectionSelector) {
+            var filters = {
+                fragments: [ { path: fragmentPath } ],
+                collection: collectionPath
+            };
+
+            updateAssociatedContentTab(associatedContentTab, filters);
+        }
+    }
+
+    /**
+     * Initialize the associated content with the existing fragments
+     *
+     * @param {boolean} addAssociatedContent - If missing, Should the associated content be added
+     */
+    function initializeFragments (addAssociatedContent) {
+        var fragments = ns.CFM.Fragments.getFragments({ withAssociatedContentOnly: true });
+        var associatedContentTab = getAssociatedContentTab(sidePanel);
+
+        if (fragments.length) {
+            if (associatedContentTab.length) {
+                populateFilters(associatedContentTab, fragments);
+                updateAssociatedContentTab(associatedContentTab, { fragments: fragments });
+                updateSelectorState(associatedContentTab);
+            } else if (addAssociatedContent === true) {
+                addAssociatedContentTab(sidePanel, fragments).then(function () {
+                    initializeFragments(false);
+                });
+            }
+        } else {
+            removeAssociatedContentTab(sidePanel);
+        }
+    }
+
+    /**
+     *
+     * Events
+     *
+     */
+
+    /**
+     * When a new set of fragments is available
+     */
+    channel.on("cq-cfm-fragments-loaded", function () {
+        initializeFragments(true);
+    });
+
+}(jQuery, Granite.author, jQuery(document), this));

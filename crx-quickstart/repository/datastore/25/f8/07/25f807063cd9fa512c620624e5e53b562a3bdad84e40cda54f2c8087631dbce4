@@ -1,0 +1,844 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+// ensure collab calendar package
+CQ.Ext.ns("CQ.mcm", "CQ.mcm.cal");
+
+/**
+ * Formats dates as strings and supports up to 9 of them (1-9). A pattern
+ * string is like in Date.format() but each* pattern char must be prefixed
+ * with the index of the date that should be used, starting at 1.
+ * For example: "1M 1j - 2j 1Y" which will result in "Dec 21 - 27 2009".
+ * 
+ * @param {String} pattern ExtJS Date pattern
+ * @param {Array} dates array of Date objects
+ * @return {String} formatted date string
+ */
+CQ.mcm.cal.multiDateFormat = function(pattern, dates) {
+    var result = "";
+    // if no index is given, default to first date in array
+    var index = 0;
+    for (var i=0; i < pattern.length; i++) {
+        var ch = pattern.charAt(i);
+        if (Date.formatCodes[ch]) {
+            result = result + dates[index].format(ch);
+            index = 0;
+        } else if (ch.match(/\d/)) {
+            // start at 1: 1 in pattern becomes 0 index
+            index = Number(ch) - 1;
+            if (index < 0) {
+                index = 0;
+            }
+        } else {
+            result = result + ch;
+        }
+    }
+    return result;
+};
+
+CQ.mcm.cal.DATE_TIME_LOCALE = "locale";
+CQ.mcm.cal.DATE_LITTLE_ENDIAN = "littleEndian";
+CQ.mcm.cal.DATE_MIDDLE_ENDIAN = "middleEndian";
+CQ.mcm.cal.DATE_BIG_ENDIAN = "bigEndian";
+CQ.mcm.cal.TIME_12HCLOCK = "12hclock";
+CQ.mcm.cal.TIME_24HCLOCK = "24hclock";
+
+/**
+ * The <code>CQ.mcm.cal.Calendar</code> class provides Utility methods 
+ * for the calendar component.
+ * @class CQ.mcm.cal.Calendar
+ */
+CQ.mcm.cal.Calendar = function() {
+    
+    var selectedDate = new Date();
+    
+    var eventDialog = null;
+    var eventPopup = null;
+    
+    var colorTable = {};
+    
+    // TODO: maybe change locale, eg. page-dependent or explictly set in calendar component
+    // CQ.I18n.setLocale(locale);
+    // ... and reset later. But what about the ExtJs Date initialization - re-run ext-lang-cq.js? Has it been executed at this point already?
+    
+    var datePatterns = {
+        // taken from i18n dictionary depending on user's locale
+        "locale": {
+            "normal":   CQ.I18n.getMessage("m/d/Y",      null, "Date format for ExtJS, eg. '9/25/2009' (http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "short":    CQ.I18n.getMessage("M/j/y",      null, "Date format for ExtJS, short without leading zeros and two-digit year, eg. '9/25/09' (http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "shortDay": CQ.I18n.getMessage("D n/j",      null, "Short day-focused date format for ExtJS, eg. 'Wed 9/10' (http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "day":      CQ.I18n.getMessage("D M j",      null, "Day-focused date format for ExtJS, eg. 'Mon Mar 29' (http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "longDay":  CQ.I18n.getMessage("<b>l</b>, M <b>j</b>, Y",  null, "Long day-focused date format for ExtJS, eg. '<b>Wednesday</b>, Jan <b>4</b>, 2009', with html bold markup (http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "month":    CQ.I18n.getMessage("<b>F</b> Y",               null, "Month-focused date format for ExtJS, eg. '<b>October</b> 2009', with html bold markup (http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "twoDatesInSameMonth":       CQ.I18n.getMessage("1M <b>1j - 2j</b> 2Y",     null, "Two dates with same month for ExtJS, eg. 'Dec <b>21 - 27</b> 2009', with html bold markup (prefix pattern chars with '1' to use the first date and '2' to use the second date - http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "twoDatesInDifferentMonths": CQ.I18n.getMessage("<b>1M 1j - 2M 2j</b>, 2Y", null, "Two dates with different months for ExtJS, eg. '<b>Nov 30 - Dec 6</b>, 2009', with html bold markup (prefix pattern chars with '1' to use the first date and '2' to use the second date - http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "twoDatesInDifferentYears":  CQ.I18n.getMessage("<b>1M 1j, 1Y - 2M 2j, 2Y</b>", null, "Two dates with different years for ExtJS, eg. '<b>Dec 28, 2009 - Jan 3, 2010</b>', with html bold markup (prefix pattern chars with '1' to use the first date and '2' to use the second date - http://extjs.com/deploy/ext/docs/output/Date.html)")
+        },
+        // starting with the day
+        "littleEndian": {
+            "normal":   "d.m.Y",       // eg. 25.09.2009
+            "short":    "j.M.y",       // recurrencerulefield eg. 25.9.09
+            "shortDay": "D j.n",       // week view eg. Mi 25.9.
+            "day":      "D j. M.",     // agenda view eg. Mo 29. Mar. 
+            "longDay":  "<b>l</b>, <b>j.</b> M., Y", // day lens eg. Dienstag, 4. Jan., 2009
+            "month":    "<b>F</b> Y",                // month lens eg. October 2009
+            "twoDatesInSameMonth":       "<b>1j. - 2j.</b> 2M. 2Y",       // eg. 21. - 27. Dez. 2009
+            "twoDatesInDifferentMonths": "<b>1j. 1M. - 2j. 2M.</b>, 2Y",  // eg. 30. Nov. - 6. Dez., 2009
+            "twoDatesInDifferentYears":  "<b>1j. 1M. 1Y - 2j. 2M. 2Y</b>" // eg. 28. Dez. 2009 - 3. Jan. 2010
+        },
+        // starting with the month
+        "middleEndian": {
+            "normal":   "m/d/Y",     // eg. 09/25/2009
+            "short":    "M/j/y",     // eg. 9/25/09
+            "shortDay": "D n/j",     // eg. Wed 9/25
+            "day":      "D M j",     // eg. Mon Mar 29
+            "longDay":  "<b>l</b>, M <b>j</b>, Y", // eg. Wednesday, Jan 4, 2009
+            "month":    "<b>F</b> Y",              // eg. October 2009
+            "twoDatesInSameMonth":       "1M <b>1j - 2j</b> 2Y",        // eg. Dec 21 - 27 2009
+            "twoDatesInDifferentMonths": "1M <b>1j - 2M 2j</b>, 2Y",    // eg. Nov 30 - Dec 6, 2009
+            "twoDatesInDifferentYears":  "<b>1M 1j, 1Y - 2M 2j, 2Y</b>" // eg. Dec 28, 2009 - Jan 3, 2010
+        },
+        // starting with the year
+        "bigEndian": {
+            "normal":   "Y-m-d",       // eg. 2009-09-25
+            "short":    "y-M-j",       // eg. 09-9-25
+            "shortDay": "D n.j",       // eg. Mi 9.25.
+            "day":      "D j. M.",     // eg. Mo 29. Mar. 
+            "longDay":  "<b>l</b>, <b>j.</b> M., Y", // eg. Dienstag, 4. Jan., 2009
+            "month":    "<b>F</b> Y" ,               // eg. October 2009
+            "twoDatesInSameMonth":       "<b>1j. - 2j.</b> 2M. 2Y",       // eg. 21. - 27. Dez. 2009
+            "twoDatesInDifferentMonths": "<b>1j. 1M. - 2j. 2M.</b>, 2Y",  // eg. 30. Nov. - 6. Dez., 2009
+            "twoDatesInDifferentYears":  "<b>1j. 1M. 1Y - 2j. 2M. 2Y</b>" // eg. 28. Dez. 2009 - 3. Jan. 2010
+        }
+    };
+    
+    var timePatterns = {
+        // taken from i18n dictionary depending on user's locale
+        "locale": {
+            "normal": CQ.I18n.getMessage("g:i a", null, "Time format for ExtJS, eg. '8:23 pm' or '08:23' (http://extjs.com/deploy/ext/docs/output/Date.html)"),
+            "short":  CQ.I18n.getMessage("ga",    null, "Short time format for ExtJS, eg. '12pm' or '12:00' (http://extjs.com/deploy/ext/docs/output/Date.html)")
+        },
+        // 12-hour clock based
+        "12hclock": {
+            "normal": "g:i a", // eg. 8:23 pm
+            "short":  "ga"     // eg. 12pm
+        },
+        // 24-hour clock based
+        "24hclock": {
+            "normal": "H:i", // eg. 08:23
+            "short":  "G:i"  // eg. 8:23
+        }
+    };
+    
+    var START_OF_WEEK_LOCALE = Number(CQ.I18n.getMessage("0", null, "Start day for week view in calendar (0=Sunday, 1=Monday, etc.)"));
+    if (START_OF_WEEK_LOCALE < 0 || START_OF_WEEK_LOCALE > 6) {
+        START_OF_WEEK_LOCALE = 0;
+    }
+    
+    var config = {
+        // the outermost DOM element of the calendar component
+        element: null,
+        
+        // Current timezone of the user.
+        timeZone: "Etc/UTC",
+        
+        // Base path of the current calendar
+        defaultCalendarPath: null,
+        
+        eventDisplay: "formPopup",
+        allowEditing: "permissionSensitive",
+        
+        // Path of the form page for creating/editing/viewing events
+        eventForm: null,
+        eventViewForm: null,
+
+        eventEditPattern: null,
+        eventViewPattern: null,
+        
+        // xtypes for dialog / popup widgets
+        eventDialogXType: "calendareventdialog",
+        eventPopupXType: "calendareventpopup",
+        
+        // calendar lens height
+        height: 0,
+        
+        // Width and height for event dialog (<= 0 for defaults)
+        eventDialogWidth: 0,
+        eventDialogHeight: 0,
+        eventPopupWidth: 0,
+        eventPopupHeight: 0,
+        
+        // Date format patterns
+        dateFormat: CQ.mcm.cal.DATE_TIME_LOCALE,
+        timeFormat: CQ.mcm.cal.DATE_TIME_LOCALE,
+
+        startOfWeek: START_OF_WEEK_LOCALE,
+        
+        // calendar colors
+        colors: ["40864B"]    
+    };
+    
+    function getStartOfWeekIndex(day) {
+        var weekStartMapping = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'locale'];
+        
+        var index = -1;
+        if (typeof(day) === "string") {
+            index = weekStartMapping.indexOf(day);
+        } else if (typeof(day) === "number") {
+            index = day; 
+        }
+        if (index < 0 || index > 7) {
+           return START_OF_WEEK_LOCALE;
+        }
+        
+        if (index == 7) {
+            return START_OF_WEEK_LOCALE;
+        } else {
+            return index;
+        }
+    }
+    
+    function initQueryBuilder(qb, pathQueryGroup) {
+        qb.form.method = "POST";
+        
+        // unlimited results
+        qb.setHidden("p.limit", "0");
+
+        // give us raw node json
+        qb.addHidden("p.hits", "full");
+        // include one level of child nodes (for "recurrence")
+        qb.addHidden("p.nodedepth", "1");
+        // include ACLs for current user
+        qb.addHidden("p.acls", "true");
+        
+        // we always want calendar events
+        qb.addHidden("type", "cq:CalendarEvent");
+        
+        for (var key in pathQueryGroup) {
+            if (pathQueryGroup.hasOwnProperty(key)) {
+                qb.addHidden("group." + key, pathQueryGroup[key]);
+            }
+        }
+
+        // event date range - actual values are set by lenses
+        qb.addHidden("event.from", "");
+        qb.addHidden("event.to", "");
+
+        qb.addHidden("1_orderby", "event");
+        qb.addHidden("2_orderby", "path");
+    }
+    
+    return {
+        init: function(cfg) {
+            config = CQ.Util.applyDefaults(cfg, config);
+            
+            // backwards compat
+            if (config.eventFormPath) {
+                config.eventForm = config.eventFormPath;
+            }
+            
+            config.startOfWeek = getStartOfWeekIndex(config.startOfWeek);
+            
+            initQueryBuilder(config.queryBuilder, config.pathQueryGroup);
+            
+            var cal = this;
+            
+            // when another lens was selected, it must be updated
+            CQ.search.Util.getLensContainer().on("switch", function(lensContainer, oldLens, newLens) {
+                if (newLens && oldLens != newLens && newLens.setDate) {
+                    cal.setDate(selectedDate, true);
+                }
+            });
+            
+            var colorIndex = 0;
+            var calendars = [config.defaultCalendarPath].concat(config.subscriptions);
+            for (var i = 0; i < calendars.length; i++) {
+                colorTable[calendars[i]] = config.colors[colorIndex];
+                
+                colorIndex++;
+                if (colorIndex >= config.colors.length) {
+                    colorIndex = 0;
+                }
+            }
+        },
+        
+        //-----------------------------------------< change date boundaries for query >
+        
+        setLowerDateBound: function(date) {
+            // date format in ISO-8601 (but shortened)
+            config.queryBuilder.setHidden("event.from", date.format("Y-m-d"));
+        },
+        
+        setUpperDateBound: function(date) {
+            // date format in ISO-8601 (but shortened)
+            config.queryBuilder.setHidden("event.to", date.format("Y-m-d"));
+        },
+        
+        // -----------------------------------------< actions >
+        
+        setDateDisplay: function(html) {
+            if (config.setDateDisplay) {
+                config.setDateDisplay(html);
+            }
+        },
+        
+        /**
+         * Moves the view to the given date. This depends on the current calendar lens, which
+         * will be given the passed date in {@link CQ.mcm.cal.CalendarLens#setDate}, mapping
+         * that date to its own display unit (eg. months) and returning the necessary start
+         * and end dates for the event query via {@link CQ.mcm.cal.CalendarLens#getStartDate}
+         * and {@link CQ.mcm.cal.CalendarLens#getEndDate}.
+         *
+         * <p>The lens will indicate with the boolean returned by
+         * {@link CQ.mcm.cal.CalendarLens#setDate} if the date is already contained in the
+         * view and if it is not necessary to rerun the event query. To force an update, pass
+         * <code>forceUpdate=true</code>.
+         *
+         * <p>This will also trigger an update of the date displayed in the calendar component
+         * header, using the text provided by the calendar lens in
+         * {@link CQ.mcm.cal.CalendarLens#getDateDisplayText}.
+         *
+         * @param {Date} date  the date to move the view to
+         * @param {Boolean} forceUpdate  set to true to force an refresh of the current view (optional)
+         */
+        setDate: function(date, forceUpdate) {
+            selectedDate = date;
+            
+            var lens = CQ.search.Util.getLensContainer().getCurrentLens();
+            if (lens && lens.setDate) {
+                
+                var update = lens.setDate(selectedDate);
+                
+                if (lens.getDateDisplayText) {
+                    CQ.mcm.cal.Calendar.setDateDisplay( lens.getDateDisplayText() );
+                }
+                
+                if (lens.getStartDate && lens.getEndDate) {
+                    CQ.mcm.cal.Calendar.setLowerDateBound( lens.getStartDate() );
+                    CQ.mcm.cal.Calendar.setUpperDateBound( lens.getEndDate() );
+                }
+                
+                if (update || forceUpdate) {
+                    CQ.mcm.cal.Calendar.update();
+                }
+            }
+        },
+        
+        /**
+         * Moves the view to the previous unit of time, eg. the previous month. This depends
+         * on the current calendar lens and uses {@link CQ.mcm.cal.CalendarLens#prev}
+         * for that.
+         */
+        prev: function() {
+            var lens = CQ.search.Util.getLensContainer().getCurrentLens();
+            if (lens && lens.prev) {
+                CQ.mcm.cal.Calendar.setDate( lens.prev() );
+            }
+        },
+        
+        /**
+         * Moves the view to the next unit of time, eg. the next month. This depends
+         * on the current calendar lens and uses {@link CQ.mcm.cal.CalendarLens#next}
+         * for that.
+         */
+        next: function() {
+            var lens = CQ.search.Util.getLensContainer().getCurrentLens();
+            if (lens && lens.next) {
+                CQ.mcm.cal.Calendar.setDate( lens.next() );
+            }
+        },
+        
+        /**
+         * Focuses the current lens on today. This will set the calendar date
+         * to "now" using {@link #setDate}, which might rerun the query for events.
+         */
+        today: function() {
+            CQ.mcm.cal.Calendar.setDate( new Date() );
+        },
+        
+        /**
+         * Refreshes the current lens view by re-running the querybuilder query for events.
+         */
+        update: function() {
+            // the currently active lens will automatically be called with the result
+            config.queryBuilder.submit();
+        },
+        
+        /**
+         * Runs a full text search of events. Pass <code>null</code> to reset the search
+         * and show all events for the current view.
+         *
+         * @param {String} searchTerm  full text search term; use <code>null</code> to clear the query
+         */
+        search: function(searchTerm) {
+            config.queryBuilder.setHidden("fulltext", searchTerm);
+            this.update();
+        },
+        
+        /**
+         * Returns the height for lenses to use in the calendar component.
+         *
+         * @return {Number} the lens height in pixels
+         */
+        getLensHeight: function() {
+            return config.height;
+        },
+        
+        /**
+         * Returns the color to use for an event. This color will be the same
+         * for all events from the same calendar/subscription.
+         * 
+         * @return {String} a hex color value in the form of "FF0000"
+         */
+        getColorFor: function(event) {
+            var path = event.get("recurrenceOf") || event.get("path");
+            
+            var match = "";
+            // find longest matching path
+            for (var p in colorTable) {
+                // event path starts with calendar path and match is longer 
+                if (path.indexOf(p) == 0 && p.length > match.length) {
+                    match = p;
+                }
+            }
+            
+            return match ? colorTable[match] : "40864B";
+        },
+        
+        // -----------------------------------------< time zone >
+        
+        /**
+         * Returns the configured calendar time zone. This is used for displaying event start and
+         * end times and also as the default time zone when creating new events.
+         *
+         * @return {String} timezone ID (olson based, see {@link Date#getTimezone})
+         */
+        getTimeZone: function() {
+            return config.timeZone;
+        },
+        
+        // -----------------------------------------< date formatting >
+        
+        /**
+         * Returns a named date pattern to be used in ExtJs' {@link Date#format}. The actual
+         * variant depends on the localization setting. Some patterns are:
+         * <ul>
+         * <li>normal - eg. 25.09.2009</li>
+         * <li>short - eg. 25.9.09</li>
+         * <li>shortDay - eg. Mi 25.9.</li>
+         * <li>day - eg. Mo 29. Mar.</li>
+         * <li>longDay - eg. Dienstag, 4. Jan., 2009</li>
+         * <li>month - eg. October 2009</li>
+         * <li>twoDatesInSameMonth - eg. 21. - 27. Dez. 2009</li>
+         * <li>twoDatesInDifferentMonths - eg. 30. Nov. - 6. Dez., 2009</li>
+         * <li>twoDatesInDifferentYears - eg. 28. Dez. 2009 - 3. Jan. 2010</li>
+         * </ul>
+         * @param {String} name  name of the pattern
+         * @return {CQ.Ext.data.Record} the event record
+         */
+        getDatePattern: function(name) {
+            return datePatterns[config.dateFormat][name];
+        },
+        
+        /**
+         * Returns a named time pattern to be used in ExtJs' {@link Date#format}. The actual
+         * variant depends on the localization setting. Some patterns are:
+         * <ul>
+         * <li>normal - eg. 8:23 pm</li>
+         * <li>short - eg. 12pm</li>
+         * </ul>
+         * @param {String} name  name of the pattern
+         * @return {CQ.Ext.data.Record} the event record
+         */
+        getTimePattern: function(name) {
+            return timePatterns[config.timeFormat][name];
+        },
+        
+        /**
+         * Returns the configured/locale-dependent start day of the week, eg.
+         * 0 for Sunday, 1 for Monday, etc.
+         *
+         * @return {Number} a number from 0 (Sunday) to 6 (Saturday)
+         */
+        getStartOfWeek: function() {
+            return config.startOfWeek;
+        },
+        
+        // -----------------------------------------< create/edit/delete event (dialogs) >
+        
+        /**
+         * Returns whether calendar editing is disabled through the configuration etc.
+         * (i.e. permission independent).
+         *
+         * @return {Boolean} if calendar editing is generally disabled
+         */
+        isEditingDisabled: function() {
+            if (config.allowEditing === "never") {
+                return true;
+                
+            } else if (config.allowEditing === "onlyOnAuthor") {
+                // TODO: CQ.WCM.isPublish() helper, see bug 30061
+                // no sidekick present == on publish
+                if (!Boolean(CQ.WCM.getSidekick())) {
+                    return true;
+                }
+            }
+            
+            return false;
+        },
+        
+        /**
+         * Returns whether the current user or the configuration and context allows events
+         * to be created. Returns false if no create event option should be available.
+         *
+         * @param {String} calendarPath  path of the calendar to create the event in; defaults to the default calendar
+         * @return {Boolean} if an event can be created
+         */
+        canCreateEvent: function(calendarPath) {
+            if (this.isEditingDisabled()) {
+                return false;
+            }
+            return CQ.User.getCurrentUser().hasPermissionOn("create", calendarPath || config.defaultCalendarPath);
+        },
+        
+        /**
+         * Returns whether the current user or the configuration and context allows the event
+         * to be modified. Returns false if events are to be displayed only.
+         *
+         * @param {CQ.Ext.data.Record} event  event record with the fields as defined by {@link #getFields}()
+         * @return {Boolean} if the event can be modified
+         */
+        canModifyEvent: function(event) {
+            if (this.isEditingDisabled()) {
+                return false;
+            }
+            // look for existing permissions from the query result
+            var p = event && event.get("jcr:permissions");
+            if (p) {
+                return p.modify;
+            }
+            // fallback: explicit path lookup
+            return CQ.User.getCurrentUser().hasPermissionOn("modify", event ? event.get("path") : config.defaultCalendarPath);
+        },
+        
+        /**
+         * Returns whether the current user or the configuration and context allows the event
+         * to be deleted. Returns false if events are to be displayed only.
+         *
+         * @param {CQ.Ext.data.Record} event  event record with the fields as defined by {@link #getFields}()
+         * @return {Boolean} if the event can be deleted
+         */
+        canDeleteEvent: function(event) {
+            if (this.isEditingDisabled()) {
+                return false;
+            }
+            // look for existing permissions from the query result
+            var p = event && event.get("jcr:permissions");
+            if (p) {
+                return p["delete"];
+            }
+            // fallback: explicit path lookup
+            return CQ.User.getCurrentUser().hasPermissionOn("delete", event ? event.get("path") : config.defaultCalendarPath);
+        },
+        
+        /**
+         * Opens the event form to create an event. Must only be called if {@link #canCreateEvent}
+         * returns true.
+         *
+         * @param {Date} date  default start date for new event; optional, defaults to the current
+         *                     time, rounded using {@link #roundedTime}
+         * @param {Boolean} isDate  if this should be an all-day event; optional, defaults to false
+         * @param {Date} endDate  default end date for new event; optional, defaults to the start date
+         *                        plus one hour
+         * @param {HTMLElement} el  the element to align to (eg. the event in the lens) (optional)
+         * @param {String} align  how to align the window to the element; see {@link CQ.Ext.Element#alignTo} (optional)
+         */
+        createEvent: function(date, isDate, endDate, el, align) {
+            if (!date) {
+                date = new Date().replaceTimezone(config.timeZone);
+                var time = CQ.mcm.cal.Calendar.roundedTime();
+                date.clearTime();
+                date.setHours(time.hour, time.min);
+            }
+            
+            var event = this.createEventRecord();
+            
+            // sling-style URL to create new content (needs to end with "/")
+            event.set("path", config.defaultCalendarPath + "/" + date.format("Y/m/d") + "/");
+            event.set("start", date);
+            event.set("end", endDate || date.add(Date.HOUR, 1));
+            // marker for editEvent method
+            event.isNew = true;
+            event.isDate = isDate;
+            
+            this.openEventEditDialog(event, el, align);
+        },
+        
+        /**
+         * Returns a link to be used as href for an event to show (instead of editing).
+         * If this method returns null, which is the case when {@link #canModifyEvent} returns
+         * false, {@link #openEvent} has to be called instead.
+         * A client is free to always call {@link #openEvent} right away, it will open the
+         * link in case of event display only.
+         *
+         * @param {CQ.Ext.data.Record} event event record with the fields as defined by {@link #getFields}()
+         * @return {String} an externalized html URL or <code>null</code>
+         */
+        getEventLink: function(event) {
+            if (this.canModifyEvent(event)) {
+                return null;
+            }
+            
+            if (config.eventDisplay === "eventUrlLink") {
+                if (event.get("url")) {
+                    return CQ.HTTP.externalize(event.get("url") + ".html");
+                }
+                return CQ.HTTP.externalize(CQ.mcm.cal.Calendar.formatEventURL(event, config.eventViewPattern));
+                
+            } else if (config.eventDisplay === "patternLink") {
+                return CQ.HTTP.externalize(CQ.mcm.cal.Calendar.formatEventURL(event, config.eventViewPattern));
+            }
+             
+            // formPopup or patternPopup => no view link, open event for view in popup
+            return null;
+        },
+        
+        /**
+         * Opens an event. See {@link #openEvent}.
+         *
+         * @deprecated since 5.4, use {@link #openEvent} instead
+         * @param {CQ.Ext.data.Record} event event record with the fields as defined by {@link #getFields}()
+         */
+        editEvent: function(event) {
+            this.openEvent(event);
+        },
+        
+        /**
+         * Opens an event. This depends on the configuration and/or the access rights of
+         * the user, and might open the event in a custom rendering in a new window, open
+         * the page assigned with the event or open a dialog to edit the event.
+         *
+         * @param {CQ.Ext.data.Record} event event record with the fields as defined by {@link #getFields}()
+         * @param {HTMLElement} el  the element to align to (eg. the event in the lens) (optional)
+         * @param {String} align  how to align the window to the element; see {@link CQ.Ext.Element#alignTo} (optional)
+         */
+        openEvent: function(event, el, align) {
+            var link = this.getEventLink(event);
+            if (link) {
+                CQ.shared.Util.open(link);
+            } else {
+                if (this.canModifyEvent(event)) {
+                    // open dialog for editing
+                    this.openEventEditDialog(event, el, align);
+                } else {
+                    // open popup for view
+                    this.openEventViewPopup(event, el, align);
+                }
+            }
+        },
+        
+        /**
+         * Opens an event popup with the configured event form or pattern to view it.
+         *
+         * <p>Uses an widget defined by the config "eventPopupXType" (defaults to
+         * {@link CQ.mcm.cal.EventPopup}), which must have a single method
+         * <code>open</code> accepting these parameters: an event record ({@link CQ.Ext.data.Record}),
+         * the config object from this calendar and optionally the element that displays
+         * the event in the current lens.
+         *
+         * @private
+         * @param {CQ.Ext.data.Record} event event record with the fields as defined by {@link #getFields}()
+         * @param {HTMLElement} el  the element to align to (eg. the event in the lens) (optional)
+         * @param {String} align  how to align the window to the element; see {@link CQ.Ext.Element#alignTo} (optional)
+         */
+        openEventViewPopup: function(event, el, align) {
+            if (!eventPopup) {
+                eventPopup = CQ.Ext.ComponentMgr.create({
+                    xtype: config.eventPopupXType || "calendareventpopup"
+                });
+            }
+            
+            eventPopup.open(event, config, el, align);
+        },
+        
+        /**
+         * Opens an event dialog with the configured event form to edit or create it.
+         * The create event case is determined by <code>event.isNew == true </code> and
+         * the path (<code>event.get("path")</code>) will end with a slash "/". Start
+         * and end date will be set (<code>event.get("start"), event.get("end")</code>),
+         * as well as <code>event.isDate</code> to indicate if it is an all-day event.
+         *
+         * <p>Uses an widget defined by the config "eventDialogXType" (defaults to
+         * {@link CQ.mcm.cal.EventDialog}), which must have a single method
+         * <code>open</code> accepting two parameters: an event record ({@link CQ.Ext.data.Record}),
+         * the config object from this calendar and optionally the element that displays
+         * the event in the current lens.
+         *
+         * @private
+         * @param {CQ.Ext.data.Record} event event record with the fields as defined by {@link #getFields}()
+         * @param {HTMLElement} el  the element to align to (eg. the event in the lens) (optional)
+         * @param {String} align  how to align the window to the element; see {@link CQ.Ext.Element#alignTo} (optional)
+         */
+        openEventEditDialog: function(event, el, align) {
+            if (!eventDialog) {
+                eventDialog = CQ.Ext.ComponentMgr.create({
+                    xtype: config.eventDialogXType || "calendareventdialog"
+                });
+            }
+        
+            eventDialog.open(event, config, el, align);
+        },
+        
+        /**
+         * Deletes an existing event given by its path.
+         * @param {String} path  the path of the event to delete
+         * @param {Boolean} onlyThis  for recurrences: true if only the selected event occurrence
+         *                            should be deleted, false if the entire series should be removed
+         */
+        deleteEvent: function(path, onlyThis) {
+            var url = path;
+            url = CQ.HTTP.addParameter(url,
+                    CQ.Sling.STATUS, CQ.Sling.STATUS_BROWSER);
+            if (onlyThis) {
+                url = CQ.HTTP.addParameter(url, CQ.mcm.cal.Calendar.DELETE_FROM_RECURRENCE_PARAM, "");
+            } else {
+                url = CQ.HTTP.addParameter(url,
+                        CQ.Sling.OPERATION, CQ.Sling.OPERATION_DELETE);
+            }
+            
+            var response = CQ.HTTP.post(url);
+            
+            if (CQ.HTTP.isOk(response)) {
+                // reload lenses
+                CQ.mcm.cal.Calendar.update();
+            } else {
+                // TODO: handle error
+            }
+        },
+        
+        // -----------------------------------------< event store >
+        
+        /**
+         * Creates an {@link CQ.Ext.data.Record} for events, using the fields provided by
+         * {@link #getFields}.
+         * @param {Object} data  the raw json object with the event node data from the server
+         * @return {CQ.Ext.data.Record} the event record
+         */
+        createEventRecord: function(data) {
+            if (!this.eventRecordPrototype) {
+                this.eventRecordPrototype = CQ.Ext.data.Record.create(this.getFields());
+            }
+            return new this.eventRecordPrototype(data || {});
+        },
+        
+        /**
+         * Returns an array of field definitions for an {@link CQ.Ext.data.Record} used for events.
+         * This is used by the {@link #createEventRecord} method.
+         * @return {Array} array of ext field definitions
+         */
+        getFields: function() {
+            function timeZoneConvert(value, rec) {
+                return Date.parseWithTimezone(value, rec.timeZone, rec.isDate, config.timeZone);
+            };
+            
+            return [
+                // we cannot use jcr:title/jcr:path directly as the xtemplate used by
+                // the DataViewLens cannot handle field names with ':' inside
+                { "name": "path", "mapping": "jcr:path" },
+                { "name": "jcr:permissions" },
+                
+                { "name": "title", "mapping": "jcr:title" },
+                
+                // provide start/end in the current user's timezone
+                { "name": "start", "type": "date", "convert": timeZoneConvert },
+                { "name": "end",   "type": "date", "convert": timeZoneConvert },
+                
+                { "name": "originalStart", "mapping": "start", "type": "date" },
+                { "name": "originalEnd",   "mapping": "end",   "type": "date" },
+                { "name": "isDate", "type": "boolean" },
+                { "name": "timeZone" },
+                
+                
+                { "name": "uid" },
+                { "name": "recurrenceOf" },
+                { "name": "recurrence" },
+                { "name": "url" }
+            ];
+        },
+        
+        // -----------------------------------------< static >
+        
+        TAKE_OUT_OF_RECURRENCE_PARAM: ":takeOutOfRecurrence",
+        DELETE_FROM_RECURRENCE_PARAM: ":deleteFromRecurrence",
+    
+        /**
+         * Returns hours and minutes "rounded" towards full and half hours. For example,
+         * "14:42" would be rounded to "15:00" and "7:24" woulde become "7:30". At the
+         * beginning and the end of the day rounding will stop at "0:00" and "23:30",
+         * respectively. If no arguments are given, the current local time will be used.
+         *
+         * @param {Number} hour  hours to round (optional)
+         * @param {Number} min   minutes to round (optional)
+         * @return {Object} an object with the fields "hour" and "min"
+         */
+        roundedTime: function(hour, min) {
+            if (arguments.length == 0) {
+                var now = new Date();
+                hour = now.getHours();
+                min = now.getMinutes();
+            }
+
+            // sanity check for wrong input
+            if (hour > 23) {
+                hour = 23;
+            } else if (hour < 0) {
+                hour = 0;
+            }
+            
+            // next upcoming half or full hour
+            // (except it is already round)
+            if (min <= 0) {
+                // sanity check for wrong input
+                min = 0;
+            } else if (min > 30) {
+                // 14:42 => 15:00
+                hour += 1;
+                min = 0;
+                // avoid skipping to the next day
+                // 23:45 => 23:30
+                if (hour >= 23) {
+                    hour = 23;
+                    min = 30;
+                }
+            } else if (min < 30) {
+                // 14:17 => 14:30
+                min = 30;
+            }
+
+            return { hour: hour, min: min };
+        },
+
+        formatEventURL: function(event, pattern) {
+            if (!pattern) {
+                return "#";
+            }
+            return new CQ.Ext.Template(pattern).applyTemplate({
+               event: event.get("path"),
+               url: event.get("url"),
+               page: CQ.WCM.getPagePath(),
+               home: CQ.User.getCurrentUser().getHome()
+            });
+        }
+        
+    };
+    
+}();

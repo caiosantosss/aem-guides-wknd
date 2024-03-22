@@ -1,0 +1,584 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.security.SecurityGridPanel
+ * @extends CQ.Ext.grid.GridPanel
+ * @since 5.4
+ * The Security Grid Panel provides a grid panel used in {@link CQ.security.SecurityAdmin SecurityAdmin}.
+ * @constructor
+ * Creates a new Security Grid Panel.
+ * @param {Object} config The config object
+ */
+CQ.security.SecurityGridPanel = CQ.Ext.extend(CQ.Ext.grid.GridPanel, {
+
+    /**
+     * @cfg {Object} actions
+     * Object containing the config options for actions and menu items.
+     * Must be valid {@link CQ.Ext.Action} configurations.
+     */
+
+    /**
+     * @cfg {Object} pagingToolbarCfg
+     * {@link CQ.Ext.PagingToolbar PagingToolbar} configuration
+     */
+
+    /**
+     * @cfg {Object} queryCfg
+     * {@link CQ.security.search.Query} configuration
+     */
+    queryCfg: {},
+
+    constructor: function(config) {
+
+        config = config || {};
+        var grid = this;
+        this.id = config.id;
+
+        this.query = new CQ.security.search.Query(CQ.Util.applyDefaults(config.queryCfg, {
+            "max": CQ.security.themes.SecurityGridPanel.PAGE_SIZE,
+            "totalMax": CQ.security.SecurityGridPanel.GRID_MEMBERSLIMIT
+        }));
+
+        // ---------------------------------------------------------------------
+        // actions (for top toolbar)
+        // ---------------------------------------------------------------------
+        this.actions = [];
+        this.checkedActions = [];
+        var gridContextActions = [];
+
+
+
+        // add global actions
+        this.actions.push({
+            "id": this.id + "-refresh",
+            "iconCls": "cq-siteadmin-refresh",
+            "handler": function() {grid.store.reload();},
+            "tooltip": {
+                "text": "Refresh",
+                "autoHide": true
+            }
+        });
+
+        // add custom actions
+        this.actions.push("-");
+        this.actions = this.actions.concat(
+                this.formatActions(config.actions, gridContextActions));
+
+        this.actions.push("->");
+
+        if (config.searchField) {
+            var searchCfg = CQ.Util.applyDefaults(config.searchField, {
+                "xtype": "trigger",
+                "triggerClass": "x-form-search-trigger " + this.id + "-search-trigger",
+                "enableKeyEvents": true,
+                "width": 140,
+                "search": function(grid) {
+                    grid.query.term = this.getValue();
+                    grid.getStore().load();
+                },
+                "onTriggerClick": function() {
+                    this.search(grid);
+                },
+                "listeners": {
+                    "specialkey": function(f,e) {
+                        if (e.getKey() == e.ENTER) this.search(grid);
+                    }
+                }
+            });
+            this.searchField = new CQ.Util.build(searchCfg);
+            // wrapping panel required for layout reasons
+            this.actions.push(new CQ.Ext.Panel({
+                "border": false,
+                "width": searchCfg.width,
+                "items": this.searchField
+            }));
+        }
+
+        if (config.helpButton) {
+            var helpConfig = CQ.wcm.HelpBrowser.createHelpButton();
+            helpConfig.id = this.id + "-help";
+            this.actions.push(helpConfig);
+        }
+
+
+        // ---------------------------------------------------------------------
+        // paging toolbar (for bottom toolbar)
+        // ---------------------------------------------------------------------
+        var ptCfg = CQ.Util.applyDefaults(config.pagingToolbarCfg, {
+            "xtype": "paging",
+            "hidden": true,
+            "pageSize": this.query.max,
+            "store": null,
+            "displayInfo": true,
+            "displayMsg": CQ.I18n.getMessage("{2} results", null, "paging display: {2} is the total, e.g. 29 results"),
+            "maxMsg": CQ.I18n.getMessage("Thousands of Results"), // additional cfg (when results exceed max)
+            "emptyMsg": "",
+            "beforePageText": CQ.I18n.getMessage("Page", null, "paging display: sample: Page 2 of 5"),
+            "afterPageText": CQ.I18n.getMessage("of {0}", null, "paging display: {0} is the total, e.g. Page 2 of 5"),
+            "firstText": CQ.I18n.getMessage("First Page"),
+            "prevText": CQ.I18n.getMessage("Previous Page"),
+            "nextText": CQ.I18n.getMessage("Next Page"),
+            "lastText": CQ.I18n.getMessage("Last Page"),
+            "refreshText": CQ.I18n.getMessage("Refresh")
+        });
+        ptCfg.originalMsg = ptCfg.displayMsg;
+
+        this.pagingToolbar = CQ.Util.build(ptCfg, true);
+
+        if (!config.storeReaderFields) config.storeReaderFields = [];
+        config.storeReaderFields.push("home", "id"); // force to request props "home" and "id"
+
+        var sModel = new CQ.Ext.grid.CheckboxSelectionModel();
+        config = CQ.Util.applyDefaults(config, {
+            "autoScroll": true,
+            "flex": 1,
+            "border": false,
+            "cls": "cq-security-grid",
+            "storeProxyUrl": "/libs/cq/security/content/authorizableSearch.json",
+            "storeReaderTotalProperty": "results",
+            "storeReaderRoot": "authorizables",
+            "storeReaderId": "home",
+            "storeBaseParams": {
+				"_charset_":"utf-8",
+                "props": config.storeReaderFields.join(",")
+                // Removing hardcoded limit
+                //"ml": 2000 // membersLimit
+            },
+            "columns": [],
+            "stateful": true,
+            "stripeRows": true,
+            "viewConfig": new CQ.Ext.grid.GridView({
+                "forceFit":true
+            }),
+            "defaults": {
+                "sortable": true
+            },
+            "tbar": this.actions,
+            "bbar": this.pagingToolbar,
+            "selModel": sModel,
+            "listeners": {
+                "rowcontextmenu":function(grid, index, e) {
+                    if (e.altKey) return;
+
+                    var xy = e.getXY();
+                    e.stopEvent();
+
+                    var sm = grid.getSelectionModel();
+                    if (!sm.hasSelection()) {
+                        sm.selectRow(index);
+                    } else if (!sm.isSelected(index)) {
+                        sm.selectRow(index);
+                    }
+
+                    if (!grid.contextMenu && (gridContextActions.length > 0)) {
+                        grid.contextMenu = new CQ.Ext.menu.Menu({
+                            "items":gridContextActions,
+                            "listeners": {
+                                "beforeshow":function() {
+                                    // enable/disable menu items
+                                    grid.checkActions.call(grid);
+                                    if (!this.hasDefaultAction) {
+                                        this.items.find(
+                                            function(item) {
+                                                if (item.isDefaultAction === true) {
+                                                    item.addClass("x-menu-item-default");
+                                                    this.hasDefaultAction = true;
+                                                    return true;
+                                                } else {
+                                                    return false;
+                                                }
+                                            }
+                                        );
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    grid.contextMenu.showAt(xy);
+                }
+            }
+        });
+
+
+        // ---------------------------------------------------------------------
+        // columns
+        // ---------------------------------------------------------------------
+        var cols = [sModel];
+        for (var i = 0; i < config.columns.length; i++) {
+            var c = config.columns[i];
+            var pref = null;
+            if (typeof c == "string") {
+                pref = c;
+            }
+            else if (typeof c == "object") {
+                if (c.usePredefined) {
+                    pref = c.usePredefined;
+                }
+            }
+            if (pref && CQ.security.SecurityGridPanel.COLUMNS[pref]) {
+                var prefCfg = CQ.Util.copyObject(CQ.security.SecurityGridPanel.COLUMNS[pref]);
+                // overlay config options
+                for (var prop in c) {
+                    if (prop == "usePredefined") continue;
+                    prefCfg[prop] = c[prop];
+                }
+
+                // #33176 - MCM console vulnerable to XSS
+                CQ.shared.XSS.updatePropertyName(prefCfg, "dataIndex");
+
+                cols.push(prefCfg);
+            }
+            else {
+                cols.push(c);
+            }
+        }
+        config.columns = cols;
+
+
+        // ---------------------------------------------------------------------
+        // store
+        // ---------------------------------------------------------------------
+        if (!config.store) {
+            var storeCfg = {
+                "autoLoad": true,
+                "proxy": new CQ.Ext.data.HttpProxy({
+                    "api": {
+                        "read": {
+                            "url": config.storeProxyUrl,
+                            "method": "GET"
+                        }
+                    }
+                }),
+                "baseParams": config.storeBaseParams,
+                "reader": new CQ.Ext.data.JsonReader({
+                    "totalProperty": config.storeReaderTotalProperty,
+                    "root": config.storeReaderRoot,
+                    "id": config.storeReaderId,
+                    "fields": config.storeReaderFields
+                }),
+                "listeners": {
+                    "beforeload": function() {
+                        try {
+                            grid.mask();
+                        } catch (e) {}
+                    },
+                    "load": function() {
+                        grid.checkPagingToolbar(this.getTotalCount());
+                        try {
+                            grid.unmask();
+                        } catch (e) {}
+                    }
+                },
+                "remoteSort":true,
+                "paramNames": {
+                    "start": "offset",
+                    "limit": "max"
+                },
+                "load" : function(options) {
+                    // overwrite Store#load (sort params are part of the query param)
+                    options = options || {};
+                    this.storeOptions(options);
+                    // start CQ.security
+                    if(this.sortInfo && this.remoteSort){
+                        var c = grid.getColumnModel().getColumnsBy(function(cfg) {
+                            // find the column of the same data index as the sortInfo field
+                            return cfg.dataIndex == this.sortInfo.field;
+                        }, this);
+                        if (c && c[0]) grid.query.sortBy = c[0].sortProp || c[0].dataIndex;
+                        grid.query.sortDir = this.sortInfo.direction.toLowerCase();
+                    }
+                    options.params = options.params || {};
+                    options.params.query = grid.query.getString();
+                    options.params.max = grid.pagingToolbar.pageSize;
+
+                    // end of CQ
+                    try {
+                        return this.execute('read', null, options); // <-- null represents rs.  No rs for load actions.
+                    } catch(e) {
+                        this.handleException(e);
+                        return false;
+                    }
+                }
+            };
+            config.store = new CQ.Ext.data.Store(storeCfg);
+        }
+
+        CQ.security.SecurityGridPanel.superclass.constructor.call(this, config);
+    },
+
+    initComponent: function() {
+        CQ.security.SecurityGridPanel.superclass.initComponent.call(this);
+
+        var grid = this;
+        this.initState();
+        this.getSelectionModel().on("selectionchange",
+            function(sm) {
+                // enable/disable toolbar items
+                grid.checkActions();
+        });
+        this.pagingToolbar.bindStore(this.getStore());
+        this.pagingToolbar.moveFirst();
+    },
+
+    showPagingToolbar: function() {
+        if (this.pagingToolbar.hidden) {
+            this.pagingToolbar.show();
+            if (this.pagingToolbar.ownerCt) this.pagingToolbar.ownerCt.doLayout();
+        }
+    },
+
+    hidePagingToolbar: function() {
+        if (!this.pagingToolbar.hidden) {
+            this.pagingToolbar.hide();
+            if (this.pagingToolbar.ownerCt) this.pagingToolbar.ownerCt.doLayout();
+        }
+    },
+
+    checkPagingToolbar: function(total) {
+        if (total == this.query.totalMax) {
+            this.pagingToolbar.displayMsg = this.pagingToolbar.maxMsg;
+        }
+        else {
+            this.pagingToolbar.displayMsg = this.pagingToolbar.originalMsg;
+        }
+        if (total <= this.pagingToolbar.pageSize) {
+            this.hidePagingToolbar();
+        } else {
+            this.showPagingToolbar();
+        }
+    },
+
+    /**
+     * Masks the main panel for loading.
+     */
+    mask: function() {
+        CQ.x = this;
+        if (!this.loadMask) {
+            this.loadMask = new CQ.Ext.LoadMask(this.body, {
+                "msg": CQ.I18n.getMessage("Loading...")
+            });
+        }
+        this.loadMask.show();
+    },
+
+    /**
+     * Unmasks the main panel after loading.
+     */
+    unmask: function() {
+        if (!this.loadMask) return;
+        this.loadMask.hide();
+    }
+
+});
+
+CQ.Ext.reg("securitygrid", CQ.security.SecurityGridPanel);
+
+//overrides current CQ.security.SecurityGrid class with methods contained in CQ.wcm.AdminBase.
+CQ.Ext.override(CQ.security.SecurityGridPanel, CQ.wcm.AdminBase);
+
+CQ.security.SecurityGridPanel.GRID_MEMBERSLIMIT = 10000;
+
+CQ.security.SecurityGridPanel.createColumnLink = function(text, link, cls) {
+    if (!cls) cls = "cq-security-grid-link";
+    return '<span class="' + cls + '" onclick="' + link + '">' + text + "</span>";
+};
+
+CQ.security.SecurityGridPanel.COLUMNS = {
+    "id": {
+        // with link
+        "header": CQ.I18n.getMessage("ID"),
+        "id": "id",
+        "dataIndex": "id",
+        "sortable": true,
+        "sortProp": "@rep:principalName",
+        "width": 150,
+        "renderer": function(v, metaData, record) {
+            return CQ.security.SecurityGridPanel.createColumnLink(v, "CQ.security.SecurityAdmin.openUser('" + record.get("home") + "');");
+        }
+    },
+    "plainId": {
+        // without link
+        "header": CQ.I18n.getMessage("ID"),
+        "id": "plainId",
+        "dataIndex": "id",
+        "sortable": true,
+        "sortProp": "@rep:principalName",
+        "width": 150
+    },
+    "groupName": {
+        "header": CQ.I18n.getMessage("Name"),
+        "id": "name",
+        "dataIndex": "name",
+        "sortable": true,
+        "sortProp": "profile/@givenName",
+        "renderer": function(v, metaData, record) {
+            return CQ.security.SecurityGridPanel.createColumnLink(v, "CQ.security.SecurityAdmin.openGroup('" + record.get("home") + "');");
+        },
+        "width": 150
+    },
+    "name": {
+        "header": CQ.I18n.getMessage("Name"),
+        "id": "name",
+        "dataIndex": "name",
+        "sortable": true,
+        "sortProp": "profile/@givenName"
+    },
+    "membersTotal": {
+        "header": CQ.I18n.getMessage("Members"),
+        "id": "membersTotal",
+        "dataIndex": "membersTotal",
+        "sortable": false,
+        "width": 80,
+        "fixed": true,
+        "renderer": function(v, metaData, record, rIndex, cIndex, store) {
+            if (v >= CQ.security.SecurityGridPanel.GRID_MEMBERSLIMIT) {
+                return CQ.security.SecurityAdmin.formatMax(v);
+            }
+            else return v;
+        }
+    },
+    "membershipsTotal": {
+        "header": CQ.I18n.getMessage("Memberships"),
+        "id": "memberOfTotal",
+        "dataIndex": "memberOfTotal",
+        "sortable": false,
+        "width": 80,
+        "fixed": true,
+        "renderer": function(v, metaData, record, rIndex, cIndex, store) {
+            if (v >= CQ.security.SecurityGridPanel.GRID_MEMBERSLIMIT) {
+                return CQ.security.SecurityAdmin.formatMax(v);
+            }
+            else return v;
+        }
+    },
+    "familyName": {
+        "header": CQ.I18n.getMessage("Family Name"),
+        "id": "familyName",
+        "dataIndex": "familyName",
+        "sortable": true,
+        "sortProp": "profile/@familyName"
+    },
+    "givenName": {
+        "header": CQ.I18n.getMessage("Given Name"),
+        "id": "givenName",
+        "dataIndex": "givenName",
+        "sortable": true,
+        "sortProp": "profile/@givenName"
+    },
+    "email": {
+        "header": CQ.I18n.getMessage("Email"),
+        "id": "email",
+        "dataIndex": "email",
+        "sortable": true,
+        "sortProp": "profile/@email"
+//        "renderer": function(v, metaData, record) {
+//            return '<a class="cq-security-grid-link" href="mailto:' + v + '">' + v + "</a>";
+//        }
+    },
+    "aboutMe": {
+        "header": CQ.I18n.getMessage("Description"),
+        "id": "aboutMe",
+        "dataIndex": "aboutMe",
+        "sortable": true,
+        "sortProp": "profile/@aboutMe",
+        "width": 300
+    },
+    "picture": {
+        // use an undefined dataIndex in order to avoid unexpected behaviour
+        "dataIndex": "picturePath",
+        // "hidden" to hide the title in the header but have it in the columns menu ("hideable")
+        "header": "<span class=\"hidden\">" + CQ.I18n.getMessage("Picture") + "</span>",
+        "id": "picture",
+        "width": 52,
+        "menuDisabled": true,
+        "hideable": true,
+        "sortable": false,
+        // do not use fixed - otherwise "hideable" does no longer work
+        //"fixed":true,
+        "renderer": function(v, metaData, record) {
+            if (v) {
+                var ext = record.get("pictureExt");
+                var mod = record.get("pictureMod"); // mod date / cache killer
+                var url = CQ.HTTP.externalize(v) + "/image.prof.thumbnail.48." + ext + "/" + mod + "." + ext;
+                return '<img src="' + url + '" height="48" width="48">';
+            }
+            else {
+                // default picture
+                return '<div></div>';
+            }
+        }
+    },
+    "published": {
+        "header":CQ.I18n.getMessage("Published"),
+        "id":"published",
+        "dataIndex":"replication.published", //todo: sorting doesn't work with 'deep' dataIndex
+        "renderer": function(v, params, record) {
+            var clazz = "";
+            var text = "";
+            var repl = record.data.replication;
+            var qtip = "";
+            var strOnTime = CQ.I18n.getMessage("N/A");
+            var strOffTime = CQ.I18n.getMessage("N/A");
+
+            if (repl && repl.published) {
+                text = CQ.wcm.SiteAdmin.formatDate(new Date(repl.published));
+                text += " (" + CQ.shared.XSS.getXSSTablePropertyValue(repl, "publishedBy") + ")";
+                if (repl.numQueued) {
+                    qtip = " ext:qtip=\"<nobr>";
+                    if (repl.action == "ACTIVATE") {
+                        clazz = "status-pending-activation";
+                        qtip += CQ.I18n.getMessage("Activation pending. #{0} in Queue.", repl.numQueued);
+                    } else {
+                        clazz = "status-pending-deactivation";
+                        qtip += CQ.I18n.getMessage("Deactivation pending. #{0} in Queue.", repl.numQueued);
+                    }
+                    qtip += "</nobr>\"";
+                } else if (repl.action == "ACTIVATE") {
+                    if (!record.data.timeUntilValid) {
+                        if (!record.data.offTime){
+                            clazz = 'status-activated';
+                        } else {
+                            clazz = 'status-offtime';
+                        }
+                    } else if (record.data.timeUntilValid){
+                        if (record.data.offTime) {
+                            clazz = "status-onofftime";
+                        } else {
+                            clazz = 'status-ontime';
+                        }
+                    }
+                    else{
+                        clazz = 'status-deactivated';
+                    }
+                } else {
+                    clazz = "status-deactivated";
+                }
+                if(record.data.timeUntilValid && (record.data.onTime || record.data.offTime)){
+                    qtip = "ext:qtip=\"<nobr>";
+                    if(record.data.onTime){
+                        strOnTime = CQ.wcm.SiteAdmin.formatDate(new Date(record.data.onTime));
+                        qtip += "<b>"+CQ.I18n.getMessage("On Time")+":</b> "+strOnTime+"<br/>";
+                    }
+                    if(record.data.offTime){
+                        strOffTime = CQ.wcm.SiteAdmin.formatDate(new Date(record.data.offTime));
+                        qtip += "<b>"+CQ.I18n.getMessage("Off Time")+":</b> "+strOffTime+"<br/>";
+                    }
+                    qtip += "</nobr>\"";
+                }
+            } else{
+                clazz = "status-none";
+            }
+            return "<div class=\"status double " + clazz + "\" "+qtip+"><span>" + text + "</span></div>";
+        }
+    }
+};

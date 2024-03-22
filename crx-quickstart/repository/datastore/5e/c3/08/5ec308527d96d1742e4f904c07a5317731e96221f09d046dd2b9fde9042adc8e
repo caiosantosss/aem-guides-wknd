@@ -1,0 +1,950 @@
+/*
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2017 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (document, $) {
+    'use strict';
+
+    var CLOUDCONFIGS_PATH = 'settings/cloudconfigs';
+
+    var FORM_FIELD_WRAPPER_CLS = '.coral-Form-fieldwrapper';
+    var CORAL_CHECKBOX = 'coral-checkbox';
+
+    var OOTB_VIEWER_PRESET_COPY_SERVLET = '/libs/settings/dam/dm/presets/viewer.pushviewerpresets';
+    var OOTB_IMAGE_SERVER_SETTING_SERVLET = '/libs/dam/presets/viewer.imageserversetting.json';
+    var ui = $(window).adaptTo('foundation-ui');
+
+    var editMode = false;
+    var companyChanged = false;
+    var credentialBlur = false;
+    var companies = [];
+
+    var configType;
+    var contentPath;
+    var dmSkylineEnabled = false;
+    var connectedAssetsConfigured = false;
+
+    var PASSWORD_CHANGE_DIALOG_ID = "#dm-change-password-dialog";
+    var CURRENT_PASSWORD_ID = "#dm-current-password";
+    var NEW_PASSWORD_ID = "#dm-new-password";
+    var REPEAT_PASSWORD_ID = "#dm-repeat-password";
+    var PASSWORD_DONE_BTN_ID = "#dm-password-done";
+    var PASSWORD_CANCEL_BTN_ID = "#dm-password-cancel";
+    var NEW_PASSWORD_VISIBILITY_BTN_ID = "#dm-new-password-visibility";
+    var NEW_PASSWORD_VISIBILITY_OFF_BTN_ID = "#dm-new-password-visibility-off";
+    var REPEAT_PASSWORD_VISIBILITY_BTN_ID = "#dm-repeat-password-visibility";
+    var REPEAT_PASSWORD_VISIBILITY_OFF_BTN_ID = "#dm-repeat-password-visibility-off";
+    var PASSWORD_MISSING_DONE_BTN_ID= "#dm-password-missing-done";
+    var PASSWORD_MISSING_DIALOG_ID = "#dm-password-missing";
+    var NEW_PASSWORD_ERR_CLASS = ".new-password-err";
+    var REPEAT_PASSWORD_ERR_CLASS = ".repeat-password-err";
+    var passwordExpired = false, passwordFilled = false;
+    var CHANGE_PASSWORD_LINK = "#dm-change-password-link";
+    var messenger = $(window).adaptTo("foundation-util-messenger");
+    var passwordUpdated ;
+    var instantiated = false;
+    $(document).on('foundation-contentloaded', function () {
+        if(instantiated) {
+            return;
+        }
+        configType = $('#edit-configuration-properties-form').data('configType');
+        contentPath = $('#edit-configuration-properties-form').data('contentPath');
+
+        // check if running in the cloud (skyline)
+        dmSkylineEnabled = $('#skyine-info').data('dm') == true;
+        // check if Connected Assets is configured (i.e., the instance is acting as "Local Site")
+        var $caConfContainer = $('meta.remotedam-config-container');
+        if ($caConfContainer) {
+            connectedAssetsConfigured = $caConfContainer.data('remote-conf');
+        }
+
+        if (contentPath.indexOf(CLOUDCONFIGS_PATH) < 0) {
+            contentPath = contentPath + '/' + CLOUDCONFIGS_PATH + '/' + configType;
+            if (connectedAssetsConfigured) {
+                ui.alert(Granite.I18n.get("Dynamic Media will be Read Only"),
+                            Granite.I18n.get("Connected Assets is configured on the instance, Dynamic Media can only be configured in read-only mode"),
+                            "warning");
+            }
+        } else {
+            editMode = true;
+
+            // change the page title in editing mode, need to consider I18N case
+            var pageTitle = $('#edit-configuration-properties-form .foundation-layout-wizard2-title').text();
+            if (configType === 'scene7') {
+                pageTitle = pageTitle.replace(Granite.I18n.get('Create Scene7 Configuration'), Granite.I18n.get('Edit Scene7 Configuration'));
+            } else if (configType === 'dmscene7' || configType === 'dynamicmediaservices') {
+                pageTitle = pageTitle.replace(Granite.I18n.get('Create Dynamic Media Configuration'), Granite.I18n.get('Edit Dynamic Media Configuration'));
+            }
+            $('#edit-configuration-properties-form .foundation-layout-wizard2-title').text(pageTitle);
+            if (connectedAssetsConfigured) {
+                if ($('coral-select[name="s7-sync-mode"]')[0].value !== "exclude"
+                    || $('coral-select[name="publishEnabled"]')[0].value !== 'selective'
+                    || $('coral-checkbox[name="selective-sync"]')[0].checked !== false) {
+                    ui.alert(Granite.I18n.get("Dynamic Media is Read Only"),
+                             Granite.I18n.get("Connected Assets is configured on the instance, Dynamic Media will operate in read-only mode"),
+                             "warning");
+                }
+                $('coral-select[name="s7-sync-mode"]').removeAttr('disabled')
+                $('coral-select[name="s7-sync-mode"]')[0].value = "exclude";
+                $('coral-select[name="s7-sync-mode"]')[0].readOnly = true;
+                $('coral-select[name="publishEnabled"]')[0].value = 'selective';
+                $('coral-select[name="publishEnabled"]')[0].readOnly = true;
+                $('coral-checkbox[name="selective-sync"]')[0].checked = false;
+                $('coral-checkbox[name="selective-sync"]')[0].readOnly = true;
+            }
+        }
+
+        if (configType === 'scene7' || configType === 'dmscene7') {
+            if (!$('input[name="companyHandle"]').val()) {
+                // 1st load, hide most fields
+                toggleFields(false);
+            } else {
+                if (configType === 'scene7') {
+                    loadVideoProfiles();
+                } else {
+                    $('coral-select[name="region"]').prop('disabled', true);
+                    $('coral-select[name="companyname"]').prop('disabled', true);
+                    $('input[name="rootPath"]').prop('disabled', true);
+                }
+            }
+            $('.cq-confadmin-s7connect').on('click', doConnect);
+            $('coral-select[name="companyname"]').on('change', doChangeCompany);
+            $('input[name="email"],input[name="password"],coral-select[name="region"]').on('change', function () {
+                credentialBlur = true;
+            });
+            $(PASSWORD_DONE_BTN_ID).on('click',hidePasswordChangeDialog);
+            $(PASSWORD_CANCEL_BTN_ID).on('click',hidePasswordChangeDialog);
+            $(NEW_PASSWORD_VISIBILITY_BTN_ID).on('click',togglePasswordEye);
+            $(NEW_PASSWORD_VISIBILITY_OFF_BTN_ID).on('click',togglePasswordEye);
+            $(REPEAT_PASSWORD_VISIBILITY_BTN_ID).on('click',togglePasswordEye);
+            $(REPEAT_PASSWORD_VISIBILITY_OFF_BTN_ID).on('click',togglePasswordEye);
+            $(PASSWORD_MISSING_DONE_BTN_ID).on('click',function(){
+                //hide the alert and show the password change dialog.
+                $(PASSWORD_MISSING_DIALOG_ID)[0].hide();
+                $(PASSWORD_CHANGE_DIALOG_ID)[0].show();
+            });
+            $(NEW_PASSWORD_ID).on("change keyup focusout", validateNewPassword);
+            $(REPEAT_PASSWORD_ID).on("change keyup focusout",validateRepeatPassword);
+            $(CHANGE_PASSWORD_LINK).on('click',function(){
+                $(PASSWORD_CHANGE_DIALOG_ID)[0].show();
+                $(CURRENT_PASSWORD_ID).val("");
+                if($('input[name="password"]').val() != ""){
+                    $(CURRENT_PASSWORD_ID).val($('input[name="password"]').val());
+                    $(CURRENT_PASSWORD_ID).attr('disabled', 'disabled');
+                }
+                $(NEW_PASSWORD_ID).val("");
+                $(REPEAT_PASSWORD_ID).val("");
+                $(NEW_PASSWORD_ID).removeAttr('invalid');
+                $(REPEAT_PASSWORD_ID).removeAttr('invalid');
+                $(PASSWORD_DONE_BTN_ID).attr('disabled', 'disabled');
+            });
+        }
+
+        toggleSubmit();
+        $('#edit-configuration-properties-form').on('change', function () {
+            toggleSubmit();
+        });
+        $('#edit-configuration-properties-form').off('submit').on('submit', doSubmit);
+        $('#dynamicmedia-selective-sync-cb').on('change', toogleSyncMode);
+        setTimeout(toogleSyncMode, 100);
+        instantiated = true;
+    });
+
+    function toogleSyncMode(){
+        if (!$('input[name="selective-sync"]')[0].checked){
+            $('coral-select[name="s7-sync-mode"]').removeAttr('disabled');
+        }
+        else {
+            $('coral-select[name="s7-sync-mode"]').attr('disabled', true);
+        }
+    }
+    // common
+    function doSubmit() {
+        //validate password change details once more before saving the config.
+        if(passwordFilled || passwordExpired){
+            if(validateNewPassword() && validateRepeatPassword()){
+                $(PASSWORD_MISSING_DIALOG_ID)[0].hide();
+            }else {
+                $(PASSWORD_MISSING_DIALOG_ID)[0].show();
+                return false;
+            }
+        }
+        var parentPath = contentPath.substr(0,contentPath.lastIndexOf('/'));
+        $.ajax({
+            type: 'GET',
+            url: Granite.HTTP.externalize(parentPath + '.1.json'),
+            cache: false
+        }).done(function (data, textStatus, jqXHR) {
+            //success means at least the cloudconfigs folder exist
+            var configNode = data[configType];
+            if (configNode) {
+                saveConfig();
+            } else {
+                createConfigPage(saveConfig);
+            }
+        }).fail(function (jqXHR, textStatus, errorThrown) {
+            // create parent folder at first
+            var createParentFolderData = {
+                ':name': 'cloudconfigs',
+                './jcr:primaryType': 'sling:Folder',
+                '_charset_': 'UTF-8'
+            };
+            $.ajax({
+                type: 'POST',
+                url: Granite.HTTP.externalize(parentPath),
+                data: createParentFolderData,
+                cache: false
+            }).done(function (data, textStatus, jqXHR) {
+                createConfigPage(saveConfig);
+            }).fail(function (jqXHR, textStatus, errorThrown) {
+            });
+        });
+        return false;
+    }
+
+    function createConfigPage(callback) {
+        var createConfigData = {};
+        createConfigData.title = $('input[name="jcr:title"]').val();
+        var parentPath = contentPath.substr(0,contentPath.lastIndexOf('/')) ;
+        createConfigData.parentPath = parentPath;
+        createConfigData.cmd = 'createPage';
+        createConfigData.template = '/libs/dam/templates/' + configType;
+        createConfigData.label = configType;
+
+        $.ajax({
+            type: 'POST',
+            url: Granite.HTTP.externalize('/bin/wcmcommand'),
+            contentType: 'application/x-www-form-urlencoded',
+            data: createConfigData,
+            cache: false
+        }).done(function (data, textStatus, jqXHR) {
+            callback();
+        }).fail(function (jqXHR, textStatus, errorThrown) {
+            ui.notify(null, Granite.I18n.get('Failed to save configuration'), 'error');
+        });
+    }
+
+    function saveConfig() {
+
+        if (configType === 'scene7') {
+            // collect video presets value and saving into hiddens for submitting form
+            getSelectedVideoProfiles();
+        }
+
+        var form = $('#edit-configuration-properties-form')[0];
+
+        // setup initial video thumbnail percentage time when first time to create the DMHybrid configuration,
+        // then keep as is when do editing later, reason is user may edit it in CRX/DE after initialization
+        if (configType === 'dynamicmediaservices') {
+            if ($('input[name="thumbnailtime"]').val() === '') {
+                $('input[name="thumbnailtime"]').remove();
+                ['1%', '11%', '21%', '31%', '41%', '51%', '61%', '71%', '81%', '91%'].forEach(function (item) {
+                    $(form).append($('<input type="hidden" name="thumbnailtime" value="' + item + '">"'));
+                });
+            } else {
+                $('input[name="thumbnailtime"]').remove();
+            }
+        }
+
+        var companyAliasVal = $('input[name="companyAlias"]').val();
+        if (companyAliasVal && companyAliasVal !== "") {
+            buildCompanyAliasHandle(companyAliasVal, form);
+        } else {
+            //cleanup existing companyAliasHandle (if any)
+            $('input[name="companyAliasHandle"]').val("");
+            validateDMCompanyAdmin(form, saveDMConfig);
+        }
+    }
+    function postSaveConfig(){
+        //scene7 classic
+        if (configType === 'scene7') {
+            // set default configuration
+            if ($('coral-checkbox[name="defaultConfiguration"]')[0].checked) {
+                $.ajax({
+                    type: 'POST',
+                    url: Granite.HTTP.externalize(contentPath + '/jcr:content' + '.config.json'),
+                    data: {
+                        setDefault: 'true'
+                    },
+                    cache: false
+                });
+            }
+            location.href = Granite.HTTP.externalize('/mnt/overlay/dam/content/configurations/' + configType + '.html/conf');
+
+        }
+        //the rest (dmscene7 + dm hybrid)
+        else if (companyChanged) {
+
+            if(dmSkylineEnabled){
+                // Use the single async job to perform setup and notify user at the end
+                var contentMessage = Granite.I18n.get("Dynamic Media will be configured and you will receive an Inbox notification when complete.");
+                var title = Granite.I18n.get("Configuring Dynamic Media");
+                var buttonConfig = [
+                    {
+                        id: "setupdm-submit",
+                        text: Granite.I18n.get("Ok"),
+                        primary: true,
+                        handler: function() {
+                            postDMS7Operation("triggerSetupJob");
+                            location.href = Granite.HTTP.externalize('/mnt/overlay/dam/content/configurations/' + configType + '.html/conf');
+                        }
+                    }
+                ];
+
+                // show dialog
+                $(window).adaptTo("foundation-ui").prompt(title, contentMessage, "info", buttonConfig);
+
+            } else {
+                //Perform OOTB viewer preset copy from /libs to /conf for DM Hybrid and DMScene7 - due to 0dt + no publish from /libs
+                var ajaxPayload = {
+                    type: 'POST',
+                    url: Granite.HTTP.externalize(OOTB_VIEWER_PRESET_COPY_SERVLET),
+                    cache: false
+                }
+                if(Granite.Toggles.isEnabled("FT_ASSETS-14407") == true) {
+                    ajaxPayload[data] = {'configPath' : contentPath};
+                }
+                $.ajax(ajaxPayload).done(function(){
+                    // Invoke servlet to handle DMS7 cases. Servlet will verify
+                    // that it is appropriate to perform operations
+                    postDMS7Operation("copySamples");
+                    postDMS7Operation("syncPresets");
+
+                    // omit this step for skyline
+                    if (!dmSkylineEnabled) {
+                        postDMS7Operation("reprocessWeRetail");
+                    }
+
+                    reloadPostSave();
+                });
+            }
+        }
+        else{
+            reloadPostSave();
+        }
+    }
+
+    function saveDMPassword(callback){
+        var passwordChangePath = '/libs/dam/content/configurations/dmscene7/password/jcr:content';
+        // set DM Password.
+        ui.wait();
+        var passwordData = {
+            email: $('input[name="email"]').val(),
+            password: $('input[name="password"]').val(),
+            newPassword: $(NEW_PASSWORD_ID).val(),
+            region: $('coral-select[name="region"]').val(),
+            configPath : contentPath
+        };
+        $.ajax({
+            type: 'POST',
+            url: Granite.HTTP.externalize(passwordChangePath),
+            data: passwordData,
+            cache: false
+        }).done(function (data, textStatus, jqXHR) {
+            ui.clearWait();
+            passwordUpdated = data.status;
+            if(passwordUpdated == "updated")
+                messenger.put(null, Granite.I18n.get("Changes saved successfully."),"success");
+            callback();
+        }).fail(function (jqXHR, textStatus, errorThrown) {
+            ui.clearWait();
+            ui.notify(null, Granite.I18n.get('Dynamic Media Password change has failed'), 'error');
+        });
+    }
+    function reloadPostSave(){
+        if(configType === 'dynamicmediaservices'){
+            //for dm hybrid, configure image server setting
+            $.ajax({
+                type: 'GET',
+                url: Granite.HTTP.externalize(OOTB_IMAGE_SERVER_SETTING_SERVLET),
+                cache: false
+            }).done(function(){
+            location.href = Granite.HTTP.externalize('/mnt/overlay/dam/content/configurations/' + configType + '.html/conf');
+            });
+        }else{
+                location.href = Granite.HTTP.externalize('/mnt/overlay/dam/content/configurations/' + configType + '.html/conf');
+        }
+    }
+
+    /**
+     * Trigger preset art and sample copy actions to S7damSampleAssetServlet for DMS7 case. The servlet will
+     * determine if it makes sense to proceed, therfore it can be invoked regardless of DMS7 or DMHybrid cases.
+     *
+     * @param action
+     */
+    function postDMS7Operation(action) {
+
+        var url;
+        if(Granite.Toggles.isEnabled("FT_ASSETS-14407") == true){
+            url = Granite.HTTP.externalize([contentPath, "sampleassets", action, "json"].join("."));
+        } else {
+            url = ["/", "sampleassets", action, "json"].join(".");
+        }
+        $.ajax({
+            type: "POST",
+            url:  url,
+            data: {},
+            dataType: "json"
+        });
+    }
+
+    function toggleSubmit() {
+        if (credentialBlur) {
+            $('.dmconfig-submit-btn').attr('disabled', 'disabled');
+        } else {
+            var incompleteForm = $('#edit-configuration-properties-form input[aria-required="true"],coral-select[aria-required="true"]').is(function (index) {
+                if (!$(this).val()) {
+                    return true;
+                }
+            });
+
+            if (incompleteForm) {
+                $('.dmconfig-submit-btn').attr('disabled', 'disabled');
+            } else {
+                $('.dmconfig-submit-btn').removeAttr('disabled');
+            }
+        }
+    }
+
+    function popupAlert(message) {
+        new Coral.Dialog().set({
+            id: 'delErrorDialog',
+            variant: 'error',
+            header: {
+                innerHTML: Granite.I18n.get('Error')
+            },
+            content: {
+                innerHTML: '<p>' + message + '</p>'
+            },
+            footer: {
+                innerHTML: '<button is="coral-button" variant="primary" coral-close size="M">' + Granite.I18n.get('Ok') + '</button>'
+            }
+        }).show();
+    }
+
+    // s7connect + dmscene7
+    function doChangeCompany(event) {
+        companyChanged = true;
+        var selectCompanyname = event.target.value;
+        if (selectCompanyname) {
+            companies.forEach(function (company, index) {
+                if (selectCompanyname === company.name) {
+                    $('input[name="companyHandle"]').val(company.handle);
+                    $('input[name="rootPath"]').val(company.rootPath);
+                    $('input[name="s7RootPath"]').val(company.rootPath);
+                    if (configType === 'scene7') {
+                        $('input[name="adhocFolder"]').val(company.rootPath + 'CQ5_adhoc');
+                        $('input[name="targetPath"]').val('/content/dam/' + company.rootPath);
+                    } else if (configType === 'dmscene7') {
+                        $('input[name="rootPath"]').prop('readonly', true);
+                    }
+                }
+            });
+        } else {
+            $('input[name="companyHandle"]').val('');
+            $('input[name="companyAlias"]').val('');
+            $('input[name="companyAliasHandle"]').val('');
+            $('input[name="rootPath"]').val('');
+            $('input[name="s7RootPath"]').val('');
+            if(Granite.Toggles.isEnabled("FT_ASSETS-14407") == false) {
+                $('input[name="targetPath"]').val('/content/dam/');
+            }
+            if (configType === 'scene7') {
+                $('input[name="adhocFolder"]').val('');
+            }
+        }
+    }
+
+    function doConnect() {
+        var email = $('input[name="email"]').val().trim();
+        var password = $('input[name="password"]').val();
+        var region = $('coral-select[name="region"]').val();
+
+        if (!email) {
+            popupAlert(Granite.I18n.get('Please provide an email address.'));
+            return;
+        }
+        if (!password) {
+            popupAlert(Granite.I18n.get('Please provide the Scene7 account\'s password.'));
+            return;
+        }
+        if (!region) {
+            popupAlert(Granite.I18n.get('Please select the region for your Scene7 account.'));
+            return;
+        }
+
+        var getCompaniesPath = '/libs/settings/dam/scene7/endpoints/' + region + '/jcr:content';
+        ui.wait();
+        var getCompaniesData = {
+            email: email,
+            password: password,
+            region: region
+        };
+        $.ajax({
+            type: 'POST',
+            url: Granite.HTTP.externalize(getCompaniesPath + '.companies.json'),
+            data: getCompaniesData,
+            cache: false
+        }).done(function (data, textStatus, jqXHR) {
+            credentialBlur = false;
+            ui.clearWait();
+            // if password expired, show change password dialog.
+            passwordExpired = data.passwordExpired;
+            if(passwordExpired){
+                $(CURRENT_PASSWORD_ID).val($('input[name="password"]').val());
+                $(CURRENT_PASSWORD_ID).attr('disabled', 'disabled');
+                $(PASSWORD_CHANGE_DIALOG_ID)[0].show();
+                $(NEW_PASSWORD_ID).val("");
+                $(REPEAT_PASSWORD_ID).val("");
+                $(NEW_PASSWORD_ID).removeAttr('invalid');
+                $(REPEAT_PASSWORD_ID).removeAttr('invalid');
+                $(PASSWORD_DONE_BTN_ID).attr('disabled', 'disabled');
+
+            }
+            var userHandle = data.userHandle;
+            companies = data.companies;
+
+            if (configType === 'scene7' || !editMode) {
+                if (!userHandle || !companies || companies.length === 0) {
+                    cleanupFields();
+
+                    toggleFields(false);
+
+                    ui.notify(null, Granite.I18n.get('Connection has failed'), 'error');
+                } else {
+                    toggleFields(true);
+
+                    // if user handle keep the same, means no need to clean fields and do reload
+                    if ($('input[name="userHandle"]').val() === userHandle) {
+                        loadCompanyList($('input[name="companyHandle"]').val());
+                    } else {
+                        cleanupFields();
+
+                        $('input[name="userHandle"]').val(userHandle);
+
+                        loadCompanyList();
+                    }
+
+                    loadPreviewServer(region);
+                }
+            }
+            toggleSubmit();
+        }).fail(function (jqXHR, textStatus, errorThrown) {
+            ui.clearWait();
+            if (configType === 'scene7' || !editMode) {
+                cleanupFields();
+                toggleFields(false);
+            }
+            try {
+                var error = JSON.parse(jqXHR.responseText);
+                if(error.DMAdminError){
+                    ui.notify(null, Granite.I18n.get(error.DMAdminError), 'error');
+                }
+            } catch (e) {
+                ui.notify(null, Granite.I18n.get('Connection has failed'), 'error');
+            }
+        });
+    }
+
+    function loadCompanyList(selectCompanyHandle) {
+        $('coral-select[name="companyname"]')[0].items.clear();
+        $('coral-select[name="companyname"]')[0].items.add({
+            value: '',
+            content: {
+                textContent: ''
+            }
+        });
+
+        companies.forEach(function (company, index) {
+            var item = {
+                value: company.name,
+                content: {
+                    textContent: company.name
+                }
+            };
+            if (selectCompanyHandle && selectCompanyHandle === company.handle) {
+                item.selected = true;
+            }
+            $('coral-select[name="companyname"]')[0].items.add(item);
+        });
+    }
+
+    function loadPreviewServer(region) {
+        $.ajax({
+            type: 'GET',
+            url: Granite.HTTP.externalize('/libs/settings/dam/scene7/endpoints/_jcr_content.info.json'),
+            cache: false
+        }).done(function (data, textStatus, jqXHR) {
+            if (data && Array.isArray(data)) {
+                data.forEach(function (endpoint, index) {
+                    if (endpoint.region === region) {
+                        $('input[name="previewServer"]').val(endpoint.defaultSecurePreviewURL);
+                        return;
+                    }
+                });
+            }
+        }).fail(function (jqXHR, textStatus, errorThrown) {
+            ui.notify(null, Granite.I18n.get('Failed to get s7 preview server'), 'error');
+        });
+    }
+
+    function toggleFields(show) {
+        if (show) {
+            $('coral-select[name="companyname"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+            $('coral-select[name="publishEnabled"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+            $('input[name="companyAlias"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+            $('input[name="rootPath"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+            $('input[name="previewServer"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+            if (configType === 'scene7') {
+                $('input[name="targetPath"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+                $('input[name="defaultConfiguration"]').closest(CORAL_CHECKBOX).show();
+                $('input[name="syncEnabled"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+                $('input[name="adhocFolder"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+            }
+            else{
+                $('#dynamicmedia-selective-sync-cb').closest(FORM_FIELD_WRAPPER_CLS).show()
+                $('coral-select[name="s7-sync-mode"]').closest(FORM_FIELD_WRAPPER_CLS).show();
+                if (connectedAssetsConfigured) {
+                    $('coral-select[name="s7-sync-mode"]')[0].value = "exclude";
+                    $('coral-checkbox[name="selective-sync"]')[0].readOnly = true;
+                    $('coral-select[name="s7-sync-mode"]')[0].readOnly = true;
+                } else {
+                    $('#dynamicmedia-selective-sync-cb').click();
+                }
+            }
+        } else {
+            $('coral-select[name="companyname"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+            $('coral-select[name="publishEnabled"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+            $('input[name="companyAlias"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+            $('input[name="rootPath"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+            $('input[name="previewServer"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+            if (configType === 'scene7') {
+                $('input[name="targetPath"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+                $('input[name="defaultConfiguration"]').closest(CORAL_CHECKBOX).hide();
+                $('input[name="syncEnabled"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+                $('input[name="adhocFolder"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+            }
+            else{
+                $('#dynamicmedia-selective-sync-cb').closest(FORM_FIELD_WRAPPER_CLS).hide()
+                $('coral-select[name="s7-sync-mode"]').closest(FORM_FIELD_WRAPPER_CLS).hide();
+            }
+        }
+    }
+
+    function cleanupFields() {
+        $('coral-select[name="companyname"]')[0].items.clear();
+        $('coral-select[name="companyname"]')[0].value = '';
+        $('input[name="companyHandle"]').val('');
+        $('input[name="companyAlias"]').val('');
+        $('input[name="companyAliasHandle"]').val('');
+        $('input[name="rootPath"]').val('');
+        $('input[name="s7RootPath"]').val('');
+        $('input[name="userHandle"]').val('');
+        if (connectedAssetsConfigured) {
+            $('coral-select[name="publishEnabled"]')[0].value = 'selective';
+            $('coral-select[name="publishEnabled"]')[0].readOnly = true;
+        } else {
+            $('coral-select[name="publishEnabled"]')[0].value = 'on';
+        }
+        $('input[name="previewServer"]').val('');
+        if(Granite.Toggles.isEnabled("FT_ASSETS-14407") == false) {
+            $('input[name="targetPath"]').val('/content/dam/');
+        }
+        if (configType === 'scene7') {
+            $('coral-checkbox[name="defaultConfiguration"]')[0].checked = false;
+            $('coral-checkbox[name="syncEnabled"]')[0].checked = false;
+            $('input[name="adhocFolder"]').val('');
+        }
+    }
+
+    // video profile is for s7connect mode only
+    /**
+     * // collect video presets value and saving into hiddens for submitting form
+     */
+    function getSelectedVideoProfiles() {
+        var avsList = '';
+        $('.avsListContainer coral-checkbox').each(function () {
+            if (this.checked) {
+                if (avsList === '') {
+                    avsList += this.value;
+                } else {
+                    avsList += ',' + this.value;
+                }
+            }
+        });
+        $('input[name="adaptiveVideoEncodingPresets"]').val(avsList);
+
+        var desktopList = '';
+        $('.desktopListContainer coral-checkbox').each(function () {
+            if (this.checked) {
+                if (desktopList === '') {
+                    desktopList += this.value;
+                } else {
+                    desktopList += ',' + this.value;
+                }
+            }
+        });
+        $('input[name="desktopVideoEncodingPresets"]').val(desktopList);
+
+        var mobileList = '';
+        $('.mobileListContainer coral-checkbox').each(function () {
+            if (this.checked) {
+                if (mobileList === '') {
+                    mobileList += this.value;
+                } else {
+                    mobileList += ',' + this.value;
+                }
+            }
+        });
+        $('input[name="mobileVideoEncodingPresets"]').val(mobileList);
+
+        var tabletList = '';
+        $('.tabletListContainer coral-checkbox').each(function () {
+            if (this.checked) {
+                if (tabletList === '') {
+                    tabletList += this.value;
+                } else {
+                    tabletList += ',' + this.value;
+                }
+            }
+        });
+        $('input[name="tabletVideoEncodingPresets"]').val(tabletList);
+    }
+
+    /**
+     * load video presets value from hidden and check according checkbox for each video preset
+     */
+    function loadVideoProfiles() {
+        if ($('input[name="adaptiveVideoEncodingPresets"]').val()) {
+            var avsList = $('input[name="adaptiveVideoEncodingPresets"]').val().split(',');
+            $('.avsListContainer coral-checkbox').each(function () {
+                if (avsList.indexOf(this.value) >= 0) {
+                    this.checked = true;
+                }
+            });
+        }
+
+        if ($('input[name="desktopVideoEncodingPresets"]').val()) {
+            var desktopList = $('input[name="desktopVideoEncodingPresets"]').val().split(',');
+            $('.desktopListContainer coral-checkbox').each(function () {
+                if (desktopList.indexOf(this.value) >= 0) {
+                    this.checked = true;
+                }
+            });
+        }
+
+        if ($('input[name="mobileVideoEncodingPresets"]').val()) {
+            var mobileList = $('input[name="mobileVideoEncodingPresets"]').val().split(',');
+            $('.mobileListContainer coral-checkbox').each(function () {
+                if (mobileList.indexOf(this.value) >= 0) {
+                    this.checked = true;
+                }
+            });
+        }
+
+        if ($('input[name="tabletVideoEncodingPresets"]').val()) {
+            var tabletList = $('input[name="tabletVideoEncodingPresets"]').val().split(',');
+            $('.tabletListContainer coral-checkbox').each(function () {
+                if (tabletList.indexOf(this.value) >= 0) {
+                    this.checked = true;
+                }
+            });
+        }
+    }
+
+    function hidePasswordChangeDialog(){
+        $(PASSWORD_CHANGE_DIALOG_ID)[0].hide();
+        $(NEW_PASSWORD_ERR_CLASS).css("display","none");
+        $(NEW_PASSWORD_ERR_CLASS).find('label').html("");
+        $(REPEAT_PASSWORD_ERR_CLASS).css("display","none");
+        $(REPEAT_PASSWORD_ERR_CLASS).find('label').html("");
+        if ($(this).attr('id') == "dm-password-cancel") {
+            // don't retain the field values.
+            $(REPEAT_PASSWORD_ID).val("");
+            $(NEW_PASSWORD_ID).val("");
+            passwordFilled = false;
+        }
+        if ($(this).attr('id') == "dm-password-done") {
+            passwordFilled = true;
+        }
+    }
+    function validateNewPasswordRegex(){
+        var lengthRegex = /^(?=^.{8,25}$)/;
+        var lowerCaseRegex = /(?=.*[a-z])/;
+        var upperCaseRegex = /(?=.*[A-Z])/;
+        var digitRegex = /(?=.*[0-9])/;
+        var charRegex= /(?=.*[\#\$\&\-\_\:\{\}])/;
+        if(!lengthRegex.test($(NEW_PASSWORD_ID).val())){
+            return "Length should be 8-25 characters.";
+        }
+        if(!lowerCaseRegex.test($(NEW_PASSWORD_ID).val())){
+            return "Contain at least one lowercase letter.";
+        }
+        if(!upperCaseRegex.test($(NEW_PASSWORD_ID).val())){
+            return "Contain at least one uppercase letter.";
+        }
+        if(!digitRegex.test($(NEW_PASSWORD_ID).val())){
+            return "Contain at least one number.";
+        }
+        if(!charRegex.test($(NEW_PASSWORD_ID).val())){
+            return "Contain at least one of the following special characters: #$&-_:{}.";
+        }
+        if($(CURRENT_PASSWORD_ID).val() == $(NEW_PASSWORD_ID).val()){
+            return "New Password should not be same as old password.";
+        }
+        return "";
+    }
+
+    function validateNewPassword(){
+        var isValid = true;
+        // on every change in password field, first disable the done button.
+        $(PASSWORD_DONE_BTN_ID).attr('disabled', 'disabled');
+        var errMsg = validateNewPasswordRegex();
+        if(errMsg != ""){
+            isValid = false;
+        }
+        if(isValid){
+            $(NEW_PASSWORD_ERR_CLASS).css("display","none");
+            $(NEW_PASSWORD_ERR_CLASS).find('label').html("");
+        }else{
+            $(NEW_PASSWORD_ERR_CLASS).css("display","block");
+            $(NEW_PASSWORD_ERR_CLASS).find('label').html(errMsg);
+            $(PASSWORD_DONE_BTN_ID).attr('disabled', 'disabled');
+        }
+        return isValid;
+    }
+    function validateRepeatPassword(){
+        $(PASSWORD_DONE_BTN_ID).attr('disabled', 'disabled');
+        var repeatPassword = $(REPEAT_PASSWORD_ID).val();
+        var newPassword = $(NEW_PASSWORD_ID).val();
+        if(!validateNewPassword()){
+            $(PASSWORD_DONE_BTN_ID).attr('disabled', 'disabled');
+            return false;
+        }else if(repeatPassword.length > 0 &&  newPassword == repeatPassword){
+            $(REPEAT_PASSWORD_ERR_CLASS).css("display","none");
+            $(REPEAT_PASSWORD_ERR_CLASS).find('label').html("");
+            $(PASSWORD_DONE_BTN_ID).removeAttr('disabled');
+            return true;
+        }else{
+            $(REPEAT_PASSWORD_ERR_CLASS).css("display","block");
+            $(REPEAT_PASSWORD_ERR_CLASS).find('label').html("Password mismatch.");
+            $(PASSWORD_DONE_BTN_ID).attr('disabled', 'disabled');
+            return false;
+        }
+    }
+
+    function togglePasswordEye() {
+        if($(this).attr('id') == "dm-new-password-visibility"){
+            $('.PasswordField-VisibilityOffToggle').css("display","block");
+            $('.PasswordField-VisibilityToggle').css("display","none");
+            $(NEW_PASSWORD_ID).attr('type','input');
+        }else if($(this).attr('id') == "dm-new-password-visibility-off"){
+            $('.PasswordField-VisibilityOffToggle').css("display","none");
+            $('.PasswordField-VisibilityToggle').css("display","block");
+            $(NEW_PASSWORD_ID).attr('type','password');
+        }else if($(this).attr('id') == "dm-repeat-password-visibility"){
+            $('.RepeatPasswordField-VisibilityOffToggle').css("display","block");
+            $('.RepeatPasswordField-VisibilityToggle').css("display","none");
+            $(REPEAT_PASSWORD_ID).attr('type','input');
+        }else if($(this).attr('id') == "dm-repeat-password-visibility-off"){
+            $('.RepeatPasswordField-VisibilityOffToggle').css("display","none");
+            $('.RepeatPasswordField-VisibilityToggle').css("display","block");
+            $(REPEAT_PASSWORD_ID).attr('type','password');
+        }
+
+    }
+
+    function saveDMConfig(form){
+        $.ajax({
+            type: form.method,
+            url: Granite.HTTP.externalize(contentPath + '/jcr:content'),
+            contentType: form.encType,
+            data: $(form).serialize(),
+            cache: false
+        }).done(function (data, textStatus, jqXHR) {
+            if(passwordFilled){
+                saveDMPassword(postSaveConfig);
+            }else
+                postSaveConfig();
+        }).fail(function (jqXHR, textStatus, errorThrown) {
+            ui.notify(null, Granite.I18n.get('Failed to save configuration'), 'error');
+        });
+    }
+
+    //Fetch the companyHandle corresponding to the companyAlias's company.
+    function buildCompanyAliasHandle(companyAlias, form) {
+        ui.wait();
+        var email = $('input[name="email"]').val();
+        var password = $('input[name="password"]').val();
+        var region = $('coral-select[name="region"]').val();
+        var companyAliasHandleData = {
+            companyName: companyAlias,
+            email: email,
+            password: password,
+            region: region
+        };
+        $.ajax({
+            type: 'POST',
+            url: Granite.HTTP.externalize(contentPath + '.dmcompanyhandle.json'),
+            data: companyAliasHandleData,
+            cache: false
+        }).done(function(data, textStatus, jqXHR) {
+            ui.clearWait();
+            if (data && data.companyHandle && data.companyHandle !== "") {
+                var companyAliasHandle = data.companyHandle;
+                $('input[name="companyAliasHandle"]').val(companyAliasHandle);
+                validateDMCompanyAdmin(form, saveDMConfig);
+            }
+        }).fail(function(jqXHR, textStatus, errorThrown) {
+            var sanitizedData = DynamicMedia.Util.sanitizeHtml(companyAlias);
+            ui.clearWait();
+            ui.notify(null, Granite.I18n.get('Something went wrong! Please verify Company Alias: ' + sanitizedData), 'error');
+        });
+    }
+
+    function validateDMCompanyAdmin(form, callback){
+
+        if(companyChanged){
+            //save cloud config creation as DM admin validation is already done while fetching company list.
+            callback(form);
+        } else{
+            var region = $('coral-select[name="region"]').val();
+            var dmUserData = {
+                email: $('input[name="email"]').val(),
+                password: $('input[name="password"]').val(),
+                configPath : contentPath
+            };
+            $.ajax({
+                type: 'POST',
+                url: Granite.HTTP.externalize(contentPath+'/jcr:content.dmCompanyAdmin.json'),
+                data: dmUserData,
+                cache: false
+            }).done(function (data, textStatus, jqXHR) {
+               callback(form);
+            }).fail(function (jqXHR, textStatus, errorThrown) {
+                try {
+                    var error = JSON.parse(jqXHR.responseText);
+                    if(error.DMAdminError){
+                        ui.notify(null, Granite.I18n.get(error.DMAdminError), 'error');
+                    }
+                } catch (e) {
+                    ui.notify(null, Granite.I18n.get('Dynamic Media Configuration save failed.'), 'error');
+                }
+            });
+        }
+    }
+
+})(document, Granite.$);

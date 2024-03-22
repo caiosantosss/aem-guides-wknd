@@ -1,0 +1,1792 @@
+/*!************************************************************************
+*
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+*  Copyright 2015 Adobe Systems Incorporated
+*  All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and are protected by trade secret or copyright law.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+**************************************************************************/
+if(typeof s7viewers == "undefined"){
+	s7viewers = {};
+}else if(typeof s7viewers != "object"){
+	throw new Error("Cannot initialize a root 's7viewers' package. s7viewers is not an object");
+}
+
+if(!s7viewers.InteractiveVideoViewer){
+	(function(){
+		var s7sdk;
+		/**
+		 * Construct a InteractiveVideoViewer object
+		 * @param {Object} inObj optional simple JSON object that consists of name:value pairs for customization of the viewer.
+		 */
+		s7viewers.InteractiveVideoViewer = function (inObj) {
+			this.sdkBasePath = '../../s7sdk/3.13/';
+			this.viewerFileName = "InteractiveVideoViewer.js";
+			this.cssSrcURL = "InteractiveVideoViewer_dark.css";
+			this.utilsFilePath = "js/s7sdk/utils/Utils.js";
+			this.containerId = null;
+			this.params = {};
+			this.handlers = [];
+			this.onInitFail = null;
+			this.initializationComplete = false;
+			this.initCalled = false;
+			this.firstMediasetParsed = false;
+			this.interactiveData = null;
+			this.interactiveDataProperties = null;
+			this.isDisposed = false;
+			this.utilsScriptElm = null;
+			this.fixinputmarker = null;
+			this.sdkProvided = false;			
+			this.lockurldomains = true;
+		
+			if (typeof inObj == "object"){
+				if (inObj.containerId) {
+					this.setContainerId(inObj.containerId);
+				}
+				if (inObj.params) {
+					for(var param in inObj.params) {
+						if(inObj.params.hasOwnProperty(param) && inObj.params.propertyIsEnumerable(param)) {
+							this.setParam(param,inObj.params[param]);
+						}
+					}
+				}
+				if (inObj.handlers) {
+					this.setHandlers(inObj.handlers);
+				}
+				if (inObj.localizedTexts) {
+					this.setLocalizedTexts(inObj.localizedTexts);
+				}
+			}		
+		};
+		
+		s7viewers.InteractiveVideoViewer.cssClassName = "s7interactivevideoviewer";
+
+		s7viewers.InteractiveVideoViewer.prototype.modifiers = {
+			assetTemplate: { params: ["template"], defaults: [""] },
+			callToActionRecap: { params: ["enabled"], defaults: [true] }
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.setContainerId = function (inElemId) {
+			if (this.isDisposed) return;
+			this.containerId = inElemId || null;
+		};
+		
+		s7viewers.InteractiveVideoViewer.getCodeBase = function() {
+			var contentUrl = "";
+			var viewerPath = "";
+			var scriptTags = null;
+			if (document.scripts){
+				scriptTags = document.scripts;
+			} else {
+				scriptTags = document.getElementsByTagName("script");
+			}
+
+			for(var i=0; i<scriptTags.length;i++){
+				var src = scriptTags[i].src;
+				var result = /^\s*(http[s]?:\/\/[^\/]*)?(.*)(\/(js|js_orig)\/InteractiveVideoViewer\.js)/.exec(src);
+				if (result && result.length == 5) {
+					if ( typeof result[1] !== 'undefined' ) {
+						contentUrl = result[1];
+					}
+					contentUrl += result[2];
+					viewerPath = src;
+					break;
+				 }
+			}
+			if ((contentUrl != '') && (contentUrl.lastIndexOf('/') != contentUrl.length - 1)) {
+				contentUrl += '/';
+			}
+			
+			var codebaseRegEx = /\/etc\/dam\/viewers\//;
+			s7viewers.InteractiveVideoViewer.codebase = {"contentUrl": contentUrl, "isDAM": codebaseRegEx.test(viewerPath)};
+			
+		};
+		s7viewers.InteractiveVideoViewer.getCodeBase();
+		
+		s7viewers.InteractiveVideoViewer.prototype.getContentUrl = function () {
+			return s7viewers.InteractiveVideoViewer.codebase.contentUrl;
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.symbols = {
+			"Container.LABEL":"Interactive video viewer",
+			"QUICKVIEW_DISCLAIMER":"Example For Preview Only"
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.includeViewer = function () {
+			s7sdk.Util.lib.include("s7sdk.common.Button");
+			s7sdk.Util.lib.include("s7sdk.common.Container");
+			s7sdk.Util.lib.include("s7sdk.event.Event");
+			s7sdk.Util.lib.include("s7sdk.video.VideoControls");
+			s7sdk.Util.lib.include("s7sdk.video.VideoPlayer");
+			s7sdk.Util.lib.include("s7sdk.common.ControlBar");
+			s7sdk.Util.lib.include("s7sdk.set.MediaSet");
+			s7sdk.Util.lib.include("s7sdk.share.Share");
+			s7sdk.Util.lib.include("s7sdk.set.InteractiveSwatches");
+			s7sdk.Util.lib.include("s7sdk.set.CallToAction");
+			
+			var interactiveVideoLocalizedTexts = {
+				"en": this.symbols,
+				defaultLocale: "en"
+			}
+
+			this.s7params = new s7sdk.ParameterManager(null, null, {"asset" : "MediaSet.asset" },this.getContentUrl() + this.cssSrcURL, this.lockurldomains);
+			var viewerName = ""; 
+			if (this.s7params.params.config && (typeof(this.s7params.params.config) == "string")) {
+				viewerName = ",";
+				if (this.s7params.params.config.indexOf("/") > -1) {
+					viewerName += this.s7params.params.config.split('/')[1];
+				} else 
+					viewerName += this.s7params.params.config;
+			}
+			this.s7params.setViewer("510,5.18.0" + viewerName);
+
+			this.s7params.setDefaultLocalizedTexts(interactiveVideoLocalizedTexts);
+			/* check viewer has "preview" modifier. If preview=true viewer loads InfoPanelPopup-library and creates infoPanelPopup-instance  */
+			if (typeof(this.s7params.get('preview')) != 'undefined'){
+				this.preview = (this.s7params.get("preview", "0") == "1" || this.s7params.get("preview", "0").toLowerCase() == "true");
+			}
+			else {
+				this.preview = this.getParam("preview")== "1" || this.getParam("preview") == "true";
+			}
+			if (this.preview){
+				s7sdk.Util.lib.include("s7sdk.info.InfoPanelPopup");
+				this.s7params.push("InfoPanelPopup.template", "<info><![CDATA[<div id='"+this.containerId+"_assetpreviewID' class='s7assetpreview' ><img id='"+this.containerId+"_assetpreviewimgID' class='s7assetpreviewimg' src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'></div>]]></info>");
+			}
+			for(var prm in this.params){
+				if (prm != "localizedtexts"){
+					this.s7params.push(prm, this.params[prm]);
+				}else{
+					this.s7params.setLocalizedTexts(this.params[prm]);
+				}
+			}
+
+			this.s7params.push('OOTBPresetCSSFileToClassMap', {
+				"html5_interactivevideo_dark": "", // Default CSS
+				"html5_interactivevideo_light": "s7interactivevideoviewer_light" 
+			});
+
+			this.trackingManager = new s7sdk.TrackingManager();
+
+			this.mediaSet = null;
+			this.container = null; 
+			this.videoplayer = null;
+			this.controls = null;
+			this.playPauseButton = null;
+			this.videoScrubber = null;
+			this.videoTime = null;
+			this.mutableVolume = null;
+			this.fullScreenButton = null;
+			this.closedCaptionButton = null;
+			
+			this.socialShare = null;
+			this.linkShare = null;
+			this.twitterShare = null;
+			this.facebookShare = null;
+			this.isCaption = true;
+			this.curCaption = null;
+			this.storedCaptionEnabled = null;
+			this.isNavigation = null;
+            this.isPosterImage = null;
+			this.innerInteractiveData = null;
+			this.fixTrackCSS = false;
+			this.controlsDivID = null;
+			
+			this.supportsInline = null;
+			
+			this.interactiveSwatches = null;
+			this.callToAction = null;
+			this.infoPanelPopup = null;
+			this.assetTemplate = null;
+			this.storedPlayingState = false;
+			this.isOrientationMarkerForcedChanged = false;
+			this.isOrientationMarkerChanged = false;
+            this.lastContainerWidth = 0;
+
+			
+			var self = this;
+
+			function initViewer(){
+				
+				self.s7params.push("aemmode",  s7viewers.InteractiveVideoViewer.codebase.isDAM  ? "1" : "0");
+							
+
+
+				var containerDivID = self.containerId + "_container";
+				self.controlsDivID = self.containerId + "_controls";
+				self.s7params.push("autoplay", "0");
+				self.s7params.push("singleclick", "playPause");
+				self.s7params.push("iconeffect", "1,-1,0.3,0");
+				self.s7params.push('bearing', 'fit-vertical');
+				self.s7params.push("initialbitrate", "1400");
+
+				self.s7params.push("InteractiveSwatches.tmbLayout", "1,0");
+
+				if (s7sdk.browser.device.name != "desktop"){
+					self.s7params.push("InteractiveSwatches.enablescrollbuttons","0");	
+				}
+				var tmpl = self.s7params.get("assettemplate", null);
+				self.assetTemplate = (tmpl && tmpl != "") ? tmpl :null;
+
+				/*get fixinputmarker*/
+				var fixinputmarkerParam = self.getParam("fixinputmarker");
+				if (fixinputmarkerParam) {
+					self.fixinputmarker = (fixinputmarkerParam == "s7touchinput" || fixinputmarkerParam == "s7mouseinput") ? self.fixinputmarker = fixinputmarkerParam : null;
+				};
+				
+				var urlParam = self.getURLParameter("fixinputmarker");
+				if (urlParam){
+					self.fixinputmarker = (urlParam == "s7touchinput" || urlParam == "s7mouseinput") ? self.fixinputmarker = urlParam : null;;
+				};
+				
+				if (self.fixinputmarker){
+					if(self.fixinputmarker === "s7mouseinput"){
+						self.addClass(self.containerId,"s7mouseinput");
+					}else if(self.fixinputmarker === "s7touchinput"){
+						self.addClass(self.containerId,"s7touchinput");
+					}
+				}else{
+					if (s7sdk.browser.supportsTouch()){
+						self.addClass(self.containerId,"s7touchinput");
+					}else{
+						self.addClass(self.containerId,"s7mouseinput");
+					}
+				}
+
+				var presetClasses = self.s7params.get("presetClasses");
+				if (presetClasses && presetClasses.length > 0) {
+					presetClasses.forEach(function(presetClass) {
+						self.addClass(self.containerId, presetClass);
+					});
+				}
+				
+				self.parseMods();
+
+				self.container = new s7sdk.common.Container(self.containerId, self.s7params, containerDivID);
+				if(self.container.isInLayout()){
+					completeInitViewer();
+				} else {
+					self.container.addEventListener(s7sdk.event.ResizeEvent.ADDED_TO_LAYOUT, completeInitViewer, false);
+				}
+			}
+
+			function completeInitViewer(){
+
+				self.container.removeEventListener(s7sdk.event.ResizeEvent.ADDED_TO_LAYOUT, completeInitViewer, false);			
+
+				// work-around for webkit issue with applying height:100% to the containing element
+				var containerDiv = document.getElementById(self.containerId);
+				var tempMinHeight = containerDiv.style.minHeight;
+				containerDiv.style.minHeight = "1px";
+
+				var testdiv = document.createElement("div");
+				testdiv.style.position = "relative";
+				testdiv.style.width = "100%";
+				testdiv.style.height = "100%";
+				containerDiv.appendChild(testdiv);
+				var emptyViewerHeight = testdiv.offsetHeight;
+				if (testdiv.offsetHeight <= 1){
+					containerDiv.style.height = "100%";
+					emptyViewerHeight = testdiv.offsetHeight;
+				}
+				containerDiv.removeChild(testdiv);
+				containerDiv.style.minHeight = tempMinHeight;
+
+				var responsive = false;
+				switch(self.s7params.get("responsive", "auto")){
+				case "fit":
+					responsive = false;
+				break;
+				case "constrain":
+					responsive = true;
+				break;
+				default :
+					responsive = emptyViewerHeight == 0;
+					break;
+				}
+				self.updateCSSMarkers();
+				self.updateOrientationMarkers();
+				if(self.container.isFixedSize()) { // free
+					self.viewerMode = "fixed";
+				} else {
+					if(responsive) { // restrict
+						self.viewerMode = "ratio";
+					} else {
+						self.viewerMode = "free";
+					}
+				}
+
+				self.containerHeight = self.container.getHeight();
+				// Create MediaSet
+				self.mediaSet = new s7sdk.MediaSet(null, self.s7params, self.containerId+"_mediaSet");
+				// Create the VideoPlayer
+				self.videoplayer = new s7sdk.video.VideoPlayer(self.container, self.s7params, self.containerId + "_videoPlayer");
+				self.trackingManager.attach(self.videoplayer);
+				// Create the ControlBar
+				self.controls = new s7sdk.common.ControlBar(self.container, self.s7params, self.controlsDivID);
+				self.controls.setCSS(".s7controlbar", "visibility", "hidden");
+
+				self.controls.attachView(self.videoplayer, false);
+				// Create the PlayPauseButton
+				self.playPauseButton = new s7sdk.common.PlayPauseButton(self.controlsDivID, self.s7params, self.containerId + "_playPauseButton");
+				// Create the VideoScrubber
+				self.videoScrubber = new s7sdk.video.VideoScrubber(self.controlsDivID, self.s7params, self.containerId + "_videoScrubber");
+				//check if css contains 'width:310px' || 'width:365px' style for track of VideoScrubber (fixed issue S7-5594, S7-6006).
+				self.fixTrackCSS = 
+					(s7sdk.Util.getStyle(self.videoScrubber.component.track, "width") == "310px") || 
+					(s7sdk.Util.getStyle(self.videoScrubber.component.track, "width") == "365px");
+				// Create the VideoTime
+				self.videoTime = new s7sdk.VideoTime(self.controlsDivID, self.s7params, self.containerId + "_videoTime");
+				// Create the ClosedCaptionButton
+				self.closedCaptionButton = new s7sdk.common.ClosedCaptionButton(self.controlsDivID, self.s7params, self.containerId + "_closedCaptionButton");
+				self.closedCaptionButton.addEventListener("click", clickClosedCaptionButton);
+				self.closedCaptionButton.setSelected(self.videoplayer.getCaptionEnabled());
+				self.videoplayer.setCaptionEnabled(self.videoplayer.getCaptionEnabled());
+				self.storedCaptionEnabled = self.videoplayer.getCaptionEnabled();
+				// Create audio and subtitle track selection button
+				self.audioCaptionsSelector = new s7sdk.video.AudioCaptions(self.controlsDivID, self.s7params, self.containerId + "_audioCaptionsSelector");
+				
+				// Create the MutableVolume
+				self.mutableVolume = new s7sdk.video.MutableVolume(self.controlsDivID, self.s7params, self.containerId + "_mutableVolume");
+                self.mutableVolume.setSelected(self.videoplayer.muted());
+				// Create the FullScreenButton
+				self.fullScreenButton = new s7sdk.common.FullScreenButton(self.controlsDivID, self.s7params, self.containerId + "_fullScreenButton");
+
+				if (!self.s7params.get("caption")) {
+					self.isCaption = false;
+				} else {
+					self.curCaption = self.s7params.params.caption;
+				}
+				if (self.s7params.get("navigation")) {
+					self.isNavigation = self.s7params.get("navigation");
+				}
+				if (self.s7params.get("interactiveData")) {
+					self.innerInteractiveData = self.s7params.get("interactiveData");
+				}
+				
+				self.supportsInline = self.videoplayer.supportsInline();
+				
+				// Create SocialShare
+				self.socialShare = new s7sdk.share.SocialShare(self.container, self.s7params, self.containerId + "_socialShare");
+				if (self.supportsInline) {
+					self.controls.attach(self.socialShare);
+				}
+				self.linkShare = new s7sdk.share.LinkShare(self.containerId + "_socialShare", self.s7params, self.containerId + "_linkShare");
+				self.twitterShare = new s7sdk.share.TwitterShare(self.containerId + "_socialShare", self.s7params, self.containerId + "_twitterShare");
+				self.facebookShare = new s7sdk.share.FacebookShare(self.containerId + "_socialShare", self.s7params, self.containerId + "_facebookShare"); 
+				self.linkShare.addEventListener(s7sdk.event.SocialEvent.NOTF_SOCIAL_ACTIVATED, onSocialActivated, false);
+				self.twitterShare.addEventListener(s7sdk.event.SocialEvent.NOTF_SOCIAL_ACTIVATED, onSocialActivated, false);
+				self.facebookShare.addEventListener(s7sdk.event.SocialEvent.NOTF_SOCIAL_ACTIVATED, onSocialActivated, false);
+				/* This block is to disable auto-hide of socialShare panel if mouse cursor is over it.*/
+				self.socialShare.addEventListener("mouseover", function(event) { 
+					self.controls.allowAutoHide(false);
+				});
+				self.socialShare.addEventListener("mouseout", function(event) { 
+					self.controls.allowAutoHide(true);
+				});
+
+				// Pass parameters to Social elements
+				self.linkShare.setContentUrl(document.URL); 
+
+				// instantiate InteractSwatchers for interactive features
+				self.interactiveSwatches = new s7sdk.set.InteractiveSwatches(self.container, self.s7params, self.containerId+"_interactiveSwatches");  
+				// Add event listeners for interactive swatches quickview and URL events
+				self.interactiveSwatches.addEventListener(s7sdk.event.InteractiveSwatchesEvent.SWATCH_QUICKVIEW_ACTIVATED, interactiveSwatchActivateHandler, false);
+				self.interactiveSwatches.addEventListener(s7sdk.event.InteractiveSwatchesEvent.SWATCH_URL_ACTIVATED, interactiveSwatchActivateHandler, false);
+				self.interactiveSwatches.addEventListener(s7sdk.event.InteractiveSwatchesEvent.NOTF_VISIBLE_INTERACTIVE_SWATCHES, interactiveSwatchVisibleEventHandler, false);
+				self.trackingManager.attach(self.interactiveSwatches);
+
+				self.callToAction = new s7sdk.set.CallToAction(self.container, self.s7params, self.containerId+"_callToAction");
+				self.callToAction.addEventListener(s7sdk.event.InteractiveSwatchesEvent.SWATCH_QUICKVIEW_ACTIVATED, interactiveSwatchActivateHandler, false);
+				self.callToAction.addEventListener(s7sdk.event.InteractiveSwatchesEvent.SWATCH_URL_ACTIVATED, interactiveSwatchActivateHandler, false);
+				self.callToAction.hidePanel();
+				self.callToAction.addEventListener(s7sdk.event.PopupEvent.POPUP_CLOSED, onPanelClosed, false);
+				self.trackingManager.attach(self.callToAction);
+				self.videoplayer.addEventListener(s7sdk.event.VideoEvent.NOTF_VIDEO_END, onVideoEnded, false);
+
+				// instantiate InfoPanelPopup for displaying QuickView
+				if (self.preview){
+					self.infoPanelPopup = new s7sdk.InfoPanelPopup(self.container, self.s7params, self.container.getId()+"_infoPanelPopup");
+				}
+				
+				self.socialShare.addTrackedComponent(self.interactiveSwatches);
+				self.socialShare.addTrackedComponent(self.controls);
+				
+				// ====================================== Event Listeners ====================================== //
+				
+				// Add MediaSet event listeners
+				self.mediaSet.addEventListener(s7sdk.event.AssetEvent.NOTF_SET_PARSED, onSetParsed, false);
+				// Add Container event listeners
+				self.container.addEventListener(s7sdk.event.ResizeEvent.COMPONENT_RESIZE, onContainerResize,false);
+				self.container.addEventListener(s7sdk.event.ResizeEvent.FULLSCREEN_RESIZE, onContainerFullScreen,false);
+				self.container.addEventListener(s7sdk.event.ResizeEvent.REMOVED_FROM_LAYOUT, onRemovedFromLayout, false);
+				self.container.addEventListener(s7sdk.event.ResizeEvent.ADDED_TO_LAYOUT, onAddedToLayout, false);
+				self.container.addEventListener(s7sdk.event.ResizeEvent.WINDOW_RESIZE, onDeviceOrientationChange,false);	
+				self.container.addEventListener(s7sdk.event.ResizeEvent.SIZE_MARKER_CHANGE, onContainerSizeMarkerChange,false);	
+				// Add VideoPlayer event listeners
+				self.videoplayer.addEventListener(s7sdk.event.CapabilityStateEvent.NOTF_VIDEO_CAPABILITY_STATE, onVideoCapabilityStateChange, false);
+				self.videoplayer.addEventListener(s7sdk.event.VideoEvent.NOTF_DURATION, onVideoDuration, false);
+				self.videoplayer.addEventListener(s7sdk.event.VideoEvent.NOTF_LOAD_PROGRESS, onVideoLoadProgress, false);
+				self.videoplayer.addEventListener(s7sdk.event.VideoEvent.NOTF_CURRENT_TIME, onVideoCurrentTime, false);
+				self.videoplayer.addEventListener(s7sdk.event.VideoEvent.NOTF_NAVIGATION, onVideoNavigation, false);
+				self.videoplayer.addEventListener(s7sdk.event.InteractiveDataEvent.NOTF_INTERACTIVE_DATA, onInteractiveData, false);
+				self.videoplayer.addEventListener(s7sdk.event.InteractiveDataEvent.NOTF_ACTIVE_INTERACTIVE_DATA_UPDATED, onActiveInteractiveDataUpdated, false);
+				self.videoplayer.addEventListener(s7sdk.event.VideoEvent.NOTF_METADATA_LOAD_COMPLETE, onMetadataLoaded);
+				// Add PlayPauseButton event listeners
+				self.playPauseButton.addEventListener("click", onPlayPauseButtonClick);
+				// Add VideoScrubber event listeners
+				//self.videoScrubber.addEventListener(s7viewers.s7sdk.SliderEvent.NOTF_SLIDER_DOWN, onNotifyScrubberEvent, false);
+				//self.videoScrubber.addEventListener(s7viewers.s7sdk.SliderEvent.NOTF_SLIDER_MOVE, onNotifyScrubberEvent, false);
+				self.videoScrubber.addEventListener(s7sdk.SliderEvent.NOTF_SLIDER_UP, onNotifyScrubberEvent, false);
+				// Add MutableVolume event listeners
+				self.mutableVolume.addEventListener("click", onMuteButtonClick);
+				self.mutableVolume.addEventListener(s7sdk.SliderEvent.NOTF_SLIDER_DOWN, onVolumeDown, false);
+				self.mutableVolume.addEventListener(s7sdk.SliderEvent.NOTF_SLIDER_MOVE, onVolumeMove, false);
+				self.mutableVolume.addEventListener(s7sdk.SliderEvent.NOTF_SLIDER_UP, onVolumeMove, false);
+				// Add FullScreenButton event listeners
+				self.fullScreenButton.addEventListener("click", onFullScreenButtonClick);
+
+				// Add audio change listener
+				self.audioCaptionsSelector.addEventListener(s7sdk.event.AudioCaptionEvent.NOTF_AUDIO_CHANGE, function(evt) {
+					self.videoplayer.selectAudioTrack(evt.s7event.data);
+				});
+				// Add subtitle change listener
+				self.audioCaptionsSelector.addEventListener(s7sdk.event.AudioCaptionEvent.NOTF_SUBTITLE_CHANGE, function(evt) {
+					var trackId = evt.s7event.data;
+					if (trackId === "off") {
+						self.videoplayer.disableTextTrack();
+						return;
+					}	
+
+					self.videoplayer.selectTextTrack(evt.s7event.data);
+					self.closedCaptionButton.setSelected(false);
+				});
+
+				self.audioCaptionsSelector.addEventListener(s7sdk.event.AudioCaptionEvent.NOTF_MENU_STATE_CHANGE, function(evt) {
+					var isMenuOpen = evt.s7event.data;
+					self.controls.allowAutoHide(!isMenuOpen);
+				});
+
+				// Add InfoPanelPopupButton close event listener
+				if (self.infoPanelPopup){
+					s7sdk.Event.addDOMListener(self.infoPanelPopup, s7sdk.event.PopupEvent.POPUP_CLOSED, onInfoPanelPopupClose, false);
+				}
+
+				// Add tracking callback
+				self.trackingManager.setCallback(proxyTrack);
+				if ((typeof(AppMeasurementBridge) == "function") && (self.isConfig2Exist == true)){
+					self.appMeasurementBridge = new AppMeasurementBridge(self.trackingParams);
+					self.appMeasurementBridge.setVideoPlayer(self.videoplayer);
+						}
+				if(self.viewerMode == "ratio"){
+					containerDiv.style.height = "auto";                
+				}
+
+				// ====================================== Event Handlers ====================================== //
+				function proxyTrack(objID, compClass, instName, timeStamp, eventInfo) {
+					if(!self.handlers["trackEvent"] && self.isConfig2Exist != true && s7sdk.Modifier.parse(self.s7params.get("launch", "true"), [true]).values[0]) {
+						if(typeof(_satellite) != 'undefined' && _satellite._dmviewers_v001) {
+							self.handlers["trackEvent"] = _satellite._dmviewers_v001().trackingFn;
+						}
+					}
+					if (self.appMeasurementBridge) {
+						self.appMeasurementBridge.track(objID, compClass, instName, timeStamp, eventInfo);
+					}
+					if (self.handlers["trackEvent"]) {
+                        if (typeof window.s7sdk == "undefined") {
+                            window.s7sdk = s7sdk;
+                        }
+						var objID_ = self.containerId;
+						self.handlers["trackEvent"](objID_, compClass, instName, timeStamp, eventInfo)
+					}
+					if ("s7ComponentEvent" in window) {
+						s7ComponentEvent(objID, compClass, instName, timeStamp, eventInfo);
+					}
+				}
+
+				function onSocialActivated (event) {
+						self.videoplayer.pause();
+				}	
+				
+				function onPanelClosed (event) {
+					self.videoplayer.togglePause();
+					self.activateComponents(true);
+					self.playPauseButton.focus();
+				}
+				// MediaSet Event Handlers
+				function onSetParsed(event) {
+					var mediasetDesc = event.s7event.asset;
+					
+					// just in case, check what is returned is of type MediaSetDesc
+					if (mediasetDesc instanceof s7sdk.MediaSetDesc) {
+						var modifiersObj = {};
+						if(self.viewerMode == "ratio"){
+							var itm = mediasetDesc.items[0];
+							self.assetRatio = itm.width/itm.height;
+							var w = self.container.getWidth();
+							if (!self.isBottom()) {
+								self.container.setModifier({ "aspect": w /( self.videoplayer.getWidth()/self.assetRatio ) });
+							}
+							else {
+								self.container.setModifier({ "aspect": w/((self.videoplayer.getWidth() / self.assetRatio) + self.interactiveSwatches.getHeight()) });
+							}
+						}
+						if (self.isNavigation) {
+							modifiersObj["navigation"] = self.isNavigation;
+						}
+						if (self.innerInteractiveData) {
+							modifiersObj["interactiveData"] = self.innerInteractiveData;
+						}
+                        if (self.isPosterImage) {
+							modifiersObj["posterimage"] =  self.isPosterImage;
+						}
+						self.videoplayer.setModifier(modifiersObj);
+						if (mediasetDesc.type == s7sdk.ItemDescType.VIDEO_SET || mediasetDesc.type == s7sdk.ItemDescType.VIDEO_GROUP) {
+							// MBR set
+							self.videoplayer.setItem(mediasetDesc);
+						}
+						else {
+							// single video
+							self.videoplayer.setItem(mediasetDesc.items[0]);
+						}
+					}
+					else
+						throw new Error("Failed to get meta data for video: " + event.s7event.asset);
+					
+					if ((self.handlers["initComplete"] != null) && (typeof self.handlers["initComplete"] == "function") && !self.firstMediasetParsed){
+                        if (typeof window.s7sdk == "undefined") {
+                            window.s7sdk = s7sdk;
+						}
+						self.handlers["initComplete"]();
+					}
+					self.firstMediasetParsed = true;
+					if (self.controls){
+						self.controls.setCSS(".s7controlbar", "visibility", "inherit");
+					}
+
+					self.handleButtonsVisibility();
+				}
+
+
+				// ====================================== Event Handlers ====================================== //
+				
+				// Container Event Handlers
+				function onContainerResize(event) {
+					if((typeof(event.target) == 'undefined') || (event.target == document.getElementById(self.containerId+"_container"))) {
+						if(!self.container.isInLayout()){
+							return;
+						}					
+						self.resizeViewer(event.s7event.w, event.s7event.h);
+						self.fullScreenButton.setSelected(self.container.isFullScreen());
+					}
+				}
+				//contatiner orientation change
+				function onDeviceOrientationChange(event) {
+					if((typeof(event.target) == 'undefined') || (event.target == document.getElementById(self.containerId+"_container"))) {
+						if(!self.container.isInLayout()){
+							return;
+						}					
+						self.resizeViewer(self.container.getWidth(), self.container.getHeight());
+					}
+				}
+				//Container FullScreen Resize handler
+				function onContainerFullScreen(event) {
+					self.resizeViewer(event.s7event.w, event.s7event.h);
+					self.fullScreenButton.setSelected(self.container.isFullScreen());
+					//When viewer goes full screen, onFullScreenEnter call back should be executed; 
+					//when viewer backs to normal mode, onFullScreenExit should be called.
+					if (!self.container.isFullScreen()){
+						self.onFullScreenExit(event);
+					} else {
+						self.onFullScreenEnter(event);
+					}					
+				}
+
+				function onContainerSizeMarkerChange(event) {
+					self.updateCSSMarkers();
+				}
+
+				function onAddedToLayout(event){
+					if (s7sdk.browser.device.name != "desktop"){
+						//
+					}else{
+						if (self.storedPlayingState) {
+							self.videoplayer.play();
+							self.storedPlayingState = false;
+						}
+					}
+				}
+				function onRemovedFromLayout(event){
+					if (s7sdk.browser.device.name != "desktop"){
+						//
+					}else{
+						//
+					}
+					if (self.videoplayer.getCapabilityState().hasCapability(s7sdk.VideoCapabilityState.PAUSE)) {
+						self.storedPlayingState = true;
+						s7sdk.Logger.log(s7sdk.Logger.INFO, "Pause video");
+						self.videoplayer.pause();
+					}
+				}
+				// VideoPlayer Event Handlers
+				function onVideoCapabilityStateChange(event){//alert(event.s7event.state)
+					//self.playPauseButton.setSelected(event.s7event.state.hasCapability(s7viewers.s7sdk.VideoCapabilityState.PLAY));	
+					var cap = event.s7event.state;
+					if (cap.hasCapability(s7sdk.VideoCapabilityState.PAUSE)) {
+						self.playPauseButton.setSelected(false);
+					}
+					else if (cap.hasCapability(s7sdk.VideoCapabilityState.PLAY) || cap.hasCapability(s7sdk.VideoCapabilityState.REPLAY)) {
+						// pause or stop
+						self.playPauseButton.setSelected(true);
+					}				
+					self.playPauseButton.enableReplay(cap.hasCapability(s7sdk.VideoCapabilityState.REPLAY));
+				}
+				function onVideoDuration(event){
+					self.videoTime.setDuration(event.s7event.data);					
+					self.videoScrubber.setDuration(event.s7event.data);
+				}
+				function onVideoLoadProgress(event){
+					self.videoScrubber.setLoadedPosition(event.s7event.data);
+				}
+				function onVideoCurrentTime(event){
+					self.videoTime.setPlayedTime(event.s7event.data);
+					self.videoScrubber.setPlayedTime(event.s7event.data);
+				}
+				function onVideoNavigation(event) {
+					self.videoScrubber.setNavigation(event.s7event.data);
+				}
+				function onInteractiveData(event) {
+					var data = event.s7event.data;
+					self.interactiveDataProperties = data ? data.properties : null;
+					self.interactiveData = data ? data.interactiveData : null;
+
+					self.interactiveSwatches.setInteractiveData(self.interactiveData, self.interactiveDataProperties);
+					self.callToAction.setInteractiveData(self.interactiveData, self.interactiveDataProperties);
+				}
+				function onActiveInteractiveDataUpdated(event) {
+					var idx = event.s7event.data;
+					if (self.interactiveData && idx != -1) {
+						self.interactiveSwatches.setActiveInteractiveDataIndex(idx);
+					}                
+				}
+				function onMetadataLoaded() {
+					var audioTracks = self.videoplayer.getAudioTracks();
+					var textTracks = self.videoplayer.getSubtitlesAndCaptions();
+
+					self.audioCaptionsSelector.setTracks(audioTracks, textTracks);
+					self.handleButtonsVisibility();
+				}
+
+				// PlayPauseButton Event handlers
+				function onPlayPauseButtonClick(event) { 
+					if (!self.playPauseButton.isSelected()) {
+						// IF the video is over, restart from the beginning
+						var rem = self.videoplayer.getDuration() - self.videoplayer.getCurrentTime();	// Time remaining
+						if (rem <= 1){
+							self.videoplayer.seek(0);
+						}
+						self.videoplayer.play();
+					}
+					else {
+						self.videoplayer.pause();
+					}
+				}
+				// VideoScrubber Event Handlers
+				function onNotifyScrubberEvent(event) {
+					self.videoplayer.seek(event.s7event.position * self.videoplayer.getDuration());
+				}
+				// MutableVolume Event Handlers
+				function onMuteButtonClick(event) {
+					if(self.mutableVolume.isSelected()){
+						self.videoplayer.mute();
+					}else{
+						self.videoplayer.unmute();
+						self.videoplayer.setVolume(self.mutableVolume.getPosition());
+					}
+				}
+				function onVolumeDown(event){
+					self.videoplayer.unmute();	// Make sure the player isn't muted as soon as the user start to change volume
+				}
+				function onVolumeMove(event){
+					self.videoplayer.setVolume(event.s7event.position);
+				}
+				// FullScreenButton Event Handlers
+				function onFullScreenButtonClick(event) { 
+					if (!self.container.isFullScreen()){
+						self.container.requestFullScreen();
+					}
+					else {
+						self.container.cancelFullScreen();
+					}					
+				}
+
+				function onInfoPanelPopupClose(event) {
+					if (self.storedPlayingState) {
+						self.videoplayer.play();
+						self.storedPlayingState = false;
+					}
+				}
+
+				// Add ClosedCaption enable/disable feature.
+				function clickClosedCaptionButton() {
+					self.videoplayer.setCaptionEnabled(self.closedCaptionButton.isSelected());
+				}			
+				
+				function makeAbsolutePath(url) {
+				if (url && ((url.indexOf("http://") == 0) || (url.indexOf("https://") == 0))) {
+					return url;
+				}
+
+				var absUrl = document.location.protocol + "//" + document.location.host;
+
+				if (!url || url.indexOf('/') != 0) {
+						absUrl += "/";
+					}
+
+					if (url) {
+						absUrl += url;
+					}
+					return absUrl;
+				}
+				
+
+				// If the platform supports inline playback (embedded on the page), update the controlbar layout.
+				var cW = self.container.getWidth();
+				var cH = self.container.getHeight();
+				self.resizeViewer(cW, cH);
+				if(!self.supportsInline){
+					// IF inline playback isn't available (iPhone iOS older 10, etc.), hide the controlbar.
+					self.controls.setCSS(".s7controlbar", "display", "none");
+				}
+
+
+
+				/**
+				 * @private
+				 * Pause video upon URL navigation
+				 */
+				function interactiveSwatchActivateHandler(event) {
+					// remember previous state of video playback
+					if (self.videoplayer.getCapabilityState().hasCapability(s7sdk.VideoCapabilityState.PAUSE)) {
+						self.storedPlayingState = true;
+						s7sdk.Logger.log(s7sdk.Logger.INFO, "Pause video");
+						self.videoplayer.pause();
+					}
+
+					if (event.type == s7sdk.event.InteractiveSwatchesEvent.SWATCH_QUICKVIEW_ACTIVATED) {
+						//
+						quickViewActivateHandler(event);
+					}else if (event.type == s7sdk.event.InteractiveSwatchesEvent.SWATCH_URL_ACTIVATED){
+						if (self.container.isFullScreen()){
+							self.container.cancelFullScreen();
+						}					
+					}
+				}
+				function onVideoEnded(event) {
+					if(self.interactiveData && self.callToActionRecap) {
+						self.callToAction.showPanel();
+						self.activateComponents(false);
+					}
+				}
+				function quickViewActivateHandler(event) {
+					if(event.s7event.data) {
+						var imgSrc = ""; 
+						var prevWidth = null;
+						var prevHeight = null;
+						var quickViewData = event.s7event.data;
+						if (self.preview){
+							self.infoPanelPopup.activateRollover(event.s7event.rolloverKey);
+							var quickViewImg = document.getElementById(self.containerId+"_assetpreviewimgID");
+							var quickViewImgCont = document.getElementById(self.containerId+"_assetpreviewID");
+							var disclaimer = document.createElement("div");
+							if (self.s7params.getLocalizedText("QUICKVIEW_DISCLAIMER") != undefined){
+								disclaimer.innerText = self.s7params.getLocalizedText("QUICKVIEW_DISCLAIMER");
+								disclaimer.className = "s7disclaimer";
+								quickViewImgCont.parentNode.appendChild(disclaimer);
+							}
+							var stdimgSrc = quickViewImg.src;
+							prevWidth = parseInt(s7sdk.Util.getStyle(quickViewImgCont, "width"));
+							prevHeight = parseInt(s7sdk.Util.getStyle(quickViewImgCont, "height"));
+							if (self.assetTemplate && quickViewData.sku){
+								var tmplStr = self.assetTemplate;
+								for (var i in quickViewData) {
+									var tmpl = new RegExp(("$" + i.toUpperCase() + "$").replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'),"gi");
+									tmplStr = tmplStr.replace(tmpl, quickViewData[i]);
+								}
+								imgSrc = tmplStr;
+								if(!(self.assetTemplate.indexOf("http://") == 0) && !(self.assetTemplate.indexOf("https://") == 0)){
+									if (self.mediaSet.component.serverUrl) {
+										var serverURL = self.mediaSet.component.serverUrl;
+										if(serverURL.lastIndexOf('/') != (serverURL.length - 1))
+										serverURL += "/";
+										if (prevWidth && prevHeight){
+											imgSrc = serverURL + imgSrc;
+											imgSrc += ((imgSrc.indexOf("?") == -1) ? "?" : "&") + "wid=" + parseInt(prevWidth) + "&hei=" + parseInt(prevHeight) ;
+										} else {
+											imgSrc = serverURL + imgSrc;
+										}
+									};
+								}else{
+									imgSrc = imgSrc;//absolute path to image
+								}
+							} else {
+								imgSrc = quickViewImg.src;
+								document.getElementById(self.containerId+"_assetpreviewimgID").src = stdimgSrc;
+								document.getElementById(self.containerId+"_assetpreviewID").className += " s7genericimage";
+							}
+
+							quickViewImg.onload = function() {  
+								//
+							};  
+							quickViewImg.onerror = quickViewImg.onabort = function() {  
+								document.getElementById(self.containerId+"_assetpreviewimgID").src = stdimgSrc;
+								document.getElementById(self.containerId+"_assetpreviewID").className += " s7genericimage";
+								if (self.handlers["quickViewAssetMissing"]) {
+									self.handlers["quickViewAssetMissing"](quickViewData, imgSrc, self.assetTemplate);
+								}
+							};  
+
+							document.getElementById(self.containerId+"_assetpreviewimgID").src = imgSrc;
+						}
+						if (self.handlers["quickViewActivate"]) {
+							self.handlers["quickViewActivate"](quickViewData);
+						}
+					}
+				}
+				
+				function interactiveSwatchVisibleEventHandler(event) {
+					self.videoplayer.updateVisibleInterativeData(event.s7event.data);
+				}
+				
+			} // End initViewer()
+
+			this.s7params.addEventListener(s7sdk.Event.SDK_READY, function(){ self.initSiteCatalyst(self.s7params,initViewer); },false);
+			this.s7params.setProvidedSdk(this.sdkProvided);
+			this.s7params.init();	
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.setParam = function(key, def){
+			if (this.isDisposed) return;
+			this.params[key] = def;	
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.getParam = function(key){
+			var keyLC = key.toLowerCase();
+            for (var paramsKey in this.params) {
+                if (paramsKey.toLowerCase() == keyLC) {
+                    return this.params[paramsKey];
+                }
+            }
+            return null; 
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.setParams = function(inParams){
+			if (this.isDisposed) return;
+			var params = inParams.split("&");
+			for (var i = 0; i < params.length; i++) {
+				var pair = params[i].split("=");
+				if (pair.length > 1) {
+					this.setParam(pair[0],decodeURIComponent(params[i].split("=")[1]));
+				}
+			}
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.s7sdkUtilsAvailable = function(){
+			if (s7viewers.InteractiveVideoViewer.codebase.isDAM) {
+				return typeof(s7viewers.s7sdk) != "undefined";
+			} else {
+				return (typeof(s7classic) != "undefined") && (typeof(s7classic.s7sdk) != "undefined");
+			}
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.resize = function(w, h){
+			this.container.resize(w, h);
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.init = function(){
+			if (this.isDisposed) return;
+			if (this.initCalled) return;
+			this.initCalled = true;
+			if (this.initializationComplete) return this;
+			
+			this.lockurldomains = (Boolean(Number(this.params.lockurldomains)) || typeof this.params.lockurldomains == "undefined") ? 1 : 0;
+			// Make sure the viewer container has a CSS class name above the basic videoplayer and SDK component names
+			var containerDiv = document.getElementById(this.containerId);
+			if (containerDiv){
+				if (containerDiv.className != ""){
+					if (containerDiv.className.indexOf(s7viewers.InteractiveVideoViewer.cssClassName) != -1){
+						//
+					}else{
+						containerDiv.className += " "+s7viewers.InteractiveVideoViewer.cssClassName;
+					}	
+				}else{
+					containerDiv.className = s7viewers.InteractiveVideoViewer.cssClassName;
+				}
+			}
+
+			this.s7sdkNamespace = s7viewers.InteractiveVideoViewer.codebase.isDAM ? "s7viewers" : "s7classic";
+
+			var utilSrcPath = this.getContentUrl() + this.sdkBasePath + "js/s7sdk/utils/Utils.js?namespace="+this.s7sdkNamespace;
+			var allScripts = null;
+			if (document.scripts){
+				allScripts = document.scripts;
+			}else{
+				allScripts = document.getElementsByTagName("script");
+			}
+
+			if (this.s7sdkUtilsAvailable()){
+				s7sdk = (s7viewers.InteractiveVideoViewer.codebase.isDAM ? s7viewers.s7sdk : s7classic.s7sdk);
+				this.sdkProvided = true;
+				if (this.isDisposed) {
+					return;
+				}
+				s7sdk.Util.init(); 
+				this.includeViewer(); 
+				this.initializationComplete = true; 
+			}else if (!this.s7sdkUtilsAvailable() && (s7viewers.InteractiveVideoViewer.codebase.isDAM ? s7viewers.S7SDK_S7VIEWERS_LOAD_STARTED : s7viewers.S7SDK_S7CLASSIC_LOAD_STARTED)){
+				this.sdkProvided = true;
+				var selfRef = this;
+				var utilsWaitId = setInterval(
+					function() {
+						if (selfRef.s7sdkUtilsAvailable()) {
+							clearInterval(utilsWaitId);
+							s7sdk = (s7viewers.InteractiveVideoViewer.codebase.isDAM ? s7viewers.s7sdk : s7classic.s7sdk);
+							if (selfRef.isDisposed) {
+								return;
+							}
+							s7sdk.Util.init(); 
+							selfRef.includeViewer();
+							selfRef.initializationComplete = true;  
+						}
+					}, 100
+				);
+			}else{
+				this.utilsScriptElm = document.createElement("script");
+				this.utilsScriptElm.setAttribute("language", "javascript");
+				this.utilsScriptElm.setAttribute("type", "text/javascript");
+
+				var headElem = document.getElementsByTagName("head")[0];
+				var self = this;
+
+				function cleanupAndInitUtils() {
+					if (!self.utilsScriptElm.executed) { 
+						self.utilsScriptElm.executed = true;
+						s7sdk = (s7viewers.InteractiveVideoViewer.codebase.isDAM ? s7viewers.s7sdk : s7classic.s7sdk);
+						if (self.s7sdkUtilsAvailable() && s7sdk.Util){
+							if (self.isDisposed) {
+								return;
+							}
+							s7sdk.Util.init(); 
+							self.includeViewer();  
+							self.initializationComplete = true;
+							self.utilsScriptElm.onreadystatechange = null;
+							self.utilsScriptElm.onload = null;
+							self.utilsScriptElm.onerror = null;
+						}
+					}  
+				}
+
+				if (typeof(self.utilsScriptElm.readyState) != "undefined") {
+					self.utilsScriptElm.onreadystatechange =  function() {
+						if (self.utilsScriptElm.readyState == "loaded") {
+							headElem.appendChild(self.utilsScriptElm);
+						} else if (self.utilsScriptElm.readyState == "complete") {
+							cleanupAndInitUtils();
+						}
+					};
+					self.utilsScriptElm.setAttribute("src", utilSrcPath);
+				} else {
+					self.utilsScriptElm.onload = function() {
+						cleanupAndInitUtils();
+					};
+					self.utilsScriptElm.onerror = function() {
+					};
+					self.utilsScriptElm.setAttribute("src", utilSrcPath);
+					headElem.appendChild(self.utilsScriptElm);
+					self.utilsScriptElm.setAttribute("data-src", self.utilsScriptElm.getAttribute("src"));
+					self.utilsScriptElm.setAttribute("src", "?namespace="+self.s7sdkNamespace);
+				}
+				if(s7viewers.InteractiveVideoViewer.codebase.isDAM) {
+					s7viewers.S7SDK_S7VIEWERS_LOAD_STARTED = true;
+				}else {
+					s7viewers.S7SDK_S7CLASSIC_LOAD_STARTED = true;	
+				}
+			}
+			
+			return this;
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.getDomScriptTag = function(jsFileNameOrPath){
+			var scriptTags;
+			if (document.scripts){
+				scriptTags = document.scripts;
+			}else{
+				scriptTags = document.getElementsByTagName("script");
+			}
+			for (var i = 0; i < scriptTags.length; i++){ 
+				if (scriptTags[i] && scriptTags[i].getAttribute("src") != null && scriptTags[i].getAttribute("src").indexOf(jsFileNameOrPath) != -1){
+					return scriptTags[i];
+					break;
+				}
+			}
+			return null;
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.getDomain = function(inUrl) {
+			var res = /(^http[s]?:\/\/[^\/]+)/i.exec(inUrl);
+			if (res == null) {
+				return '';
+			} else {
+				return res[1];
+			}
+		};
+
+		/**
+		 * @private
+		 * The second parameter could be the caption or a JSON object contain pairs of values to
+		 * specify the caption, navigation, etc.
+		 */
+		s7viewers.InteractiveVideoViewer.prototype.setAsset = function(inAsset, inObj) {
+			if (this.isDisposed) return;
+			if(this.callToAction) {
+				this.activateComponents(true);
+				if(this.callToAction.getVisibility()) this.callToAction.hidePanel();
+			}
+			if(this.videoplayer){
+				this.videoplayer.seek(0);
+			}
+			var inCaption = null, inNavigation = null, inInteractiveData = null, inPosterImage = null;
+			// check if second parameter is present
+			if (inObj) {
+				// check for type, cannot use s7viewers.s7sdk before initialization in embed share usage
+				if (Object.prototype.toString.apply(inObj) === '[object String]') {
+					inCaption = inObj;
+				} else if (typeof inObj == "object"){
+					if (inObj.caption) {
+						inCaption = inObj.caption;
+					} 
+					if (inObj.navigation) {
+						inNavigation = inObj.navigation
+					}
+					if (inObj.interactiveData) {
+						inInteractiveData = inObj.interactiveData;
+					}
+					if (inObj.posterimage) {
+						inPosterImage = inObj.posterimage
+					}
+				}
+			}
+			
+			if (this.mediaSet){
+				this.videoplayer.resetQosMetric();
+				
+				this.mediaSet.setAsset(inAsset);
+				if (inCaption){
+					this.isCaption = true;
+					this.curCaption = inCaption + ",1";
+					this.videoplayer.setCaption(inCaption);
+					this.videoplayer.setCaptionEnabled(this.storedCaptionEnabled);
+				}
+				else {
+					this.isCaption = false;
+					this.curCaption = null;
+					this.videoplayer.setCaptionEnabled(false);//disable caption because caption may be active from previous video
+				}
+
+				this.isNavigation = (inNavigation)? inNavigation : null;		
+				this.innerInteractiveData = (inInteractiveData) ? inInteractiveData : null;	
+                this.isPosterImage =(inPosterImage)? inPosterImage : null;
+				this.closedCaptionButton.setSelected(this.storedCaptionEnabled);
+			
+			}else{
+				this.setParam("asset", inAsset);
+			}
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.setLocalizedTexts = function(inText) {
+			if (this.isDisposed) return;
+			if (this.s7params){
+				this.s7params.setLocalizedTexts(inText);
+			}else{
+				this.setParam("localizedtexts", inText);
+			}
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.initSiteCatalyst = function(params,inCallback) {
+			//integrate SiteCatalyst logging
+			//strip modifier from asset and take the very first entry from the image list, and the first element in combination from that entry
+			if(params.get("asset", null, "MediaSet")){
+				var siteCatalystAsset = params.get("asset", null, "MediaSet").split(',')[0].split(':')[0];
+				this.isConfig2Exist = false;
+				if (siteCatalystAsset.indexOf('/') != -1) {
+					var company = s7sdk.MediaSetParser.findCompanyNameInAsset(siteCatalystAsset);
+					var config2 = params.get("config2");
+					this.isConfig2Exist = (config2 != '' && typeof config2 != "undefined");
+					if (this.isConfig2Exist){
+						this.trackingParams = {
+							siteCatalystCompany: company,
+							config2: config2,
+							isRoot: params.get("serverurl"),
+							contentUrl: this.getContentUrl()
+						};
+						var jsp_src =this.getContentUrl()+'../../AppMeasurementBridge.js?company=' + company + (config2 == '' ? '' : '&preset=' + config2);
+						if (params.get("serverurl", null)) {
+							jsp_src += "&isRoot=" + params.get("serverurl");
+						}
+						var elem = document.createElement("script");
+						elem.setAttribute("language", "javascript");
+						elem.setAttribute("type", "text/javascript");
+						elem.setAttribute("src", jsp_src);
+
+						var elems = document.getElementsByTagName("head");
+						elem.onload = elem.onerror = function() {  
+							if (!elem.executed) { 
+								elem.executed = true;  
+								if (typeof inCallback == "function"){
+									inCallback();
+								}
+								elem.onreadystatechange = null;
+								elem.onload = null;
+								elem.onerror = null;
+							}  
+						};  
+
+						elem.onreadystatechange = function() {  
+							if (elem.readyState == "complete" || elem.readyState == "loaded") {  
+								setTimeout(function() { 
+									if (!elem.executed) { 
+										elem.executed = true;  
+										if (typeof inCallback == "function"){
+											inCallback();
+										}
+									}  
+									elem.onreadystatechange = null;
+									elem.onload = null;
+									elem.onerror = null;
+								}, 0);
+							}  
+						};
+						elems[0].appendChild(elem);
+					}else{
+						if (typeof inCallback == "function"){
+							inCallback();
+						}
+					}	
+				}
+			}
+			else {
+				if (typeof inCallback == "function"){
+					inCallback();
+				}			
+			}
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.onFullScreenEnter = function(event) {
+		 //callback template
+			this.socialShare.setCSS(".s7socialshare", "display", "none");
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.onFullScreenExit = function(event) {
+		 //callback template
+			this.socialShare.setCSS(".s7socialshare", "display", "");
+		};
+
+		/**
+		 * Return component within the viewer according the specified id, null if id is invalid or inapplicable.
+		 * @param inId ID of the component to retrieve 
+		 */
+		s7viewers.InteractiveVideoViewer.prototype.getComponent = function(inId) {
+			if (this.isDisposed) return;
+			switch(inId){
+				case "container":
+					return this.container || null;
+				case "mediaSet":
+					return this.mediaSet || null;
+				case "videoPlayer":
+					return this.videoplayer || null;
+				case "controls":
+					return this.controls || null;
+				case "videoScrubber":
+					return this.videoScrubber || null;
+				case "videoTime":
+					return this.videoTime || null;
+				case "mutableVolume":
+					return this.mutableVolume || null;
+				case "playPauseButton":
+					return this.playPauseButton || null;
+				case "closedCaptionButton":
+					return this.closedCaptionButton || null;
+				case "fullScreenButton":
+					return this.fullScreenButton || null;
+				case "twitterShare":
+					return this.twitterShare || null;
+				case "facebookShare":
+					return this.facebookShare || null;
+				case "linkShare":
+					return this.linkShare || null;
+				case "socialShare":
+					return this.socialShare || null;
+				case "interactiveSwatches":
+					return this.interactiveSwatches || null;
+				case "callToAction":
+					return this.callToAction || null;
+				case "infoPanelPopup":
+					return this.infoPanelPopup || null;
+				case "parameterManager":
+					return this.s7params || null;
+				default:
+					return null;
+			}
+		};
+
+		/**
+		 * @private
+		 * Assigns handler functions by names.  This function will clear the previous handler functions on the list.
+		 * Non-function entries will be ignored.
+		 *
+		 * @param {Object} inObj Simple JSON object containing name:function pairs.
+		 */
+		s7viewers.InteractiveVideoViewer.prototype.setHandlers = function(inObj) {
+			if (this.isDisposed || this.initCalled) return;
+			this.handlers = [];
+			for (var i in inObj) {
+				if (!inObj.hasOwnProperty(i)) continue;
+				if (typeof inObj[i] != "function") continue;
+				this.handlers[i] = inObj[i];
+			}
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.getModifiers = function() {
+			return this.modifiers;
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.setModifier = function(modifierObject) {
+			if (this.isDisposed) return;
+			var modName, modDesc, modObj, modVal, parsedModifier, i;
+			for(modName in modifierObject) {
+				if(!this.modifiers.hasOwnProperty(modName)) {
+					continue;
+				}
+				modDesc = this.modifiers[modName];
+				
+				try {
+					modVal = modifierObject[modName];
+
+					if (modDesc.parseParams === false) {
+						parsedModifier = new s7sdk.Modifier([modVal  != "" ? modVal : modDesc.defaults[0]]);
+					} else {
+						parsedModifier = s7sdk.Modifier.parse(modVal, modDesc.defaults, modDesc.ranges);
+					}
+
+					if(parsedModifier.values.length == 1) {
+						this[modName] = parsedModifier.values[0];
+						this.setModifierInternal(modName);
+					}
+					else if(parsedModifier.values.length > 1) {
+						modObj = {};
+						for(i = 0; i < parsedModifier.values.length; i++) {
+							modObj[modDesc.params[i]] = parsedModifier.values[i];
+						}
+						this[modName] = modObj;
+						this.setModifierInternal(modName);
+					}
+				}
+				catch(error) {
+					throw new Error("Unable to process modifier: '"+ modName + "'. " + error);
+				}
+			}
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.setModifierInternal = function(modName) {
+			switch (modName.toLowerCase()) {
+				case "calltoactionrecap" :
+					if(this.interactiveData && this.videoplayer.ended()) {
+						if (this.callToActionRecap){
+							this.callToAction.showPanel();
+							this.activateComponents(false);
+						}else{
+							this.activateComponents(true);
+							this.callToAction.hidePanel();
+						}
+					}
+					break;				
+				default :
+					break;				
+			}
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.parseMods = function () {
+			var modName, modDesc, modObj, modVal, parsedModifier, i;
+			
+			for(modName in this.modifiers) {
+				if(!this.modifiers.hasOwnProperty(modName)) {
+					continue;
+				}
+				modDesc = this.modifiers[modName];
+				
+				try {
+					modVal = this.s7params.get(modName, "");
+
+					if (modDesc.parseParams === false) {
+						parsedModifier = new s7sdk.Modifier([modVal  != "" ? modVal : modDesc.defaults[0]]);
+					} else {
+						parsedModifier = s7sdk.Modifier.parse(modVal, modDesc.defaults, modDesc.ranges);
+					}
+
+					if(parsedModifier.values.length == 1) {
+						this[modName] = parsedModifier.values[0];
+					}
+					else if(parsedModifier.values.length > 1) {
+						modObj = {};
+						for(i = 0; i < parsedModifier.values.length; i++) {
+							modObj[modDesc.params[i]] = parsedModifier.values[i];
+						}
+						this[modName] = modObj;
+					}
+				}
+				catch(error) {
+					throw new Error("Unable to process modifier: '"+ modName + "'. " + error);
+				}
+			}
+		};
+
+		/**
+		 * @private
+		 */
+		s7viewers.InteractiveVideoViewer.prototype.updateCSSMarkers = function (){
+			var sizeMarker = this.container.getSizeMarker();
+			var newclass;
+			if (sizeMarker == s7sdk.common.Container.SIZE_MARKER_NONE){
+				return;
+			}		
+			if (sizeMarker == s7sdk.common.Container.SIZE_MARKER_LARGE){
+				newclass = "s7size_large";
+			}else{
+				if (sizeMarker == s7sdk.common.Container.SIZE_MARKER_SMALL){
+					newclass = "s7size_small";
+				}else if (sizeMarker == s7sdk.common.Container.SIZE_MARKER_MEDIUM){
+					newclass = "s7size_medium";
+				}
+			}
+			if (this.containerId) {
+				this.setNewSizeMarker(this.containerId, newclass);
+			}
+			this.reloadInnerComponents();
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.reloadInnerComponents = function () {
+			var regCompArr = this.s7params.getRegisteredComponents();
+			for(var i=0; i < regCompArr.length; i++){
+				if (regCompArr[i] && regCompArr[i].restrictedStylesInvalidated()){
+					regCompArr[i].reload();
+				}
+			}
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.setNewSizeMarker = function (elm, inClass) {
+			var cls = document.getElementById(elm).className;
+			var re = /^(.*)(s7size_small|s7size_medium|s7size_large)(.*)$/gi;
+			var newcls;
+			if(cls.match(re)){
+				newcls = cls.replace(re,  "$1" + inClass + "$3");
+			} else {
+				newcls = cls + " " + inClass;
+			}
+			if(cls != newcls){
+				document.getElementById(elm).className = newcls;
+			}
+		};
+		
+		s7viewers.InteractiveVideoViewer.prototype.dispose = function () {
+			if (this.appMeasurementBridge) {
+				this.appMeasurementBridge.dispose();
+				this.appMeasurementBridge = null;
+			}
+			if (this.trackingManager){
+				this.trackingManager.dispose();
+				this.trackingManager = null;
+			}
+			if (this.videoplayer){
+				this.videoplayer.dispose();
+				this.videoplayer = null;
+			}
+			if (this.facebookShare){
+				this.facebookShare.dispose();
+				this.facebookShare = null;
+			}
+			if (this.twitterShare){
+				this.twitterShare.dispose();
+				this.twitterShare = null;
+			}
+			if (this.linkShare){
+				this.linkShare.dispose();
+				this.linkShare = null;
+			}
+			if (this.socialShare){
+				this.socialShare.dispose();
+				this.socialShare = null;
+			}
+			if (this.closedCaptionButton){
+				this.closedCaptionButton.dispose();
+				this.closedCaptionButton = null;
+			}
+			if (this.fullScreenButton){
+				this.fullScreenButton.dispose();
+				this.fullScreenButton = null;
+			}
+			if (this.mutableVolume){
+				this.mutableVolume.dispose();
+				this.mutableVolume = null;
+			}
+			if (this.videoTime){
+				this.videoTime.dispose();
+				this.videoTime = null;
+			}
+			if (this.videoScrubber){
+				this.videoScrubber.dispose();
+				this.videoScrubber = null;
+			}
+			if (this.playPauseButton){
+				this.playPauseButton.dispose();
+				this.playPauseButton = null;
+			}
+			if (this.controls){
+				this.controls.dispose();
+				this.controls = null;
+			}
+			if (this.infoPanelPopup){
+				this.infoPanelPopup.dispose();
+				this.infoPanelPopup = null;
+			}		
+			if (this.interactiveSwatches){
+				this.interactiveSwatches.dispose();
+				this.interactiveSwatches = null;
+			}
+			if (this.interactiveData) {
+				this.interactiveData = null;
+			}
+			if (this.callToAction){
+				this.callToAction.dispose();
+				this.callToAction = null;
+			}			
+			if (this.mediaSet){
+				this.mediaSet.dispose();
+				this.mediaSet = null;
+			}
+			if (this.s7params){
+				this.s7params.dispose();
+				this.s7params = null;
+			}
+			if (this.title) {
+				this.title.parentNode.removeChild(this.title);	
+				delete this.title;
+			}
+			if (this.header){
+				this.header.parentNode.removeChild(this.header);	
+				delete this.header;
+			}		
+			if (this.interactiveThumbnailGridViewContainer){
+				this.interactiveThumbnailGridViewContainer.parentNode.removeChild(this.interactiveThumbnailGridViewContainer);	
+				delete this.interactiveThumbnailGridViewContainer;
+			}
+			if (this.container){
+				var classes = [s7viewers.InteractiveVideoViewer.cssClassName,"s7touchinput","s7mouseinput","s7size_large","s7size_small","s7size_medium"];
+				var cls = document.getElementById(this.containerId).className.split(' ');
+				for(var i=0; i<classes.length;i++){
+					var idx = cls.indexOf(classes[i]);
+					if(idx != -1) { 
+						cls.splice(idx, 1);
+					}
+				}
+				document.getElementById(this.containerId).className = cls.join(' ');
+				this.container.dispose();
+				this.container = null;
+			}
+			this.params = {};		
+			this.handlers = [];
+			this.isDisposed = true;
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.updateOrientationMarkers = function (){
+			if(!this.isOrientationMarkerForcedChanged){
+				var newclass;
+				if (window.innerWidth > window.innerHeight){
+					newclass = "s7device_landscape";
+				}else{
+					newclass = "s7device_portrait";
+				}
+				if (document.getElementById(this.containerId).className.indexOf(newclass) == -1) {
+					this.setNewOrientationMarker(this.containerId, newclass);
+					this.reloadInnerComponents();
+					this.isOrientationMarkerChanged = true;
+				} else {
+					this.isOrientationMarkerChanged = false;
+				}	
+		}	
+		};	
+
+		s7viewers.InteractiveVideoViewer.prototype.setNewOrientationMarker = function (elm, inClass) {
+			var cls = document.getElementById(elm).className;
+			var re = /^(.*)(s7device_landscape|s7device_portrait)(.*)$/gi;
+			var newcls;
+			if(cls.match(re)){
+				newcls = cls.replace(re,  "$1" + inClass + "$3");
+			} else {
+				newcls = cls + " " + inClass;
+			}
+			if(cls != newcls){
+				document.getElementById(elm).className = newcls;
+			}
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.isBottom = function () {
+			var divTest = document.createElement("div");
+			divTest.className = "s7interactiveswatches";
+			var ctnr = document.getElementById(this.container.getInnerContainerId());
+			ctnr.appendChild(divTest);
+			var wi = divTest.offsetWidth;
+			var he = divTest.offsetHeight;
+			ctnr.removeChild(divTest);
+			
+			return he > 0 ;
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.forceDeviceOrientationMarker = function (marker){
+			switch (marker){
+				case "s7device_portrait":
+				case "s7device_landscape":
+					this.isOrientationMarkerForcedChanged = true;
+					if (this.containerId) {
+						this.setNewOrientationMarker(this.containerId, marker);
+					}
+					this.reloadInnerComponents();
+					break;
+				case null:
+					this.isOrientationMarkerForcedChanged = false;
+					this.updateOrientationMarkers();
+					break;
+				default:
+					break;
+			}
+			this.resizeViewer(this.container.getWidth(), this.container.getHeight());
+		};
+
+		// ====================================== UI Layout Helper Functions ====================================== //	
+		s7viewers.InteractiveVideoViewer.prototype.resizeViewer = function (w,h){
+			this.callToAction.resize(w, h);
+			this.updateCSSMarkers();
+			this.updateOrientationMarkers();
+			//
+			var divTest = document.createElement("div");
+			divTest.className = "s7interactiveswatches";
+			var ctnr = document.getElementById(this.container.getInnerContainerId());
+			ctnr.appendChild(divTest);
+			var wi = divTest.offsetWidth;
+			var he = divTest.offsetHeight;
+			ctnr.removeChild(divTest);				
+			//
+			 if (he > 0){
+				//if height is set in CSS for interactive swatches we have horizontal orientation
+				this.videoplayer.resize(w, h - he);
+				this.interactiveSwatches.resize(w ,he);					
+			}
+			else {
+				this.videoplayer.resize(w - wi, h);
+				this.interactiveSwatches.resize(wi ,h);
+			}
+            if ((this.isOrientationMarkerChanged || (this.lastContainerWidth != w)) && this.assetRatio){
+				this.isOrientationMarkerChanged = false;
+                this.lastContainerWidth = w;
+				var w = this.container.getWidth();
+				var newAspect = this.isBottom() ? (w/((this.videoplayer.getWidth() / this.assetRatio) + this.interactiveSwatches.getHeight())) : (w /( this.videoplayer.getWidth()/this.assetRatio ));
+				this.container.setModifier({ "aspect": newAspect});
+			}
+			this.updateControlsWidth(w);
+			if (this.infoPanelPopup){
+				this.infoPanelPopup.resize(w, h);
+			}
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.updateControlsWidth = function (w) {
+			if (this.supportsInline != true){
+				return;
+			}
+
+			var videoControlsObj = document.getElementById(this.containerId + "_controls");
+			var prevState = s7sdk.Util.getStyle(videoControlsObj, "display");
+			videoControlsObj.style.display  = 'block';
+			
+			this.videoScrubber.resize(0,0);				
+			this.controls.resize(this.videoplayer.getWidth(), this.controls.getHeight());
+
+			this.videoTime.autoSize();
+
+			var bcr_playPauseButton = document.getElementById(this.containerId + "_playPauseButton").getBoundingClientRect();
+			var bcr_videoTime = document.getElementById(this.containerId + "_videoTime").getBoundingClientRect();
+			var bcr_videoScrubber = document.getElementById(this.containerId + "_videoScrubber").getBoundingClientRect();
+			this.videoScrubber.resize(bcr_videoTime.left - bcr_playPauseButton.right - 10, (bcr_videoScrubber.bottom - bcr_videoScrubber.top));				
+
+			videoControlsObj.style.display  = prevState;
+			
+			this.handleButtonsVisibility();
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.handleButtonsVisibility = function() {
+			var rightOffset = 5;
+			var gapSize = 2;
+			var shouldHideFullScreenButton = this.container.isPopup() && !this.container.isFixedSize() && !this.container.supportsNativeFullScreen();
+			var isMultiAudioMultiCaptionButtonVisible = this.firstMediasetParsed && this.videoplayer.hasMultiAudioMultiCaptions();
+			var isClosedCaptionsButtonVisible = this.firstMediasetParsed && this.isCaption && !isMultiAudioMultiCaptionButtonVisible;
+
+			var self = this;
+			var initialLayout = [
+				{
+					id: self.containerId + "_fullScreenButton",
+					isEnabled: !shouldHideFullScreenButton,
+					hide: function() {
+						self.fullScreenButton.setCSS(".s7fullscreenbutton", "display", "none");
+					},
+					setPosition: function(pos) {
+						self.fullScreenButton.setCSS(".s7fullscreenbutton", "right", pos);
+					},
+					show: function() {
+						self.fullScreenButton.setCSS(".s7fullscreenbutton", "display", "block");
+					},
+				},
+				{
+					id: self.containerId + "_mutableVolume",
+					isEnabled: self.videoplayer.supportsVolumeControl(),
+					hide: function() {
+						self.mutableVolume.setCSS(".s7mutablevolume", "display", "none");
+					},
+					setPosition: function(pos) {
+						self.mutableVolume.setCSS(".s7mutablevolume", "right", pos);
+					},
+					show: function() {
+						self.mutableVolume.setCSS(".s7mutablevolume", "display", "block");
+					},
+				}, 
+				{
+					id: self.containerId + "_audioCaptionsSelector",
+					isEnabled: isMultiAudioMultiCaptionButtonVisible,
+					hide: function() {
+						self.audioCaptionsSelector.setCSS(".s7audiocaptions", "display", "none");
+					},
+					setPosition: function(pos) {
+						self.audioCaptionsSelector.setCSS(".s7audiocaptions", "right", pos);
+					},
+					show: function() {
+						self.audioCaptionsSelector.setCSS(".s7audiocaptions", "display", "block");
+					},
+				}, 
+				{
+					id: self.containerId + "_closedCaptionButton",
+					isEnabled: isClosedCaptionsButtonVisible,
+					hide: function() {
+						self.closedCaptionButton.setCSS(".s7closedcaptionbutton", "display", "none");
+					},
+					setPosition: function(pos) {
+						self.closedCaptionButton.setCSS(".s7closedcaptionbutton", "right", pos);
+					},
+					show: function() {
+						self.closedCaptionButton.setCSS(".s7closedcaptionbutton", "display", "block");
+					},
+				},
+				{
+					id: self.containerId + "_videoTime",
+					isEnabled: true,
+					hide: function() {
+						self.videoTime.setCSS(".s7videotime", "display", "none");
+					},
+					setPosition: function(pos) {
+						self.videoTime.setCSS(".s7videotime", "right", pos);
+					},
+					show: function() {
+						self.videoTime.setCSS(".s7videotime", "display", "block");
+					},
+				}
+			];
+
+			// Helper for getting computed CSS Styles
+			function getDeepCSS (element, css){
+				var dv, sty, val;
+				if(element && element.style){
+					css= css.toLowerCase();
+					sty= css.replace(/\-([a-z])/g, function(a, b){
+						return b.toUpperCase();
+					});
+					val= element.style[sty];
+					if(!val){
+						dv= document.defaultView || window;
+						if(dv.getComputedStyle){
+							val= dv.getComputedStyle(element,'').getPropertyValue(css);
+						}
+						else if(element.currentStyle){
+							val= element.currentStyle[sty];
+						}
+					}
+				}
+				return val || '';
+			}
+
+			var nextRightPosition = rightOffset;
+			for (var i = 0; i < initialLayout.length; i++) {
+				var button = initialLayout[i];
+				if (button.isEnabled) {
+					button.setPosition(nextRightPosition + "px");
+					button.show();
+
+					var width = getDeepCSS(document.getElementById(button.id), "width");
+					width = Number(width.substring(0, width.length - 2));
+
+					nextRightPosition += width + gapSize;
+				} else {
+					button.hide();
+				}
+			}
+			
+			var bcr_playPauseButton = document.getElementById(this.containerId + "_playPauseButton").getBoundingClientRect();
+			//resize track of VideoScrubber if css contains 'width'=310px for it (fixed issue S7-5594).
+			if (this.fixTrackCSS) {
+				this.videoScrubber.setCSS('.s7videoscrubber .s7track','width', (document.getElementById(this.containerId + "_videoTime").getBoundingClientRect().left - bcr_playPauseButton.right - 10) + "px");
+			}
+
+			this.videoScrubber.resize(document.getElementById(this.containerId + "_videoTime").getBoundingClientRect().left - bcr_playPauseButton.right - 10, document.getElementById(this.containerId + "_videoScrubber").getBoundingClientRect().height);			
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.getURLParameter = function (name) {
+			var sanitizedUrlParams = s7sdk.ParameterManager.getSanitizedParameters(s7sdk.query.params, this.lockurldomains); 
+            		return  sanitizedUrlParams[name];
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.addClass = function (elm, inClass) {
+			var cls = document.getElementById(elm).className.split(' ');
+			if(cls.indexOf(inClass) == -1) {
+				cls[cls.length] = inClass;
+				document.getElementById(elm).className = cls.join(' ');
+			}
+		};
+
+		s7viewers.InteractiveVideoViewer.prototype.activateComponents = function (flag){
+			if (!flag){
+				this.controls.setCSS(".s7controlbar", "visibility", "hidden");
+				this.interactiveSwatches.setCSS(".s7interactiveswatches", "visibility", "hidden");
+				this.socialShare.setCSS(".s7socialshare", "visibility", "hidden");
+			}else{
+				this.controls.setCSS(".s7controlbar", "visibility", "inherit");
+				this.interactiveSwatches.setCSS(".s7interactiveswatches", "visibility", "inherit");
+				this.socialShare.setCSS(".s7socialshare", "visibility", "inherit");
+			}
+		};
+
+
+	})();		
+}

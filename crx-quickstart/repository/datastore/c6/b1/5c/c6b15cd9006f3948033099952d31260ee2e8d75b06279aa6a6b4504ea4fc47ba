@@ -1,0 +1,399 @@
+<%@page session="false"
+        contentType="text/html"
+        pageEncoding="utf-8"
+        import="java.io.PrintWriter,
+            java.util.Iterator,
+            javax.jcr.Node,
+            javax.jcr.RepositoryException,
+            javax.jcr.Session,
+            org.apache.jackrabbit.util.Text,
+            org.apache.sling.api.resource.Resource,
+            org.apache.sling.api.resource.ResourceMetadata,
+            org.apache.sling.api.resource.ResourceResolver,
+            org.apache.sling.api.scripting.SlingScriptHelper,
+            org.slf4j.Logger,
+            org.slf4j.LoggerFactory,
+            com.day.cq.commons.LabeledResource,
+            com.day.cq.dam.api.Asset,
+            com.day.cq.replication.Agent,
+            com.day.cq.replication.AgentManager,
+            com.day.cq.replication.ReplicationActionType,
+            com.day.cq.replication.ReplicationException,
+            com.day.cq.replication.ReplicationQueue,
+            com.day.cq.replication.ReplicationStatus,
+            com.day.cq.replication.Replicator,
+            com.day.cq.wcm.api.Page,
+            com.day.cq.i18n.I18n,
+            com.adobe.granite.xss.XSSAPI" %>
+<%@ page import="java.util.List" %>
+<%@ page import="java.util.ArrayList" %>
+<%@ page import="java.util.Arrays" %>
+<%
+%><%@taglib prefix="sling" uri="http://sling.apache.org/taglibs/sling/1.0" %><%
+%><%@taglib prefix="cq" uri="http://www.day.com/taglibs/cq/1.0" %><%
+%><cq:defineObjects /><%
+
+    String path = slingRequest.getParameter("path");
+    boolean onlyMod = "true".equals(slingRequest.getParameter("onlymodified"));
+    boolean ignDeact = "true".equals(slingRequest.getParameter("ignoredeactivated"));
+    boolean reactivate = "true".equals(slingRequest.getParameter("reactivate"));
+    boolean dryRun = "dryrun".equals(slingRequest.getParameter("cmd"));
+    Replicator repl = sling.getService(Replicator.class);
+    I18n i18n = new I18n(slingRequest);
+
+%><html><head>
+    <style type="text/css">
+        div {
+            font-family:arial,tahoma,helvetica,sans-serif;
+            font-size:11px;
+            white-space:nowrap;
+        }
+        .action {
+            display: inline;
+            width: 130px;
+            float: left;
+            overflow: hidden;
+        }
+        .error {
+            color: red;
+            font-weight: bold;
+        }
+        .title {
+            display: inline;
+            width: 150px;
+            float: left;
+            margin: 0 8px 0 0;
+            overflow: hidden;
+        }
+        .activate {
+
+        }
+        .ignore {
+            color: #888888;
+        }
+        .cf {
+            color: #888888;
+        }
+        .path {
+            display: inline;
+            width: 100%;
+        }
+
+    </style>
+    <script type="text/javascript">
+        var started = false;
+
+        function start() {
+            started = true;
+        }
+        function stop() {
+            started = false;
+        }
+        function isStarted() {
+            return started;
+        }
+        function jump() {
+            window.scrollTo(0, 100000);
+        }
+    </script>
+</head>
+<body bgcolor="white">
+<div>
+    <%
+        Processor p = new Processor(repl, slingRequest.getResourceResolver(), new PrintWriter(out), sling, i18n);
+        p.setIgnoreDeactivated(ignDeact);
+        p.setOnlyModified(onlyMod);
+        p.setReactivate(reactivate);
+        p.setDryRun(dryRun);
+        p.process(path);
+    %></div>
+</body>
+</html><%!
+
+    private static class Processor {
+
+        /**
+         * default logger
+         */
+        private static final Logger log = LoggerFactory.getLogger(Processor.class);
+
+        private final Replicator replicator;
+
+        private final SlingScriptHelper sling;
+
+        private final ResourceResolver resolver;
+
+        private final Session session;
+
+        private final PrintWriter out;
+
+        private boolean onlyModified;
+
+        private boolean reactivate;
+
+        private boolean ignoreDeactivated;
+
+        private boolean dryRun;
+
+        private int tCount;
+
+        private int aCount;
+
+        private long lastUpdate;
+
+        private I18n i18n;
+
+        private XSSAPI xssAPI;
+
+        private List<String> replicatedPaths = new ArrayList<String>();
+
+        private final int BATCH_SIZE = 10;
+
+        private Processor(Replicator replicator, ResourceResolver resolver, PrintWriter out, SlingScriptHelper sling, I18n i18n) {
+            this.replicator = replicator;
+            this.resolver = resolver;
+            this.out = out;
+            this.session = resolver.adaptTo(Session.class);
+            this.sling = sling;
+            this.i18n = i18n;
+            this.xssAPI = sling.getService(XSSAPI.class);
+        }
+
+        public void setOnlyModified(boolean onlyModified) {
+            this.onlyModified = onlyModified;
+        }
+
+        public void setReactivate(boolean reactivate) {
+            this.reactivate = reactivate;
+        }
+
+        public void setIgnoreDeactivated(boolean ignoreDeactivated) {
+            this.ignoreDeactivated = ignoreDeactivated;
+        }
+
+        public void setDryRun(boolean dryRun) {
+            this.dryRun = dryRun;
+        }
+
+        public void process(String path) {
+            if (path == null || path.length() == 0) {
+                out.printf("<div class=\"error\">" + i18n.get("No start path specified.") + "</div>");
+                return;
+            }
+            // snip off all trailing slashes
+            while (path.endsWith("/")) {
+                path = path.substring(0, path.length() - 1);
+            }
+            // reject root and 1 level paths
+            if (path.lastIndexOf('/') <= 0) {
+                if (path.length() == 0) {
+                    path = "/";
+                }
+                out.printf("<div class=\"error\">" + xssAPI.encodeForHTML(i18n.get("Refusing to tree-activate '{0}'", null, path)) + "</div>");
+                return;
+
+            }
+            Resource res = resolver.getResource(path);
+            if (res == null) {
+                out.printf("<div class=\"error\">" + xssAPI.encodeForHTML(i18n.get("The resource at '{0}' does not exist.", null, path)) + "</div>");
+                return;
+            }
+
+            out.printf("%n<script>start()</script>%n");
+            if(dryRun){
+                if(onlyModified && !reactivate && !ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Simulating tree nice-activation below path '{0}' of all pages that are modified", null, path)) + "</strong><br>");
+                else if(!onlyModified && reactivate && !ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Simulating tree nice-activation below path '{0}' of all pages that are activated", null, path)) + "</strong><br>");
+                else if(!onlyModified && !reactivate && ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Simulating tree nice-activation below path '{0}' of all pages that are not deactivated", null, path)) + "</strong><br>");
+                else if(onlyModified && !reactivate && ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Simulating tree nice-activation below path '{0}' of all pages that are modified and not deactivated", null, path)) + "</strong><br>");
+                else if(onlyModified && reactivate && !ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Simulating tree nice-activation below path '{0}' of all pages that are modified and activated", null, path)) + "</strong><br>");
+                else if(!onlyModified && reactivate && ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Simulating tree nice-activation below path '{0}' of all pages that are activated and not deactivated", null, path)) + "</strong><br>");
+                else if(onlyModified && reactivate && ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Simulating tree nice-activation below path '{0}' of all pages that are modified and activated and not deactivated", null, path)) + "</strong><br>");
+                else
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Simulating tree nice-activation below path '{0}' of all pages", null, path)) + "</strong><br>");
+            }
+            else{
+                if(onlyModified && !reactivate && !ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Starting tree nice-activation below path '{0}' of all pages that are modified", null, path)) + "</strong><br>");
+                else if(!onlyModified && reactivate && !ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Starting tree nice-activation below path '{0}' of all pages that are activated", null, path)) + "</strong><br>");
+                else if(!onlyModified && !reactivate && ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Starting tree nice-activation below path '{0}' of all pages that are not deactivated", null, path)) + "</strong><br>");
+                else if(onlyModified && !reactivate && ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Starting tree nice-activation below path '{0}' of all pages that are modified and not deactivated", null, path)) + "</strong><br>");
+                else if(onlyModified && reactivate && !ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Starting tree nice-activation below path '{0}' of all pages that are modified and activated", null, path)) + "</strong><br>");
+                else if(!onlyModified && reactivate && ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Starting tree nice-activation below path '{0}' of all pages that are activated and not deactivated", null, path)) + "</strong><br>");
+                else if(onlyModified && reactivate && ignoreDeactivated)
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Starting tree nice-activation below path '{0}' of all pages that are modified and activated and not deactivated", null, path)) + "</strong><br>");
+                else
+                    out.printf("<strong>" + xssAPI.encodeForHTML(i18n.get("Starting tree nice-activation below path '{0}' of all pages", null, path)) + "</strong><br>");
+            }
+            out.printf("<hr size=\"1\">%n");
+
+            long startTime = System.currentTimeMillis();
+            tCount = aCount = 0;
+            try {
+                process(res);
+                replicate(session, null);
+                long endTime = System.currentTimeMillis();
+                out.printf("<hr size=\"1\"><br><strong>" + xssAPI.encodeForHTML(i18n.get("Activated {0} of {1} resources in {2} seconds.", null, aCount, tCount, (endTime-startTime)/1000)) + "</strong><br>");
+
+            } catch (Exception e) {
+                out.printf("<div class=\"error\">" + xssAPI.encodeForHTML(i18n.get("Error during processing: {0}", null, e.toString())) + "</div>");
+                log.error("Error during tree activation of " + path, e);
+            }
+
+            out.printf("%n<script>jump();stop();</script>%n");
+            out.flush();
+        }
+
+
+        private boolean process(Resource res)
+                throws RepositoryException, ReplicationException {
+
+            // we can only tree-activate hierarchy nodes
+            Node node = res.adaptTo(Node.class);
+            if (node==null || !node.isNodeType("nt:hierarchyNode")) {
+                return false;
+            }
+            Page page = res.adaptTo(Page.class);
+            Asset asset = res.adaptTo(Asset.class);
+            long lastModified;
+            if (page != null) {
+                lastModified = page.getLastModified() == null
+                        ? -1
+                        : page.getLastModified().getTimeInMillis();
+            } else if (asset != null) {
+                lastModified = asset.getLastModified() == 0
+                        ? -1
+                        : asset.getLastModified();
+            }else {
+                ResourceMetadata data = res.getResourceMetadata();
+                lastModified = data.getModificationTime();
+            }
+            String title = Text.getName(res.getPath());
+            LabeledResource lr = res.adaptTo(LabeledResource.class);
+            if (lr != null && lr.getTitle() != null) {
+                title = lr.getTitle();
+            }
+            ReplicationStatus rs = res.adaptTo(ReplicationStatus.class);
+            long lastPublished = 0;
+            boolean isDeactivated = false;
+            boolean isActivated = false;
+            if (rs != null && rs.getLastPublished() != null) {
+                lastPublished = rs.getLastPublished().getTimeInMillis();
+                isDeactivated = rs.isDeactivated();
+                isActivated = rs.isActivated();
+            }
+            boolean isModified = lastModified > lastPublished;
+            boolean doActivate = false;
+            String action;
+            if (!isModified && onlyModified) {
+                doActivate = false;
+                action = i18n.get("Ignore (not modified)");
+            } else if (!isActivated && reactivate) {
+                action = i18n.get("Ignore (not activated)");
+            } else if (isDeactivated && ignoreDeactivated) {
+                action = i18n.get("Ignore (deactivated)");
+            } else {
+                try {
+                    replicator.checkPermission(this.session, ReplicationActionType.ACTIVATE, res.getPath());
+                    action = i18n.get("Activate");
+                    doActivate = true;
+                } catch (ReplicationException e) {
+                    action = i18n.get("No replication permission");
+                }
+            }
+
+            tCount++;
+
+
+            if (doActivate) {
+                if (!dryRun) {
+                    replicate(session, res);
+                }
+                aCount++;
+            }
+            // get classifier
+            String cf = "";
+            String delim = "(";
+            if (isModified) {
+                cf+= delim + i18n.get("modified");
+                delim = ", ";
+            }
+            if (isActivated) {
+                cf+= delim + i18n.get("activated");
+                delim = ", ";
+            }
+            if (isDeactivated) {
+                cf+= delim + i18n.get("deactivated");
+            }
+            if (cf.length() > 0) {
+                cf = "<span class=\"cf\">" + cf + ")</span>";
+            }
+            // print
+            out.printf("<div class=\"action %s\">%s</div>", doActivate ? "activate" : "ignore", action);
+            out.printf("<div class=\"title\">%s</div>", xssAPI.encodeForHTML(title));
+            out.printf("<div class=\"path\">%s %s [%d]</div><br>", xssAPI.encodeForHTML(res.getPath()), cf, tCount);
+            out.flush();
+            long now  = System.currentTimeMillis();
+            if (now - lastUpdate > 1000L) {
+                lastUpdate = now;
+                out.printf("<script>jump();</script>%n");
+                out.flush();
+            }
+            Iterator<Resource> iter = resolver.listChildren(res);
+            while (iter.hasNext()) {
+                process(iter.next());
+            }
+
+            // flush
+            return true;
+        }
+
+
+        private void replicate(Session session, Resource res) throws RepositoryException {
+            try {
+
+                boolean doReplicate = false;
+                if (res != null) {
+                    replicatedPaths.add(res.getPath());
+                    doReplicate = replicatedPaths.size() >= BATCH_SIZE;
+                } else {
+                    doReplicate = replicatedPaths.size() > 0;
+                }
+
+                if (doReplicate) {
+                    if (session.hasPendingChanges()) {
+                        session.refresh(true);
+                    }
+
+                    String[] array = replicatedPaths.toArray(new String[replicatedPaths.size()]);
+                    replicator.replicate(session, ReplicationActionType.ACTIVATE, array, null);
+
+                    out.printf("<div class=\"action Flush\">Flush</div>");
+                    out.printf("<div class=\"title\">%d resources activated</div><br>", array.length);
+                    out.printf("<div class=\"path\"></div>");
+
+                    out.flush();
+                    replicatedPaths.clear();
+                }
+
+            } catch (ReplicationException e) {
+                out.printf("<div class=\"error\">" + xssAPI.encodeForHTML(i18n.get("Error during processing: {0}", null, e.toString())) + "</div>");
+                log.error("Error during tree activation of " + res.getPath(), e);
+                if (e.getCause() instanceof RepositoryException) {
+                    session.refresh(false);
+                }
+            }
+        }
+    }
+%>

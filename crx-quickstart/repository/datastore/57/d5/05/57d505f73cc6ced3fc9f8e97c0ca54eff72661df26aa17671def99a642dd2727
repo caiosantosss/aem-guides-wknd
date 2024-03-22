@@ -1,0 +1,580 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2011 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+
+/**
+ * @class CQ.mcm.GanttView
+ * @extends CQ.Ext.Panel
+ * The GanttView shows all campaigns for a specific brand in a Gantt Chart.
+ * @constructor
+ * Creates a new Campaigns Overview.
+ * @param {Object} config The config object
+ * @since 5.5
+ */
+CQ.mcm.GanttView = CQ.Ext.extend(CQ.Ext.Panel, {
+    timelineStart: new Date().add(Date.DAY, -10).dateOnly(),
+    timelineEnd: new Date().add(Date.DAY, 20).dateOnly(), // first day not visible
+    columnColors: ["#fcfcfc", "white"],
+    todayFillColor: "#faffee",
+    eventFillColor: "#efefef", 
+    eventStrokeColor: "#efefef", 
+    eventLabelColor: "black",
+    eventSelectedFillColor: "d3ea9a",
+    eventSelectedLabelColor: "315c00",
+    eventHoverFillColor: "dedede",
+    columnBorderColor: "#eeeeee",
+    mainHeaderColor: "#e1e1e1",
+    subHeaderColor: "#eeeeee",
+    subHeaderHighlightColor: "#ebf0de", // today
+    headerBorderColor: "#c2c2c2",
+    headerBorderTopColor: "#f9f9f9",
+    headerBorderLeftColor: "#eeeeee",
+    headerBorderRightColor: "#d0d0d0",
+    blackFont: {
+                    "fill": "black",
+                    "font-size": "11px",
+                    "font-weight": "normal",
+                    "font-family": "tahoma,arial,helvetica,sans-serif"
+                },
+    blackFontCenter: {
+                    "fill": "black",
+                    "font-size": "11px",
+                    "font-weight": "normal",
+                    "font-family": "tahoma,arial,helvetica,sans-serif",
+                    "text-align": "center"
+                },
+    blackFontCenterBold: {
+        "fill": "black",
+        "font-size": "11px",
+        "font-weight": "bold",
+        "font-family": "tahoma,arial,helvetica,sans-serif",
+        "text-align": "center"
+    },
+    headerHeight: 46,
+    mainHeaderInnerHeight: 22,
+    subHeaderInnerHeight: 21,
+    enableDoubleClick: false,
+
+    // internal
+    canvasWidth: 10,
+    canvasHeight: 10,
+    rowHeight: 30,
+    doubleClickSpeed: 500,
+    currentElement: null,
+    currentSelection: null,
+    currentRecord: null,
+
+    constructor: function(config) {
+        var that = this;
+        var dateFormat = config.dateFormat || "Y-m-d";
+        var timeFormat = config.timeFormat || "c";
+        
+        this.store = new CQ.Ext.data.JsonStore({
+            root: 'events',
+            idProperty: 'id',
+            remoteSort: true,
+    
+            fields: [
+                'id', 
+                'label', 
+                {name: 'startDate', convert: function(date) {
+                    var tmp = Date.parseDate(date, dateFormat);
+                    if(tmp != null)
+                        return tmp.dateOnly();
+                    else return null;
+                }},
+                {name: 'endDate', convert: function(date) {
+                    var tmp = Date.parseDate(date, dateFormat);
+                    if(tmp != null)
+                        return tmp.dateOnly();
+                    else return null;
+                }},
+                'touchpointType',
+                'isDisplayOnTimes',
+                'sling:resourceType',
+                'propertiesDialogPath'
+            ]
+        });
+        
+        this.canvas = null;
+        CQ.Util.applyDefaults(config,  {
+                border: false,
+                autoScroll: true,
+                listeners: {
+                    bodyresize: function(panel) {
+                        that.panelSize = panel.body.getSize();
+                        that.resizeCanvas();
+                        that.doRender();
+                    },
+                    afterrender: function(panel) {
+                        that.canvas = CQ.Raphael(panel.body.dom, 100, 100);
+                    }
+                }
+            });
+        
+        config.timelineStart = config.timelineStart.dateOnly();
+        config.timelineEnd = config.timelineEnd.dateOnly();
+
+        CQ.mcm.GanttView.superclass.constructor.call(this, config);
+
+        CQ.event.EventAdmin.registerEventHandler("com/day/mcm/gantt/CLICK", this.raiseClick, this);
+        
+    },
+    initComponent: function() {
+        CQ.mcm.GanttView.superclass.initComponent.call(this);
+        
+        this.addEvents(
+            /**
+             * @event eventclick
+             * Fires when an event was clicked. If doubleclick is enabled, the single click is delayed by 500ms.
+             * @param {Ext.data.Record} record the Record that belongs to this event.
+             */
+            'eventclick',
+            /**
+             * @event eventdblclick
+             * Fires when an event was double clicked. Please enable double click by setting enableDoubleClick to true.
+             * @param {Ext.data.Record} record the Record that belongs to this event.
+             */
+            'eventdblclick',
+            /**
+             * @event selectionchange
+             * Fires when an event was selected. Works only if selectable is not false.
+             * @param {CQ.mcm.GanttView} view
+             * @param {Ext.data.Record} selection the Record that is currently selected. Null if nothing is selected
+             */
+            'selectionchange'
+        );
+    },
+    
+    setTimespan: function(startDate, endDate) {
+        this.timelineStart = startDate.dateOnly();
+        this.timelineEnd = endDate.dateOnly();
+        this.doRender();
+    },
+    
+    updateData: function(data) {
+        this.store.loadData(data);
+        this.resizeCanvas();
+        this.doRender();
+        this.currentSelection = null;
+        this.fireEvent('selectionchange', this, null);
+    },
+    
+    doRender: function() {
+        this.canvas.clear();
+        
+        this.drawGrid();
+        this.drawItems();
+    },
+    
+    resizeCanvas: function() {
+        var panelBody = this.body;
+        var height = this.headerHeight + 15 + this.rowHeight * this.store.getCount() + 10; // the 10 pixel are just for a little gap below the last entry
+        if (this.panelSize) {
+            // if we do not need scrollbars, we would like to fill the space the scrollbar usually needs,
+            // but this doesn't work, browsers will always start to show a scrollbar when making the window smaller
+            // afterwards, so need to always accomodate for the scrollbar, to avoid it being shown if not needed.
+            // So: Need to mangle the style to turn off the scroll bars
+            if(height > this.panelSize.height-3) {
+                this.canvasWidth = this.panelSize.width - 16;
+                this.canvasHeight = height;
+                if (panelBody) { 
+                    panelBody.setStyle("overflow-x", "hidden");
+                    panelBody.setStyle("overflow-y", "auto");
+                }
+            } else {
+                this.canvasWidth = this.panelSize.width-1;
+                this.canvasHeight = this.panelSize.height-3;
+                // sadly shows an empty scrollbar on bottom
+                if (panelBody) { 
+                    panelBody.setStyle("overflow-x", "hidden");
+                    panelBody.setStyle("overflow-y", "hidden");
+                }   
+            }
+            this.canvas.setSize(this.canvasWidth, this.canvasHeight );
+        }
+    },
+    
+    getLastDayOfMonth: function(cal) {
+        var daysToJumpOverEnd = 31 - cal.getDate(); // to or over
+        var endCal = cal.add(Date.DAY, daysToJumpOverEnd);
+        while (endCal.getMonth() != cal.getMonth()) {
+            endCal = endCal.add(Date.DAY, -1);
+        }
+        return endCal.getDate();
+    },
+    
+    drawGrid: function() {
+        var days = Math.round(this.timelineStart.getElapsed(this.timelineEnd) / 86400000);
+        var width = this.canvasWidth;
+        if (width < 1) width = 1;
+        var height = this.canvasHeight;
+        if (height < 1) height = 1;
+        
+        var columnWidth = width / days;
+        
+        if(columnWidth >= 32) { // draw days
+            
+            for(var i=0; i < days; i++) {
+                
+                var currentColCal = this.timelineStart.add(Date.DAY, i);
+                var currentColCurrentDay = currentColCal.getElapsed(new Date().dateOnly()) == 0;
+                var currentColIsFirst = (i == 0);
+                var currentColStartsMonth = (currentColCal.format("j") == 1);
+                var daysLeftInMonth = this.getLastDayOfMonth(currentColCal) - (currentColCal.getDate()-1);
+                                
+                if(currentColIsFirst || currentColStartsMonth) {
+                    this.canvas.rect(columnWidth * i, 1, daysLeftInMonth * columnWidth, this.mainHeaderInnerHeight + 0.5).attr({
+                        fill: "url('" + CQ.HTTP.externalize("/libs/cq/ui/widgets/themes/default/ext/grid/grid3-hrow2.gif") + "')",// this.mainHeaderColor,
+                        stroke: ""
+                    });
+                    // draw month name only if length available is at least 80px.
+                    var daysOfMonthToDraw = Math.min(daysLeftInMonth, days - i);
+                    if (daysOfMonthToDraw * columnWidth >= 80) {
+                        var middle = i + (daysOfMonthToDraw/2.0);
+                        this.canvas.text(columnWidth * (middle), 12, currentColCal.format("F")).attr(this.blackFontCenterBold);
+                    }
+                }
+                if (currentColStartsMonth) {
+                    // draw vertical line
+                    this.canvas.path("M" + (columnWidth * i ) + ", " + (0 + 1) 
+                        + " L " + (columnWidth * i ) + "," + (this.mainHeaderInnerHeight + 1 )).attr({
+                        fill: "none",
+                        stroke: this.headerBorderRightColor,
+                        "stroke-width": "1px"
+                    });
+                    this.canvas.path("M" + (columnWidth * i + 1) + ", " + (0 + 1) 
+                        + " L " + (columnWidth * i + 1) + "," + (this.mainHeaderInnerHeight + 1 )).attr({
+                        fill: "none",
+                        stroke: this.headerBorderLeftColor,
+                        "stroke-width": "1px"
+                    });
+                }
+                                
+                var subHeaderFill = currentColCurrentDay ? this.subHeaderHighlightColor : this.subHeaderColor;
+                this.canvas.rect(columnWidth * i, this.mainHeaderInnerHeight + 1, columnWidth, this.subHeaderInnerHeight + 0.5+1).attr({
+                    fill: subHeaderFill,
+                    stroke: ""
+                });
+                
+                // subheader separator line
+                this.canvas.path("M" + (columnWidth * i + 0) + ", " + (this.mainHeaderInnerHeight + 1) 
+                    + " L " + (columnWidth * i + 0) + "," + (this.mainHeaderInnerHeight + 1 + this.subHeaderInnerHeight + 1)).attr({
+                    fill: "none",
+                    stroke: this.headerBorderColor,
+                    "stroke-width": "1px"
+                });
+                
+                var subheaderFormat = "j";
+                if (columnWidth >= 80) {
+                    subheaderFormat = "l, j";
+                }
+                this.canvas.text(columnWidth * (i + 0.5), this.headerHeight - 11, 
+                    this.timelineStart.add(Date.DAY, i).format(subheaderFormat)).attr(this.blackFontCenter);
+                
+                
+                // main canvas coloring
+                var fillColor = (currentColCurrentDay ? this.todayFillColor: this.columnColors[i % 2] );
+                var mainFillHeight = height-this.headerHeight;
+                if (mainFillHeight < 1) {
+                    mainFillHeight = 1;
+                }
+                this.canvas.rect(columnWidth * i, this.headerHeight, columnWidth, mainFillHeight).attr({
+                    fill: fillColor,
+                    stroke: ""
+                });                
+                this.canvas.path("M" + columnWidth * i + "," + this.headerHeight + " L " + columnWidth * i + "," + height).attr({
+                    fill: "none",
+                    stroke: this.columnBorderColor
+                });
+                
+            }
+        }else { // draw weeks
+            var startOfWeek = 
+                Number(CQ.I18n.getMessage("0", null, "Start day for week view in calendar (0=Sunday, 1=Monday, etc.)"));
+            var weekColumnWidth = width * 7 / days;
+            var week = 0;
+            
+            for(var i=0; i < days; i++) {
+                var currentColCal = this.timelineStart.add(Date.DAY, i);
+                var currentColCurrentDay = currentColCal.getElapsed(new Date().dateOnly()) == 0;
+                var currentColIsFirst = (i == 0);
+                var currentColWeekday = parseInt(currentColCal.format("w"));
+                var currentColStartsWeek = (""+currentColWeekday == startOfWeek);
+                if (startOfWeek) {
+                    if (currentColWeekday < startOfWeek) {
+                        deltaToLastWeekDay = startOfWeek - currentColWeekday;
+                    } else {
+                        deltaToLastWeekDay = 6 + startOfWeek - currentColWeekday;
+                    }                    
+                } else {
+                    var deltaToLastWeekDay = 6  - currentColWeekday;
+                }
+                var lastWeekDay = currentColCal.add(Date.DAY, deltaToLastWeekDay);
+                
+                if (currentColStartsWeek) week++;
+            
+                var currentColStartsMonth = (currentColCal.format("j") == 1);
+                var daysLeftInMonth = this.getLastDayOfMonth(currentColCal) - (currentColCal.getDate()-1);
+                           
+                // main header (months)
+                if(currentColIsFirst || currentColStartsMonth) {
+                    this.canvas.rect(columnWidth * i, 1, daysLeftInMonth * columnWidth, this.mainHeaderInnerHeight + 0.5).attr({
+                        fill: "url('" + CQ.HTTP.externalize("/libs/cq/ui/widgets/themes/default/ext/grid/grid3-hrow2.gif") + "')",// this.mainHeaderColor,
+                        stroke: ""
+                    });
+                    // draw month name only if length available is at least 120px.
+                    var daysOfMonthToDraw = Math.min(daysLeftInMonth, days - i);
+                    
+                    if (daysOfMonthToDraw * columnWidth >= 120) {
+                        var middle = i + (daysOfMonthToDraw/2.0);
+                        this.canvas.text(columnWidth * (middle), 12, currentColCal.format("F Y")).attr(this.blackFontCenterBold);
+                    }
+                }
+                if (currentColStartsMonth) {
+                    // draw vertical line
+                    this.canvas.path("M" + (columnWidth * i + 0) + ", " + (0 + 1) 
+                        + " L " + (columnWidth * i +0) + "," + (this.mainHeaderInnerHeight + 1 )).attr({
+                        fill: "none",
+                        stroke: this.headerBorderRightColor,
+                        "stroke-width": "1px"
+                    });
+                    this.canvas.path("M" + (columnWidth * i + 1) + ", " + (0 + 1) 
+                        + " L " + (columnWidth * i + 1) + "," + (this.mainHeaderInnerHeight + 1 )).attr({
+                        fill: "none",
+                        stroke: this.headerBorderLeftColor,
+                        "stroke-width": "1px"
+                    });
+                }
+    
+                if (currentColStartsWeek || currentColIsFirst) {
+                    
+                    // sub header
+                    this.canvas.rect(columnWidth * i , this.mainHeaderInnerHeight + 1, columnWidth*(deltaToLastWeekDay+1), this.subHeaderInnerHeight + 0.5+1).attr({
+                        fill: this.subHeaderColor,
+                        stroke: ""
+                    });
+                    
+                    // subheader separator line
+                    this.canvas.path("M" + (columnWidth * i + 0) + ", " + (this.mainHeaderInnerHeight + 1) 
+                        + " L " + (columnWidth * i + 0) + "," + (this.mainHeaderInnerHeight + 1 + this.subHeaderInnerHeight + 1)).attr({
+                        fill: "none",
+                        stroke: this.headerBorderColor,
+                        "stroke-width": "1px"
+                    });
+                    
+                    if (deltaToLastWeekDay * columnWidth >= 45) {
+                        var formatDate = currentColCal;
+                        if (startOfWeek == 0) {
+                            formatDate = currentColCal.add(Date.DAY, 1); // be sure to have a monday or tuesday, if week starts on sunday,
+                                                                         // the format for CW starts on monday with new week (see iso why we need this).
+                        }
+                        this.canvas.text(columnWidth * (i + (deltaToLastWeekDay+1)/2), this.headerHeight - 13, 
+                            formatDate.format("C\\W W")).attr(this.blackFontCenter);
+                    }
+                        
+                    // main canvas coloring
+                    var fillColor = this.columnColors[week % 2];
+                    var mainFillHeight = height-this.headerHeight;
+                    if (mainFillHeight < 1) mainFillHeight = 1;
+                    this.canvas.rect(columnWidth * i, this.headerHeight, columnWidth*(deltaToLastWeekDay+1), mainFillHeight).attr({
+                        fill: fillColor,
+                        stroke: ""
+                    });                
+                    this.canvas.path("M" + columnWidth * i + "," + this.headerHeight + " L " + columnWidth * i + "," + height).attr({
+                        fill: "none",
+                        stroke: this.columnBorderColor
+                    });
+                }
+                
+                // subheader day marker line
+                this.canvas.path("M" + (columnWidth * i + 0) + ", " + (this.mainHeaderInnerHeight + 1+16) 
+                    + " L " + (columnWidth * i + 0) + "," + (this.mainHeaderInnerHeight + 1 + this.subHeaderInnerHeight + 1)).attr({
+                    fill: "none",
+                    stroke: this.headerBorderColor,
+                    "stroke-width": "1px"
+                });
+                if (currentColCurrentDay) {
+                    var mainFillHeight = height-this.headerHeight;
+                    if (mainFillHeight < 1) mainFillHeight = 1;
+                    this.canvas.rect(columnWidth * i, this.headerHeight, columnWidth, mainFillHeight).attr({
+                        fill: this.todayFillColor,
+                        stroke: ""
+                    });   
+                }
+                
+                
+            }
+            
+            
+        }
+        this.canvas.path("M0,0 L" + width + ",0").attr({
+            fill: "none",
+            stroke: this.headerBorderTopColor,
+            "stroke-width": "1px"
+        });
+        // separation lines between header parts:        
+        this.canvas.path("M0," + (this.mainHeaderInnerHeight + 1 + this.subHeaderInnerHeight + 1) 
+            + " L" + width + "," + (this.mainHeaderInnerHeight + 1 + this.subHeaderInnerHeight + 1)).attr({
+            fill: "none",
+            stroke: this.headerBorderColor,
+            "stroke-width": "1px"
+        });
+    },
+    
+    dataStoreFilter: function(record, id) {
+        if (! this.recordHasStartEnd(record)) {
+            return true; // records without start or end shown all the time
+        }
+        var timelineStartInSec = this.timelineStart.format("U");
+        var timelineEndInSec = this.timelineEnd.format("U");
+        var startInSec = record.data.startDate.format("U");
+        var endInSec = record.data.endDate.format("U");
+        return (timelineStartInSec <= startInSec && startInSec < timelineEndInSec) ||
+                (timelineStartInSec <= endInSec && endInSec < timelineEndInSec) ||
+                (startInSec < timelineStartInSec && timelineEndInSec <= endInSec);
+    },
+    
+    drawItems: function() {
+        var that = this;
+        var days = Math.floor(this.timelineStart.getElapsed(this.timelineEnd) / 86400000);
+        var width = this.canvasWidth;
+        var height = this.canvasHeight;
+        var columnWidth = width / days;
+        var maxEvents = Math.floor(height / this.rowHeight) - 1;
+        
+        this.store.filterBy(this.dataStoreFilter, this);
+        var row = 0;
+        var timelineStartInSec = this.timelineStart.format("U");
+        this.store.each(function(record) {
+                var set = this.canvas.set();
+                var startDate = null;
+                var endDate = null;
+                startDate = record.data.startDate;
+                endDate = record.data.endDate;
+                if(startDate == null)
+                    startDate = this.timelineStart.add(Date.DAY, -10);
+                if(endDate == null)
+                    endDate  = this.timelineEnd.add(Date.DAY, 10);
+                
+                var startInSec = startDate.format("U");
+                var startDay = Math.round((startInSec - timelineStartInSec) / 86400);
+                var lengthInDays = Math.round(startDate.getElapsed(endDate) / 86400000) + 1; // plus one to include the endDate => if start and end are the same, it should be one full day
+                var recordRectWidth = columnWidth * lengthInDays - 2;
+                if (recordRectWidth < 1) recordRectWidth = 1;
+                var recordRectHeight = this.rowHeight - 6;
+                if (recordRectHeight < 1) recordRectHeight = 1;
+                var recordRect = this.canvas.rect(columnWidth * startDay + 1, this.rowHeight * row + 3 + this.headerHeight + 12, recordRectWidth, recordRectHeight, 8).attr({
+                    fill: this.eventFillColor,
+                    stroke: this.eventStrokeColor,
+                    cursor: "pointer",
+                    "stroke-width": "0px"
+                });
+                
+                
+                
+                set.push(recordRect);
+                
+                set.push(
+                    this.canvas.text(Math.max(columnWidth * startDay + 11, 7), this.rowHeight * (row + 0.5) + this.headerHeight + 12, record.data.label).attr(CQ.Util.applyDefaults({
+                        fill: this.eventLabelColor,
+                        cursor: "pointer",
+                        "text-anchor": "start"
+                    }, this.blackFont))
+                );
+                
+                var current = {element: set, record: record};
+                set.hover(function(evt) {
+                    var currentLoc = current;
+                    that.hover(evt, currentLoc.element, currentLoc.record);
+                }, function(evt) {
+                    var currentLoc = current;
+                    that.unhover(evt, currentLoc.element, currentLoc.record);
+                });
+                set.click(function(evt) {
+                    var currentLoc = current;
+                    that.click(evt, currentLoc.element, currentLoc.record);
+                });
+                set.dblclick(function(evt) {
+                    var currentLoc = current;
+                    that.dblclick(evt, currentLoc.element, currentLoc.record);
+                });
+                
+                row++;
+        }, this);
+
+        return;
+
+    },
+    
+    raiseClick: function() {
+        if(this.selectable !== false)
+            this.selectEvent(this.currentElement, this.currentRecord);
+        this.fireEvent('eventclick', this.currentRecord);
+    },
+    
+    selectEvent: function(element, record) {
+        if(this.currentSelection != null && this.currentSelection.record.id == record.id) {
+            // ignore, no changes
+        } else {
+            if(this.currentSelection != null) {
+                this.currentSelection.element.items[0].attr("fill", this.eventFillColor);
+                this.currentSelection.element.items[1].attr("font-weight", "normal");
+                this.currentSelection.element.items[1].attr("fill", this.eventLabelColor);
+            }
+
+            element.items[0].attr("fill", "#" + this.eventSelectedFillColor);
+            element.items[1].attr("font-weight", "bold");
+            element.items[1].attr("fill", "#" + this.eventSelectedLabelColor);
+            this.currentSelection = {
+                element: element,
+                record: record
+            };
+            this.fireEvent('selectionchange', this, record);
+        }
+    },
+    
+    hover: function(evt, element, record) {
+        if(this.currentSelection == null || this.currentSelection.element != element)
+            element.items[0].attr("fill", "#" + this.eventHoverFillColor);
+    },
+    
+    unhover: function(evt, element, record) {
+        if(this.currentSelection == null || this.currentSelection.element != element)
+            element.items[0].attr("fill", this.eventFillColor);
+    },
+    
+    click: function(evt, element, record) {
+        if(this.selectable !== false)
+            this.selectEvent(element, record);
+        this.fireEvent('eventclick', record);
+    },
+    
+    dblclick: function(evt, element, record) {
+        this.fireEvent('eventdblclick', record);
+    },
+    
+    recordHasStartEnd: function(record) {
+        if (record.data.startDate == null
+            || record.data.endDate == null) {
+            return false;
+        }
+        return true;
+    }
+});
+
+CQ.Ext.reg("mcmganttview", CQ.mcm.GanttView);

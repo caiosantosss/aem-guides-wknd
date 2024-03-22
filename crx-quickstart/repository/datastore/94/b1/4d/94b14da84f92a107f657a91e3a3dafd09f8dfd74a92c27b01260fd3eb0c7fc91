@@ -1,0 +1,694 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+CQ.Workflow.Console.LauncherPanel = function(config) {
+    this.construct.call(this, config);
+};
+
+CQ.Ext.extend(CQ.Workflow.Console.LauncherPanel, CQ.Workflow.Console.GridPanel, {
+    id:'cq.workflow.launcher',
+
+    // the value "Any Node Type" is defined/used by the server and cannot change.
+    validNodeRemovedNodeTypes: ["Any Node Type", "nt:folder", "nt:file", "sling:Folder", "cq:Page", "dam:Asset"],
+
+    anyNodeTypeRecord: new CQ.Ext.data.Record({ name: CQ.I18n.getMessage("Any Node Type"), value: "Any Node Type" }),
+
+    title:CQ.I18n.getMessage('Launcher'),
+    tabTip:CQ.I18n.getMessage('Launch workflow triggered by content action(s)'),
+
+    listeners: {
+        rowcontextmenu: function(grid, index, e) {
+            if (!this.contextMenu) {
+                this.contextMenu = new CQ.Ext.menu.Menu({
+                    items: this.actions
+                });
+            }
+            var xy = e.getXY();
+            this.contextMenu.showAt(xy);
+            e.stopEvent();
+        },
+        rowdblclick: function(grid, index, e) {
+            this.editAction.execute();
+        }
+    },
+
+    view: new CQ.Ext.grid.GroupingView({
+        forceFit:true,
+        groupTextTpl: '{text} ({[values.rs.length]} {[values.rs.length > 1 ? "'+CQ.I18n.getMessage("Configurations")+'" : "'+CQ.I18n.getMessage("Configuration")+'"]})'
+    }),
+
+    construct: function(config) {
+        var myThis = this;
+        this.resourcePath = config.resourcePath;
+
+        // store
+        this.store = new CQ.Ext.data.GroupingStore({
+            proxy: new CQ.Ext.data.HttpProxy({
+                url:"/libs/cq/workflow/launcher.json",
+                method:"GET"
+            }),
+            listeners: {
+                exception: function(obj, action, data, it, response) {
+                    CQ.shared.HTTP.handleForbidden(response);
+                }
+            },
+            autoLoad:false,
+            reader: new CQ.Ext.data.JsonReader({
+                root: 'configs',
+                totalProperty: 'results',
+                id: 'id',
+                fields: [
+                    'eventType',
+                    'nodetype',
+                    'glob',
+                    'whereClause',
+                    'workflow',
+                    'workflowTitle',
+                    'description',
+                    'enabled',
+                    'exclude',
+                    'runModes'
+                ]
+            })
+        });
+        this.store.setDefaultSort('glob', 'ASC');
+
+        // column model
+        this.cm = new CQ.Ext.grid.ColumnModel([
+            new CQ.Ext.grid.RowNumberer(),
+            {
+                header: CQ.I18n.getMessage("Event Type"),
+                dataIndex: 'eventType'
+            },{
+                header: CQ.I18n.getMessage("Nodetype"),
+                dataIndex: 'nodetype'
+            },{
+                header: CQ.I18n.getMessage("Globbing"),
+                dataIndex: 'glob'
+            },{
+                header: CQ.I18n.getMessage("Condition"),
+                dataIndex: 'whereClause'
+            },{
+                header: CQ.I18n.getMessage("Workflow"),
+                dataIndex: 'workflow',
+                renderer: myThis.renderModelLink
+            },{
+                header: CQ.I18n.getMessage("Description"),
+                dataIndex: 'description'
+            },{
+                header: CQ.I18n.getMessage("Enabled"),
+                dataIndex: 'enabled'
+            },{
+                header: CQ.I18n.getMessage("Exclude"),
+                dataIndex: 'exclude'
+            },{
+                header: CQ.I18n.getMessage("Run Modes"),
+                dataIndex: 'runModes'
+            }
+        ]);
+        this.cm.defaultSortable = true;
+
+        // selection model
+        this.sm = new CQ.Ext.grid.RowSelectionModel({
+            singleSelect:true,
+            listeners: {
+                selectionchange: function(selectionModel) {
+                    myThis.removeAction.setPath('/libs/settings/workflow/launcher/config', true);
+                    myThis.editAction.setPath('/libs/settings/workflow/launcher/config', true);
+                }
+            }
+        });
+
+        // actions
+        this.removeAction = new CQ.PrivilegedAction({
+            cls:'cq.workflow.launcher.remove',
+            text:CQ.I18n.getMessage('Remove'),
+            privileges:['delete'],
+            path:'/libs/settings/workflow/launcher/config',
+            conditions:'',
+            handler: function() {
+                var selection = myThis.getSelectionModel().getSelected();
+                CQ.HTTP.post(
+                    "/libs/cq/workflow/launcher",
+                    function(options, success, response) {
+                        if (success) {
+                            myThis.reload();
+                        }
+                    },
+                    { "delete":selection.id },
+                    this
+                );
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Remove configuration entry'),
+                text:CQ.I18n.getMessage('Removes the selected launcher configuration entry'),
+                autoHide:true
+            }
+        });
+
+        this.addAction = new CQ.PrivilegedAction({
+            cls:'cq.workflow.launcher.add',
+            text:CQ.I18n.getMessage('Add...'),
+            privileges:['create'],
+            path:'/conf/global/settings/workflow/launcher/config',
+            conditions:'',
+            handler: function() {
+
+                var wfAutoAssignRuleDlg = {
+                    "jcr:primaryType": "cq:Dialog",
+                    "title":CQ.I18n.getMessage("Workflow Launcher Configuration"),
+                    "formUrl":"/libs/cq/workflow/launcher",
+                    "failure": function(){
+                        CQ.Ext.Msg.alert(
+                            CQ.I18n.getMessage("Error"),
+                            CQ.I18n.getMessage("Could not add configuration entry."));
+                    },
+                    "params": {
+                        "_charset_":"utf-8",
+                        "add":"true"
+                    },
+                    "height":380,
+                    "items": {
+                        "jcr:primaryType": "cq:Panel",
+                        "items": {
+                            "jcr:primaryType": "cq:WidgetCollection",
+                            "eventType": {
+                                "xtype":"combo",
+                                "fieldLabel":CQ.I18n.getMessage("Event Type"),
+                                "displayField":"name",
+                                "valueField":"evType",
+                                "title":CQ.I18n.getMessage("Event Types"),
+                                "selectOnFocus":true,
+                                "triggerAction":"all",
+                                "editable":false,
+                                "allowBlank":false,
+                                "name":"eventType",
+                                "hiddenName":"eventType",
+                                "mode": 'local',
+                                "store":
+                                      new CQ.Ext.data.SimpleStore({
+                                            fields: ['evType','name'],
+                                            data: [
+                                                [1, CQ.I18n.getMessage("Created")],
+                                                [16, CQ.I18n.getMessage("Modified")],
+                                                [2, CQ.I18n.getMessage("Removed")]
+                                            ]
+                                      }
+                                    )                            },
+                            "nodetypes": {
+                                "xtype":"combo",
+                                "fieldLabel":CQ.I18n.getMessage("Nodetype"),
+                                "displayField":"name",
+                                "valueField":"value",
+                                "title":CQ.I18n.getMessage("Available nodetypes"),
+                                "fieldDescription": CQ.I18n.getMessage("For event type 'Removed' only the following node types are supported: nt:folder, nt:file, sling:Folder (folders without jcr:content sub-node), dam:Asset and cq:Page. For reliable detection, nodes must not reside under the repository root ('/') in this case."),
+                                "selectOnFocus":true,
+                                "triggerAction":"all",
+                                "lastQuery": "",
+                                "clearFilterOnReset": false,
+                                "editable":false,
+                                "allowBlank":false,
+                                "name":"nodetype",
+                                "hiddenName":"nodetype",
+                                "store":new CQ.Ext.data.Store({
+                                    "proxy":new CQ.Ext.data.HttpProxy({
+                                        "url":"/libs/cq/workflow/launcher.nodetypes.json",
+                                        "method":"GET"
+                                    }),
+                                    listeners: {
+                                        exception: function(obj, action, data, it, response) {
+                                            CQ.shared.HTTP.handleForbidden(response);
+                                        }
+                                    },
+                                    "reader":new CQ.Ext.data.JsonReader(
+                                        {
+                                            "totalProperty":"results",
+                                            "root":"nodetypes"
+                                        },
+                                        [ {"name":"name"}, {"name":"value"} ]
+                                    )
+                                }),
+                                "listeners": {
+                                    "expand": myThis.filterNodetypes
+                                }
+                            },
+                            "glob": {
+                                "xtype":"pathfield",
+                                "selectOnFocus":true,
+                                "allowBlank":false,
+                                "name":"glob",
+                                "fieldLabel":CQ.I18n.getMessage("Path"),
+                                "predicate":"nosystem"
+                            },
+                            "condition": {
+                                "xtype":'textfield',
+                                "name":'condition',
+                                "fieldLabel":'Condition',
+                                "allowBlank":true
+                             },
+                            "model": {
+                                "xtype":"combo",
+                                "fieldLabel":CQ.I18n.getMessage("Workflow"),
+                                "displayField":"label",
+                                "valueField":"wid",
+                                "title":CQ.I18n.getMessage("Available Workflows"),
+                                "selectOnFocus":true,
+                                "triggerAction":"all",
+                                "editable":false,
+                                "allowBlank":false,
+                                "name":"workflow",
+                                "hiddenName":"workflow",
+                                "store":new CQ.Ext.data.Store({
+                                    "proxy":new CQ.Ext.data.HttpProxy({
+                                        "url":"/libs/cq/workflow/content/console/workflows.json",
+                                        "method":"GET"
+                                    }),
+                                    listeners: {
+                                        exception: function(obj, action, data, it, response) {
+                                            CQ.shared.HTTP.handleForbidden(response);
+                                        }
+                                    },
+                                    "reader":new CQ.Ext.data.JsonReader(
+                                        {
+                                            "totalProperty":"results",
+                                            "root":"workflows"
+                                        },
+                                        [ {"name":"wid"}, {"name":"label"}, {"name": CQ.shared.XSS.getXSSPropertyName("label")} ]
+                                    )
+                                }),
+                                "tpl": new CQ.Ext.XTemplate(
+                                    '<tpl for=".">',
+                                        '<div class="x-combo-list-item">',
+                                            '{[CQ.shared.XSS.getXSSTablePropertyValue(values, \"label\")]}',
+                                        '</div>',
+                                    '</tpl>'
+                                )
+                            },
+                        "desc": {
+                            "xtype":'textfield',
+                            "name":'description',
+                            "fieldLabel":'Description',
+                            "allowBlank":true
+                          },
+                        "enabled": {
+                            "xtype": "selection",
+                            "name": "enabled",
+                            "border": false,
+                            "cls": "x-form-field",
+                            "fieldLabel": CQ.I18n.getMessage("Activate"),
+                            "type": "radio",
+                            "value": "true",
+                            "options": [ {
+                                "text": CQ.I18n.getMessage("Enable"),
+                                "value": "true"
+                                }, {
+                                    "text": CQ.I18n.getMessage("Disable"),
+                                    "value": "false"
+                                }]
+                            },
+                        "exclude": {
+                            "xtype":'textfield',
+                            "name":'excludeList',
+                            "fieldLabel":CQ.I18n.getMessage('Exclude List'),
+                            "allowBlank":true
+                            },
+                        "runmode": {
+                                "xtype":"combo",
+                                "fieldLabel":CQ.I18n.getMessage("Run Mode(s)"),
+                                "displayField":"name",
+                                "valueField":"runMode",
+                                "title":CQ.I18n.getMessage("Run Mode(s)"),
+                                "selectOnFocus":true,
+                                "triggerAction":"all",
+                                "editable":false,
+                                "allowBlank":false,
+                                "name":"runModes",
+                                "hiddenName":"runModes",
+                                "mode": 'local',
+                                "store":
+                                      new CQ.Ext.data.SimpleStore({
+                                            fields: ['runMode','name'],
+                                            data: [
+                                                ["author","Author"],
+                                                ["publish","Publish"],
+                                                ["author,publish","Author & Publish"]
+                                            ]
+                                      }
+                                )
+                            }
+                        }
+                    }
+                };
+
+                var ruleDlg = CQ.WCM.getDialog(wfAutoAssignRuleDlg);
+                ruleDlg.success = function() {
+                    myThis.reload();
+                };
+                ruleDlg.show();
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Workflow Launcher Config'),
+                text:CQ.I18n.getMessage('Add a new workflow launcher configuration'),
+                autoHide:true
+            }
+        });
+
+        this.editAction = new CQ.PrivilegedAction({
+            cls:'cq.workflow.launcher.edit',
+            text:CQ.I18n.getMessage('Edit...'),
+            privileges:['modify'],
+            path:'/libs/settings/workflow/launcher/config',
+            conditions:'',
+            handler: function() {
+
+                var selectedLauncher = myThis.getSelectionModel().getSelected();
+
+                // flip to the new console if we have:
+                //    - if wherClauses (plural) does not match whereClause (singular, i.e. the legacy settings for conditions)
+                //    - specified features is not empty/blank
+                //    - specified disabled features is not empty/blank
+                var whereClause = selectedLauncher.json["whereClause"];
+                var whereClauses = selectedLauncher.json["whereClauses"];
+                var features = selectedLauncher.json["features"];
+                var disabledFeatures = selectedLauncher.json["disabledFeatures"];
+
+                var useNewUI = false;
+                if ((whereClauses && whereClauses != whereClause)
+                    || (features && features.length > 1)
+                    || (disabledFeatures && disabledFeatures.length > 1)) {
+                        useNewUI = true;
+                }
+
+                if (useNewUI) {
+                    CQ.Ext.MessageBox.confirm(CQ.I18n.getMessage('Advanced Features'),
+                        CQ.I18n.getMessage('This launcher uses features which can only be edited in the new workflow console.') + '<br/>'
+                        + CQ.I18n.getMessage('Would you like to open this launcher using the new workflow console?'),
+                        function(btn) {
+                            if (btn == "yes") {
+                                var launcherPropertiesUrl = CQ.HTTP.externalize("/mnt/overlay/cq/workflow/admin/console/content/launchers/properties.html?item=");
+                                launcherPropertiesUrl += encodeURI(selectedLauncher.id);
+                                window.open(launcherPropertiesUrl, '_blank');
+                            }
+                        }
+                    );
+                } else {
+                    var editDialog = {
+                        "jcr:primaryType": "cq:Dialog",
+                        "title": CQ.I18n.getMessage("Workflow Launcher Configuration"),
+                        "formUrl": "/libs/cq/workflow/launcher",
+                        "failure": function () {
+                            CQ.Ext.Msg.alert(
+                                CQ.I18n.getMessage("Error"),
+                                CQ.I18n.getMessage("Could not edit configuration entry."));
+                        },
+                        "params": {
+                            "_charset_": "utf-8",
+                            "edit": myThis.getSelectionModel().getSelected().id
+                        },
+                        "height": 380,
+                        "items": {
+                            "jcr:primaryType": "cq:Panel",
+                            "items": {
+                                "jcr:primaryType": "cq:WidgetCollection",
+                                "eventType": {
+                                    "xtype": "combo",
+                                    "fieldLabel": CQ.I18n.getMessage("Event Type"),
+                                    "displayField": "name",
+                                    "valueField": "evType",
+                                    "title": CQ.I18n.getMessage("Event Types"),
+                                    "selectOnFocus": true,
+                                    "triggerAction": "all",
+                                    "editable": false,
+                                    "allowBlank": false,
+                                    "name": "eventType",
+                                    "hiddenName": "eventType",
+                                    "mode": 'local',
+                                    "store":
+                                        new CQ.Ext.data.SimpleStore({
+                                                fields: ['evType', 'name'],
+                                                data: [
+                                                    [1, CQ.I18n.getMessage("Created")],
+                                                    [16, CQ.I18n.getMessage("Modified")],
+                                                    [2, CQ.I18n.getMessage("Removed")]
+                                                ]
+                                            }
+                                        )
+                                },
+                                "nodetypes": {
+                                    "xtype": "combo",
+                                    "fieldLabel": CQ.I18n.getMessage("Nodetype"),
+                                    "displayField": "name",
+                                    "valueField": "value",
+                                    "title": CQ.I18n.getMessage("Available nodetypes"),
+                                    "fieldDescription": CQ.I18n.getMessage("For event type 'Removed' only the following node types are supported: nt:folder, nt:file, sling:Folder (folders without jcr:content sub-node), dam:Asset and cq:Page. For reliable detection, nodes must not reside under the repository root ('/') in this case."),
+                                    "selectOnFocus": true,
+                                    "triggerAction": "all",
+                                    "lastQuery": "",
+                                    "clearFilterOnReset": false,
+                                    "editable": false,
+                                    "allowBlank": false,
+                                    "name": "nodetype",
+                                    "hiddenName": "nodetype",
+                                    "store": new CQ.Ext.data.Store({
+                                        "proxy": new CQ.Ext.data.HttpProxy({
+                                            "url": "/libs/cq/workflow/launcher.nodetypes.json",
+                                            "method": "GET"
+                                        }),
+                                        listeners: {
+                                            exception: function (obj, action, data, it, response) {
+                                                CQ.shared.HTTP.handleForbidden(response);
+                                            }
+                                        },
+                                        "reader": new CQ.Ext.data.JsonReader(
+                                            {
+                                                "totalProperty": "results",
+                                                "root": "nodetypes"
+                                            },
+                                            [{"name": "name"}, {"name": "value"}]
+                                        )
+                                    }),
+                                    "listeners": {
+                                        "expand": myThis.filterNodetypes
+                                    }
+                                },
+                                "glob": {
+                                    "xtype": "pathfield",
+                                    "selectOnFocus": true,
+                                    "allowBlank": false,
+                                    "name": "glob",
+                                    "fieldLabel": CQ.I18n.getMessage("Path"),
+                                    "predicate": "nosystem"
+                                },
+                                "condition": {
+                                    "xtype": 'textfield',
+                                    "name": 'condition',
+                                    "fieldLabel": 'Condition',
+                                    "allowBlank": true,
+                                    "listeners": {
+                                        "beforeloadcontent": function(field, record, path) {
+                                            if ((record.data.condition == "" || record.data.condition === undefined)
+                                              && record.data.conditions && record.data.conditions.length==1) {
+                                                record.data.condition = record.data.conditions[0];
+                                            }
+                                        }
+                                    },
+                                },
+                                "model": {
+                                    "xtype": "combo",
+                                    "fieldLabel": CQ.I18n.getMessage("Workflow"),
+                                    "displayField": "label",
+                                    "valueField": "wid",
+                                    "title": CQ.I18n.getMessage("Available Workflows"),
+                                    "selectOnFocus": true,
+                                    "triggerAction": "all",
+                                    "editable": false,
+                                    "allowBlank": false,
+                                    "name": "workflow",
+                                    "hiddenName": "workflow",
+                                    "store": new CQ.Ext.data.Store({
+                                        "proxy": new CQ.Ext.data.HttpProxy({
+                                            "url": "/libs/cq/workflow/content/console/workflows.json",
+                                            "method": "GET"
+                                        }),
+                                        listeners: {
+                                            exception: function (obj, action, data, it, response) {
+                                                CQ.shared.HTTP.handleForbidden(response);
+                                            }
+                                        },
+                                        "reader": new CQ.Ext.data.JsonReader(
+                                            {
+                                                "totalProperty": "results",
+                                                "root": "workflows"
+                                            },
+                                            [{"name": "wid"}, {"name": "label"}, {"name": CQ.shared.XSS.getXSSPropertyName("label")}]
+                                        )
+                                    }),
+                                    "tpl": new CQ.Ext.XTemplate(
+                                        '<tpl for=".">',
+                                        '<div class="x-combo-list-item">',
+                                        '{[CQ.shared.XSS.getXSSTablePropertyValue(values, \"label\")]}',
+                                        '</div>',
+                                        '</tpl>'
+                                    )
+                                },
+                                "desc": {
+                                    "xtype": 'textfield',
+                                    "name": 'description',
+                                    "fieldLabel": 'Description',
+                                    "allowBlank": true
+                                },
+                                "enabled": {
+                                    "xtype": "selection",
+                                    "name": "enabled",
+                                    "border": false,
+                                    "cls": "x-form-field",
+                                    "fieldLabel": CQ.I18n.getMessage("Activate"),
+                                    "type": "radio",
+                                    "value": "true",
+                                    "options": [{
+                                        "text": CQ.I18n.getMessage("Enable"),
+                                        "value": "true"
+                                    }, {
+                                        "text": CQ.I18n.getMessage("Disable"),
+                                        "value": "false"
+                                    }]
+                                },
+                                "exclude": {
+                                    "xtype": 'textfield',
+                                    "name": 'excludeList',
+                                    "fieldLabel": CQ.I18n.getMessage('Exclude List'),
+                                    "allowBlank": true
+                                },
+                                "runmode": {
+                                    "xtype": "combo",
+                                    "fieldLabel": CQ.I18n.getMessage("Run Mode(s)"),
+                                    "displayField": "name",
+                                    "valueField": "runMode",
+                                    "title": CQ.I18n.getMessage("Run Mode(s)"),
+                                    "selectOnFocus": true,
+                                    "triggerAction": "all",
+                                    "editable": false,
+                                    "allowBlank": false,
+                                    "name": "runModes",
+                                    "hiddenName": "runModes",
+                                    "mode": 'local',
+                                    "store":
+                                        new CQ.Ext.data.SimpleStore({
+                                                fields: ['runMode', 'name'],
+                                                data: [
+                                                    ["author", "Author"],
+                                                    ["publish", "Publish"],
+                                                    ["author,publish", "Author & Publish"]
+                                                ]
+                                            }
+                                        )
+                                }
+                            }
+                        }
+                    };
+
+                    var editDlg = CQ.WCM.getDialog(editDialog);
+
+                    // load existing conf
+                    //var conf = CQ.HTTP.eval(myThis.getSelectionModel().getSelected().id + ".json");
+                    //console.log(conf);
+                    editDlg.loadContent(myThis.getSelectionModel().getSelected().id);
+                    editDlg.success = function () {
+                        myThis.reload();
+                    };
+                    editDlg.show();
+                }
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Workflow Launcher Config'),
+                text:CQ.I18n.getMessage('Edit workflow launcher configuration'),
+                autoHide:true
+            }
+        });
+        this.editAction.setDisabled(true);
+        this.removeAction.setDisabled(true);
+
+        this.actions = [ this.addAction, "-",
+                         this.editAction,
+                         this.removeAction ];
+        this.tbar = this.actions;
+
+        this.bbar = new CQ.Ext.PagingToolbar({
+            pageSize:this.pageSize,
+            store:this.store,
+            displayInfo:true,
+            displayMsg:CQ.I18n.getMessage("Displaying entries {0} - {1} of {2}"),
+            emptyMsg:CQ.I18n.getMessage("No entries to display")
+        });
+
+        CQ.Workflow.Console.LauncherPanel.superclass.constructor.call(this, config);
+        this.addAction.setPath('/conf/global/settings/workflow/launcher/config', false);
+        this.addAction.setDisabled(false);
+        this.store.load({params:{start:0, limit:this.pageSize}});
+    },
+
+    filterNodetypes:function (combo) {
+        var wfLauncherComponent = CQ.Ext.getCmp('cq.workflow.launcher');
+
+
+        var nodeTypeUI = combo.findParentByType("dialog").find("name", "nodetype");
+        if (nodeTypeUI && nodeTypeUI.length == 1) {
+            nodeTypeUI[0].getStore().remove(wfLauncherComponent.anyNodeTypeRecord);
+        }
+
+        var filter = function () {
+            return true;
+        };
+
+        var fields = combo.findParentByType("dialog").find("name", "eventType");
+        if (fields && fields.length == 1) {
+
+            if (fields[0].getValue() == 2) {
+                // working on 'delete', add the 'Any Node Type' record
+                if (nodeTypeUI && nodeTypeUI.length == 1) {
+                    nodeTypeUI[0].getStore().add(wfLauncherComponent.anyNodeTypeRecord);
+                }
+
+                combo.clearValue();
+                filter = function (record) {
+                    return wfLauncherComponent.validNodeRemovedNodeTypes.indexOf(
+                            record.get("value")
+                    ) != -1;
+                };
+            }
+
+            combo.getStore().filterBy(filter, this);
+        }
+    },
+
+	initComponent: function() {
+        CQ.Workflow.Console.LauncherPanel.superclass.initComponent.call(this);
+
+        this.addEvents({ editmodel:true });
+    },
+
+	renderModelLink: function(value, p, record) {
+        var url = CQ.HTTP.externalize(value);
+		return String.format(
+			'<a href="{0}" onclick="return CQ.Ext.getCmp(\'cq.workflow.launcher\').fireOpenModelEvent(\'{0}\', \'{1}\');">{1}</a>',
+			url, record.get("workflowTitle"));
+    },
+
+	fireOpenModelEvent: function(url, title) {
+		var atts = {
+	        title:title,
+	        url:CQ.HTTP.externalize(url)
+	    };
+        this.fireEvent('editmodel', atts);
+		return false;
+    }
+});

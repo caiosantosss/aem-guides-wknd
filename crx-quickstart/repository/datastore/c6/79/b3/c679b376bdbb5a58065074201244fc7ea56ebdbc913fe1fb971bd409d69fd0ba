@@ -1,0 +1,677 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2016 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function(window, document, Granite, $) {
+    "use strict";
+
+    var authMethod = undefined;
+
+    var inputTemplate = $('<input type="hidden" name="servicename">');
+
+    /**
+     * Returns the modal dialog. If the dialog is not yet in the DOM it will be
+     * appended.
+     *
+     * @returns
+     */
+    function getDialog() {
+        var dialog = $("#configuration-progress");
+        if (dialog.length === 0) {
+            dialog = new Coral.Dialog().set({
+                id: "configuration-progress",
+                variant: "info",
+                header: {
+                    innerHTML: Granite.I18n.get("Setup")
+                },
+                content: {
+                    innerHTML: "<p>" + Granite.I18n.get("Setting up Analytics for Asset Insights.") + "</p>"
+                }
+            });
+            document.body.appendChild(dialog);
+            return dialog;
+        }
+        return dialog[0];
+    }
+
+    /**
+     * Show a modal progress dialog.
+     *
+     * @param heading
+     * @param content
+     */
+    function showProgress(heading, content) {
+        var dialog = getDialog();
+        dialog.variant = "info";
+        dialog.header.innerHTML = heading;
+        $(dialog.content).html($("<coral-wait></coral-wait>"));
+        $(dialog.content).append($("<span></span>").text(content));
+        $(dialog.footer).empty();
+        dialog.center().show();
+    }
+
+    /**
+     * Submit the form.
+     *
+     * @param form Form HTMLElement
+     */
+    function submit(form) {
+        showProgress(
+            Granite.I18n.get("Setup"),
+            Granite.I18n.get("Setting up Analytics for Asset Insights.")
+        );
+
+        handleSuccess(form, Granite.I18n.get("Asset Insights configuration finished successfully!"));
+    }
+
+    /**
+     * Handles success and show a modal success dialog.
+     *
+     * @param form
+     * @param message
+     */
+    function handleSuccess(form, message) {
+        var dialog = getDialog();
+        dialog.variant = "success";
+        dialog.closable = "on";
+        dialog.header.innerHTML = Granite.I18n.get("Success");
+        $(dialog.content).html($("<p></p>").text(message));
+        $(dialog.footer).html(
+            '<button is="coral-button" variant="primary" coral-close>' + Granite.I18n.get("Ok") + "</button>");
+        dialog.on("coral-overlay:close", function(event) {
+            redirect(form);
+        });
+        dialog.center().show();
+    }
+
+    /**
+     * Handles error and shows a modal error dialog.
+     *
+     * @param form
+     * @param message
+     * @param isRedirect
+     */
+    function handleError(form, message, isRedirect) {
+        if (!message || typeof message !== "string") {
+            message = "";
+        }
+
+        var dialog = getDialog();
+        dialog.variant = "error";
+        dialog.closable = "on";
+        dialog.header.innerHTML = Granite.I18n.get("Error");
+        $(dialog.content).html($("<p></p>").text(message));
+        $(dialog.footer).html(
+            '<button is="coral-button" variant="primary" coral-close>' + Granite.I18n.get("Ok") + "</button>"
+        );
+        dialog.on("coral-overlay:close", function(event) {
+            if (isRedirect) {
+                redirect(form);
+            }
+        });
+        dialog.center().show();
+    }
+
+    /**
+     * Redirect to the value of the input if an input field with name :redirect
+     * is present in the form.
+     *
+     * @param form
+     */
+    function redirect(form) {
+        var redirectTo = form.closest(".foundation-wizard-step").find('[name=":redirect"]').val();
+        if (redirectTo) {
+            window.location = Granite.HTTP.externalize(redirectTo);
+        }
+    }
+
+    /**
+     * Triggers authentication of the SiteCatalyst service.
+     *
+     * @param done
+     */
+    function authenticateSiteCatalyst(done) {
+        var sc = $('article[data-servicename="assetinsights"]');
+        var server = $('coral-select[name="analytics.server"]', sc);
+        var servers = server.length > 0 ? server[0].items.getAll() : [];
+
+        showProgress(
+            Granite.I18n.get("Authentication"),
+            Granite.I18n.get("Authenticating...")
+        );
+
+        getEndpoint(servers, function(data) {
+            if (data.authMethod) {
+                authMethod = data.authMethod;
+            } else {
+                authMethod = undefined;
+            }
+
+            var getReportSuitesAndTrackingServers = function(data) {
+                getReportSuites(function(data) {
+                    var json = {};
+                    json = JSON.parse(data.response);
+                    if (json.report_suites) {
+                        setReportSuiteOptions(json.report_suites, done);
+                    }
+                });
+            };
+
+            $("input[name='analytics.secret']").val($("input[name='analytics.password']").val());
+            getReportSuitesAndTrackingServers(data);
+            persistConfig();
+        });
+    }
+
+    /**
+     * Marks the service as selected
+     *
+     * @param button Button element
+     */
+    function selectService(button) {
+        var article = button.parent("article");
+        var isSelected = article.hasClass("selected");
+        toggleService(button, isSelected);
+        toggleWizardNext();
+    }
+
+    /**
+     * Toggles the 'selected' state of the specified {@code btn} element
+     *
+     * @param btn Button element
+     */
+    function toggleService(btn, selected) {
+        var lbl = btn.data("label");
+        var lblSel = btn.data("label-selected");
+        var $article = btn.parent("article");
+        var value = $article.data("servicename");
+        if (selected) {
+            $article.removeClass("selected");
+            $('input[name="servicename"]', $article).remove();
+            btn[0].icon = "";
+            btn[0].label.innerHTML = lbl;
+        } else {
+            $article.addClass("selected");
+            var input = inputTemplate.clone();
+            input.val(value);
+            $article.append(input);
+            btn[0].icon = "checkCircle";
+            btn[0].label.innerHTML = lblSel;
+        }
+    }
+
+    /**
+     * Toggles the wizard next button. If no service is selected
+     * it will be disabled, otherwise enabled.
+     */
+    function toggleWizardNext() {
+        var $wizardNext = $(".services-next");
+        if ($(".configuration-wizard .service.selected").length > 0) {
+            $wizardNext.prop("disabled", false);
+        } else {
+            $wizardNext.prop("disabled", true);
+        }
+    }
+
+    /**
+     * Sets the report suite dropdown values
+     *
+     * @param options Options object
+     * @param done Done callback
+     */
+    function setReportSuiteOptions(options, done) {
+        var select = $('coral-select[name="analytics.reportsuite"]')[0];
+        if (select !== undefined) {
+            if (select.items.length === 0) {
+                $.each(options, function(i, obj) {
+                    select.items.add({
+                        "content": {
+                            "innerHTML": obj.site_title
+                        },
+                        "value": obj.rsid
+                    });
+                });
+                // enable; value is not sent otherwise
+                select.disabled = false;
+            }
+            // if only 1 option; select & proceed
+            if (options.length === 1) {
+                select.value = null;
+                select.value = options[0].rsid;
+                $(select).trigger("change");
+                getTrackingServers(function(data) {
+                    var json = {};
+                    json = JSON.parse(data.response);
+                    $('input[name="analytics.namespace"]').val(json.namespace);
+                    $('input[name="analytics.trackingserver"]').val(json.tracking_server);
+                    $('input[name="analytics.trackingserversecure"]').val(json.tracking_server);
+                    addMappingsToFwPage(function() {
+                        getDialog().remove();
+                    });
+                    done.call(this, data);
+                });
+            // if multiple options; let user choose report suite manually
+            } else {
+                var btn = $("#service-step .service-analytics button.add");
+                var lblAuthenticated = btn.data("label-authenticated");
+                btn[0].disabled = true;
+                btn[0].label.innerHTML = lblAuthenticated;
+                getDialog().remove();
+            }
+        }
+    }
+
+    /**
+     * Fetches the Data Center endpoint for the company.
+     *
+     * @param servers {Array} CUI.Select.Option's of servers
+     * @param done {Function} Done callback
+     * @param fail {Function} Fail callback
+     */
+    function getEndpoint(servers, done, fail) {
+        var form = $(".configuration-form");
+
+        var sc = $('article[data-servicename="assetinsights"]');
+        var company = $('input[name="analytics.company"]', sc).val();
+        var server = $('coral-select[name="analytics.server"]', sc)[0];
+        querySC("Company.GetEndpoint", { "company": company },
+            function(data, status, request) {
+                if (!data.error) {
+                    var endpoint = data.response.replace(/[\"\\]/gi, ""); // eslint-disable-line no-useless-escape
+                    server.value = endpoint;
+                    done.call(this, data, status, request);
+                } else if (data.error === "not online") {
+                    handleError(form, Granite.I18n.get("Not online. Please check your Internet connection."));
+                } else if (servers.length === 0) {
+                    var msg = data.error;
+                    if (msg.indexOf("Invalid company specified") > -1 ||
+                            msg.indexOf("Login is a required parameter") > -1) {
+                        msg = Granite.I18n.get("Provided credentials are not valid.");
+                    }
+                    handleError(form, msg);
+                } else {
+                    // try next server?
+                    getEndpoint(servers, done, fail);
+                }
+            },
+            function(request, status, error) {
+                if (fail) {
+                    fail.call(this, request, status, error);
+                } else {
+                    if (status === "error") {
+                        handleError(form, Granite.I18n.get('Error "{0}"', error));
+                    }
+                }
+            }
+        );
+    }
+
+    /**
+     * Fetches the report suites for the company.
+     *
+     * @param done {Function} Done callback
+     */
+    function getReportSuites(done) {
+        querySC("Company.GetReportSuites", { "rs_types": [ "standard" ] }, done);
+    }
+
+    /**
+     * Fetches the tracking servers for the report suite.
+     *
+     * @param done {Function} Done callback
+     */
+    function getTrackingServers(done) {
+        showProgress(
+            Granite.I18n.get("Associating Report Suite"),
+            Granite.I18n.get("Setting up selected Report Suite...")
+        );
+
+        var sc = $('article[data-servicename="assetinsights"]');
+        var rs = $('coral-select[name="analytics.reportsuite"]', sc)[0];
+        var reportSuite = rs.value;
+        querySC("Company.GetTrackingServer", { "rsid": reportSuite }, done);
+    }
+
+    /**
+     * Queries the SiteCatalyst servlet with the provided {@code method} and {@code data}.
+     *
+     * @param method
+     * @param data
+     * @param done
+     * @param fail
+     */
+    function querySC(method, data, done, fail) {
+        var form = $(".configuration-form");
+        var sc = $('article[data-servicename="assetinsights"]');
+
+        var payload = {};
+        try {
+            payload = JSON.stringify(data);
+        } catch (e) {
+            handleError(form, Granite.I18n.get("Unable to serialize data."));
+        }
+        var secret = $('input[name="analytics.secret"]', sc).val();
+        if (!secret) {
+            secret = $('input[name="analytics.password"]', sc).val();
+        }
+
+        var sendData = {
+            "method": method,
+            "server": $('[name="analytics.server"]', sc).val(),
+            "company": $('input[name="analytics.company"]', sc).val(),
+            "username": $('input[name="analytics.username"]', sc).val(),
+            "secret": secret,
+            "automaticProvisioning": "false",
+            "data": payload
+        };
+
+        if (authMethod) {
+            sendData["auth"] = authMethod;
+        }
+
+        $.ajax({
+            type: "POST",
+            url: "/libs/dam/gui/content/assetinsights/authenticate/sitecatalyst.json",
+            data: sendData
+        }).done(function(data, status, request) {
+            if (!data.error) {
+                done.call(this, data, status, request);
+            } else if (data.error === "not online") {
+                handleError(form, Granite.I18n.get("Not online. Please check your Internet connection."));
+            } else {
+                var msg = data.error;
+                if (msg.indexOf("Invalid company specified") > -1 ||
+                        msg.indexOf("Login is a required parameter") > -1) {
+                    msg = Granite.I18n.get("Provided credentials are not valid.");
+                }
+                handleError(form, msg);
+            }
+        }).fail(function(request, status, error) {
+            if (fail) {
+                fail.call(this, request, status, error);
+            } else {
+                if (status === "error") {
+                    handleError(form, Granite.I18n.get('Error "{0}"', error));
+                }
+            }
+        });
+    }
+
+    /**
+     * Create Asset Insights Analytics Config
+     */
+    function persistConfig() {
+        var sc = $('article[data-servicename="assetinsights"]');
+        $.ajax({
+            type: "HEAD",
+            url: "/etc/cloudservices/sitecatalyst/assetinsights.json"
+        }).done(function(data, status, request) {
+            addCredsToConfigPage();
+        }).fail(function(request, status, error) {
+            if (request.status === 404) {
+                createConfigPage();
+            }
+        });
+
+        function createConfigPage() {
+            var createConfigPageForm = document.createElement("form");
+            createConfigPageForm.appendChild(createInputElemForForm("cmd", "createPage"));
+            createConfigPageForm.appendChild(createInputElemForForm("_charset_", "utf-8"));
+            createConfigPageForm.appendChild(createInputElemForForm("parentPath", "/etc/cloudservices/sitecatalyst"));
+            createConfigPageForm.appendChild(createInputElemForForm("title", "assetinsights"));
+            createConfigPageForm.appendChild(createInputElemForForm("label", "assetinsights"));
+            createConfigPageForm.appendChild(createInputElemForForm("template",
+                "/libs/cq/analytics/templates/sitecatalyst"));
+            $.ajax({
+                type: "POST",
+                url: "/bin/wcmcommand",
+                data: $(createConfigPageForm).serialize()
+            }).done(function(data, status, request) {
+                if (status === "success") {
+                    addCredsToConfigPage();
+                }
+            }).fail(function(request, status, error) {
+                if (status === "error") {
+                    handleError(createConfigPageForm, Granite.I18n.get('Error "{0}"', error));
+                }
+            });
+        }
+
+        function addCredsToConfigPage() {
+            var server = $('coral-select[name="analytics.server"]', sc).val();
+            var company = $('input[name="analytics.company"]', sc).val();
+            var username = $('input[name="analytics.username"]', sc).val();
+            var secret = $('input[name="analytics.secret"]', sc).val();
+
+            var addCredsConfigForm = document.createElement("form");
+            addCredsConfigForm.appendChild(createInputElemForForm("./sling:resourceType",
+                "cq/analytics/components/sitecatalystpage"));
+            addCredsConfigForm.appendChild(createInputElemForForm("_charset_", "utf-8"));
+            addCredsConfigForm.appendChild(createInputElemForForm("./company", company));
+            addCredsConfigForm.appendChild(createInputElemForForm("./username", username));
+            addCredsConfigForm.appendChild(createInputElemForForm("./server", server));
+            addCredsConfigForm.appendChild(createInputElemForForm("./public/disableTrackingCode@Delete", true));
+            addCredsConfigForm.appendChild(createInputElemForForm("./public/useAppMeasurement@Delete", true));
+            addCredsConfigForm.appendChild(createInputElemForForm("./public/useClientContext@Delete", true));
+            addCredsConfigForm.appendChild(createInputElemForForm("./disableImportPageImpressionsAuthor@Delete", true));
+            addCredsConfigForm
+                .appendChild(createInputElemForForm("./disableImportPageImpressionsPublish@Delete", true));
+            addCredsConfigForm.appendChild(createInputElemForForm("./secret", secret));
+            addCredsConfigForm.appendChild(createInputElemForForm("./secret@Encrypted", ""));
+            addCredsConfigForm.appendChild(createInputElemForForm("./connectedWhen", "username"));
+            addCredsConfigForm.appendChild(createInputElemForForm("./contextdata", ""));
+            addCredsConfigForm.appendChild(createInputElemForForm("./segment", ""));
+            $.ajax({
+                type: "POST",
+                url: "/etc/cloudservices/sitecatalyst/assetinsights/jcr:content",
+                data: $(addCredsConfigForm).serialize()
+            }).done(function(data, status, request) {
+                if (status === "success") {
+                    $.ajax({
+                        type: "HEAD",
+                        url: "/etc/cloudservices/sitecatalyst/assetinsights/performance.json"
+                    }).fail(function(request, status, error) {
+                        if (request.status === 404) {
+                            createFrameworkMappingPage();
+                        }
+                    });
+                }
+            }).fail(function(request, status, error) {
+                if (status === "error") {
+                    handleError(addCredsConfigForm, Granite.I18n.get('Error "{0}"', error));
+                }
+            });
+        }
+
+        function createFrameworkMappingPage() {
+            var createFrameworkMappingForm = document.createElement("form");
+            createFrameworkMappingForm.appendChild(createInputElemForForm("cmd", "createPage"));
+            createFrameworkMappingForm.appendChild(createInputElemForForm("_charset_", "utf-8"));
+            createFrameworkMappingForm.appendChild(createInputElemForForm("parentPath",
+                "/etc/cloudservices/sitecatalyst/assetinsights"));
+            createFrameworkMappingForm.appendChild(createInputElemForForm("title", "performance"));
+            createFrameworkMappingForm.appendChild(createInputElemForForm("label", "performance"));
+            createFrameworkMappingForm.appendChild(createInputElemForForm("template",
+                "/libs/cq/analytics/templates/framework"));
+            $.ajax({
+                type: "POST",
+                url: "/bin/wcmcommand",
+                data: $(createFrameworkMappingForm).serialize()
+            }).done(function(data, status, request) {
+                if (status === "success") {
+                    addMappingsToFwPage(function() {
+                        getDialog().remove();
+                    });
+                }
+            }).fail(function(request, status, error) {
+                if (status === "error") {
+                    handleError(createFrameworkMappingForm, Granite.I18n.get('Error "{0}"', error));
+                }
+            });
+        }
+    }
+
+    /**
+     * Create Asset Insights Analytics Config's Framework Mappings
+     */
+    function addMappingsToFwPage(callAtEnd) {
+        var sc = $('article[data-servicename="assetinsights"]');
+        var selectedRS = $('coral-select[name="analytics.reportsuite"] coral-select-item[selected]', sc).val();
+        if (selectedRS && selectedRS.length) {
+            var trackingServer = $('input[name="analytics.trackingserver"]', sc).val();
+            var trackingServerSecure = $('input[name="analytics.trackingserversecure"]', sc).val();
+            var namespace = $('input[name="analytics.namespace"]', sc).val();
+            var addMappingsToFwForm = document.createElement("form");
+            addMappingsToFwForm.appendChild(createInputElemForForm("public/reportsuites", selectedRS + ";"));
+            addMappingsToFwForm.appendChild(createInputElemForForm("public/reportsuite", selectedRS));
+            addMappingsToFwForm.appendChild(createInputElemForForm("public/cq:trackingServer", trackingServer));
+            addMappingsToFwForm.appendChild(createInputElemForForm("public/cq:trackingServerSecure",
+                trackingServerSecure));
+            addMappingsToFwForm.appendChild(createInputElemForForm("public/cq:visitorNamespace", namespace));
+            $.ajax({
+                type: "POST",
+                url: "/etc/cloudservices/sitecatalyst/assetinsights/performance/jcr:content",
+                data: $(addMappingsToFwForm).serialize()
+            }).done(function(data, status, request) {
+                if (typeof callAtEnd === "function") {
+                    callAtEnd();
+                }
+            }).fail(function(request, status, error) {
+                if (status === "error") {
+                    handleError(addMappingsToFwForm, Granite.I18n.get('Error "{0}"', error));
+                }
+            });
+        }
+    }
+
+    /**
+     * helper function for creating POST formdata
+     */
+    function createInputElemForForm(name, val) {
+        var i = document.createElement("input");
+        i.setAttribute("name", name);
+        i.setAttribute("value", val);
+        return i;
+    }
+
+    /**
+     * Handler for SiteCatalyst report suite selection
+     */
+    $(document).on("change", '#service-step .service-analytics coral-select[name="analytics.reportsuite"]',
+        function(e) {
+            this.invalid = false;
+            $("#service-step .service-analytics button.add")[0].disabled = false;
+        });
+
+    /**
+     * Handler for the SiteCatalyst button
+     */
+    $(document).on("click", "#service-step .service-analytics button.add", function(e) {
+        var button = $(this);
+        var selectSvr = $('coral-select[name="analytics.server"]')[0];
+        var company = $('input[name="analytics.company"]')[0];
+        var username = $('input[name="analytics.username"]')[0];
+        var password = $('input[name="analytics.password"]')[0];
+        var selectRS = $('coral-select[name="analytics.reportsuite"]')[0];
+        if (selectRS.items.length && selectRS.value.length &&
+            !button.parent("article").hasClass("selected")) {
+            getTrackingServers(function(data) {
+                var json = {};
+                json = JSON.parse(data.response);
+                $('input[name="analytics.namespace"]').val(json.namespace);
+                $('input[name="analytics.trackingserver"]').val(json.tracking_server);
+                $('input[name="analytics.trackingserversecure"]').val(json.tracking_server);
+                selectService(button);
+                addMappingsToFwPage(function() {
+                    getDialog().remove();
+                });
+            });
+            // disable all user-inputs until re-authentication is requested by user
+            selectSvr.disabled = true;
+            company.disabled = true;
+            username.disabled = true;
+            password.disabled = true;
+            selectRS.disabled = true;
+        } else if (!button.parent("article").hasClass("selected")) {
+            authenticateSiteCatalyst(function(data) {
+                selectService(button);
+                getDialog().remove();
+            });
+        } else {
+            selectService(button);
+            selectRS.items.clear();
+            selectSvr.disabled = false;
+            company.disabled = false;
+            username.disabled = false;
+            password.disabled = false;
+            selectRS.invalid = true;
+            selectRS.disabled = true;
+        }
+    });
+
+    /**
+     * Handler for form invalidation
+     */
+    $(document).on("keypress", "#service-step .service.selected", function(e) {
+        var button = $(this).find("button.add");
+        selectService(button);
+    });
+
+    /**
+     * Handler for form submission
+     */
+    $(document).on("submit.configuration-form", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        showProgress(
+            Granite.I18n.get("Enabling AEM Reporting"),
+            Granite.I18n.get("Enabling AEM Reporting for selected ReportSuite...")
+        );
+        var form = $(".configuration-form");
+        var selectedRS = $('coral-select[name="analytics.reportsuite"]')[0].value;
+        querySC("ReportSuite.SaveAEMReporting", { "rsid_list": new Array(selectedRS) },
+            function(data, status, request) {
+                if (!data.error) {
+                    var $form = $("#service-step");
+                    submit($form);
+                } else {
+                    handleError(form, data.error);
+                }
+            },
+            function(request, status, error) {
+                if (status === "error") {
+                    handleError(form, Granite.I18n.get('Error "{0}"', error));
+                }
+                return false;
+            }
+        );
+    });
+
+    /**
+     * Initial setup once page is ready
+     */
+    $(document).ready(function(e) {
+        var wizard = $(".configuration-wizard", e.target);
+        $("coral-steplist coral-step:nth-child(1)", wizard).addClass("service-step");
+        $('#service-step coral-select[name="analytics.reportsuite"]').each(function() {
+            var self = $(this)[0];
+            Coral.commons.ready(self, function() {
+                self.disabled = true;
+                self.invalid = true;
+            });
+        });
+    });
+})(window, document, Granite, Granite.$);

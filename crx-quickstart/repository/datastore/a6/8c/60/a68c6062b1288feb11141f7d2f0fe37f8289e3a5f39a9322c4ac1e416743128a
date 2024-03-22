@@ -1,0 +1,399 @@
+(function(window, document, Granite, $) {
+    "use strict";
+
+    Granite = Granite || {};
+    Granite.UI = Granite.UI || {};
+
+    var ACTION_STATUS_KEY = "page.action.status";
+
+    /**
+    * @param  options          Options for this wizard
+    */
+
+    var ExtractArchiveWizard = function(options) {
+        var self = this;
+        this.sourceItem = options.sourceItem || "";
+        this.destinationPath = null;
+
+        this.formElement = $("#cq-damadmin-admin-extractarchive-form");
+        this.wizardElement = options.wizardElement;
+        this.wizard = this.wizardElement.adaptTo("foundation-wizard");
+        this.nextButton = this.wizardElement.find("button.select-destination-next");
+        this.submitButton = this.wizardElement.find("button.conflicts-step-next-extract");
+        this.cancelButton = this.wizardElement.find("a[data-foundation-wizard-control-action='cancel']");
+        this.prevButton = this.wizardElement.find("button[data-foundation-wizard-control-action='prev']");
+
+        this.collectionAPI = $(".cq-damadmin-admin-extractarchive .foundation-collection")
+            .adaptTo("foundation-collection");
+        this.ui = $(window).adaptTo("foundation-ui");
+
+        this.nextButton.off("click").on("click", function(e) {
+            e.preventDefault();
+            this.destPath = $('input[name="destPath"]').val();
+        }.bind(this));
+
+        this.submitButton.off("click").on("click", function(e) {
+            e.preventDefault();
+            var conflictOption = $('input[name="extract-conflict-options"]:checked').val();
+            self.updateConflictModeValue(conflictOption);
+            self.prepareSubmitWizard();
+        }.bind(this));
+
+        $(document).on("foundation-selections-change", function(e) {
+            var $collection = $(e.target);
+            var $selectedItem = $collection.find("[selected]");
+            var itemType = $selectedItem.find(".foundation-collection-assets-meta")
+                .data("foundation-collection-meta-type");
+            var nextEnabled = $selectedItem.length > 0 && itemType === "directory";
+            this.wizard.toggleNext(nextEnabled);
+        }.bind(this));
+    };
+
+    ExtractArchiveWizard.prototype.prepareSubmitWizard = function() {
+        var self = this;
+        if (self.isEmptyDestination()) {
+            self.createProgressColumnItem(true);
+            self.submitWizard();
+        } else {
+            self.loadDestinationColumn(function() {
+                self.createProgressColumnItem(false);
+                self.submitWizard();
+            });
+        }
+    };
+
+    ExtractArchiveWizard.prototype.submitWizard = function() {
+        var self = this;
+        var url = this.formElement.attr("action");
+        var data = this.formElement.serialize().concat("&action=extract&destPath=" + self.destPath);
+
+        $.ajax({
+            url: url,
+            type: "POST",
+            data: data,
+            success: function(response, textStatus, xhr) {
+                if (response.url) {
+                    if (xhr.status === 202) {
+                        self.prevButton.click();
+                        // eslint-disable-next-line max-len
+                        self.initProgressCheck(response.jobId, response.url, response.maxUIWaitFileSize, response.maxUIWaitTime, true);
+                    } else {
+                        self.prevButton.click();
+                        // eslint-disable-next-line max-len
+                        self.initProgressCheck(response.jobId, response.url, response.maxUIWaitFileSize, response.maxUIWaitTime);
+                    }
+                }
+            },
+            error: function() {
+                self.ui.notify(
+                    Granite.I18n.get("ERROR"),
+                    Granite.I18n.get("Could not extract archive."),
+                    "error"
+                );
+            }
+        });
+        this.toggleSelectionState(false);
+    };
+
+    ExtractArchiveWizard.prototype.toggleSelectionState = function(isActive) {
+        if (isActive) {
+            this.nextButton.show();
+            this.cancelButton.find("coral-anchorbutton-label").text(Granite.I18n.get("Cancel"));
+            this.updateConflictModeValue();
+            $("coral-columnview")[0].selectionMode = Coral.ColumnView.selectionMode.SINGLE;
+        } else {
+            this.nextButton.hide();
+            this.cancelButton.find("coral-anchorbutton-label").text(Granite.I18n.get("Cancel"));
+            $("coral-columnview")[0].selectionMode = Coral.ColumnView.selectionMode.NONE;
+        }
+    };
+
+    ExtractArchiveWizard.prototype.updateConflictModeValue = function(mode) {
+        if (mode) {
+            this.formElement.find('input[name="conflictMode"]').val(mode);
+        } else {
+            this.formElement.find('input[name="conflictMode"]').val("");
+        }
+    };
+
+    ExtractArchiveWizard.prototype.isEmptyDestination = function() {
+        var self = this;
+        var $collection = self.wizardElement.find(".foundation-collection");
+        var $selectedItem = $collection.find("[selected]");
+        return !($selectedItem[0].variant === "drilldown");
+    };
+
+    ExtractArchiveWizard.prototype.loadDestinationColumn = function(callback) {
+        var self = this;
+        $(document).one("foundation-collection-navigate", function(e) {
+            if (self.wizardElement.find('[data-foundation-layout-columnview-columnid="' +
+                self.destPath + '"]').length > 0) {
+                if (typeof callback === "function") {
+                    callback(false);
+                }
+            }
+        });
+        this.collectionAPI.load(self.destPath);
+    };
+
+    ExtractArchiveWizard.prototype.createProgressColumnItem = function(isCreateColumn) {
+        var self = this;
+        var itemName = self.sourceItem.split("/").pop();
+        itemName = itemName.substring(0, itemName.lastIndexOf("."));
+
+        $(".dam-archive-extract-columnview-item-progress").remove();
+
+        // create new empty column if destination target is empty
+        if (isCreateColumn) {
+            var column = new Coral.ColumnView.Column();
+            column.classList.add("dam-archive-extract-column-empty");
+            column.setAttribute("data-foundation-layout-columnview-columnid", self.destPath);
+            var columnView = $("coral-columnview")[0];
+            var lastColumn = $("coral-columnview coral-columnview-column:last-child")[0];
+            columnView.setNextColumn(column, lastColumn, true);
+        }
+
+        var zipIcon = new Coral.Icon().set({
+            size: Coral.Icon.size.SMALL,
+            icon: "fileZip"
+        });
+
+        var progress = new Coral.Progress();
+        progress.classList.add("dam-archive-extract-progress");
+        progress.id = "dam-archive-extract-progress";
+        progress.value = 0;
+
+        var columnItem = new Coral.ColumnView.Item();
+        columnItem.classList.add("dam-archive-extract-columnview-item-progress");
+        columnItem.id = "dam-archive-extract-columnview-item-progress";
+        columnItem.setAttribute("showpercent", "true");
+
+        var columnContent = columnItem.content;
+        columnContent.innerText = itemName.substring(0, 15);
+        columnContent.setAttribute("title", itemName);
+        columnContent.appendChild(progress);
+
+        var columnThumbnail = columnItem.thumbnail;
+        columnThumbnail.appendChild(zipIcon);
+
+        columnContent = $("coral-columnview coral-columnview-column:last-child")[0].content;
+        columnContent.insertBefore(columnItem, columnContent.childNodes[0]);
+    };
+
+    // eslint-disable-next-line max-len
+    ExtractArchiveWizard.prototype.initProgressCheck = function(jobId, jobURL, maxUIWaitFileSize, maxUIWaitTime, alreadyRunning) {
+        var self = this;
+        var progress = 0;
+        var progressBar = $("#dam-archive-extract-progress")[0];
+        var progressCheckDelay = 5000;
+        var progressCheckTimeout = null;
+        var reloadAfterSucceedDelay = 2000;
+        var reloadAfterJobStartDelay = 5000;
+        var maxRetries = 5;
+        var retryCount = 0;
+        var startTime = new Date().getTime();
+        var jobPageURL = Granite.HTTP.externalize(
+            "/mnt/overlay/granite/async/content/asyncjobs/jobdetails.html?jobid=" +
+            jobId + "&jobname=UNZIP");
+
+        if (alreadyRunning) {
+            self.showAsyncJobRunningNotification(jobPageURL, alreadyRunning);
+            self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterJobStartDelay);
+            return;
+        } else {
+            var checkProgress = function() {
+                $.ajax({
+                    url: jobURL,
+                    type: "GET",
+                    cache: false,
+                    success: function(response) {
+                        var done = parseInt(response.done);
+                        var total = parseInt(response.total);
+                        if (response.state === "SUCCEEDED") {
+                            progress = 100;
+                            self.showSuccessNotification();
+                            self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterSucceedDelay);
+                        } if (response.state === "ERROR" || response.state === "GIVEN_UP") {
+                            self.showErrorNotification(jobPageURL);
+                            self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterJobStartDelay);
+                        } else if (response.state === "STOPPED") {
+                            self.showCancelNotification();
+                            self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterSucceedDelay);
+                        } else {
+                            var currentTime = new Date().getTime();
+                            var elapsedTime = currentTime - startTime;
+                            // Don't make the user wait for the job to finish if it's
+                            // taking too long or the file size is too big
+                            if (response.state && (response.state === "QUEUED" || response.state === "ACTIVE") &&
+                            (elapsedTime > maxUIWaitTime || total > maxUIWaitFileSize)) {
+                                self.showAsyncJobRunningNotification(jobPageURL);
+                                self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterJobStartDelay);
+                            } else {
+                                if (retryCount < maxRetries) {
+                                    if (response.state === "ACTIVE") {
+                                        progressCheckDelay = 2000;
+                                        progress = Math.round(done / total * 100);
+                                        progressBar.indeterminate = false;
+                                    } else if (response.state === "QUEUED") {
+                                        progressBar.indeterminate = true;
+                                    } else {
+                                        progressBar.indeterminate = true;
+                                        retryCount++;
+                                    }
+                                    progressCheckTimeout = window.setTimeout(checkProgress, progressCheckDelay);
+                                } else if (response.state) {
+                                    progressBar.value = 100;
+                                    self.showErrorNotification(jobPageURL);
+                                    self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterJobStartDelay);
+                                } else {
+                                    progressBar.value = 100;
+                                    self.showErrorNotification();
+                                    self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterJobStartDelay);
+                                }
+                            }
+                        }
+                        progressBar.value = Math.max(progress, progressBar.value);
+                    },
+                    error: function(response) {
+                        if (response.state === "ERROR" || response.state === "GIVEN_UP") {
+                            self.showErrorNotification();
+                            self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterJobStartDelay);
+                        } else if (response.state === "STOPPED") {
+                            self.showCancelNotification();
+                            self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterSucceedDelay);
+                        } else if (retryCount < maxRetries) {
+                            retryCount++;
+                            progressBar.indeterminate = true;
+                            progressCheckTimeout = window.setTimeout(checkProgress, progressCheckDelay);
+                        } else if (response.state) {
+                            progressBar.value = 100;
+                            self.showErrorNotification(jobPageURL);
+                            self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterJobStartDelay);
+                        } else {
+                            progressBar.value = 100;
+                            self.showErrorNotification();
+                            self.redirectWithDelay("/assets.html" + self.destPath, reloadAfterJobStartDelay);
+                        }
+                    }
+                });
+            };
+
+            $(self.cancelButton).on("click", function() {
+                window.clearTimeout(progressCheckTimeout);
+                checkProgress = $.noop;
+                $(this).remove();
+                self.cancelExtractionProcess(jobURL);
+                self.showCancelNotification();
+            });
+            checkProgress();
+        }
+    };
+
+    ExtractArchiveWizard.prototype.redirectWithDelay = function(url, delay) {
+        window.setTimeout(function() {
+            var destURL = Granite.HTTP.externalize(url);
+            location.href = destURL;
+        }, delay);
+    };
+
+    ExtractArchiveWizard.prototype.showAsyncJobRunningNotification = function(jobPageURL, alreadyRunning) {
+        var self = this;
+        // eslint-disable-next-line max-len
+        var destURL = Granite.HTTP.externalize("/assets.html" + self.destPath);
+        var msg;
+        if (alreadyRunning) {
+            msg = Granite.I18n.get("The archive is already being extracted to {0}.", [ self.destPath ]);
+        } else {
+            msg = Granite.I18n.get("The archive is being extracted to {0}.", [ self.destPath ]);
+        }
+        msg += "<br/>";
+        msg += '<a class="coral-Link--overBackground" href="' +
+        jobPageURL + '">' + Granite.I18n.get("Go to the job console to view progress.") + "</a>";
+        msg += "<br/>";
+        msg += '<a class="coral-Link--overBackground" href="' +
+            destURL + '">' + Granite.I18n.get("Go to the target folder.") + "</a>";
+        self.ui.notify(Granite.I18n.get("IN PROGRESS"), msg, (alreadyRunning ? "warning" : "info"));
+        sessionStorage.setItem(ACTION_STATUS_KEY, JSON.stringify({
+            status: "success",
+            text: msg
+        }));
+    };
+
+    ExtractArchiveWizard.prototype.showSuccessNotification = function() {
+        var self = this;
+        var destURL = Granite.HTTP.externalize("/assets.html" + self.destPath);
+        var msg = Granite.I18n.get("The archive has been extracted.");
+        msg += "<br/>";
+        msg += '<a class="coral-Link--overBackground" href="' +
+            destURL + '">' + Granite.I18n.get("Go to the target folder.") + "</a>";
+        self.ui.notify(Granite.I18n.get("SUCCESS"), msg, "success");
+        sessionStorage.setItem(ACTION_STATUS_KEY, JSON.stringify({
+            status: "success",
+            text: msg
+        }));
+    };
+
+    ExtractArchiveWizard.prototype.showErrorNotification = function(jobPageURL) {
+        var self = this;
+        var msg = Granite.I18n.get("An error occurred while extracting the archive.");
+        self.ui.notify(Granite.I18n.get("ERROR"), msg, "error", 5000);
+        msg += "<br/>";
+        if (jobPageURL) {
+            msg += '<a class="coral-Link--overBackground" href="' +
+            jobPageURL + '">' + Granite.I18n.get("Go to the job console to view progress.") + "</a>";
+        }
+        sessionStorage.setItem(ACTION_STATUS_KEY, JSON.stringify({
+            status: "error",
+            text: msg
+        }));
+    };
+
+    ExtractArchiveWizard.prototype.showCancelNotification = function() {
+        var self = this;
+        var msg = Granite.I18n.get("The extraction process has been cancelled.");
+        self.ui.notify(Granite.I18n.get("CANCELLED"), msg, "warning");
+        sessionStorage.setItem(ACTION_STATUS_KEY, JSON.stringify({
+            status: "success",
+            text: msg
+        }));
+    };
+
+    ExtractArchiveWizard.prototype.cancelExtractionProcess = function(jobURL) {
+        var self = this;
+        $.ajax({
+            url: jobURL,
+            type: "POST",
+            data: {
+                "action": "stop"
+            },
+            cache: false,
+            success: function(response) {
+                self.collectionAPI.reload();
+                self.toggleSelectionState(true);
+                self.submitButton.removeAttr("disabled");
+            }
+        });
+        return false;
+    };
+
+    $(document).one("foundation-contentloaded.extract-archive-wizard", function(e) {
+        var sourceItem = getParameterByName("item") || null;
+        var options = {
+            sourceItem: sourceItem,
+            wizardElement: $(".foundation-wizard", e.target)
+        };
+        new ExtractArchiveWizard(options);
+    });
+
+    function getParameterByName(name) {
+        name = name.replace(/[[]/, "\\[").replace(/[\]]/, "\\]");
+        var regexS = "[?&]" + name + "=([^&#]*)";
+        var regex = new RegExp(regexS, "g");
+        var match = regex.exec(window.location.search);
+        var result = null;
+        if (match) {
+            result = decodeURIComponent(match[1].replace(/\+/g, " "));
+        }
+        return result;
+    }
+})(window, document, Granite, Granite.$);

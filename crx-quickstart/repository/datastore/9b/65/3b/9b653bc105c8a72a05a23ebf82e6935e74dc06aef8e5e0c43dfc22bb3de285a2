@@ -1,0 +1,1086 @@
+//ImageMapUtil component.
+(function($){
+	'use strict';
+	
+	// TODO: This is "global" to the page which implies the limitation of one ImageMapUtil on the same page only.
+	// Refactor in future to make it a private property instead.
+	 var _self;
+	 
+	 var VERTICAL	= 'vertical';
+	 var HORIZONTAL = 'horizontal';
+	 
+	/*
+	 * Initialize Map Utility
+	*/
+	function ImageMapUtil() {
+	}
+	
+	ImageMapUtil.prototype._init = function(options) {
+		
+		_self=this;
+		
+		// This is the easiest way to have default options.
+		var settings = $.extend({
+				assetHeight: 0,
+				assetWidth: 0,
+				backgroundColor: '#FFFFFF', 
+				borderColor: '#3399ff',
+				borderThickness: '2px',
+				canvasId: 'hotspotCanvas', 
+				hotspotWidth: 10,
+				hotspotHeight: 10,
+				hotspotClassName: 'hotspot',
+				mapClassName: 'map',
+				mapType: 'imagemap',
+				viewerComponent: null,
+				viewerContainer: null,
+				viewerId: 's7viewer'
+			}, options );
+		
+		this.assetHeight;
+		this.assetWidth;
+		this.borderThickness = settings.borderThickness;
+		this.canvasId = settings.canvasId;
+		this.hotspotClassName = settings.hotspotClassName;
+		this.hotspotWidth= settings.hotspotWidth;
+		this.hotspotHeight= settings.hotspotHeight;
+		this.mapClassName = settings.mapClassName;
+		this.mapType = settings.mapType;
+		this.mode = 'default';
+		this.viewerId = settings.viewerId;
+		this.viewerComponent = settings.viewerComponent;
+		this.viewerContainer = settings.viewerContainer;
+		this.borderColor = settings.borderColor;
+		this.backgroundColor = settings.backgroundColor;
+		
+		this.$viewerContainer = $('#'+this.viewerId);
+		this.$mapCanvas = $('#'+this.canvasId);
+		
+		this.dragstartX = 0;
+		this.dragstartY = 0;
+		this.mapId = undefined;
+		this.panning = false;
+		this.zooming = false;
+		
+		this._initUI();
+		
+		this._initUIActions();
+	}
+	
+	ImageMapUtil.prototype.setAssetDimensions = function(w,h) {
+		
+		this.assetHeight = h;
+		this.assetWidth = w;
+		
+		//trigger resize to fit canvas to viewer based on asset and canvas dimensions
+		this.$viewerContainer.trigger('resize');
+	}
+	
+	/***
+	 * This function get the maximum x position that a hotspot can be added at (canvas edge)
+	 */
+	ImageMapUtil.prototype._withinBoundaries = function(x,y) {
+		
+		var maxXpos;
+		var maxYpos;
+		
+		var point = new s7viewers.s7sdk.Point2D(0, 0);
+		var coordinates = _self.viewerComponent.imagePixelsToViewPoint(point);
+		var xOffset = Math.round(coordinates.x) > 0 ? Math.round(coordinates.x) : 0;
+		var yOffset = Math.round(coordinates.y) > 0 ? Math.round(coordinates.y) : 0;
+		
+		//check min x an y boundaries 
+		maxXpos = parseInt(_self.$mapCanvas.width()) - xOffset;
+		maxYpos = parseInt(_self.$mapCanvas.height()) - yOffset;
+		
+		if(y < yOffset 
+				|| x < xOffset 
+				|| x > maxXpos 
+				|| y > maxYpos ) {
+			return false;
+		}
+		
+		return true;
+	}
+	
+	
+	ImageMapUtil.prototype._selectMap = function(mapId) {
+		
+		var $map = (mapId == undefined)? undefined : $('#'+mapId);
+		
+		setMapSelected($map);
+	}
+	
+	ImageMapUtil.prototype._setMapType = function(mapType) {
+		this.mapType = mapType;
+	}
+	
+	ImageMapUtil.prototype._getMapType = function(mapType) {
+		 return this.mapType;
+	}
+	
+	ImageMapUtil.prototype._setMode = function(mode, mapId) {
+		this.mode = mode;
+		switch(this.mode) {
+		case 'create':
+			//disable pan
+			this.$mapCanvas.data('panEnabled', false);
+			this.$mapCanvas.draggable({ disabled: true });
+			this.mapId = mapId;
+			break;
+		case 'edit':
+			this.$mapCanvas.data('panEnabled', true);
+			this.$mapCanvas.draggable("enable");
+			break;
+		default:
+			this.$mapCanvas.data('panEnabled', true);
+		this.$mapCanvas.draggable("enable");
+		this.mapId = undefined;
+		}
+	}
+	
+	ImageMapUtil.prototype._initUI = function() {
+		//set map type
+		this._setMapType(this.mapType);
+	}
+	
+	ImageMapUtil.prototype._initUIActions = function() {
+		
+		this.$mapCanvas.data('drawingMap', false);
+		
+		//enable pan feature
+		this.$mapCanvas.data('panEnabled', true);
+		
+		//add listeners for viewer events
+		this.viewerComponent.addEventListener( s7viewers.s7sdk.event.CapabilityStateEvent.NOTF_ZOOM_CAPABILITY_STATE, this._onZoomStateChange);
+		this.viewerComponent.addEventListener( s7viewers.s7sdk.event.ZoomRgnEvent.NOTF_ZOOM_RGN, this._zoomRegionUpdate);
+		this.viewerContainer.addEventListener( s7viewers.s7sdk.event.ResizeEvent.COMPONENT_RESIZE, this._resizeCanvasEvent);
+		
+		//trigger resize to fit canvas to viewer based on asset and canvas dimensions
+		this.$viewerContainer.trigger('resize');
+		
+		//force resize after everything loads..
+		setTimeout(function() {
+			_self._resizeCanvasEvent();
+		}, 100);
+		
+		//manage mousedown 
+		this.$mapCanvas.on('mousedown', function(e) {
+			
+			if(_self.mode !== 'create' || _self.mapType !== 'imagemap') {
+				return;
+			}
+			
+			if(e.originalEvent.layerX > _self.$viewerContainer.width() 
+					|| e.originalEvent.layerY > _self.$viewerContainer.height()) {
+    			return;
+    		}
+			
+			_self.$mapCanvas.data('drawingMap', true);
+		});
+		
+		this.$mapCanvas.on('mousemove', function(e) {
+			 
+			if(_self.mode !== 'create' || !_self.$mapCanvas.data('drawingMap')) {
+				return;
+			}
+			
+			//draw map
+			setTimeout(function() {
+				_self._drawMap(_self.mapId, e.originalEvent.layerX, e.originalEvent.layerY);
+			}, 100);
+		});
+		
+		this.$mapCanvas.on('mouseup', function(e) {
+			
+			if( _self.mode === 'default' && _self.mode !== 'create') {
+    			var obj = document.getElementById("s7viewer_zoomView");
+				_self._create_and_fire_MouseEvent(obj,"mousedown",e.originalEvent.layerX, e.originalEvent.layerY);
+				_self._create_and_fire_MouseEvent(obj,"mouseup",e.originalEvent.layerX, e.originalEvent.layerY);
+    			return;
+    		}
+			
+			if(_self.mode !== 'create') {
+				return;
+			}
+			
+			var x;
+			var y;
+			var coordinates;
+			var point;
+			var $map;
+			var marginLeft = parseInt(_self.$mapCanvas.css('left').replace('px',''));
+			var marginTop = parseInt(_self.$mapCanvas.css('top').replace('px',''));
+			
+			if(_self.$mapCanvas.data('drawingMap')) {
+				
+				$map = $('#'+_self.mapId);
+				
+				if($map.length < 1) {
+					return;
+				}
+				
+				x = parseInt($map.css('left').replace('px', '')) + marginLeft;
+				y = parseInt($map.css('top').replace('px', '')) + marginTop;
+				point = new s7viewers.s7sdk.Point2D(x, y);
+				coordinates = _self.viewerComponent.viewPointToImagePixels(point);
+				
+				// get width and height in image coordinates
+				// then convert width and height to view coordiantes
+				var bottomRight = new s7viewers.s7sdk.Point2D(point.x + $map.width(), point.y + $map.height());
+				var brCoordinates = _self.viewerComponent.viewPointToImagePixels(bottomRight);
+				var width = brCoordinates.x - coordinates.x;
+				var height = brCoordinates.y - coordinates.y;
+				
+				$map.data('id', _self.mapId);
+				$map.data('x', Math.round(coordinates.x));
+				$map.data('y', Math.round(coordinates.y));
+				$map.data('wid', Math.round(width));
+				$map.data('hei', Math.round(height));
+			}
+			else {
+				
+				if(_self.mapType !== 'hotspot') {
+					return;
+				}
+	    		
+				// this should stay at the center of the hotspot, exectly where the user clicked
+                // do not use layerX/Y coordinates from the event, if a hotspot overlaps an image map layerX/Y will be
+                // in tareget coordinates, which in this case would be the underlying image map not the canvas
+                var canvasX = e.clientX - _self.$mapCanvas.offset().left;
+                var canvasY = e.clientY - _self.$mapCanvas.offset().top;
+                
+                // now convert to view coordinates
+                x = canvasX + marginLeft;
+	    		y = canvasY + marginTop;
+				
+				// now convert to image coordinates
+	    		point = new s7viewers.s7sdk.Point2D(x, y);
+				coordinates = _self.viewerComponent.viewPointToImagePixels(point);
+				
+				// now adjust for the fixed 10x10 width of the hotspot in image coordinates
+				x -= _self.hotspotWidth/2;
+				y -= _self.hotspotHeight/2;
+				
+				//get the maximum x position
+				if(!_self._withinBoundaries(x,y)) {
+					return;
+				}
+				
+				// set data
+				var data = ({id:_self.mapId, x:Math.round(coordinates.x), y:Math.round(coordinates.y)});
+				
+				// add hotspot
+				$map = _self._addHotspot(_self.mapId, data);
+				
+				// position hotspot
+				_self._positionHotspot($map);
+				
+				$map.data('id', _self.mapId);
+				$map.data('x', Math.round(coordinates.x));
+				$map.data('y', Math.round(coordinates.y));
+				$map.data('wid', _self.hotspotWidth);
+				$map.data('hei', _self.hotspotHeight);
+			}
+			
+			if($map.hasClass('hotspot')) {
+				$map.data('coord', $map.data('x') + ',' + $map.data('y'));
+                $map.focus();
+			}
+			else {
+				$map.data('coord', getCoordinatesFromSize($map.data('x'), $map.data('y'), $map.data('wid'), $map.data('hei')));
+			}
+			
+			//select map
+			setMapSelected($map);
+			//clean up
+			_self.$mapCanvas.data('drawingMap', false);
+			_self._setMode('default');
+			
+			//add event listeners for dragging, selection, etc
+			_self._addUserInteractionEvents($map);
+			
+			//send notification of map creation
+	        _self.$mapCanvas.trigger({type:'map-update', 'mapId':$map.data('id'), 'map':$map.data()});
+		});
+		
+		//canvas for panning
+		this.$mapCanvas.draggable({
+			
+    		start: function(e) {
+        		//if the viewer is not zooming bail
+        		if(!_self.zooming) {
+        			e.preventDefault();
+        		}
+        		
+				if(!_self.$mapCanvas.data('panEnabled')) {
+					e.preventDefault();
+					return;
+				}
+				 		
+        		//set start x and y properties for panning..
+    	    	this.dragstartX = Math.round(e.originalEvent.screenX);
+    	    	this.dragstartY = Math.round(e.originalEvent.screenY); 
+        	},
+        	drag: function(e) {
+        		
+        		if(!_self.$mapCanvas.data('panEnabled')) {
+					e.preventDefault();
+					return;
+				}
+        		
+        		//hide canvas for now
+        		_self.$mapCanvas.css('visibility','hidden');
+
+        		var x = ((e.originalEvent.screenX - this.dragstartX) < 0)? parseFloat(-.0025) : parseFloat(.0025);
+        		var y = ((e.originalEvent.screenY - this.dragstartY) < 0)? parseFloat(-.0025) : parseFloat(.0025);
+
+        		//update drag start
+        		this.dragstartX = Math.round(e.originalEvent.screenX);
+        		this.dragstartY = Math.round(e.originalEvent.screenY); 
+        		
+        		//pan
+        		_self.viewerComponent.zoomNPan(x,y);
+        	},
+        	stop: function(e) {
+        		
+        		if(!_self.$mapCanvas.data('panEnabled')) {
+					e.preventDefault();
+					return;
+				}
+        		//show canvas
+        		_self.$mapCanvas.css('visibility','visible');
+        		
+        		//set flag
+        		_self.panning = false;
+        		
+        		//update UI to reposition canvas
+        		_self._zoomRegionUpdate();
+        	}
+        });
+		
+		
+		//send notification of map creation
+        _self.$mapCanvas.trigger({type:'map-editor-ready'});
+	}
+	
+	ImageMapUtil.prototype._addUserInteractionEvents = function ($map) {
+		
+		if($map.data('hasEvents') != undefined && $map.data('hasEvents') == true) {
+			return;
+		}
+		
+        $map.on('keydown', function(e) {
+			var marginLeft = parseInt(_self.$mapCanvas.css('left').replace('px',''));
+			var marginTop = parseInt(_self.$mapCanvas.css('top').replace('px',''));
+			var marginBottom = parseInt(_self.$mapCanvas.css('left').replace('px','')) + _self.$mapCanvas.height() - $map.height();
+			var marginRight = parseInt(_self.$mapCanvas.css('top').replace('px','')) + _self.$mapCanvas.width() - $map.width();
+		/*	right 39 left 37 up 38 down 40 */ 
+            var stepX = parseInt($(this).css('left').replace('px', ''));
+            var stepY = parseInt($(this).css('top').replace('px', ''));
+            var posChanged = false;
+            if (e.which === 39) {
+				stepX += 10;
+                if (stepX <= marginRight) {
+                	$(this).css('left', stepX);
+                	posChanged = true;
+                }
+            } else if (e.which === 37) {
+				stepX -= 10;
+                if (stepX >= marginLeft) {
+                	$(this).css('left', stepX);
+                	posChanged = true;
+                }
+            } else if (e.which === 38) {
+				stepY -= 10;
+                if (stepY >= marginTop) {
+                	$(this).css('top', stepY);
+                	posChanged = true;
+                }
+            } else if (e.which === 40) {
+				stepY += 10;
+                if (stepY <= marginBottom) {
+                	$(this).css('top', stepY);
+                	posChanged = true;
+            	}
+            }
+
+            if (posChanged) {
+				_self._setMode('edit');
+
+				var x = parseInt($(this).css('left').replace('px', '')) + marginLeft;
+				var y = parseInt($(this).css('top').replace('px', '')) + marginTop;
+
+				//add offset for centering hotspot
+				if($(this).hasClass(_self.hotspotClassName)) {
+					x = x + $(this).width()/2;
+					y = y + $(this).height()/2;
+				}
+
+				var point = new s7viewers.s7sdk.Point2D(x, y);
+				var coordinates = _self.viewerComponent.viewPointToImagePixels(point);
+
+				// get width and height in image coordinates
+				// then convert width and height to view coordiantes
+				var bottomRight = new s7viewers.s7sdk.Point2D(point.x + $map.width(), point.y + $map.height());
+				var brCoordinates = _self.viewerComponent.viewPointToImagePixels(bottomRight);
+				var width = brCoordinates.x - coordinates.x;
+				var height = brCoordinates.y - coordinates.y
+
+				$(this).data('id', _self.mapId);
+				$(this).data('x', Math.round(coordinates.x));
+				$(this).data('y', Math.round(coordinates.y));
+				$(this).data('wid', Math.round(width));
+				$(this).data('hei', Math.round(height));
+
+            	//set coordinates property
+           		$(this).data('coord', $map.data('x') + ',' + $map.data('y'));
+
+          	// get the selection handles back
+            	setMapSelected($(this));
+            	//send notification of map update
+                var inst = this;
+        		setTimeout(function() {
+            		_self.$mapCanvas.trigger({type:'map-update', 'mapId':inst.id, 'map':$(inst).data()});
+        		},0);
+            }
+	});
+
+	    $map.on('focus', function(e) {
+        	$(this).css('opacity', 1);
+		if(_self.mode !== 'create') {
+			_self._setMode('edit');
+			//select map
+                _self._selectMap(this.id);
+			setMapSelected($(this));
+
+			//notify of map select
+			_self.$mapCanvas.trigger({type:'map-select', 'mapId':this.id});
+            	}
+	    });
+
+	    $map.on('blur', function(e) {
+        	$(this).css('opacity', .5);
+            	if(_self.mode !== 'create') {
+            		_self._setMode('default');
+            	}
+	    });
+
+		$map.on('mousedown', function() {
+			if(_self.mode !== 'create') {
+				_self._setMode('edit');
+        			$(this).focus();
+				//select map
+				setMapSelected($(this));
+			
+				//notify of map select
+				_self.$mapCanvas.trigger({type:'map-select', 'mapId':this.id});
+            		}
+		});
+		
+		$map.on('mouseover', function() {
+			if(_self.mode !== 'create') {
+				_self._setMode('edit');
+			}
+		});
+		
+		$map.on('mouseout', function() {
+			if(_self.mode === 'create') {
+				return;
+			}
+			_self._setMode('default');
+		});
+		
+		//make draggable
+		$map.draggable();
+		
+		$map.on('dragstop', function(e) {
+			
+			setMapSelected($(this));
+			
+			var marginLeft = parseInt(_self.$mapCanvas.css('left').replace('px',''));
+			var marginTop = parseInt(_self.$mapCanvas.css('top').replace('px',''));
+			
+			var x = parseInt($(this).css('left').replace('px', '')) + marginLeft;
+			var y = parseInt($(this).css('top').replace('px', '')) + marginTop;
+			
+			//add offset for centering hotspot
+			if($(this).hasClass(_self.hotspotClassName)) {
+				x = x + $(this).width()/2;
+				y = y + $(this).height()/2;
+			}
+			
+			var point = new s7viewers.s7sdk.Point2D(x, y);
+			var coordinates = _self.viewerComponent.viewPointToImagePixels(point);
+			
+			// get width and height in image coordinates
+			// then convert width and height to view coordiantes
+			var bottomRight = new s7viewers.s7sdk.Point2D(point.x + $map.width(), point.y + $map.height());
+			var brCoordinates = _self.viewerComponent.viewPointToImagePixels(bottomRight);
+			var width = brCoordinates.x - coordinates.x;
+			var height = brCoordinates.y - coordinates.y
+						
+			$(this).data('id', _self.mapId);
+			$(this).data('x', Math.round(coordinates.x));
+			$(this).data('y', Math.round(coordinates.y));
+			$(this).data('wid', Math.round(width));
+			$(this).data('hei', Math.round(height));
+            
+            //set coordinates property
+            if($(this).hasClass(_self.hotspotClassName)) {
+            	$(this).data('coord', $map.data('x') + ',' + $map.data('y'));
+            }
+            else if($(this).hasClass(_self.mapClassName)) {
+            	$(this).data('coord', getCoordinatesFromSize($map.data('x'), $map.data('y'), $map.data('wid'), $map.data('hei')));
+            }
+            
+            // get the selection handles back
+            setMapSelected($(this));
+            
+            
+            if(_self.mode !== 'create') {
+            	_self._setMode('default');
+            }
+            
+            //send notification of map update
+            _self.$mapCanvas.trigger({type:'map-update', 'mapId':this.id, 'map':$(this).data()});
+        });
+		
+		$map.data('hasEvents', true);
+	}
+	
+	
+	ImageMapUtil.prototype._onZoomStateChange = function (e) {
+		if(e.s7event.state.hasCapability(s7viewers.s7sdk.ZoomCapabilityState.ZOOM_RESET)){
+			_self.zooming = true;
+		}else{
+			_self.zooming = false;
+			_self._resizeCanvasEvent();
+		}
+		
+		//send notification of map creation
+        _self.$mapCanvas.trigger({type:'zoom-state-changed'});
+	}
+	
+	ImageMapUtil.prototype._resizeCanvasEvent = function(e) {
+		
+		if(this.zooming) {
+			return;
+		}
+		
+		var $canvas	= _self.$mapCanvas;
+		
+		// get the top/left image corner in view coordinates
+		var point = new s7viewers.s7sdk.Point2D(0, 0);
+		var coordinates = _self.viewerComponent.imagePixelsToViewPoint(point);
+		
+		// if the image is in reset state the offset will be >= 0 depending on aspect
+		// we do not care about the other case since canvas will cover all of the image
+		// if the image is zoomed in
+		var xOffset = Math.round(coordinates.x) > 0 ? Math.round(coordinates.x) : 0;
+		var yOffset = Math.round(coordinates.y) > 0 ? Math.round(coordinates.y) : 0;
+    	
+		// canvas only covers image area, adjust its size and margins
+		$canvas.width($canvas.width - 2 * xOffset);
+		$canvas.height($canvas.height - 2 * yOffset);
+    	
+		$canvas.css('left', 0);
+    	$canvas.css('top', 0);
+    	
+    	//BB If there are not hotspots or maps in the DOM skip this step
+    	if($('.'+_self.mapClassName+',.'+_self.hotspotClassName).length < 1) {
+    		return;
+    	}
+    	
+    	//position maps and hotspots
+    	_self._positionMaps();
+    	_self._positionHotspots();
+    	
+	}
+	
+	ImageMapUtil.prototype._zoomRegionUpdate = function zoomRegionUpdate(e) {
+		
+		var $canvas	= _self.$mapCanvas;
+		var $viewer = $('#'+_self.viewerId);
+		
+		//if not zooming
+		if(!_self.zooming) {
+    		return;
+    	}
+		
+		var $canvas	= _self.$mapCanvas;
+		var $viewer = $('#'+_self.viewerId);
+    	
+    	//update canvas size
+		$canvas.width($viewer.width());
+		$canvas.height($viewer.height());
+    	
+    	var canvasWidth = $canvas.width();
+    	var canvasHeight = $canvas.height();
+    	
+    	//reposition
+    	$canvas.css('top', 0);
+    	$canvas.css('left', 0);
+    	
+    	//if there are no maps 
+    	if($canvas.children().length < 1) {
+    		return;
+    	}
+
+    	//position maps and hotspots
+    	_self._positionMaps();
+    	_self._positionHotspots();
+	}
+	
+	ImageMapUtil.prototype._addHotspot = function(id, data) {
+		
+		var point = new s7viewers.s7sdk.Point2D(Math.round(data.x), Math.round(data.y));
+		var coordinates = this.viewerComponent.imagePixelsToViewPoint(point);
+		
+		var $map = $(new Coral.Icon().set({
+			id: id,
+			icon: "target",
+			size: "L"
+		}));
+
+		$map.addClass(this.hotspotClassName);
+		$map.css('position', 'absolute');
+		$map.css('float', 'left');
+		$map.css('top', coordinates.y+'px');
+		$map.css('left', coordinates.x+'px');
+		$map.css('z-index', 1000);
+		$map.attr('tabindex', 0);
+		
+        //add to canvas
+        this.$mapCanvas.append($map);
+        
+		$map.data('x', Math.round(data.x));
+		$map.data('y', Math.round(data.y));
+		$map.data('coord', data.x+','+data.y);
+        
+        //add event listeners
+		this._addUserInteractionEvents($map);
+
+		Coral.commons.ready($map, function() {
+			//position hotspot
+			_self._positionHotspot($map);
+		});
+		
+		return $map;
+	}
+	
+	ImageMapUtil.prototype._addMap = function(id, data) {
+		
+		//create map
+		var $map = $('<div>', {'id':id, 'class': this.mapClassName});
+		$map.css('position', 'absolute');
+		$map.css('border', this.borderThickness+' solid '+this.borderColor);
+		
+		//get map
+		this.$mapCanvas.append($map);
+		
+		//set props
+		$map.data('id', this.mapId);
+		$map.data('x', data.x); // map size/position is in image coordinates
+		$map.data('y', data.y);
+		$map.data('wid', data.hei);
+		$map.data('hei', data.wid);
+		$map.data('coord', Math.round(data.x1)+','+Math.round(data.y1)+','+Math.round(data.x2)+','+Math.round(data.y2));
+		
+		this._positionMap($map);
+		
+		//add event listeners
+		this._addUserInteractionEvents($map);
+		
+		return $map;
+	}
+	
+	ImageMapUtil.prototype._drawMap = function(id, currentX, currentY) {
+		
+		var $map = $('#'+id);
+		
+		if($map.length < 1) {
+			
+			//create map
+			var $map = $('<div>', {'id':id, 'class': this.mapClassName});
+			$map.css('position', 'absolute');
+			$map.css('top', currentY);
+			$map.css('left', currentX);
+			$map.css('border', this.borderThickness+' solid '+this.borderColor);
+			
+			$map = this.$mapCanvas.append($map);
+		}
+		else {
+			
+			var x = parseInt($map.css('left').replace('px', ''));
+			var y = parseInt($map.css('top').replace('px', ''));
+			
+			var size = this._getSizeFromCoordinates(x, y, currentX, currentY);
+			
+			if(size.h < 1) {
+				size.h = 5;
+			}
+			if(size.w < 1) {
+				size.w = 5;
+			}
+			$map.height(size.h);
+			$map.width(size.w);
+		}
+		return $map;
+	}
+	
+	ImageMapUtil.prototype._positionHotspots = function() {
+		var i;
+		var maps = $('.'+this.hotspotClassName);
+		var len = maps.length;
+		
+		for(i=0;i<len;i++) {
+			var $map = $(maps[i]);
+			this._positionHotspot($map);
+		}
+	}
+	
+	ImageMapUtil.prototype._positionHotspot = function($map) {
+		
+		// the hotspot center point in image coordinates
+		var point = new s7viewers.s7sdk.Point2D(Number($map.data('x')), Number($map.data('y')));
+		
+		// now convert to view coordinates
+ 		var coordinates = this.viewerComponent.imagePixelsToViewPoint(point);
+		
+ 		// get the canvas margin
+		var marginLeft = parseInt(this.$mapCanvas.css('left').replace('px',''));
+		var marginTop = parseInt(this.$mapCanvas.css('top').replace('px',''));
+		
+		// adjust the coordinates for the margin
+		coordinates.x = coordinates.x-marginLeft;
+		coordinates.y = coordinates.y-marginTop;
+		
+		// now center the icon around the hotspot center
+		coordinates.x = coordinates.x - $map.width()/2;
+		coordinates.y = coordinates.y - $map.height()/2;
+		
+		$map.css('left', coordinates.x+'px');
+		$map.css('top', coordinates.y+'px');
+	}
+	
+	ImageMapUtil.prototype._positionMaps = function() {
+		var i;
+		var maps = $('.'+this.mapClassName);
+		var len = maps.length;
+		
+        if(len == 0) {
+            return;
+        } 
+
+		for(i=0;i<len;i++) {
+			var $map = $(maps[i]);
+			this._positionMap($map);
+		}
+		
+		//if showing map resizing controls reposition them too and reselect map
+		this._selectMap($('.editHandle').first().attr('target'));
+	}
+	
+	ImageMapUtil.prototype._positionMap = function($map) {
+		
+		//
+		// convert map size/position from image to view coordinates
+		//
+		
+		// top left corner first
+		var point = new s7viewers.s7sdk.Point2D(Number($map.data('x')), Number($map.data('y')));
+		var coordinates = this.viewerComponent.imagePixelsToViewPoint(point);
+		 		
+		 		
+	 	// then convert width and height to view coordiantes
+	 	var bottomRight = new s7viewers.s7sdk.Point2D(Number($map.data('x')) + Number($map.data('wid')), Number($map.data('y')) + Number($map.data('hei')) );
+	 	var brCoordinates = this.viewerComponent.imagePixelsToViewPoint(bottomRight);
+	 	var width = brCoordinates.x - coordinates.x;
+	 	var height = brCoordinates.y - coordinates.y;
+		
+		// translate for the margin
+		var marginLeft = parseInt(this.$mapCanvas.css('left').replace('px',''));
+		var marginTop = parseInt(this.$mapCanvas.css('top').replace('px',''));
+		
+		coordinates.x = coordinates.x-marginLeft;
+		coordinates.y = coordinates.y-marginTop;
+		
+		// set the dom element position/size
+		$map.css('left', Math.round(coordinates.x) +'px');
+		$map.css('top', Math.round(coordinates.y) +'px');
+		$map.height(Math.round(width));
+		$map.width(Math.round(height));
+	}
+	
+	ImageMapUtil.prototype._emptyCanvas = function() {
+		//remove maps/hotspots
+		$('.hotspot').remove();
+		$('.map').remove();
+		$('.editHandle').remove();
+	}
+	
+	ImageMapUtil.prototype._removeByID = function(id) {
+		var $el = $('#'+id);
+		//remove maps/hotspots
+		$el.remove();
+		$('.editHandle').remove();
+	}
+	
+	ImageMapUtil.prototype._getSizeFromCoordinates = function(x1,y1,x2,y2) {
+		var ret = {w:0,h:0};
+		var wei = x2-x1;
+		var hei = y2-y1;
+		ret = {w:wei,h:hei};
+		return ret;
+	}
+	
+	ImageMapUtil.prototype._create_and_fire_MouseEvent = function(obj,typ,x,y) {
+		if( document.createEvent ) {
+		  var eventObj = document.createEvent('MouseEvents');
+		  eventObj.initMouseEvent( typ, true, false, window, 0, 0, 0, x, y, false, false, false, false, 0, null );
+		  obj.dispatchEvent(eventObj);
+		}
+	}
+	
+	function setMapSelected($map) {
+		
+		//BB If there are not hotspots or maps in the DOM skip this step
+    	if($('.'+_self.mapClassName+',.'+_self.hotspotClassName).length < 1) {
+    		return;
+    	}
+		
+		var zIndex = $('#hotspotCanvas').css('z-index');
+		
+		// BB if the map passed into the function is undefined get reference to the currently selected map. 
+		//This happens when the resize event is triggered
+		if($map == undefined) {
+			
+			var i;
+			var id;
+			var maps = $('.hotspot,.map');
+			var maps = $('.'+_self.mapClassName+',.'+_self.hotspotClassName);
+			var mapLen = maps.length;
+			
+			for(i=0;i<mapLen;i++) {
+				var $mp = $(maps[i]);
+				if($mp.css('opacity') === '1') {
+					id = $mp.attr('id');
+					$map = $('#'+id);
+					break;
+				}
+			}
+		}
+		
+		//deselect maps
+		$('.'+_self.mapClassName).css('z-index', zIndex);
+		$('.'+_self.mapClassName).css('background-color', 'transparent');
+		
+		//deselect hotspots
+		$('.'+_self.hotspotClassName).css('opacity', .5);
+		$('.'+_self.hotspotClassName).css('z-index', zIndex);
+		$('.'+_self.hotspotClassName).css('background-color', 'transparent');
+		
+		//remove edit controls
+		$('.editHandle').remove();
+		
+		//update zIndex
+		zIndex = parseInt(zIndex+10);
+		
+		//update newly selected hotspot / map
+		if(isHotspot($map)) {
+			$map.css('opacity', 1);
+			$map.attr('tabindex', 0);
+		}
+		else {
+			var $canvas = $map.parent();
+			var offset = 4;
+			
+			var zIndex = $canvas.css('z-index');
+			
+			zIndex ++;
+			
+			//top left
+			var tLx = parseInt($map.css('left'))-offset;
+			var tLy = parseInt($map.css('top'))-offset;
+			
+			//top right
+			var tRx = parseInt($map.css('left'))+$map.width()-offset;
+			var tRy = parseInt($map.css('top'))-offset;
+			
+			//bottom left
+			var blx = parseInt($map.css('left'))-offset;
+			var bly = parseInt($map.css('top'))+$map.height()-offset;
+			
+			//bottom right
+			var bRx = parseInt($map.css('left')) +$map.width()-offset;
+			var bRy = parseInt($map.css('top')) + $map.height()-offset;
+			
+			//add handles for resizing map
+			var topLeftHandle = '<div id="topLeftHandle" target="'+$map.attr('id')+'" class="editHandle" style="position:absolute; left:'+tLx+'px; top:'+tLy+'px;">';
+			var topRightHandle = '<div id="topRightHandle" target="'+$map.attr('id')+'" class="editHandle" style="position:absolute; left:'+tRx+'px; top:'+tRy+'px;">';
+			var bottomLeftHandle = '<div id="bottomLeftHandle" target="'+$map.attr('id')+'" class="editHandle" style="position:absolute; left:'+blx+'px; top:'+bly+'px;">';
+			var bottomRightHandle = '<div id="bottomRightHandle" target="'+$map.attr('id')+'" class="editHandle" style="position:absolute; left:'+bRx+'px; top:'+bRy+'px;">';
+			
+			$canvas.append(topLeftHandle);
+			$canvas.append(topRightHandle);
+			$canvas.append(bottomLeftHandle);
+			$canvas.append(bottomRightHandle);
+			
+			$('.editHandle').width('8px');
+			$('.editHandle').height('8px');
+			$('.editHandle').css('z-index',zIndex);
+			$('.editHandle').css('background-color', _self.borderColor);
+			$('.editHandle').css('opacity', .5);
+			$('.editHandle').css('border', _self.borderThickness +' solid #000');
+			
+			//make draggable
+			$('.editHandle').draggable();
+			
+			//add hotspot events for drag and click
+			$('.editHandle').on('dragstart', function(e) {
+				
+				var $map = $('#'+$(this).attr('target'));
+				
+				this.mapEditControlDragStartX = Math.round(e.originalEvent.screenX);
+				this.mapEditControlDragStartY = Math.round(e.originalEvent.screenY);
+				this.beginningWidth = $map.width();
+				this.beginningHeight = $map.height();
+				this.mapLeftPosition = parseInt($map.css('left'));
+				this.mapTopPosition = parseInt($map.css('top'));
+				
+				$('.editHandle[id!='+this.id+']').hide();
+			});
+			
+			$('.editHandle').on('drag', function(e) {
+				
+				var leftOffset;
+				var $map = $('#'+$(this).attr('target'));
+				var size;
+				var wid;
+				var hei;
+				
+				var x;
+				var y;
+					
+				switch(this.id) {
+					case'topLeftHandle':
+						
+						var nw = this.mapEditControlDragStartX - e.originalEvent.screenX;
+						var nh = this.mapEditControlDragStartY-e.originalEvent.screenY;
+						
+						wid = this.beginningWidth + nw;
+						hei = this.beginningHeight + nh;
+						
+						var distanceLeft = this.mapEditControlDragStartX - e.originalEvent.screenX;
+						var distanceTop = this.mapEditControlDragStartY - e.originalEvent.screenY;
+						
+						var leftLocation = this.mapLeftPosition - distanceLeft;
+						var topLocation = this.mapTopPosition - distanceTop;
+						
+						if(wid > 1) {
+							$map.css('left', leftLocation+'px');
+						}
+						
+						if(hei > 1) {
+							$map.css('top', topLocation+'px');
+						}
+						
+						break;
+					case'topRightHandle':
+						
+						var nw = e.originalEvent.screenX - this.mapEditControlDragStartX;
+						var nh = this.mapEditControlDragStartY-e.originalEvent.screenY;
+						
+						wid = this.beginningWidth + nw;
+						hei = this.beginningHeight + nh;
+						
+						var distance = this.mapEditControlDragStartY - e.originalEvent.screenY;
+						var topLocation = this.mapTopPosition - distance;
+						
+						$map.css('top', topLocation+'px');
+						break;
+					case'bottomLeftHandle':
+						
+						var nw = this.mapEditControlDragStartX - e.originalEvent.screenX;
+						var nh = e.originalEvent.screenY - this.mapEditControlDragStartY;
+						
+						wid = this.beginningWidth + nw;
+						hei = this.beginningHeight + nh;
+						
+						var distanceLeft = this.mapEditControlDragStartX - e.originalEvent.screenX;
+						var leftLocation = this.mapLeftPosition - distanceLeft;
+						
+						if(wid > 1) {
+							$map.css('left', leftLocation+'px');
+						}
+						
+						break;
+					case'bottomRightHandle':
+						var nw = e.originalEvent.screenX - this.mapEditControlDragStartX;
+						var nh = e.originalEvent.screenY - this.mapEditControlDragStartY;
+						
+						wid = this.beginningWidth + nw;
+						hei = this.beginningHeight + nh;
+						break;
+					default:
+				}
+				
+				$map.width(wid);
+				$map.height(hei);
+			});
+			
+			$('.editHandle').on('dragstop', function(e) {
+				
+				var $map = $('#'+$(this).attr('target'));
+				
+				var marginLeft = parseInt(_self.$mapCanvas.css('left').replace('px',''));
+				var marginTop = parseInt(_self.$mapCanvas.css('top').replace('px',''));
+				var x = parseInt($map.css('left').replace('px', '')) + marginLeft;
+				var y = parseInt($map.css('top').replace('px', '')) + marginTop;
+				
+				var point = new s7viewers.s7sdk.Point2D(x, y);
+				var coordinates = _self.viewerComponent.viewPointToImagePixels(point);
+				
+				// get width and height in image coordinates
+				// then convert width and height to view coordiantes
+				var bottomRight = new s7viewers.s7sdk.Point2D(point.x + $map.width(), point.y + $map.height());
+				var brCoordinates = _self.viewerComponent.viewPointToImagePixels(bottomRight);
+				var width = brCoordinates.x - coordinates.x;
+				var height = brCoordinates.y - coordinates.y
+				
+				
+				$map.data('id', _self.mapId);
+				$map.data('x', Math.round(coordinates.x));
+				$map.data('y', Math.round(coordinates.y));
+				$map.data('wid', Math.round(width));
+				$map.data('hei', Math.round(height));
+	            
+	            //set coordinates property
+				$map.data('coord', getCoordinatesFromSize($map.data('x'), $map.data('y'), $map.data('wid'), $map.data('hei')));
+	            
+	            setMapSelected($map);
+	            
+	            //send notification of map update
+	            _self.$mapCanvas.trigger({type:'map-update', 'mapId':$map.attr('id'), 'map':$map.data()});
+	        });
+		}
+	}
+	
+	function isHotspot($map) {
+		return $map.hasClass('hotspot');
+	}
+	
+	function getCoordinatesFromSize(x1, y1, w, h) {
+		var x2 = Number(x1) + Number(w);
+		var y2 = Number(y1) + Number(h);
+		var coords = x1 + ',' + y1 + ',' + x2 + ' ,' + y2;
+		
+		return coords;
+	}
+	
+	/**
+	 * Add ImageMapUtil to global namespace
+	 */
+	window.ImageMapUtil = ImageMapUtil;
+}(jQuery));

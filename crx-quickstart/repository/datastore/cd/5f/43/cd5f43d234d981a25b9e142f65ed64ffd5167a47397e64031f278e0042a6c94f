@@ -1,0 +1,426 @@
+(function ($, $document, Granite) {
+    "use strict";
+
+    const JOB_ID_KEY = "page.action.createSite.jobId";
+
+    const contextPath = window.Granite.HTTP.getContextPath();
+    const ui = $(window).adaptTo("foundation-ui");
+
+    function initImportButton() {
+
+        const fileUpload = $(".cq-createquicksite-site-wizard-import__button");
+
+        fileUpload.on("coral-fileupload:loadstart", function (evt) {
+            ui.wait();
+        });
+
+        fileUpload.on("coral-fileupload:load", function (evt) {
+            ui.clearWait();
+            if (evt.detail.item._xhr.status === 200) {
+                window.location.reload();
+            } else {
+                ui.notify(evt.detail.item._xhr.statusText);
+                displayImportErrors(evt);
+            }
+        });
+
+        fileUpload.on("coral-fileupload:error", function (evt) {
+            ui.notify("Network Error");
+        });
+    }
+
+    function initDeleteButton() {
+        const deleteSiteTemplateButton = $(".cq-createquicksite-site-wizard-delete__button");
+        deleteSiteTemplateButton.on("click", function () {
+            displaySiteTemplateConfirmDeletionDialog()
+        });
+    }
+
+    function displaySiteTemplateConfirmDeletionDialog() {
+        const selectedSiteTemplate = $(".foundation-selections-item.is-selected");
+        const selectedSiteTemplatePath = selectedSiteTemplate && selectedSiteTemplate.attr("data-granite-collection-item-id");
+        const selectedSiteTemplateName = selectedSiteTemplatePath && selectedSiteTemplatePath.substring(selectedSiteTemplatePath.lastIndexOf('/') + 1);
+        const deleteConfirmationHTML = selectedSiteTemplateName &&
+            "<p>" + Granite.I18n.get("You are going to delete the following site template: ") + "<strong>" + selectedSiteTemplateName + "</strong>" + "</p>";
+
+        if (selectedSiteTemplateName) {
+            const confirmDeleteSiteTemplateDialog = new Coral.Dialog().set({
+                header: {
+                    innerHTML: Granite.I18n.get("Delete Confirmation")
+                },
+                content: {
+                    innerHTML: deleteConfirmationHTML
+                },
+                variant: "warning"
+            });
+            const cancelButton = new Coral.Button().set({
+                variant: "secondary",
+                label  : {
+                    textContent: Granite.I18n.get("Cancel")
+                }
+            });
+            const deleteButton = new Coral.Button().set({
+                variant: "warning",
+                type   : "submit",
+                label  : {
+                    textContent: Granite.I18n.get("Delete")
+                }
+            });
+            cancelButton.on("click", function () {
+                confirmDeleteSiteTemplateDialog.hide();
+            });
+            deleteButton.on("click", function () {
+                deleteSiteTemplate(selectedSiteTemplateName);
+                confirmDeleteSiteTemplateDialog.hide();
+            });
+            confirmDeleteSiteTemplateDialog.footer.appendChild(cancelButton);
+            confirmDeleteSiteTemplateDialog.footer.appendChild(deleteButton);
+            document.body.appendChild(confirmDeleteSiteTemplateDialog);
+            confirmDeleteSiteTemplateDialog.show();
+        }
+    }
+
+    function displaySiteTemplateDeletionStatusDialog(status) {
+        const deletingStatusHtml = status === "success" ? "<p>" + Granite.I18n.get("The site template was successfully deleted.") + "</p>" :
+            "<p>" + Granite.I18n.get("An error occurred while trying to delete the site template.") + "</p>";
+
+        const deleteStatusOfSiteTemplateDialog = new Coral.Dialog().set({
+            header : {
+                innerHTML: status === "success" ? Granite.I18n.get("Delete Successful") : Granite.I18n.get("Delete Error")
+            },
+            content: {
+                innerHTML: deletingStatusHtml
+            },
+            variant: status === "success" ? "success" : "error"
+        });
+        const closeButton = new Coral.Button().set({
+            variant: "primary",
+            label  : {
+                textContent: Granite.I18n.get("Close")
+            }
+        });
+        deleteStatusOfSiteTemplateDialog.on("coral-overlay:beforeclose", function(event) {
+            event.preventDefault();
+        });
+        closeButton.on("click", function () {
+            deleteStatusOfSiteTemplateDialog.hide();
+            window.location.reload();
+        });
+        deleteStatusOfSiteTemplateDialog.footer.appendChild(closeButton)
+        document.body.appendChild(deleteStatusOfSiteTemplateDialog);
+        deleteStatusOfSiteTemplateDialog.show();
+    }
+
+    function displaySiteTemplateInUseDialog(referencingSites) {
+        const templateInUseHTML = "<p>" + Granite.I18n.get("The site template cannot be deleted because it is referenced by the following site(s): ") + "<strong>" + referencingSites + "</strong></p>";
+
+        const templateInUseDialog = new Coral.Dialog().set({
+            header : {
+                innerHTML: Granite.I18n.get("Delete Error")
+            },
+            content: {
+                innerHTML: templateInUseHTML
+            },
+            variant: "error"
+        });
+        const closeButton = new Coral.Button().set({
+            variant: "primary",
+            label  : {
+                textContent: Granite.I18n.get("Close")
+            }
+        });
+        closeButton.on("click", function () {
+            templateInUseDialog.hide();
+        });
+        templateInUseDialog.footer.appendChild(closeButton);
+        document.body.appendChild(templateInUseDialog);
+        templateInUseDialog.show();
+    }
+
+    function displaySiteTemplatePublishedDialog() {
+        const templatePublishedHTML = "<p>" + Granite.I18n.get("The site template is published and cannot be deleted. Please unpublish it first and try again.") + "</p>";
+
+        const templatePublishedDialog = new Coral.Dialog().set({
+            header : {
+                innerHTML: Granite.I18n.get("Delete Error")
+            },
+            content: {
+                innerHTML: templatePublishedHTML
+            },
+            variant: "error"
+        });
+        const closeButton = new Coral.Button().set({
+            variant: "primary",
+            label  : {
+                textContent: Granite.I18n.get("Close")
+            }
+        });
+        closeButton.on("click", function () {
+            templatePublishedDialog.hide();
+        });
+        templatePublishedDialog.footer.appendChild(closeButton);
+        document.body.appendChild(templatePublishedDialog);
+        templatePublishedDialog.show();
+    }
+
+    function deleteSiteTemplate(templateName) {
+        ui.wait();
+        fetch(getCsrfTokenUrl()).then(function (response) {
+            if (response.status === 200) {
+                return response.json()
+            }
+        }).then(function (response) {
+            fetch(getSiteTemplateDeleteUrl(templateName), {
+                method : "POST",
+                headers: {
+                    "CSRF-Token": response ? response.token : ""
+                },
+            }).then(function (response) {
+                if (response.status === 200) {
+                    ui.clearWait();
+                    displaySiteTemplateDeletionStatusDialog("success")
+                } else {
+                    return response.json();
+                }
+            }).then(function (response) {
+                    if (response) {
+                        if (response.referencingSites) {
+                            ui.clearWait();
+                            displaySiteTemplateInUseDialog(response.referencingSites)
+                        } else if (response.siteTemplatePublished) {
+                            ui.clearWait();
+                            displaySiteTemplatePublishedDialog()
+                        } else {
+                            ui.clearWait();
+                            displaySiteTemplateDeletionStatusDialog("error");
+                        }
+                    }
+                }
+            ).catch(function () {
+                ui.clearWait();
+                displaySiteTemplateDeletionStatusDialog("error");
+            })
+        })
+    }
+
+    function displayImportErrors(e) {
+        const errors = JSON.parse(e.detail.item._xhr.responseText);
+        if (errors) {
+            let errorsHTML = "<p>" + Granite.I18n.get("The site template could not be imported because of following problem(s):") + "</p></p><ul>";
+            errors.forEach(function (error) {
+                errorsHTML += "<li>" + Granite.I18n.get(error) + "</li>";
+            });
+            errorsHTML += "</ul>"
+            const errorsDialog = new Coral.Dialog().set({
+                header: {
+                    innerHTML: Granite.I18n.get("Import Error")
+                },
+                content: {
+                    innerHTML: errorsHTML
+                }
+            });
+            const closeButton = new Coral.Button().set({
+                variant: "primary",
+                label: {
+                    textContent: Granite.I18n.get("Close")
+                }
+            });
+            closeButton.on("click", function() {
+                errorsDialog.hide();
+            });
+            errorsDialog.footer.appendChild(closeButton);
+            document.body.appendChild(errorsDialog);
+            errorsDialog.show();
+        }
+    }
+
+    function createEmptyPreview() {
+        const $kitPreview = $(document).find('.cq-createquicksite-site-wizard-kit-preview');
+        $kitPreview.html($('<div class="site-wizard-kit-preview__empty">Select a site template to preview templates</div>'));
+    }
+
+    function createProperty(label, text) {
+        return $('<div class="site-wizard-kit-preview__property"/>')
+            .append($('<div class="site-wizard-kit-preview__property__label">' + label + ': </div>'))
+            .append($('<div class="site-wizard-kit-preview__property__text"/>').text(text));
+    }
+
+    function createInfo($kitPreview, subtitle, createdBy, useCases) {
+        const $kitPreviewInfo = $('<div class="site-wizard-kit-preview__info"/>');
+        $kitPreviewInfo.append(createProperty("Description", subtitle));
+        $kitPreviewInfo.append(createProperty("Created by", createdBy));
+        $kitPreviewInfo.append(createProperty("Use cases", useCases));
+        $kitPreview.append($kitPreviewInfo);
+    }
+
+    function createKitPreviewThumbnails($kitPreview, thumbnails) {
+        const $pagePreviewContainer = $('<div class="site-wizard-kit-preview__page-preview-container"/>');
+        $kitPreview.append($pagePreviewContainer);
+        for (let i = 0; i < thumbnails.length; i++) {
+            $pagePreviewContainer.append($('<img class="site-wizard-kit-preview__page-preview"/>').attr('src', thumbnails[i] + '.thumb.512.512.png'));
+        }
+    }
+
+    function createDetailsPreviewThumbnail($detailsPreview, thumbnmail) {
+        $detailsPreview.html($('<img class="site-wizard-details__thumbnail"/>').attr('src', thumbnmail + '.thumb.1024.1024.png'));
+    }
+
+    function updateSuccessUi($successUi, open) {
+        const json = $successUi.data("foundation-form-response-ui-success");
+
+        if (!json.defaultOpen) {
+            json.defaultOpen = json.open;
+        }
+
+        json.open = !open ? json.defaultOpen : open;
+        $successUi.data("foundation-form-response-ui-success", json);
+    }
+
+    function onSelectionChange($selectedItems) {
+
+        const $kitPreview = $(document).find('.cq-createquicksite-site-wizard-kit-preview');
+        const $detailsPreview = $(document).find('.cq-createquicksite-site-wizard-details-preview');
+
+        $kitPreview.empty();
+        $detailsPreview.empty();
+
+        $selectedItems.each(function (index, item) {
+            const $card = $(item).find('.site-wizard-card').first();
+
+            const title = $card.data("title");
+            const subtitle = $card.data("subtitle");
+            const createdBy = $card.data("created-by");
+            const useCases = $card.data("use-cases");
+            const pageThumbnails = $card.data("page-thumbnails").split(',');
+            const successUiOpen = $card.data("success-ui-open");
+
+            $kitPreview.append($('<div class="site-wizard-kit-preview__title"/>').text(title));
+            createInfo($kitPreview, subtitle, createdBy, useCases);
+
+            if (pageThumbnails.length) {
+                createKitPreviewThumbnails($kitPreview, pageThumbnails);
+                createDetailsPreviewThumbnail($detailsPreview, pageThumbnails[0]);
+            }
+
+            const $successUi = $card.closest(".cq-createquicksite-site-wizard-form").find(".foundation-form-response-ui-success");
+            updateSuccessUi($successUi, successUiOpen);
+        });
+    }
+
+    function updatePreviews() {
+        const $selectedItems = $(".foundation-selections-item");
+        if ($selectedItems.size() > 0) {
+            onSelectionChange($selectedItems);
+            toggleDeleteSiteTemplateSection("show");
+        } else {
+            createEmptyPreview();
+            toggleDeleteSiteTemplateSection("hide");
+        }
+    }
+
+    function toggleDeleteSiteTemplateSection(state) {
+        const deleteSection = $(".cq-createquicksite-site-wizard-delete");
+        if (state === "show") {
+            deleteSection.css('display', 'flex')
+        } else {
+            deleteSection.css('display', 'none')
+        }
+    }
+
+    function showFeatureIsNotEnabled() {
+        const ui = $(window).adaptTo("foundation-ui");
+        ui.notify("Site Templates feature is not enabled.");
+    }
+
+    function getCsrfTokenUrl() {
+        return `${contextPath}/libs/granite/csrf/token.json`
+    }
+
+    function getSiteTemplateDeleteUrl(siteTemplateName) {
+        return `${contextPath}/bin/wcm/site-template/delete?siteTemplateName=${siteTemplateName}`;
+    }
+
+    if (!Granite.Toggles.isEnabled("ft-cq-4297727")) {
+        $(showFeatureIsNotEnabled);
+        return;
+    }
+
+    $(initImportButton);
+    $(initDeleteButton);
+    $document.on("foundation-selections-change", ".foundation-collection", updatePreviews);
+
+    const CreateSiteWizard = function(options) {
+        const self = this;
+
+        this.wizardElement = options.wizardElement;
+
+        this.wizardElement.closest("form").off("submit").on("submit", function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const url = $(".foundation-wizard-control[data-foundation-wizard-control-action='cancel']").attr("href");
+
+            self.processCreateSite(function(status, jobId) {
+                if (status === "success") {
+                    sessionStorage.setItem(JOB_ID_KEY, jobId);
+                    ui.prompt(Granite.I18n.get("Create Site"),
+                        Granite.I18n.get("A background job to create the Site has been submitted"), "notice", [{
+                        text: Granite.I18n.get("Okay"),
+                        primary: true,
+                        handler: function() {
+                            location.href = Granite.HTTP.externalize(url);
+                        }
+                    }])
+                }
+            });
+        });
+
+    };
+
+    CreateSiteWizard.prototype.processCreateSite = function(callback) {
+        const siteTemplatePath = $(".foundation-selections-item.is-selected").attr("data-granite-collection-item-id");
+        const siteTitle = $('input[name="title"]').val();
+        const siteName = $('input[name="name"]').val();
+        const analyticsEnabled = $('input[name="analytics"]').is(':checked');
+        const drNumber = $('input[name="drNumber"]').val();
+        
+        const data = {
+            cmd: "createSiteFromSiteTemplate",
+            operation: "asyncCreateSiteFromSiteTemplate",
+            _charset_: "utf-8",
+            siteTitle: siteTitle,
+            siteName: siteName,
+            drNumber: drNumber,
+            analyticsEnabled: analyticsEnabled,
+            path: (siteName !== "" ? "/content/" + siteName : siteTitle),
+            siteTemplatePath: siteTemplatePath
+        }
+
+        $.post(Granite.HTTP.externalize("/bin/asynccommand"), data, function(response, status) {
+            callback(status, extractJobId(response));
+        });
+    }
+
+    $document.off("foundation-contentloaded.createsiteWizard").on("foundation-contentloaded.createsiteWizard", function(e) {
+
+        const options = {
+            wizardElement: $(".cq-createquicksite-site-wizard-form .foundation-wizard")
+        }
+
+        const wizard = new CreateSiteWizard(options);
+    });
+
+    /**
+     * extract the jobId parameter from the response of the /bin/asynccomand post request
+     * @param response the response
+     */
+    function extractJobId(response) {
+        const $message = $($.parseHTML(response)).find("#Message");
+        let jobId;
+        if ($message.length > 0) {
+            jobId = $message.text().match(/([a-f0-9-/_]{36,})/gm);
+        }
+        return jobId;
+    }
+
+})(jQuery, jQuery(document), Granite);

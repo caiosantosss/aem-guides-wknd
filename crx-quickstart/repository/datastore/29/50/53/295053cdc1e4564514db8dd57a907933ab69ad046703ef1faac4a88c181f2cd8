@@ -1,0 +1,573 @@
+<%@page session="false"%><%--
+  Copyright 1997-2011 Day Management AG
+  Barfuesserplatz 6, 4001 Basel, Switzerland
+  All Rights Reserved.
+
+  This software is the confidential and proprietary information of
+  Day Management AG, ("Confidential Information"). You shall not
+  disclose such Confidential Information and shall use it only in
+  accordance with the terms of the license agreement you entered into
+  with Day.
+
+--%><%@ include file="/libs/foundation/global.jsp" %><%
+%><%@ page import="java.util.*,
+                   javax.jcr.*,
+                   javax.jcr.query.*,
+                   org.apache.jackrabbit.util.Text,
+                   org.slf4j.Logger,
+                   org.apache.sling.api.resource.*,
+                   org.apache.sling.commons.json.*,
+                   org.apache.sling.commons.json.io.JSONWriter,
+                   com.day.cq.commons.jcr.*,
+                   org.apache.commons.io.IOUtils,
+                   org.apache.commons.lang.StringUtils,
+                   java.io.InputStream,
+                   java.io.IOException,
+                   org.apache.jackrabbit.commons.JcrUtils,
+                   java.io.ByteArrayInputStream,
+                   org.apache.sling.commons.json.io.JSONRenderer" %><%!
+
+    private Logger log;
+
+    private static String getKey(String source, String comment) {
+        if (comment != null && comment.length() > 0) {
+            return source + " ((" + comment + "))";
+        }
+        return source;
+    }
+
+    public abstract class Dict {
+        public abstract void set(String key, String message);
+        public abstract void delete(String key);
+        public abstract void save() throws Exception;
+    }
+
+    public static final String JSON_EXT = ".json";
+
+    public static boolean isJsonDict(Resource resource) {
+        return resource.getName().endsWith(JSON_EXT);
+    }
+
+    public class JsonDict extends Dict {
+
+        private Resource resource;
+
+        private Resource parent;
+        private String language;
+
+        private JSONObject json;
+        private boolean dirty = false;
+        private boolean doNotOverwrite = false;
+
+        public JsonDict(Resource resource) {
+            this.resource = resource;
+            this.language = resource.getValueMap().get("jcr:language", String.class);
+        }
+
+        public JsonDict(Resource parent, final String language) {
+            this.parent = parent;
+            this.language = language;
+        }
+
+        private JSONObject json() {
+            if (json == null) {
+                if (resource == null) {
+                    json = new JSONObject();
+                } else {
+                    InputStream stream = resource.adaptTo(InputStream.class);
+                    if (stream != null) {
+                        String encoding = "utf-8";
+                        ResourceMetadata metadata = resource.getResourceMetadata();
+                        if (metadata != null) {
+                            if (metadata.getCharacterEncoding() != null) {
+                                encoding = metadata.getCharacterEncoding();
+                            }
+                        }
+                        // might be expensive to build large string first,
+                        // but sling commons json only has a string-based tokenizer
+                        try {
+                            json = new JSONObject(IOUtils.toString(stream, encoding));
+                        } catch (JSONException e) {
+                            log.warn("Could not parse i18n json dictionary {}: {}", resource.getPath(), e.getMessage());
+                            doNotOverwrite = true;
+                            json = new JSONObject();
+                        } catch (IOException e) {
+                            log.warn("Could not parse i18n json dictionary {}: {}", resource.getPath(), e.getMessage());
+                            doNotOverwrite = true;
+                            json = new JSONObject();
+                        }
+                    }
+                }
+            }
+            return json;
+        }
+
+        public void save() throws Exception {
+            if (dirty) {
+                Node parentNode;
+                String name;
+                if (resource != null) {
+                    Node node = resource.adaptTo(Node.class);
+                    parentNode = node.getParent();
+                    name = node.getName();
+
+                    if (doNotOverwrite) {
+                        // in case the original file could not be written due to syntax errors
+                        // move it out of the way before writing the new (smaller) dict
+
+                        String target = node.getPath() + ".original";
+                        log.info("keeping copy of original, broken json dict: {}", target);
+                        node.getSession().move(node.getPath(), target);
+                    }
+                } else {
+                    parentNode = parent.adaptTo(Node.class);
+                    name = language + JSON_EXT;
+                }
+
+                log.info("saving json dict {}/{}", parentNode.getPath(), name);
+
+                // nice readable format when the key and value strings are long
+                // {
+                //
+                //   "key":
+                //     "value",
+                //
+                //   "key2":
+                //     "value2"
+                //
+                // }
+                JSONRenderer renderer = new JSONRenderer() {
+                    // same config options as used in Ruby helper scripts
+                    private String indent = "  ";
+                    private String space  = "\n    ";
+                    private String object_nl = "\n\n";
+
+                    @Override
+                    public String toString(JSONObject jo) {
+                        try {
+                            final Iterator<String> keys = jo.keys();
+                            final StringBuffer sb = new StringBuffer("{");
+
+                            while (keys.hasNext()) {
+                                if (sb.length() > 1) {
+                                    sb.append(',');
+                                }
+                                sb.append(object_nl);
+
+                                String o = keys.next();
+                                sb.append(indent);
+                                sb.append(quote(o));
+                                sb.append(':').append(space);
+                                sb.append(valueToString(jo.get(o)));
+                            }
+
+                            if (sb.length() > 1) {
+                                sb.append(object_nl);
+                            }
+
+                            sb.append('}');
+                            return sb.toString();
+                        } catch (Exception e) {
+                            return null;
+                        }
+                    }
+                };
+                String jsonString = renderer.toString(json);
+
+                InputStream stream = new ByteArrayInputStream(jsonString.getBytes("utf-8"));
+
+                Node node = JcrUtils.putFile(parentNode, name, "application/json", stream);
+                node.addMixin("mix:language");
+                node.setProperty("jcr:language", language);
+            }
+        }
+
+        public void set(String key, String message) {
+            try {
+                boolean exists = json().has(key);
+
+                // - no change if old and new are empty/non-existing
+                if (!exists && StringUtils.isEmpty(message)) {
+                    return;
+                }
+                // - no change if no change
+                if (exists && json().get(key).equals(message)) {
+                    return;
+                }
+
+                log.info("{}: setting translation for '{}' => '{}'", new Object[] {language, key, message});
+
+                json().put(key, message);
+                dirty = true;
+
+            } catch (JSONException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        public void delete(String key) {
+            log.info("{}: deleting translation for '{}'", language, key);
+            if (json().remove(key) != null) {
+                dirty = true;
+            }
+        }
+    }
+
+    public class SlingMessageDict extends Dict {
+
+        private static final String LANGUAGE_MIXIN = "mix:language";
+
+        private static final String SLING_MESSAGE_MIXIN = "sling:Message";
+
+        private static final String SLING_KEY_PROP = "sling:key";
+
+        private static final String SLING_MESSAGE_PROP = "sling:message";
+
+        private static final String SLING_MESSAGE_ENTRY_PROP = "sling:MessageEntry";
+
+        private Node languageNode;
+        private final String language;
+
+        private final int treeDepth;
+        private Session session;
+
+        // maps "key" to "node path"
+        private Map<String, String> messageNodesByKey;
+        private Map<String, String> lowerCaseNodeNames;
+
+        public SlingMessageDict(Resource resource, int treeDepth) throws RepositoryException {
+            this.languageNode = resource.adaptTo(Node.class);
+            this.treeDepth = treeDepth;
+
+            this.language = languageNode.getName();
+
+            session = resource.getResourceResolver().adaptTo(Session.class);
+        }
+
+        public SlingMessageDict(Resource parent, String language, int treeDepth) throws Exception {
+            this.treeDepth = treeDepth;
+            this.language = language;
+
+            session = parent.getResourceResolver().adaptTo(Session.class);
+
+            languageNode = JcrUtil.createPath(parent.getPath() + "/" + language, JcrConstants.NT_FOLDER, session);
+
+            // ensure mixin mix:language
+            if (!languageNode.isNodeType(LANGUAGE_MIXIN)) {
+                languageNode.addMixin(LANGUAGE_MIXIN);
+            }
+            // ensure language property set
+            if (!languageNode.hasProperty(JcrConstants.JCR_LANGUAGE)) {
+                languageNode.setProperty(JcrConstants.JCR_LANGUAGE, language);
+            }
+        }
+
+        public void save() throws Exception {
+            // nothing to do here
+        }
+
+        private Map<String, String> messageNodesByKey() throws RepositoryException {
+            if (messageNodesByKey == null) {
+                messageNodesByKey = new HashMap<String, String>();
+                lowerCaseNodeNames = new HashMap<String, String>();
+
+                // add existing translations from nodes
+                // search entire subtree below the languageNode
+                String query = "/jcr:root" + languageNode.getPath() + "//*[@sling:message]";
+                QueryManager qm = session.getWorkspace().getQueryManager();
+                NodeIterator messageNodes = qm.createQuery(query, Query.XPATH).execute().getNodes();
+                while (messageNodes.hasNext()) {
+                    Node node = messageNodes.nextNode();
+
+                    lowerCaseNodeNames.put(node.getName().toLowerCase(), node.getName());
+
+                    try {
+                        if (node.isNodeType(SLING_MESSAGE_MIXIN)) {
+                            if (node.hasProperty(SLING_KEY_PROP)) {
+                                messageNodesByKey.put(node.getProperty(SLING_KEY_PROP).getString(), node.getPath());
+                            } else {
+                                // use node name as fallback
+                                messageNodesByKey.put(node.getName(), node.getPath());
+                            }
+                        }
+                    } catch (Exception e) {
+                        // catch PathNotFound and NPEs if the sling:Message node is not correct
+                        log.warn("Error while reading existing translation inside '" + languageNode.getPath() + "'", e);
+                    }
+                }
+
+            }
+            return messageNodesByKey;
+        }
+
+        private String getNodeName(String source) {
+            // remove leading & trailing whitespaces
+            source = source.trim();
+            // maximum 50 characters for the node name
+            source = source.substring(0, source.length() > 50 ? 50 : source.length());
+            // #19921 - I18n node names should be filesystem compatible for CQDE
+            source = source.replaceAll(":", "_");
+            source = source.replaceAll("/", "_");
+            source = source.replaceAll("<", "_");
+            source = source.replaceAll(">", "_");
+            // finally convert to valid jcr node name string
+            return Text.escapeIllegalJcrChars(source);
+        }
+
+        private String getSource(String key) {
+            if (key.endsWith("))")) {
+                int commentStart = key.indexOf(" ((");
+                return key.substring(0, commentStart);
+            }
+            return key;
+        }
+
+        private String getCommentForLog(String key) {
+            String comment = null;
+            if (key.endsWith("))")) {
+                int commentStart = key.indexOf(" ((");
+                comment = key.substring(commentStart + 3, key.length() - 2);
+            }
+            if (comment != null) {
+                return " (comment: " + comment + ")";
+            }
+            return "";
+        }
+
+        private String calculateFolderPath(String nodeName, int treeDepth) {
+            StringBuilder path = new StringBuilder();
+            int i=0;
+            for (int n=0; n < nodeName.length() && i < treeDepth; n++) {
+                char c = nodeName.charAt(n);
+                // alphanum
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+                    // keep everything lower case to avoid bugs #26543 and #19921
+                    path.append(Character.toLowerCase(c));
+                    path.append("/");
+                    i++;
+                }
+            }
+            path.append(nodeName);
+            return path.toString();
+        }
+
+        public void set(String key, String message) {
+            try {
+                Node messageNode = null;
+
+                String source = getSource(key);
+                String commentForLog = getCommentForLog(key);
+
+                // check for an existing sling:key property
+                // maps "key" to "node path"
+                Map<String, String> translations = messageNodesByKey();
+                if (translations.containsKey(key)) {
+                    messageNode = (Node) session.getItem(translations.get(key));
+                    if (messageNode.hasProperty(SLING_MESSAGE_PROP)) {
+                        String existingTranslation = messageNode.getProperty(SLING_MESSAGE_PROP).getString();
+                        // check if translation for that key is the same
+                        if (message.equals(existingTranslation)) {
+                            log.info(language + ": skipping repeated translation '" + source + "' => '" +
+                                    message + "'" + commentForLog + " :: '" + messageNode.getPath() + "'");
+                            // stop here
+                            return;
+                        } else {
+                            log.info(language + ": overwriting old translation for '" + source + "', " +
+                                    "existing translation: '" + existingTranslation + "', " + "new translation: '" + message + "'" +
+                                    commentForLog + " :: '" + messageNode.getPath() + "'");
+                        }
+                    } else {
+                        log.warn("existing message node without translation (sling:message) found '" + messageNode.getPath() + "'");
+                    }
+                }
+
+                // don't create new message nodes for empty translations
+                if (messageNode == null && StringUtils.isEmpty(message)) {
+                    return;
+                }
+
+                // create new node if we don't overwrite an existing one
+                if (messageNode == null) {
+                    String nodeNameHint = getNodeName(source);
+
+                    // #19921 - I18n node names should be filesystem compatible for CQDE
+                    if (lowerCaseNodeNames.containsKey(nodeNameHint.toLowerCase())) {
+                        // conflict: for case-insensitive filesystems, the two names would be regarded as equal
+                        // solution: use existing node name, so that createUniquePath below will create a unique name (appending nr at the end)
+                        nodeNameHint = lowerCaseNodeNames.get(nodeNameHint.toLowerCase());
+                    }
+
+                    String pathHint = languageNode.getPath() + "/" + calculateFolderPath(nodeNameHint, treeDepth);
+                    messageNode = JcrUtil.createUniquePath(pathHint, SLING_MESSAGE_ENTRY_PROP, session);
+                }
+
+                log.info(language + ": translating '" + source + "' => '" + message + "'" +
+                        commentForLog + " :: '" + messageNode.getPath() + "'");
+
+                // only set key property if the node name is not sufficient
+                if (!messageNode.getName().equals(key)) {
+                    messageNode.setProperty(SLING_KEY_PROP, key);
+                }
+                messageNode.setProperty(SLING_MESSAGE_PROP, message);
+
+                translations.put(key, messageNode.getPath());
+                lowerCaseNodeNames.put(messageNode.getName().toLowerCase(), messageNode.getName());
+
+            } catch (RepositoryException e) {
+                try {
+                    log.error("could not add translation unit to '" + languageNode.getPath() + "'", e);
+                } catch (RepositoryException ignore) {
+                }
+            }
+        }
+
+        public void delete(String key) {
+            try {
+                // maps "key" to "node path"
+                Map<String, String> map = messageNodesByKey();
+                if (map.containsKey(key)) {
+                    Node messageNode = (Node) session.getItem(map.get(key));
+                    log.info("deleting translation " + messageNode.getPath());
+                    messageNode.remove();
+                    map.remove(key);
+                }
+
+            } catch (RepositoryException e) {
+                log.error("could not delete translation '" + key + "'", e);
+            }
+        }
+    }
+
+%><%
+
+    this.log = log;
+
+    JSONObject obj = new JSONObject(IOUtils.toString(slingRequest.getReader()));
+    int treeDepth = 0;
+    String treeDepthFromParam = request.getParameter("treeDepth");
+    if (treeDepthFromParam == null && obj.has("treeDepth")) {
+        treeDepthFromParam = obj.getString("treeDepth");
+    }
+    if (treeDepthFromParam != null) {
+        treeDepth = Integer.parseInt(treeDepthFromParam);
+    }
+    /*
+      Maps "path + lang" => map of "lower-case node name" => "real node name".
+      Required to avoid case-insensitive duplicate node names.
+     */
+    String path1 = request.getParameter("path");
+    if (path1 == null && obj.has("path")) path1 = obj.getString("path");
+    if (path1 == null) path1 = "/libs/wcm/core/i18n";
+    
+    ResourceResolver resolver = slingRequest.getResourceResolver();
+    Resource i18n = resolver.getResource(path1);
+    if (i18n == null) {
+        response.sendError(400, "Path '" + path1 + "' not found.");
+        return;
+    }
+
+%><%@ include file="languagenodes.jsp" %><%--
+
+    POST requests supported:
+    
+    * CREATE (add source) and UPDATE (change translation):
+    => POST /libs/cq/i18n/translator.translations.json
+    
+    * DELETE (remove source and all its translations)
+    => POST /libs/cq/i18n/translator.translations.delete.json
+    
+    * JSON format:
+    
+    {
+        'translations': [
+            { 'string': 'source text', 'comment': 'some hint', 'de': 'deutsch', 'fr' : 'francais' },
+            { 'string': '2nd text',    'comment': 'some hint', 'de': 'deutsch', 'fr' : 'francais' }
+        ]
+    }
+
+--%><%
+
+    // language -> dictionary
+    Map<String, Dict> dictionaries = new HashMap<String, Dict>();
+
+    // for to-be-created dictionaries (in new languages), default to sling:Message,
+    // but use json if there is at least one json dictionary existing
+    boolean useJsonForNewDicts = false;
+    for (int i = 0; i < languageNodes.size(); i++) {
+        Resource dictionaryResource = languageNodes.get(i);
+        if (isJsonDict(dictionaryResource)) {
+            useJsonForNewDicts = true;
+            dictionaries.put(languages.get(i), new JsonDict(dictionaryResource));
+        } else {
+            dictionaries.put(languages.get(i), new SlingMessageDict(dictionaryResource, treeDepth));
+        }
+    }
+
+    boolean isDelete = Arrays.asList(slingRequest.getRequestPathInfo().getSelectors()).contains("delete");
+
+    if (obj.has("translations")) {
+        JSONArray ts = obj.getJSONArray("translations");
+        for (int i=0; i < ts.length(); i++) {
+            if (isDelete) {
+                // delete all translations
+                String key = ts.getString(i);
+                for (Dict dict : dictionaries.values()) {
+                    dict.delete(key);
+                }
+            } else {
+                JSONObject t = ts.getJSONObject(i);
+                if (!t.has("string")) {
+                    continue;
+                }
+
+                Iterator<String> keys = t.keys();
+                while (keys.hasNext()) {
+                    String lang = keys.next();
+                    if (!"key".equals(lang) && !"string".equals(lang) && !"comment".equals(lang)) {
+                        String value = t.getString(lang);
+                        Dict dict = dictionaries.get(lang);
+                        if (dict == null) {
+                            if (StringUtils.isEmpty(value)) {
+                                // don't create dictionary for empty translations
+                                // (but must update existing translations to empty string)
+                                continue;
+                            }
+                            // create dict if it does not exist yet
+                            if (useJsonForNewDicts) {
+                                dict = new JsonDict(i18n, lang);
+                            } else {
+                                dict = new SlingMessageDict(i18n, lang, treeDepth);
+                            }
+                            dictionaries.put(lang, dict);
+                        }
+
+                        // key includes comment if present
+                        String source = t.getString("string");
+                        String comment = null;
+                        if (t.has("comment")) {
+                            comment = t.getString("comment");
+                        }
+                        String key = getKey(source, comment);
+
+                        dict.set(key, value);
+                    }
+                }
+            }
+        }
+    }
+
+    for (Dict dict : dictionaries.values()) {
+        dict.save();
+    }
+
+    // save the session
+    resolver.commit();
+
+    response.setContentType("application/json");
+    response.setCharacterEncoding("utf-8");
+
+    JSONWriter w = new JSONWriter(response.getWriter());
+    w.object();
+    w.key("success").value(true);
+    w.endObject();
+%>

@@ -1,0 +1,820 @@
+/*
+ * Copyright 1997-2011 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.SiteAdminSearchPanel
+ * @extends CQ.Ext.Panel
+ * The Search Panel used in DAM Admin.
+ * @constructor
+ * Creates a new SiteAdminSearchPanel.
+ * @param {Object} config The config object
+ * @since 5.5
+ */
+CQ.wcm.SiteAdminSearchPanel = CQ.Ext.extend(CQ.Ext.Panel, {
+
+    /**
+     * @cfg {Object} actions
+     * Object containing the config options for actions and menu items.
+     * Must be valid {@link CQ.Ext.Action} configurations.
+     */
+
+    /**
+     * @cfg {Number} pageSize
+     * Number of displayed items. Defaults to 15.
+     */
+    pageSize: 15,
+
+    /**
+     * @cfg {String} facetURL
+     * URL to facet configuration. Defaults to '/libs/dam/content/search/searchpanel/facets.overlay.infinity.json'.
+     */
+    facetURL: "/libs/dam/content/search/searchpanel/facets.overlay.infinity.json",
+
+    /**
+     * @private
+     */
+    store: null,
+
+    constructor: function(config) {
+
+        var panel = this;
+        var id = config.id || "cq-siteadminsearchpanel";
+
+        // actions
+        this.actions = [];
+        this.checkedActions = [];
+        var gridContextActions = [];
+
+        this.actions.push({
+            "id":this.id + "-grid-refresh",
+            "iconCls":"cq-siteadmin-refresh",
+            "handler": this.reloadPages,
+            "scope":this,
+            "tooltip": {
+                "title":CQ.I18n.getMessage("Refresh Result List"),
+                "text": CQ.I18n.getMessage("Refreshes the list of results"),
+                "autoHide":true
+            }
+        });
+
+        // add custom actions
+        this.actions.push("-");
+        this.actions = this.actions.concat(this.formatActions(config.actions, gridContextActions));
+
+        this.actions.push("->");
+
+        //setup grid
+        this.colModelColumns = new Array();
+        var defaultColumns = [
+            CQ.wcm.SiteAdminSearchPanel.COLUMNS["numberer"],
+            CQ.wcm.SiteAdminSearchPanel.COLUMNS["thumbnail"],
+            CQ.wcm.SiteAdminSearchPanel.COLUMNS["name"],
+            CQ.wcm.SiteAdminSearchPanel.COLUMNS["published"],
+            CQ.wcm.SiteAdminSearchPanel.COLUMNS["modified"],
+            CQ.wcm.SiteAdminSearchPanel.COLUMNS["width"],
+            CQ.wcm.SiteAdminSearchPanel.COLUMNS["height"],
+            CQ.wcm.SiteAdminSearchPanel.COLUMNS["size"]
+        ];
+
+        if (config.columns) {
+            for (var i = 0; i < config.columns.length; i++) {
+                var c = config.columns[i];
+                var pref = null;
+                if (typeof c == "string") {
+                    pref = c;
+                } else if (typeof c == "object") {
+                    if (c.usePredefined) {
+                        pref = c.usePredefined;
+                    }
+                    // #33555 - Site Admin: vulnerable to XSS
+                    CQ.shared.XSS.updatePropertyName(c, "dataIndex");
+                }
+
+                if (pref && CQ.wcm.SiteAdminSearchPanel.COLUMNS[pref]) {
+                    var prefCfg = CQ.Util.copyObject(CQ.wcm.SiteAdminSearchPanel.COLUMNS[pref]);
+                    // overlay config options
+                    for (var prop in c) {
+                        if (prop == "usePredefined") continue;
+                        prefCfg[prop] = c[prop];
+                    }
+                    this.colModelColumns.push(prefCfg);
+                } else if (c != null && c.xtype == "gridcolumn") {
+                    this.colModelColumns.push(c);
+                }
+            }
+        } else {
+            this.colModelColumns = defaultColumns;
+        }
+
+
+        this.store = new CQ.Ext.data.Store({
+            "autoLoad": false,
+            "replication": null,
+            "paramNames": {
+                "start" : 'p.offset',
+                "limit" : 'p.limit',
+                "sort" : '',
+                "dir" : ''
+            },
+            listeners : {
+                load: function(e) {
+                    this.replication = null;
+                }
+            },
+            "proxy": new CQ.Ext.data.HttpProxy({
+                "url": CQ.shared.HTTP.externalize("/bin/querybuilder.json"),
+                "method":"POST"
+            }),
+            "reader": new CQ.Ext.data.JsonReader({
+                "root":"hits",
+                "id":"jcr:path",
+                scope: this,
+                "totalProperty":"total",
+                "fields": [
+                    "numberer",
+                    "thumbnail",
+                    {
+                        "name": "ck",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record) {
+                            try {
+                                var mod = record["jcr:content"]["renditions"]["cq5dam.thumbnail.48.48.png"]["jcr:content"]["jcr:lastModified"];
+                                return new Date(mod).getTime();
+                            } catch(e) {
+                                return "";
+                            }
+                        }
+                    },
+                    {
+                        "name":"title",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record){
+                            try {
+                                return CQ.shared.XSS.getXSSValue(record["jcr:content"]["jcr:title"]);
+                            } catch (e) {
+                                /*ignore*/
+                            }
+                            try {
+                                return CQ.shared.XSS.getXSSValue(record["jcr:content"]["metadata"]["dc:title"]);
+                            } catch (e) {
+                                return "";
+                            }
+                        }
+                    },
+                    {
+                        "name":"template",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record){
+                            try {
+                                return record["jcr:content"]["cq:template"];
+                            } catch (e) {
+                                return "";
+                            }
+                        }
+                    },
+                    {
+                        "name":"name",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record){
+                            try {
+                                var idx = record["jcr:path"].lastIndexOf("/");
+                                var name = record["jcr:path"].substr(idx+1);
+                                if(name.length > 0) {
+                                    return CQ.shared.XSS.getXSSValue(name);
+                                }
+                                return "";
+                            } catch (e) {
+                                return "";
+                            }
+                        }
+                    },
+                    {
+                        "name":"created",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record){
+                            return (!record["jcr:created"]) ? "" : record["jcr:created"];
+                        }
+                    },
+                    {
+                        "name":"replication",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record){
+                            try {
+                                return {
+                                    published: record["jcr:content"]["cq:lastReplicated"],
+                                    publishedBy: CQ.shared.XSS.getXSSValue(record["jcr:content"]["cq:lastReplicatedBy"]),
+                                    action: record["jcr:content"]["cq:lastReplicationAction"],
+                                    numQueued: "N/A"
+                                };
+                            } catch (e) {
+                                return null;
+                            }
+                        }
+                    },
+                    {
+                        "name":"lastModified",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record){
+                            try {
+                                if (record["jcr:content"]["cq:lastModified"]) {
+                                    return record["jcr:content"]["cq:lastModified"];
+                                } else {
+                                    return record["jcr:content"]["jcr:lastModified"];
+                                }
+                            } catch (e) {
+                                return "";
+                            }
+                        }
+                    },
+                    {
+                        "name":"lastModifiedBy",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record){
+                            try {
+                                return CQ.shared.XSS.getXSSValue(record["jcr:content"]["jcr:lastModifiedBy"]);
+                            } catch (e) {
+                                return "";
+                            }
+                        }
+                    },
+                    {
+                        "name":"size",
+                        "sortType":CQ.Ext.data.SortTypes.asInt,
+                        "convert":function(v,record){
+                            try {
+                                return record["jcr:content"]["renditions"]["original"]["jcr:content"][":jcr:data"];
+                            } catch (e) {
+                                return 0;
+                            }
+                        }
+                    },
+                    {
+                        "name": "height",
+                        "sortType":CQ.Ext.data.SortTypes.asInt,
+                        "convert":function(v,record){
+                            try {
+                                return record["jcr:content"]["metadata"]["tiff:ImageLength"];
+                            } catch (e) {
+                                return 0;
+                            }
+                        }
+                    },
+                    {
+                        "name": "width",
+                        "sortType":CQ.Ext.data.SortTypes.asInt,
+                        "convert":function(v,record){
+                            try {
+                                return record["jcr:content"]["metadata"]["tiff:ImageWidth"];
+                            } catch (e) {
+                                return 0;
+                            }
+                        }
+                    },
+                    {
+                        "name":"mime",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record){
+                            try {
+                                return record["jcr:content"]["metadata"]["dc:format"];
+                            } catch (e) {
+                                return "";
+                            }
+                        }
+                    },
+                    {
+                        "name": "type",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record) {
+                            try {
+                                return record["jcr:primaryType"];
+                            } catch (e) {
+                                return "";
+                            }
+                        }
+                    },
+                    {
+                        "name": "lockedBy",
+                        "sortType":CQ.Ext.data.SortTypes.asUCString,
+                        "convert":function(v,record) {
+                            try {
+                                return (!record["jcr:content"]["jcr:lockOwner"]) ? "" : CQ.shared.XSS.getXSSValue(record["jcr:content"]["jcr:lockOwner"]);
+                            }catch (e) {
+                                return "";
+                            }
+                        }
+                    }
+                ]
+            })
+        });
+
+        this.pagingToolbar = new CQ.Ext.PagingToolbar({
+            pageSize: config.pageSize ? config.pageSize : CQ.themes.wcm.SiteAdminSearchPanel.GRID_PAGE_SIZE,
+            store: this.store,
+            displayInfo: true,
+            displayMsg: CQ.themes.wcm.SiteAdminSearchPanel.GRID_PAGE_TEXT,
+            emptyMsg: ""
+        });
+
+        var facets = [
+            {
+                "xtype": "hidden",
+                "name": "p.hitwriter",
+                "value": "full"
+            },
+            {
+                "xtype": "hidden",
+                "name": "p.nodedepth",
+                "value": "4"
+            }
+        ];
+
+        var customFacets = CQ.Util.formatData(CQ.HTTP.eval( (config.facetURL || this.facetURL) ));
+        for(var key in customFacets) {
+            if(typeof(customFacets[key]) === 'object') {
+                facets.push(customFacets[key]);
+            }
+        }
+
+        this.typeCache = {};
+
+        config = CQ.Util.applyDefaults(config, {
+            "title":CQ.I18n.getMessage("Search"),
+            "iconCls":id + "-icon",
+            "id": id,
+            "cls": "cq-siteadmin-wrapper",
+            "xtype":"panel",
+            "layout":"border",
+            "border":false,
+            "margins":"5 0 5 5",
+            "items": [{
+                "xtype": "panel",
+                "id": id  + "-search",
+                "cls": "cq-siteadminsearch-wrapper",
+                "layout": "form",
+                "autoScroll": true,
+                "region":"west",
+                "margins":"5 0 5 5",
+                "padding": "5px 5px 5px 5px",
+                "width": CQ.themes.wcm.SiteAdminSearchPanel.QUERYBUILDER_WIDTH,
+                "collapsible":true,
+                "collapseMode":"mini",
+                "hideCollapseTool": true,
+                "animate":true,
+                "split":true,
+                "bbar":[
+                    '->',
+                    {
+                        "xtype": "button",
+                        "text": CQ.I18n.getMessage("Reset"),
+                        "handler": function(button, event) {
+                            panel.performReset();
+                        }
+                    },
+                    {
+                        "xtype": "button",
+                        "text": CQ.I18n.getMessage("Search"),
+                        "handler": function(button, event) {
+                            panel.performSearch();
+                        }
+                    }
+                ],
+                "items": facets
+            },
+                {
+                    "xtype": "siteadmingrid",
+                    "id": id + "-grid",
+                    "region":"center",
+                    "tbar": this.actions,
+                    "bbar": this.pagingToolbar,
+                    "contextActions": gridContextActions,
+                    "admin": this,
+                    "store": this.store,
+                    "cm": new CQ.Ext.grid.ColumnModel({
+                        "columns": this.colModelColumns
+                    }),
+                    "listeners": {
+                        "afterrender": function(grid) {
+                            panel.hidePagingToolbar();
+                            panel.checkActions();
+                            grid.getSelectionModel().on("selectionchange",
+                                function(sm) {
+                                    // enable/disable toolbar items
+                                    var sel = sm.getSelections();
+                                    for (var i = 0; i < sel.length; i++) {
+                                        panel.typeCache[sel[i].id] = sel[i].get("type");
+                                    }
+                                    panel.checkActions();
+                                }
+                            );
+                        },
+                        "beforeshow": function(grid) {
+                            console.log(CQ.Ext.getCmp(window.CQ_SiteAdminSearch_id).store);
+                        }
+                    }
+                }]
+        });
+
+        window.CQ_SiteAdminSearch_id = id;
+
+        CQ.wcm.SiteAdminSearchPanel.superclass.constructor.call(this, config);
+    },
+
+    performSearch: function() {
+        var baseParams = {
+            "p.guessTotal": "1000",
+            "p.limit": this.pageSize,
+            "p.offset": 0,
+            "_charset_": "UTF-8"
+        };
+        this.mask();
+        this.store.baseParams = CQ.Util.applyDefaults(this.getPredicateParameters(), baseParams);
+        this.store.load({
+            "callback": function() {
+                this.checkPagingToolbar(this.store.getTotalCount());
+                this.unmask();
+            },
+            "scope": this
+        });
+    },
+
+    performReset: function() {
+        this.findBy(function(component, container){
+            if(component instanceof CQ.Ext.form.Field) {
+                component.reset();
+            }
+        });
+        this.store.removeAll();
+        this.store.baseParams = {};
+        this.store.lastOptions = {};
+        this.hidePagingToolbar();
+    },
+
+    reloadPages: function() {
+        if(this.store.getTotalCount() > 0) {
+            this.mask();
+            this.store.reload({
+                "callback": function() {
+                    this.checkPagingToolbar(this.store.getTotalCount());
+                    this.unmask();
+                },
+                "scope": this
+            });
+        }
+    },
+
+    showPagingToolbar: function() {
+        if (this.pagingToolbar.hidden) {
+            this.pagingToolbar.show();
+            this.pagingToolbar.ownerCt.doLayout();
+        }
+    },
+
+    hidePagingToolbar: function() {
+        if (!this.pagingToolbar.hidden) {
+            this.pagingToolbar.hide();
+            this.pagingToolbar.ownerCt.doLayout();
+        }
+    },
+
+    checkPagingToolbar: function(total) {
+        if (!this.pagingToolbar.resultHasMore() && total <= this.pagingToolbar.pageSize) {
+            this.hidePagingToolbar();
+        } else {
+            this.showPagingToolbar();
+        }
+    },
+
+    loadPath: function(path) {
+        //just refresh the search
+        this.reloadPages();
+    },
+
+    mask: function() {
+        if (!this.loadMask) {
+            this.loadMask = new CQ.Ext.LoadMask(this.id, {
+                "msg": CQ.I18n.getMessage("Searching...")
+            });
+        }
+        this.loadMask.show();
+    },
+
+    unmask: function(timeout) {
+        if (!this.loadMask) return;
+        this.loadMask.hide();
+    },
+
+    /**
+     * Returns the currently selected pages in the grid.
+     * @return {Object[]} The selected pages
+     */
+    getSelectedPages: function() {
+        var admin = this;
+        var gridSel = CQ.Ext.getCmp(this.id + "-grid").getSelectionModel().getSelections();
+        if (gridSel.length > 0) {
+            return gridSel;
+        } else {
+            return [];
+        }
+    },
+
+    /**
+     * @private
+     */
+    getPredicateParameters: function() {
+        var panel = this;
+        var newParams = {};
+        this.findBy(function(component, container){
+            if(component instanceof CQ.Ext.form.Field) {
+                var value = component.getValue();
+                if(component instanceof CQ.Ext.form.Checkbox) {
+                    if(component.getValue()){
+                        value = component.inputValue;
+                    }else{
+                        //skip field
+                        return;
+                    }
+                }
+                newParams[component.name] = value;
+            }
+        });
+        /**
+         * CQ-8573 | ExtJs findBy() is not returning non-leaf checkboxes
+         * which are part of (expand/collapse)toolbar
+         */
+        var checks = panel.getEl().query (".cq-optionspredicate input[type='checkbox']:checked");
+        for (var i=0; i<checks.length; i++){
+            if (!newParams[checks[i].name]){
+                newParams[checks[i].name] = checks[i].value;
+            }
+        }
+        return newParams;
+    }
+
+});
+CQ.Ext.reg("siteadminsearchpanel", CQ.wcm.SiteAdminSearchPanel);
+
+//overrides current CQ.wcm.SiteAdmin class with methods contained in CQ.wcm.AdminBase.
+CQ.Ext.override(CQ.wcm.SiteAdminSearchPanel, CQ.wcm.AdminBase);
+
+
+CQ.wcm.SiteAdminSearchPanel.formatDate = function(date) {
+    if (typeof date == "number") {
+        date = new Date(date);
+    }
+    var fmt = CQ.I18n.getMessage("d-M-Y H:i", null, "Date format for ExtJS SiteAdmin (short, eg. two-digit year, http://extjs.com/deploy/ext/docs/output/Date.html)")
+    return date.format(fmt);};
+
+CQ.wcm.SiteAdminSearchPanel.COLUMNS = {
+    "numberer": {
+        "id":"numberer",
+        "header":CQ.I18n.getMessage(""),
+        "width":23,
+        "sortable":true,
+        "menuDisabled":true,
+        "fixed":true,
+        "hideable":false,
+        "dataIndex":"index",
+        "renderer": function(v, params, record) {
+            if (v != undefined) {
+                return v + 1;
+            }
+            return "";
+        }
+    },
+    "title": {
+        "header":CQ.I18n.getMessage("Title"),
+        "id":"title",
+        "sortable":true,
+        "dataIndex":"title",
+        "renderer": function(val, meta, rec) {
+            return CQ.shared.XSS.xssPropertyRenderer(val, meta, rec, this);
+        }
+    },
+    "name": {
+        "header":CQ.I18n.getMessage("Name"),
+        "id":"name",
+        "sortable":true,
+        "dataIndex": "name",
+        "width":80,
+        "renderer": function(v, params, record) {
+            return record.get("name");
+        }
+    },
+    "template": {
+        "header":CQ.I18n.getMessage("Template"),
+        "id":"template",
+        "sortable":true,
+        "dataIndex":"template",
+        "renderer":function(v, params, record) {
+            return v ? v : "";
+        }
+    },
+    "created": {
+        "header":CQ.I18n.getMessage("Created"),
+        "id": "created",
+        "sortable":true,
+        "dataIndex":"created",
+        "renderer": function(v, params, record) {
+            var created = record.data.created;
+            var text = "";
+            if(created && created.length > 0) {
+                text = CQ.wcm.SiteAdminSearchPanel.formatDate(new Date(record.data.created));
+                var createdBy = CQ.shared.XSS.getXSSTablePropertyValue(record.data, "createdBy");
+                if(createdBy && createdBy.length > 0) {
+                    text += "(" + createdBy + ")";
+                }
+            }
+            return "<div>" + text + "</div>";
+        }
+    },
+    "published": {
+        "header":CQ.I18n.getMessage("Published"),
+        "id":"published",
+        "dataIndex":"replication.published", //todo: sorting doesn't work with 'deep' dataIndex
+        "renderer": function(v, params, record) {
+            var store = CQ.Ext.getCmp(window.CQ_SiteAdminSearch_id).store;
+            if (store.replication == null) {
+
+                var assetPaths = [];
+                var params = "";
+                $CQ.each(store.data.items, function(idx, item) {
+                    params += "assetPaths=" + encodeURIComponent(item.id) + "&";
+                });
+
+                params = params.substring(0, params.length - 1);
+
+                var request = ((window.XMLHttpRequest) ? new XMLHttpRequest() : new ActiveXObject("Microsoft.XMLHTTP"));
+                request.open("POST", CQ.HTTP.externalize("/bin/replication.json"), false);
+                request.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
+                request.send(params);
+                var replicationStatus = CQ.Ext.decode(request.responseText);
+                store.replication = replicationStatus;
+
+            }
+            var clazz = "";
+            var text = "";
+            var repl = record.data.replication;
+            var qtip = "";
+            var strOnTime = CQ.I18n.getMessage("N/A");
+            var strOffTime = CQ.I18n.getMessage("N/A");
+
+            if (repl && repl.published) {
+                text = CQ.wcm.SiteAdmin.formatDate(new Date(repl.published));
+                text += " (" + CQ.shared.XSS.getXSSTablePropertyValue(repl, "publishedBy") + ")";
+                /*
+                 * Bug #41576 - Incorrect activation status shown in DAM admin search view
+                 * Correcting numQueued check in case its N/A then skip.
+                 *
+                 */
+                var numQueued = store.replication["queueStatus"][record.id]["numQueued"];
+                if (numQueued) {
+                    qtip = " ext:qtip=\"<nobr>";
+                    if (repl.action == "Activate") {
+                        clazz = "status-pending-activation";
+                        qtip += CQ.I18n.getMessage("Activation pending. #{0} in Queue.", repl.numQueued);
+                    } else {
+                        clazz = "status-pending-deactivation";
+                        qtip += CQ.I18n.getMessage("Deactivation pending. #{0} in Queue.", repl.numQueued);
+                    }
+                    qtip += "</nobr>\"";
+                } else if (repl.action == "Activate") {
+                    if (!record.data.timeUntilValid) {
+                        if (!record.data.offTime){
+                            clazz = 'status-activated';
+                        } else {
+                            clazz = 'status-offtime';
+                        }
+                    } else if (record.data.timeUntilValid){
+                        if (record.data.offTime) {
+                            clazz = "status-onofftime";
+                        } else {
+                            clazz = 'status-ontime';
+                        }
+                    }
+                    else{
+                        clazz = 'status-deactivated';
+                    }
+                } else {
+                    clazz = "status-deactivated";
+                }
+                if(record.data.timeUntilValid && (record.data.onTime || record.data.offTime)){
+                    qtip = "ext:qtip=\"<nobr>";
+                    if(record.data.onTime){
+                        strOnTime = CQ.wcm.SiteAdmin.formatDate(new Date(record.data.onTime));
+                        qtip += "<b>"+CQ.I18n.getMessage("On Time")+":</b> "+strOnTime+"<br/>";
+                    }
+                    if(record.data.offTime){
+                        strOffTime = CQ.wcm.SiteAdmin.formatDate(new Date(record.data.offTime));
+                        qtip += "<b>"+CQ.I18n.getMessage("Off Time")+":</b> "+strOffTime+"<br/>";
+                    }
+                    qtip += "</nobr>\"";
+                }
+            } else{
+                clazz = "status-none";
+            }
+            return "<div class=\"status double " + clazz + "\" "+qtip+"><span>" + text + "</span></div>";
+        }
+    },
+    "modified": {
+        "header":CQ.I18n.getMessage("Modified"),
+        "id":"modified",
+        "sortable":true,
+        "dataIndex":"lastModified",
+        "renderer": function(v, params, record) {
+            var repl = record.data.replication;
+            var lastMod = record.data.lastModified;
+            var text = "";
+            var clazz = "";
+            if (lastMod) {
+                text = CQ.wcm.SiteAdmin.formatDate(new Date(record.data.lastModified));
+                var lastModifiedBy = CQ.shared.XSS.getXSSTablePropertyValue(record.data, "lastModifiedBy");
+                if (lastModifiedBy && lastModifiedBy.length > 0) {
+                    text += " (" + lastModifiedBy + ")";
+                }
+                clazz = "status-localmodified";
+            }
+            if (repl && repl.published) {
+                if (repl.action == "Activate") {
+                    if (new Date(lastMod) > new Date(repl.published)) {
+                        clazz = "status-modified";
+                    }
+                }
+            }
+            if (!clazz) {
+                clazz = "status-localmodified";
+            }
+            return "<div class=\"status " + clazz + "\">" + text + "</div>";
+        }
+    },
+    "size": {
+        "header":CQ.I18n.getMessage("Size"),
+        "id":"size",
+        "width":60,
+        "sortable":true,
+        "dataIndex":"size",
+        "renderer": function(v, params, record) {
+            return v ? CQ.Util.formatFileSize(v) : "";
+        }
+    },
+    "width": {
+        "header":CQ.I18n.getMessage("Width"),
+        "id":"width",
+        "width":55,
+        "sortable":true,
+        "dataIndex":"width",
+        "renderer": function(v, params, record) {
+            return v ? v : "";
+        }
+    },
+    "height": {
+        "header":CQ.I18n.getMessage("Height"),
+        "id":"height",
+        "width":50,
+        "sortable":true,
+        "dataIndex":"height",
+        "renderer": function(v, params, record) {
+            return v ? v : "";
+        }
+    },
+    "mimeType": {
+        "header":CQ.I18n.getMessage("Kind"),
+        "id":"mimeType",
+        "sortable":true,
+        "hidden":true,
+        "dataIndex":"mimeType"
+    },
+    "thumbnail": {
+        // "hidden" to hide the title in the header but have it in the columns menu ("hideable")
+        "header":"<span class=\"hidden\">"+CQ.I18n.getMessage("Thumbnail")+"</span>",
+        "id":"thumbnail",
+        "width":60,
+        "menuDisabled":true,
+        "hideable":true,
+        "refreshOnHiddenchange": true,
+        // use an undefined dataIndex in order to avoid unexpected behaviour
+        "dataIndex":"X",
+        "sortable":false,
+        "renderer": function(v, params, record) {
+            var admin = CQ.Ext.getCmp(window.CQ_SiteAdmin_id);
+            var grid = CQ.Ext.getCmp("cq-siteadminsearchpanel-grid");
+            if (grid.getColumnModel().getColumnById(params.id).hidden) {
+                // column is hidden: do not render thumbnails
+                return "";
+            }
+            var path = record.id;
+            var ck = record.get("ck");
+            var url = CQ.HTTP.externalize(CQ.shared.XSS.getXSSValue(CQ.HTTP.encodePath(path)) + ".thumb.48.48" + (ck ? "." + ck : "") + ".png", true);
+            return '<img src="' + url + '">';
+        }
+    }
+};
+

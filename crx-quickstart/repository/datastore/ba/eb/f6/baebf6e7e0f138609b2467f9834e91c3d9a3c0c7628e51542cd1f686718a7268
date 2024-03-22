@@ -1,0 +1,448 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2015 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%><%
+%><%@include file="/libs/granite/ui/global.jsp"%><%
+%><%@page session="false"%><%
+%><%@page import="java.util.ArrayList,
+                  java.util.Calendar,
+                  java.util.Collection,
+                  java.util.Date,
+                  java.util.List,
+                  java.util.Locale,
+                  java.util.Map,
+                  java.time.OffsetDateTime,
+                  javax.jcr.RepositoryException,
+                  javax.jcr.Session,
+                  javax.jcr.security.AccessControlManager,
+                  javax.jcr.security.Privilege,
+                  org.apache.commons.lang.StringUtils,
+                  org.apache.jackrabbit.util.Text,
+                  org.apache.sling.api.resource.ResourceResolver,
+                  org.apache.sling.api.resource.ValueMap,
+                  org.apache.sling.api.SlingHttpServletRequest,
+                  com.adobe.granite.jobs.async.ui.commons.asyncbarricade.AsyncBarricadeStatusService,
+                  com.adobe.granite.jobs.async.ui.commons.asyncbarricade.AsyncBarricadeUIDetails,
+                  com.adobe.granite.security.user.util.AuthorizableUtil,
+                  com.adobe.granite.ui.components.AttrBuilder,
+                  com.adobe.granite.ui.components.Config,
+                  com.adobe.granite.ui.components.Tag,
+                  com.adobe.granite.workflow.exec.Workflow,
+                  com.adobe.granite.workflow.status.WorkflowStatus,
+                  com.adobe.granite.toggle.api.ToggleRouter,
+                  com.adobe.cq.ui.commons.admin.views.PublicationStatusUtils,
+                  com.day.cq.replication.AgentManager,
+                  com.day.cq.replication.ReplicationQueue,
+                  com.day.cq.replication.ReplicationStatus,
+                  com.day.cq.wcm.api.Page,
+                  com.day.cq.wcm.api.Template,
+                  com.adobe.granite.toggle.api.ToggleRouter,
+                  com.day.cq.wcm.api.PageManager,
+                  com.adobe.granite.ui.preview.PreviewEnabledService,
+                  com.adobe.cq.ui.admin.siteadmin.components.ui.UIHelper" %><%
+
+final Locale locale = request.getLocale();
+
+final String REPLICATION_ATTR_PUBLISH = "libs.cq.gui.components.coral.admin.page.row.replicationMapPublish";
+final String REPLICATION_ATTR_PREVIEW = "libs.cq.gui.components.coral.admin.page.row.replicationMapPreview";
+
+Config cfg = cmp.getConfig();
+String path = StringUtils.trimToNull(cmp.getExpressionHelper().getString(cfg.get("path", String.class)));
+
+Resource contentResource = resourceResolver.getResource(path);
+
+final ToggleRouter toggleRouter = sling.getService(ToggleRouter.class);
+AsyncBarricadeStatusService asyncBarricadeStatusService = sling.getService(AsyncBarricadeStatusService.class);
+boolean isBarricadingFeatureEnabled = asyncBarricadeStatusService != null && asyncBarricadeStatusService.isBarricadingFeatureEnabled();
+AsyncBarricadeUIDetails barricadeDetails = null;
+boolean isBlockingBarricade = false;
+boolean isBarricadeInfoPresent = false;
+if (isBarricadingFeatureEnabled){
+    barricadeDetails = asyncBarricadeStatusService.getBarricadeDetails(path, true, true);
+    isBlockingBarricade = barricadeDetails.isBlockingBarricade();
+    isBarricadeInfoPresent = barricadeDetails.isBarricadeInfoPresent();
+}
+
+// In case the barricaded resource is no longer available at the current path show background job details. For example in case of page move
+// operation, the page would be no longer available at the current location.
+if (contentResource == null) {
+    if (isBarricadeInfoPresent){
+        %><coral-columnview-preview>
+            <coral-columnview-preview-content>
+                <coral-columnview-preview-asset>
+                    <div>
+                        <coral-icon icon="pending" size="L"></coral-icon>
+                    </div>
+                    <div>
+                        <coral-progress value="<%= barricadeDetails.getProgressPercentage() %>" showpercent></coral-progress>
+                    </div>
+                </coral-columnview-preview-asset>
+                <coral-columnview-preview-label><%= xssAPI.encodeForHTML(i18n.getVar(barricadeDetails.getJobStatusLabel())) %></coral-columnview-preview-label>
+                    <coral-columnview-preview-value><a href="/mnt/overlay/granite/async/content/asyncjobs.html"><%= xssAPI.encodeForHTML(i18n.get(barricadeDetails.getOperationName())) %></a></coral-columnview-preview-value>
+                <coral-columnview-preview-label><%= i18n.get("Created On") %></coral-columnview-preview-label>
+                    <coral-columnview-preview-value>
+                        <foundation-time type="datetime" value="<%= xssAPI.encodeForHTMLAttr(barricadeDetails.getCreationDate().toInstant().toString()) %>"></foundation-time>
+                    </coral-columnview-preview-value>
+                <coral-columnview-preview-label><%= i18n.get("Started By") %></coral-columnview-preview-label>
+                    <coral-columnview-preview-value><%= xssAPI.encodeForHTML(AuthorizableUtil.getFormattedName(resourceResolver, barricadeDetails.getCreatedByUser())) %></coral-columnview-preview-value>
+                <coral-columnview-preview-label><%= i18n.get("Current Status") %></coral-columnview-preview-label>
+                    <coral-columnview-preview-value><%= xssAPI.encodeForHTML(i18n.getVar(barricadeDetails.getJobStatus())) %></coral-columnview-preview-value>
+                <coral-columnview-preview-label><%= i18n.get("Job Id") %></coral-columnview-preview-label>
+                    <coral-columnview-preview-value><%= xssAPI.encodeForHTML(barricadeDetails.getJobId()) %></coral-columnview-preview-value>
+            </coral-columnview-preview-content>
+        </coral-columnview-preview><%
+    }
+    return;
+}
+
+Page cqPage = contentResource.adaptTo(Page.class);
+String title;
+String name;
+String thumbnailUrl;
+boolean isFolder = false;
+
+
+if (cqPage != null) {
+    title = cqPage.getTitle() == null ? cqPage.getName() : cqPage.getTitle();
+    name = cqPage.getName();
+    thumbnailUrl = getThumbnailUrl(cqPage, 480, 300);
+} else {
+    title = getFolderTitle(contentResource);
+    name = contentResource.getName();
+    thumbnailUrl = Text.escapePath(contentResource.getPath()) + ".folderthumbnail.jpg";
+    isFolder = true;
+}
+
+AgentManager agentManager = sling.getService(AgentManager.class);
+WorkflowStatus workflowStatus = contentResource.adaptTo(WorkflowStatus.class);
+ReplicationStatus replicationStatus = contentResource.adaptTo(ReplicationStatus.class);
+Map<String, ReplicationQueue.Entry> replicationEntriesPublish = (Map<String, ReplicationQueue.Entry>)request.getAttribute("libs.cq.gui.components.coral.admin.page.row.replicationMapPublish");
+if (replicationEntriesPublish == null) {
+    replicationEntriesPublish = PublicationStatusUtils.buildPendingReplicationMap(agentManager, AGENT_ID_PUBLISH);
+    request.setAttribute("libs.cq.gui.components.coral.admin.page.row.replicationMapPublish", replicationEntriesPublish);
+}
+List<String> publicationPendingStatus = PublicationStatusUtils.getPendingStatus(replicationEntriesPublish, contentResource.getPath() , i18n);
+Calendar publishedDate = null;
+String publishedBy = null;
+Boolean isDeactivated = false;
+if (replicationStatus != null) {
+    publishedDate = replicationStatus.getLastPublished();
+    publishedBy = AuthorizableUtil.getFormattedName(resourceResolver, replicationStatus.getLastPublishedBy());
+    isDeactivated = replicationStatus.isDeactivated();
+}
+
+PreviewEnabledService previewEnabledService = sling.getService(PreviewEnabledService.class);
+boolean isPreviewEnabled = previewEnabledService != null && previewEnabledService.isEnabled() && toggleRouter!= null && toggleRouter.isEnabled("ft-cq-4295001");
+
+Calendar previewedDate = null;
+String previewedBy = null;
+Boolean isDeactivatedOnPreview = false;
+List<String> previewPendingStatus = new ArrayList<String>();
+if (isPreviewEnabled && replicationStatus != null) {
+    ReplicationStatus replicationStatusPreview = replicationStatus.getStatusForAgent(AGENT_ID_PREVIEW);
+    if (replicationStatusPreview != null) {
+        previewedDate = replicationStatusPreview.getLastPublished();
+        previewedBy = AuthorizableUtil.getFormattedName(resourceResolver, replicationStatusPreview.getLastPublishedBy());
+        isDeactivatedOnPreview = replicationStatusPreview.isDeactivated();
+    }
+    Map<String, ReplicationQueue.Entry> replicationEntriesPreview = (Map<String, ReplicationQueue.Entry>)request.getAttribute(REPLICATION_ATTR_PREVIEW);
+    if (replicationEntriesPreview == null) {
+        replicationEntriesPreview = PublicationStatusUtils.buildPendingReplicationMap(agentManager, AGENT_ID_PREVIEW);
+        request.setAttribute(REPLICATION_ATTR_PREVIEW, replicationEntriesPreview);
+    }
+    previewPendingStatus = PublicationStatusUtils.getPendingStatus(replicationEntriesPreview, contentResource.getPath() , i18n);
+}
+
+AccessControlManager acm = null;
+try {
+    acm = resourceResolver.adaptTo(Session.class).getAccessControlManager();
+} catch (RepositoryException e) {
+    log.error("Unable to get access manager", e);
+}
+
+String actionRels = StringUtils.join(getActionRels(slingRequest, contentResource, cqPage, acm), " ");
+
+Tag tag = cmp.consumeTag();
+
+%><coral-columnview-preview><coral-columnview-preview-content>
+    <coral-columnview-preview-asset>
+        <div>
+            <img src="<%= xssAPI.getValidHref(request.getContextPath() + thumbnailUrl) %>" alt="">
+        </div><%
+        if (isBlockingBarricade){
+        %><div>
+            <coral-progress size="S" value="<%= barricadeDetails.getProgressPercentage() %>" showpercent></coral-progress>
+        </div><%
+        }
+    %></coral-columnview-preview-asset>
+    <coral-columnview-preview-label><%= i18n.get("Title") %></coral-columnview-preview-label>
+    <coral-columnview-preview-value><%= xssAPI.encodeForHTML(title) %></coral-columnview-preview-value><%
+
+    if (name != null && !name.equals(title)) {
+      %><coral-columnview-preview-label><%= i18n.get("Name") %></coral-columnview-preview-label>
+        <coral-columnview-preview-value><%= xssAPI.encodeForHTML(name) %></coral-columnview-preview-value><%
+    }
+
+    if (cqPage != null) {
+
+        Template template = cqPage.getTemplate();
+        if (template != null) {
+            String templateTitle = template.getTitle();
+            if ("".equals(templateTitle) || templateTitle == null) {
+                templateTitle = template.getName();
+            }
+            %><coral-columnview-preview-label><%= i18n.get("Template") %></coral-columnview-preview-label>
+            <coral-columnview-preview-value><%= xssAPI.encodeForHTML(i18n.getVar(templateTitle)) %></coral-columnview-preview-value><%
+        }
+
+        if (cqPage.getLastModified() != null) {
+            %><coral-columnview-preview-label><%= i18n.get("Modified") %></coral-columnview-preview-label>
+            <coral-columnview-preview-value>
+              <foundation-time value="<%= xssAPI.encodeForHTMLAttr(cqPage.getLastModified().toInstant().toString()) %>"></foundation-time>
+            </coral-columnview-preview-value>
+            <coral-columnview-preview-label><%= i18n.get("Modified By") %></coral-columnview-preview-label>
+            <coral-columnview-preview-value><%= xssAPI.encodeForHTML(AuthorizableUtil.getFormattedName(resourceResolver, cqPage.getLastModifiedBy())) %></coral-columnview-preview-value><%
+        }
+
+        if (cqPage.getPageTitle() != null) {
+            %><coral-columnview-preview-label><%= i18n.get("Page Title") %></coral-columnview-preview-label>
+            <coral-columnview-preview-value><%= xssAPI.encodeForHTML(cqPage.getPageTitle()) %></coral-columnview-preview-value><%
+        }
+
+        if (cqPage.getNavigationTitle() != null) {
+            %><coral-columnview-preview-label><%= i18n.get("Navigation Title") %></coral-columnview-preview-label>
+            <coral-columnview-preview-value><%= xssAPI.encodeForHTML(cqPage.getNavigationTitle()) %></coral-columnview-preview-value><%
+        }
+
+        if (cqPage.getDescription() != null) {
+            %><coral-columnview-preview-label><%= i18n.get("Description") %></coral-columnview-preview-label>
+            <coral-columnview-preview-value><%= xssAPI.encodeForHTML(cqPage.getDescription()) %></coral-columnview-preview-value><%
+        }
+
+        %><coral-columnview-preview-label><%= i18n.get("Language") %></coral-columnview-preview-label>
+        <coral-columnview-preview-value><%= xssAPI.encodeForHTML(cqPage.getLanguage(false).getDisplayLanguage(locale)) %></coral-columnview-preview-value><%
+
+        if (cqPage.getOnTime() != null) {
+            %><coral-columnview-preview-label><%= i18n.get("On Time") %></coral-columnview-preview-label>
+            <coral-columnview-preview-value>
+              <foundation-time value="<%= xssAPI.encodeForHTMLAttr(cqPage.getOnTime().toInstant().toString()) %>"></foundation-time>
+            </coral-columnview-preview-value><%
+        }
+
+        if (cqPage.getOffTime() != null) {
+            %><coral-columnview-preview-label><%= i18n.get("Off Time") %></coral-columnview-preview-label>
+            <coral-columnview-preview-value>
+              <foundation-time value="<%= xssAPI.encodeForHTMLAttr(cqPage.getOffTime().toInstant().toString()) %>"></foundation-time>
+            </coral-columnview-preview-value><%
+        }
+
+        // Async Jobs Status
+        if (isBarricadeInfoPresent) {
+            %><coral-columnview-preview-label><%= xssAPI.encodeForHTML(i18n.getVar(barricadeDetails.getJobStatusLabel())) %></coral-columnview-preview-label>
+                <coral-columnview-preview-value><a href="/mnt/overlay/granite/async/content/asyncjobs.html"><%= xssAPI.encodeForHTML(i18n.getVar(barricadeDetails.getOperationName())) %></a></coral-columnview-preview-value>
+            <coral-columnview-preview-label><%= i18n.get("Current Status") %></coral-columnview-preview-label>
+                <coral-columnview-preview-value><%= xssAPI.encodeForHTML(i18n.getVar(barricadeDetails.getJobStatus())) %></coral-columnview-preview-value>
+            <coral-columnview-preview-label><%= i18n.get("Created On") %></coral-columnview-preview-label>
+                <coral-columnview-preview-value>
+                    <foundation-time type="datetime" value="<%= xssAPI.encodeForHTMLAttr(barricadeDetails.getCreationDate().toInstant().toString()) %>"></foundation-time>
+                </coral-columnview-preview-value>
+            <coral-columnview-preview-label><%= i18n.get("Started By") %></coral-columnview-preview-label>
+                <coral-columnview-preview-value><%= xssAPI.encodeForHTML(AuthorizableUtil.getFormattedName(resourceResolver, barricadeDetails.getCreatedByUser())) %></coral-columnview-preview-value>
+            <coral-columnview-preview-label><%= i18n.get("Job Id") %></coral-columnview-preview-label>
+                <coral-columnview-preview-value><%= xssAPI.encodeForHTML(barricadeDetails.getJobId()) %></coral-columnview-preview-value><%
+        }
+
+        // published status
+        %><coral-columnview-preview-label><%= xssAPI.encodeForHTMLAttr(i18n.get("Published")) %></coral-columnview-preview-label><%
+        %><coral-columnview-preview-value><%
+            if (!isDeactivated && publishedDate != null) {
+                %><foundation-time value="<%= xssAPI.encodeForHTMLAttr(publishedDate.toInstant().toString()) %>"></foundation-time><%
+            } else {
+                %><%= xssAPI.encodeForHTML(i18n.get("Not published")) %><%
+            }
+        %></coral-columnview-preview-value><%
+
+        // published by
+        if (!isDeactivated && publishedBy != null) {
+            %><coral-columnview-preview-label><%= xssAPI.encodeForHTMLAttr(i18n.get("Published By")) %></coral-columnview-preview-label><%
+            %><coral-columnview-preview-value><%= xssAPI.encodeForHTML(publishedBy) %></coral-columnview-preview-value><%
+         }
+
+        // publication pending status
+        if (publicationPendingStatus.size() > 0) {
+            %><coral-columnview-preview-label>&nbsp;</coral-columnview-preview-label><%
+            %><coral-columnview-preview-value><br><%
+                for (String s : publicationPendingStatus) {
+                    %><%= xssAPI.encodeForHTML(s) %><br><%
+                }
+        %></coral-columnview-preview-value><%
+        }
+
+        // publication/un-publication scheduled indicator
+        List<Workflow> scheduledWorkflows = PublicationStatusUtils.getScheduledWorkflows(workflowStatus);
+        if (scheduledWorkflows.size() > 0) {
+            List<PublicationStatusUtils.ScheduledStatus> scheduledStatusPublish = PublicationStatusUtils.getScheduledStatus(scheduledWorkflows, resourceResolver, AGENT_ID_PUBLISH);
+            if (scheduledStatusPublish.size() > 0) {
+                %><coral-columnview-preview-label>&nbsp;</coral-columnview-preview-label><%
+                %><coral-columnview-preview-value><br><%
+                    for (PublicationStatusUtils.ScheduledStatus sInfo : scheduledStatusPublish) {
+                        %><%= xssAPI.encodeForHTML(i18n.get(sInfo.isPublishPending() ? "Publication Pending":"Un-publication Pending")) %><br><%
+                        %><%= i18n.get("Version") %>: <%= xssAPI.encodeForHTML(sInfo.getVersion()) %><br><%
+                        OffsetDateTime odt = sInfo.getOffsetDateTime();
+                        if (odt != null) {
+                          %><%= i18n.get("Scheduled") %>: <foundation-time value="<%= xssAPI.encodeForHTMLAttr(odt.toString()) %>" format="short" type="datetime"></foundation-time><br><%
+                        }
+                        %>(<%= xssAPI.encodeForHTML(sInfo.getAuthorizableName()) %>)<br><%
+                    }
+                %></coral-columnview-preview-value><%
+            }
+        }
+
+        if (isPreviewEnabled) {
+            // preview status
+            %><coral-columnview-preview-label><%= xssAPI.encodeForHTMLAttr(i18n.get("Preview")) %></coral-columnview-preview-label><%
+            %><coral-columnview-preview-value><%
+                if (!isDeactivatedOnPreview && previewedDate != null) {
+                    %><foundation-time value="<%= xssAPI.encodeForHTMLAttr(previewedDate.toInstant().toString()) %>"></foundation-time><%
+                } else {
+                    %><%= xssAPI.encodeForHTML(i18n.get("Not previewed")) %><%
+                }
+            %></coral-columnview-preview-value><%
+
+            // preview by
+            if (!isDeactivatedOnPreview && previewedBy != null) {
+                %><coral-columnview-preview-label><%= xssAPI.encodeForHTMLAttr(i18n.get("Previewed By")) %></coral-columnview-preview-label><%
+                %><coral-columnview-preview-value><%= xssAPI.encodeForHTML(previewedBy) %></coral-columnview-preview-value><%
+             }
+
+            // publication pending status
+            if (previewPendingStatus.size() > 0) {
+                %><coral-columnview-preview-label>&nbsp;</coral-columnview-preview-label><%
+                %><coral-columnview-preview-value><br><%
+                    for (String s : previewPendingStatus) {
+                        %><%= xssAPI.encodeForHTML(s) %><br><%
+                    }
+            %></coral-columnview-preview-value><%
+            }
+
+            // publication/un-publication scheduled indicator
+            if (scheduledWorkflows.size() > 0) {
+                List<PublicationStatusUtils.ScheduledStatus> scheduledStatusPreview = PublicationStatusUtils.getScheduledStatus(scheduledWorkflows, resourceResolver, AGENT_ID_PREVIEW);
+                if (scheduledStatusPreview.size() > 0) {
+                    %><coral-columnview-preview-label>&nbsp;</coral-columnview-preview-label><%
+                    %><coral-columnview-preview-value><br><%
+                        for (PublicationStatusUtils.ScheduledStatus sInfo : scheduledStatusPreview) {
+                            %><%= xssAPI.encodeForHTML(i18n.get(sInfo.isPublishPending() ? "Publication Pending":"Un-publication Pending")) %><br><%
+                            %><%= i18n.get("Version") %>: <%= xssAPI.encodeForHTML(sInfo.getVersion()) %><br><%
+                            OffsetDateTime odt = sInfo.getOffsetDateTime();
+                            if (odt != null) {
+                              %><%= i18n.get("Scheduled") %>: <foundation-time value="<%= xssAPI.encodeForHTMLAttr(odt.toString()) %>" format="short" type="datetime"></foundation-time><br><%
+                            }
+                            %>(<%= xssAPI.encodeForHTML(sInfo.getAuthorizableName()) %>)<br><%
+                        }
+                    %></coral-columnview-preview-value><%
+                }
+            }
+        }
+    }
+
+    AttrBuilder metaAttrs = tag.getAttrs();
+    metaAttrs.addBoolean("hidden", true);
+    metaAttrs.addClass("foundation-collection-meta");
+    metaAttrs.add("data-foundation-collection-meta-title", title);
+    metaAttrs.add("data-foundation-collection-meta-folder", isFolder);
+    metaAttrs.add("data-foundation-collection-meta-rel", actionRels);
+
+    AttrBuilder imgAttrs = new AttrBuilder(request, xssAPI);
+    imgAttrs.addClass("foundation-collection-meta-thumbnail");
+    imgAttrs.addHref("src", thumbnailUrl);
+
+    %><div <%= metaAttrs %>>
+        <img alt="thumbnail image" <%= imgAttrs %>>
+    </div>
+</coral-columnview-preview-content></coral-columnview-preview><%!
+
+    private static final String AGENT_ID_PUBLISH = "publish";
+    private static final String AGENT_ID_PREVIEW = "preview";
+
+    private String getThumbnailUrl(Page page, int width, int height) {
+        String ck = "";
+
+        ValueMap metadata = page.getProperties("image/file/jcr:content");
+        if (metadata != null) {
+            Calendar cal = metadata.get("jcr:lastModified", Calendar.class);
+            if (cal != null) {
+                ck = "" + (cal.getTimeInMillis() / 1000);
+            }
+        }
+
+        return Text.escapePath(page.getPath()) + ".thumb." + width + "." + height + ".png?ck=" + ck;
+    }
+
+    private String getFolderTitle(Resource folder) {
+        ValueMap vm = folder.getValueMap();
+        return vm.get("jcr:content/jcr:title", vm.get("jcr:title", folder.getName()));
+    }
+
+    private List<String> getActionRels(SlingHttpServletRequest slingRequest, Resource resource, Page page, AccessControlManager acm) {
+        List<String> actionRels = new ArrayList<String>();
+        // actions rels [data-foundation-collection-meta-rel], are not respected if they are empty.
+        actionRels.add("dummy");
+        actionRels.add("cq-siteadmin-admin-createlanguagecopy");
+
+        if (hasPermission(acm, resource, Privilege.JCR_ADD_CHILD_NODES)) {
+            actionRels.add("cq-siteadmin-admin-createsite");
+            actionRels.add("cq-siteadmin-admin-createsitefromsitetemplate");
+            actionRels.add("cq-siteadmin-admin-createlivecopy");
+            actionRels.add("cq-siteadmin-admin-createcatalog");
+            actionRels.add("cq-siteadmin-admin-pastepagedialog");
+
+            if (UIHelper.resourceHasAllowedTemplates(resource, slingRequest)) {
+                actionRels.add("cq-siteadmin-admin-createpage");
+            }
+
+            if (page == null) {
+                actionRels.add("cq-siteadmin-admin-createfolder");
+            }
+        }
+
+        if (!resource.getPath().equals("/content") && hasPermission(acm, "/content/launches", Privilege.JCR_ADD_CHILD_NODES)) {
+            actionRels.add("cq-siteadmin-admin-createlaunch");
+        }
+        if(page!=null){
+            ValueMap pageProperties = page.getProperties();
+            if(pageProperties !=null && pageProperties.containsKey("cq:lastTranslationDone")){
+                //this is translation page
+                actionRels.add("cq-siteadmin-admin-actions-translation-update-memory");
+            }
+        }
+        return actionRels;
+    }
+
+    private boolean hasPermission(AccessControlManager acm, String path, String privilege) {
+        if (acm != null) {
+            try {
+                Privilege p = acm.privilegeFromName(privilege);
+                return acm.hasPrivileges(path, new Privilege[]{p});
+            } catch (RepositoryException ignore) {
+            }
+        }
+        return false;
+    }
+
+    private boolean hasPermission(AccessControlManager acm, Resource resource, String privilege) {
+        return hasPermission(acm, resource.getPath(), privilege);
+    }
+%>

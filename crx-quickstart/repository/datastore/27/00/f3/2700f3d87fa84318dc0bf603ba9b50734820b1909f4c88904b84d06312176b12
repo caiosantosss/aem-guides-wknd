@@ -1,0 +1,514 @@
+/*
+  ADOBE CONFIDENTIAL
+  __________________
+
+   Copyright 2019 Adobe Systems Incorporated
+   All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+*/
+
+// eslint-disable-next-line max-statements
+(function($, CUI, Coral, Class) {
+    const ACTIVATOR_WHITELIST = ['span', 'p', 'b', 'i', 'u', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
+    const KEY_DELETE = 8;
+    const PLACEHOLDER_TAG = 'span';
+    const PLACEHOLDER_INDICATOR = '[data-ups-var]';
+    const PLACEHOLDER_IS_EDITABLE ='contentEditable';
+    const FIELD_DEFAULT_VALUE = '[name="rte-ups-variable-default-value"]';
+    const ICON = 'visit';
+    const DIALOG_TEMPLATE_NAME = 'ups_variable';
+    const HIDE_CARET = 'hide-caret';
+    const IS_SELECTED = 'is-selected';
+    const PLUGIN_ID = 'ups-variable';
+    const TOOLBAR_ID = 'placeholder';
+    const PLUGIN_I18N_KEY = `plugins.${PLUGIN_ID}.${TOOLBAR_ID}`;
+    const COMMAND = `${PLUGIN_ID}#${TOOLBAR_ID}`;
+    const GROUP_ID = 'ups';
+    const GROUP_SORT = CUI.rte.plugins.Plugin.SORT_MAX - 1;
+    const IS_TOGGABLE = false;
+    const i18n = CUI.rte.Utils.i18n;
+
+    // foo-bar -> FooBar
+    const PLUGIN_NAME = PLUGIN_ID
+        .split(/-/).map((chunk) => `${chunk.charAt(0).toUpperCase()}${chunk.slice(1)}`)
+        .join('');
+
+    /**
+     * Dialog apply button handler.
+     *
+     * @this CUI.rte.ui.cui.UPS_VARIABLE_DIALOG
+     */
+    const apply = function() {
+        const plugin = this.config.parameters.plugin;
+        const elements = plugin.elements;
+        const context = plugin.editorKernel.editContext;
+
+        // restore cursor position in the rte
+        context.win.getSelection().removeAllRanges();
+        context.win.getSelection().addRange(plugin.savedRange);
+
+        // get placeholder markup
+        const placeholder = top.ups.aem.getContentPlaceholderMarkup(PLACEHOLDER_TAG, elements.autocomplete.value, elements.defaultValue.value);
+
+        if (top.ups.aem.isPlaceholder(elements.underCursor)) {
+            // replace existing placeholder
+            elements.underCursor.replaceWith(placeholder);
+        } else {
+            // insert new placeholder
+            context.win.document.execCommand('insertHTML', false, `&nbsp;${placeholder.outerHTML}&nbsp;`);
+        }
+
+        // hide dialog
+        this.hide();
+    };
+
+    /**
+     * Validates dialog fields.
+     *
+     * @this CUI.rte.ui.cui.UPS_VARIABLE_DIALOG
+     * @return {boolean}
+     */
+    const validate = function() {
+        const elements = this.elements || this.config.parameters.plugin.elements;
+        const isValid = !(elements.autocompleteTyping || { value: '' }).value.split(/[\\/ ]/).some((chunk) => chunk.length === 0);
+
+        // update auto complete and submit button availability based on validation result
+        elements.autocomplete.invalid = !isValid;
+        elements.confirm.disabled = !isValid;
+
+        return isValid;
+    };
+
+    // plugin dialog
+    CUI.rte.ui.cui.UPS_VARIABLE_DIALOG = new Class({
+        extend: CUI.rte.ui.cui.AbstractDialog,
+        toString: `${PLUGIN_NAME}Dialog`,
+        getDataType: () => DIALOG_TEMPLATE_NAME,
+
+        initialize: function(config) {
+            this.config = config;
+            this.$dialog.on('keyup', this.handleKeyUp.bind(this));
+            this.plugin = this.config.parameters.plugin;
+        },
+
+        onHide: function() {
+            // disable plugin activator button
+            this.plugin.activator.setDisabled(false);
+
+            // do not listen to dialog clicks
+            this.plugin.dialog.detach();
+
+            // make all rte placeholders read-only
+            this.plugin.setPlaceholdersEditable(false);
+        },
+
+        onShow: function() {
+            // disable plugin activator button
+            this.plugin.activator.setDisabled(true);
+
+            // make all rte placeholders editable, otherwise `document.execCommand` destroy them on node insert
+            this.plugin.setPlaceholdersEditable(true);
+        },
+
+        handleKeyUp: function() {
+            // validate plugin dialog fields on key up event
+            this.validate();
+        },
+
+        apply,
+        validate,
+        mustRecreate: () => true
+    });
+
+    /**
+     * Sets plugin config.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {object} pluginConfig - plugin config
+     */
+    const notifyPluginConfig = function(pluginConfig) {
+        this.config = Object.assign({}, pluginConfig, {
+            tooltips: {
+                [PLUGIN_ID]: {
+                    title: i18n(`${PLUGIN_I18N_KEY}Title`),
+                    text: i18n(`${PLUGIN_I18N_KEY}Text`)
+                }
+            }
+        });
+    };
+
+    /**
+     * Handles plugin ui initialization - requires UPS RTE plugin to be enabled and `ups-variable-manager` to be loaded.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {object} tbGenerator - toolbar generator
+     */
+    const initializeUI = function(tbGenerator) {
+        if (!this.isFeatureEnabled(COMMAND) || !top.ups) {
+            return;
+        }
+
+        tbGenerator.registerIcon(COMMAND, ICON);
+
+        // create plugin activator button
+        this.activator = tbGenerator.createElement(TOOLBAR_ID, this, IS_TOGGABLE, this.getTooltip(PLUGIN_ID));
+
+        // add activator to the toolbar
+        tbGenerator.addElement(GROUP_ID, GROUP_SORT, this.activator, 12);
+
+        // key/mouse handlers
+        this.editorKernel.addPluginListener('keyup', this.keyPressHandler, this, this, false);
+        this.editorKernel.addPluginListener('mouseup', this.mousePressHandler, this, this, false);
+
+        // change hydration context
+        top.ups.hydrate.context = 'rte';
+    };
+
+    /**
+     * Plugin activator handler.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {string} command - command name
+     * @param {string} value - value
+     * @param {object} env - options
+     * @return {object}
+     */
+    const execute = function(command, value, env) {
+        const dialogManager = this.editorKernel.getDialogManager();
+
+        // save cursor position in the rte
+        this.savedRange = env.editContext.win.getSelection().getRangeAt(0);
+
+        // create and display dialog
+        this.createDialog();
+        dialogManager.show(this.dialog);
+
+        return { preventTouchFocus: true };
+    };
+
+    /**
+     * Updates state when UPS RTE plugin is enabled and `ups-variable-manager` is loaded.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {object} state - selection information
+     */
+    const updateState = function(state) {
+        if (!this.isFeatureEnabled(COMMAND) || !top.ups) {
+            return;
+        }
+
+        // remember node under cursor
+        this.elements.underCursor = state.consistentFormatting[0] || getSelectedNode();
+
+        // update placeholder highlight
+        this.highlightSelectedPlaceholder();
+
+        // enable/disable activator when needed
+        this.updateActivatorAvailability(state);
+    };
+
+    /**
+     * Remove placeholder decoration classes on rich text editor save.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {string} contentType - interception type
+     * @param {object} defs - object
+     */
+    const interceptContent = function(contentType, defs) {
+        // on rte load
+        if (contentType === 'postprocessDom') {
+            this.setPlaceholdersEditable(false);
+        }
+
+        // on rte save
+        if ((contentType === 'cleanDom') && defs) {
+            const content = defs.root;
+
+            if (content) {
+                content.querySelectorAll(PLACEHOLDER_INDICATOR).forEach((item) => {
+                    const classes = Array.from(item.classList)
+                        .filter((name) => !name.startsWith('var-') && (name !== IS_SELECTED))
+                        .join(' ');
+
+                    if (classes.length) {
+                        item.classList = classes;
+                    } else {
+                        item.removeAttribute('class');
+                    }
+                });
+
+                content.setAttribute('value', content.innerHTML);
+            }
+
+            // change hydration context (only if dialog is not available)
+            if (top.ups && !this.editorKernel.dialogManager.dialogShown) {
+                top.ups.hydrate.context = 'default';
+            }
+        }
+    };
+
+    // dialog config
+    const dialogConfig = {
+        configVersion: 1,
+        defaultDialog: {
+            dialogClass: {
+                type: PLUGIN_ID
+            }
+        },
+        dialog: CUI.rte.ui.cui.UPS_VARIABLE_DIALOG,
+        parameters: {
+            command: COMMAND
+        }
+    };
+
+    /**
+     * Creates plugin dialog (when clicking plugin icon in the rte toolbar).
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     */
+    const createDialog = function() {
+        const dialogManager = this.editorKernel.getDialogManager();
+
+        // create dialog if needed
+        if (!this.dialog || dialogManager.mustRecreate(this.dialog)) {
+            const dialogHelper = dialogManager.createDialogHelper();
+
+            // create dialog
+            dialogConfig.parameters.editorKernel = this.editorKernel;
+            dialogConfig.parameters.plugin = this;
+            dialogHelper.configure(dialogConfig);
+            this.dialog = dialogHelper.create();
+
+            // save reference to dialog elements
+            Object.assign(this.elements, {
+                defaultValue: this.dialog.$container.find(FIELD_DEFAULT_VALUE)[0],
+                confirm: this.dialog.$container.find('[data-type="apply"]')[0]
+            });
+        }
+
+        // create autocomplete field
+        this.createVariableAutocomplete();
+
+        // fill dialog fields in case we are editing existing placeholder
+        this.updateDialogContent();
+    };
+
+    /**
+     * Fills plugin dialog fields if we are editing existing placeholder.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     */
+    const updateDialogContent = function() {
+        const self = this;
+        const values = {
+            autocomplete: '',
+            default: ''
+        };
+
+        // get node details it's a placeholder
+        if (top.ups.aem.isPlaceholder(this.elements.underCursor)) {
+            const placeholder = top.ups.aem.getPlaceholderDetails(this.elements.underCursor);
+
+            values.autocomplete = placeholder.key;
+            values.default = placeholder.defaultValue;
+        }
+
+        // fill values when component is ready
+        Coral.commons.ready(this.elements.autocomplete, () => {
+            self.elements.autocomplete.value = values.autocomplete;
+            self.elements.autocompleteTyping.value = self.elements.autocompleteTyping.value.replace(/&gt;/g, '>');
+            self.elements.defaultValue.value = values.default;
+            self.dialog.validate();
+        });
+    };
+
+    /**
+     * Creates auto complete field for ups variables.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     */
+    const createVariableAutocomplete = function() {
+        const dialogAutocomplete = this.dialog.$container.find('coral-autocomplete')[0];
+        const schema = top.ups.schema.getState().schema;
+
+        // create auto complete field
+        const autocomplete = new Coral.Autocomplete().set({
+            placeholder: i18n('Enter Variable Name')
+        });
+
+        // plug validation on auto complete change
+        autocomplete.on('change', this.dialog.validate.bind(this));
+
+        // we need this setting in order to avoid popover stretching and clipping outside of dialog
+        autocomplete._elements.overlay.collision = 'none';
+
+        // add all items from ups schema
+        Object.entries(schema).forEach(([key, details]) => {
+            autocomplete.items.add({
+                value: key,
+                content: {
+                    innerHTML: details.title
+                }
+            });
+        });
+
+        // replace old auto complete with fresh one
+        dialogAutocomplete.replaceWith(autocomplete);
+        this.elements.autocomplete = autocomplete;
+        this.elements.autocompleteTyping = autocomplete.querySelector('input[handle="input"]');
+    };
+
+    /**
+     * Returns node currently pointed by editor cursor.
+     *
+     * @private
+     * @return {HTMLElement|null}
+     */
+    const getSelectedNode = () => {
+        let node = null;
+
+        if (document.selection) {
+            node = document.selection.createRange().parentElement();
+        } else {
+            const selection = window.getSelection();
+
+            if (selection.rangeCount > 0) {
+                node = selection.getRangeAt(0).startContainer.parentNode;
+            }
+        }
+
+        return node;
+    };
+
+    /**
+     * Updates activator availability.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {object} state - selection information
+     */
+    const updateActivatorAvailability = function(state) {
+        // do not update availability if plugin dialog is displayed
+        if (!this.dialog || !this.dialog.isShown()) {
+            // disabled if in selection mode or node does not match activator white list
+            const nodeTagName = ((this.elements.underCursor || {}).tagName || '').toLowerCase();
+            const shouldDisable = state.isSelection || !ACTIVATOR_WHITELIST.includes(nodeTagName);
+
+            this.activator.setDisabled(shouldDisable);
+        }
+    };
+
+    /**
+     * Highlights currently selected placeholder.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     */
+    const highlightSelectedPlaceholder = function() {
+        const rte = this.editorKernel.getEditContext().root;
+        const underCursor = this.elements.underCursor;
+
+        if (top.ups.aem.isPlaceholder(underCursor)) {
+            underCursor.classList.add(IS_SELECTED);
+            rte.classList.add(HIDE_CARET);
+        } else {
+            rte.classList.remove(HIDE_CARET);
+        }
+
+        // deselect other placeholders
+        rte.querySelectorAll(`.${IS_SELECTED}`).forEach((item) => {
+            if (item !== underCursor) {
+                item.classList.remove(IS_SELECTED);
+            }
+        });
+    };
+
+    /**
+     * Makes all placeholders read-only for given rte.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {boolean} isEditable - true if placeholders should be editable
+     */
+    const setPlaceholdersEditable = function(isEditable) {
+        const rte = this.editorKernel.getEditContext().root;
+
+        rte.querySelectorAll(PLACEHOLDER_INDICATOR).forEach((item) => {
+            item.setAttribute(PLACEHOLDER_IS_EDITABLE, isEditable);
+        });
+    };
+
+    /**
+     * Key press handler.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {object} event - event details
+     */
+    const keyPressHandler = function(event) {
+        if (top.ups.aem.isPlaceholder(this.elements.underCursor)) {
+            // delete placeholder
+            if (event.charCode === KEY_DELETE) {
+                this.elements.underCursor.outerHTML = '';
+            }
+        }
+    };
+
+    /**
+     * Mouse press handler.
+     *
+     * @this CUI.rte.plugins.Plugin.UpsVariable
+     * @param {object} event - event details
+     */
+    const mousePressHandler = function(event) {
+        const target = event.nativeEvent.target;
+
+        // update cursor position if target is placeholder, otherwise rte will lose focus as placeholder has contentEditable="false"
+        if (top.ups.aem.isPlaceholder(target)) {
+            const context = this.editorKernel.editContext;
+            let range = context.win.getSelection();
+
+            if (range.rangeCount > 0) {
+                const parent = range.getRangeAt(0).startContainer.parentNode;
+
+                range = new Range();
+                range.setStartBefore(parent);
+                context.win.getSelection().removeAllRanges();
+                context.win.getSelection().addRange(range);
+            }
+        }
+    };
+
+    // create plugin instance
+    const plugin = new Class({
+        // plugin base
+        toString: PLUGIN_NAME,
+        extend: CUI.rte.plugins.Plugin,
+        notifyPluginConfig,
+        initializeUI,
+        execute,
+        updateState,
+        interceptContent,
+
+        // custom
+        createDialog,
+        updateDialogContent,
+        createVariableAutocomplete,
+        updateActivatorAvailability,
+        highlightSelectedPlaceholder,
+        setPlaceholdersEditable,
+        keyPressHandler,
+        mousePressHandler,
+        dialog: null,
+        activator: null,
+        elements: {}
+    });
+
+    // register plugin
+    CUI.rte.plugins[PLUGIN_NAME] = plugin;
+    CUI.rte.plugins.PluginRegistry.register(PLUGIN_ID, plugin);
+})(window.jQuery, window.CUI, window.Coral, window.Class);

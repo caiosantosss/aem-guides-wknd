@@ -1,0 +1,797 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2014 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+/* eslint no-shadow: 0, key-spacing: 0, comma-spacing: 0 */
+
+ContextHub.console.log(ContextHub.Shared.timestamp(), '[loading] contexthub.ui - ContextHub.UI.BaseModuleRenderer.js');
+
+(function($) {
+    'use strict';
+
+    var handlebars = ContextHub.UI.handlebars;
+    var popover = null;
+
+    // noinspection JSValidateTypes
+
+    /**
+     * @classdesc <code>Class</code> with basic render functionality. Extend this class to create a specific renderer.
+     *
+     * Instances of this class should have a <code>defaultConfig</code> member that is always merged with the module
+     * config before using any of the values. This class supports the following configuration keys:
+     *
+     * <ul>
+     *     <li><code>image</code> - a URL to an image to display as icon</li>
+     *     <li><code>icon</code> - an icon class (image takes precedence) from CoralUI (e.g. "icon-globe")</li>
+     *     <li><code>title</code> - a title for the modules rendered by this</li>
+     *     <li><code>fullscreen</code> - whether modules of this type support fullscreen</li>
+     *     <li><code>template</code> - a handlebars template that will be rendered in the module; use at most two
+     *         <code>&lt;p&gt;</code> tags</li>
+     *     <li><code>storeMapping</code> - a (key -> ContextHub store) mapping that will be used when rendering the
+     *          template - the stores can be accessed in templates by key</li>
+     *     <li><code>list</code> - an array of items to display as a list in a popover when the module is clicked</li>
+     *     <li><code>listType</code> - how to display selected list items: 'checkmark', 'checkbox' or 'radio'</li>
+     *     <li><code>popoverTemplate</code> - a Handlebars template to render in a popover when the module is clicked.</li>
+     * </ul>
+     *
+     * The <code>BaseModuleRenderer</code> registers itself as a renderer for modules with type 'contexthub.base'.
+     *
+     * @see {@link ContextHub.UI.BaseModuleRenderer#getPopoverContent|getPopoverContent} for more information on the popover-related keys
+     * @class ContextHub.UI.BaseModuleRenderer
+     */
+    ContextHub.UI.BaseModuleRenderer = function() {
+        var config = window.ContextHubUIConfig || {};
+        var i18nHandler = config.i18n ? config.i18n : ContextHub.I18n.get;
+
+        handlebars.registerHelper('i18n', i18nHandler);
+        handlebars.registerHelper('iconName', function(iconName) {
+            return (iconName || '').replace(/coral-Icon--/, '');
+        });
+
+        this.moduleTemplate = handlebars.compile(ContextHub.UI.Templates.MODULE);
+        this.popoverTemplate = handlebars.compile(ContextHub.UI.Templates.POPOVER);
+    };
+
+    ContextHub.UI.BaseModuleRenderer.prototype.defaultConfig = function() {
+    };
+
+
+    /**
+     * Default render method: compiles the handlebars template and displays it next to an image or icon, according
+     * to the configuration.
+     *
+     * Also re-renders the popover if it's currently shown for the module in question.
+     *
+     * @instance
+     * @param {Object} module the module to render
+     * @return {jQuery|HTMLElement} the module content.
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.render = function(module) {
+        var config = $.extend(true, {}, this.defaultConfig, module.config);
+        var popover = this.getPopover(module);
+        var context = $.extend(true, {}, config, { content: this.getContent(module) });
+
+        if (popover) {
+            this.updatePopoverContent(popover, this.getPopoverContent(module, popover.variant || 'default'));
+        }
+
+        var moduleContent = $(this.moduleTemplate(context));
+        moduleContent.addClass('module-' + module.type.replace(/\./g, '-'));
+
+        if (config.clickable) {
+            var moduleIcon = moduleContent;
+            var isGenericModule = module.type === 'contexthub.base';
+
+            if (config.editable) {
+                moduleIcon = moduleIcon.find('.contexthub-module-button');
+
+                /* popover for generic module will always point at the icon */
+                if (isGenericModule) {
+                    module.config.pointAt = '.contexthub-module-button';
+                }
+
+                moduleContent.find('.contexthub-module-description').click(function(event) {
+                    /* clicking handler should work only when 'clickable' class is set on the module element */
+                    if (!$(event.currentTarget).closest('.contexthub-module').hasClass('clickable')) {
+                        return;
+                    }
+
+                    this.onClickModuleDescription(module, event);
+                }.bind(this));
+            }
+
+            $(moduleIcon).click(function(event) {
+                /* clicking handler should work only when 'clickable' class is set on the module element */
+                if (!$(event.currentTarget).closest('.contexthub-module').hasClass('clickable')) {
+                    return;
+                }
+
+                /* if it's a generic module and it's editable - show only popover with edition */
+                if (isGenericModule && config.editable) {
+                    moduleContent.find('.contexthub-module-description').click();
+                } else {
+                    this.onClickModuleIcon(module, event);
+                }
+            }.bind(this));
+        }
+
+        return moduleContent;
+    };
+
+    /**
+     * Update the contents of this module. By default, calls render() if the configuration doesn't have a <code>storeMapping</code>
+     * or one of the mapped stores is the store with data changes. Otherwise, returns <code>null</code>.
+     *
+     * @instance
+     * @param {object} module the module which is being updated
+     * @param {jQuery} content the current contents of the module
+     * @param {ContextHub.Store.Core} store the store which has updated data
+     * @returns {jQuery|HTMLElement|null} the new content, or <code>null</code> if nothing has changed
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.update = function(module, content, store) {
+        var config = $.extend({}, this.defaultConfig, module.config);
+        if (!config.storeMapping ||
+            $.inArray(store, $.map(config.storeMapping, function(v) { return v; })) !== -1) {
+            return this.render(module);
+        }
+        return null;
+    };
+
+    /**
+     * Updates the content of the popover.
+     * @param popover
+     * @param popoverContent
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.updatePopoverContent = function(popover, popoverContent) {
+        var scrollPosition = popover.$element.find('ul.contexthub-popover-content').scrollTop();
+
+        /* mark elements as popover content */
+        popoverContent.addClass('contexthub-popover-content');
+
+        /* post-process content */
+        this.postProcessPopoverContent(popoverContent);
+
+        /* remove all elements, except all with 'do-not-update' class and skip first one in the list */
+        popover.$element.find('.contexthub-popover-content:not(.do-not-update):not(:first)').remove();
+
+        /* replace first element with new content */
+        popover.$element.find('.contexthub-popover-content:not(.do-not-update)').replaceWith(popoverContent);
+        popoverContent.trigger('cui-contentloaded');
+        popover.$element.find('ul.contexthub-popover-content').scrollTop(scrollPosition);
+    };
+
+    /**
+     * Called when the user clicks on the module's icon (or anywhere in the module - if 'editable' setting is set
+     * to false). By default it renders a {@link CUI.Popover} with the content returned by
+     * {@link ContextHub.UI.BaseModuleRenderer#getPopoverContent|getPopoverContent} inside. Override this method
+     * to implement more exotic behavior.
+     *
+     * @instance
+     * @param {Object} module the module that was clicked
+     * @param {Event} event the user event
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.onClickModuleIcon = function(module, event) {
+        var config = $.extend({}, this.defaultConfig, module.config);
+        var view = $(event.target).closest('.contexthub-module');
+        var variant = 'default';
+
+        if (!popover) {
+            var popoverContent = this.getPopoverContent(module, variant);
+
+            if (popoverContent) {
+                var popoverHtml = $(this.popoverTemplate(config));
+                var popoverType = (config.listType || 'default').replace(/[^a-zA-Z0-9]/g, '');
+
+                popoverHtml.addClass('contexthub-popover-' + module.type.replace(/\./g, '-'));
+                popoverHtml.addClass('listType--' + popoverType);
+                popoverHtml.addClass('mode-' + variant);
+                popoverHtml.appendTo(ContextHub.UI.Container.element);
+
+                if (config.fullscreen) {
+                    popoverHtml.find('.coral-Icon--fullScreen, [icon="fullScreen"]').click(function(thisEvent) {
+                        this.onFullscreenClicked(module, thisEvent, variant);
+                    }.bind(this));
+                }
+
+                ContextHub.UI.Container.fullscreen(true);
+
+                popover = new CUI.Popover({
+                    pointAt: view.find('.contexthub-module-button'),
+                    element: popoverHtml
+                });
+
+                /* need to override default behaviour which would hide popover on blur - also when clicking an element inside popover */
+                popover._focusOutHandler = function(thisEvent) {
+                    $(thisEvent.currentTarget).removeClass('is-focused');
+                };
+
+                popover.owner = module.uuid;
+                popover.variant = variant;
+                this.updatePopoverContent(popover, $(popoverContent));
+
+                popover.on('hide', function() {
+                    $(popoverHtml).remove();
+                    popover = null;
+
+                    /* stay in full screen mode if requested (leaving fullscreen will be handled manually) */
+                    if (!$('body').hasClass('keep-full-screen')) {
+                        ContextHub.UI.Container.fullscreen(false);
+                    }
+                });
+
+                popover.show();
+                view.data('popover', popover);
+
+                event.stopPropagation();
+            }
+        }
+    };
+
+    /**
+     * Called when the user clicks on the module's description ('editable' setting have to be set to true in order
+     * to use this functionality). By default it renders a {@link CUI.Popover} with the key/value editing. Override
+     * {@link ContextHub.UI.BaseModuleRenderer.moduleEditing} to provide custom behavior.
+     *
+     * @instance
+     * @param {Object} module - the module that was clicked
+     * @param {Event} event - the user event
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.onClickModuleDescription = function(module, event) {
+        var config = $.extend({}, this.defaultConfig, module.config);
+
+        this.moduleEditing(module, event, config);
+    };
+
+    ContextHub.UI.BaseModuleRenderer.prototype.postProcessPopoverContent = function(content) {
+        /* set title on li element */
+        $.each(content.find('[data-li-title]'), function(idx, element) {
+            var title = ($(element).data('li-title') || '').replace(/^\/store/, '');
+            $(element).removeAttr('data-li-title').closest('li').attr('title', title);
+        });
+    };
+
+    /**
+     * Allows to post process list context before generating html. This method have to be overwritten in order to do post processing.
+     *
+     * @param {Object} context
+     * @returns {Object}
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.postProcessListContext = function(context) {
+        return context;
+    };
+
+    /**
+     *  Module editing feature. Override this method to provide a custom behavior.
+     *
+     * @param {Object} module - this module
+     * @param {Object} event - user event
+     * @param {Object} config - module config
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.moduleEditing = function(module, event, config) {
+        var view = $(event.target).closest('.contexthub-module');
+        var variant = 'module-editing';
+
+        if (!popover) {
+            var popoverContent = this.getPopoverContent(module, variant, { list: config.editable.key || null, listType: 'input' });
+            var popoverHtml = $(this.popoverTemplate(config));
+            var popoverType = (config.listType || 'default').replace(/[^a-zA-Z0-9]/g, '');
+
+            popoverHtml.addClass('contexthub-popover-' + module.type.replace(/\./g, '-'));
+            popoverHtml.addClass('listType--' + popoverType);
+            popoverHtml.addClass('mode-' + variant);
+            popoverHtml.appendTo(ContextHub.UI.Container.element);
+
+            /* set focus in the input after clicking popover item */
+            popoverHtml.click(function(thisEvent) {
+                $(thisEvent.target).closest('li').find('input').focus();
+            });
+
+            popoverHtml.find('.coral-Icon--fullScreen, [icon="fullScreen"]').click(function(thisEvent) {
+                this.onFullscreenClicked(module, thisEvent, variant);
+            }.bind(this));
+
+            ContextHub.UI.Container.fullscreen(true);
+
+            popover = new CUI.Popover({
+                pointAt: view.find(module.config.pointAt || '.contexthub-module-description'),
+                element: popoverHtml
+            });
+
+            /* need to override default behaviour which would hide popover on blur - also when clicking an element inside popover */
+            popover._focusOutHandler = function(thisEvent) {
+                $(thisEvent.currentTarget).removeClass('is-focused');
+            };
+
+            popover.owner = module.uuid;
+            popover.variant = variant;
+            this.updatePopoverContent(popover, $(popoverContent));
+
+            popover.on('hide', function() {
+                $(popoverHtml).remove();
+                popover = null;
+
+                /* stay in full screen mode if requested (leaving fullscreen will be handled manually) */
+                if (!$('body').hasClass('keep-full-screen')) {
+                    ContextHub.UI.Container.fullscreen(false);
+                }
+            });
+
+            popover.show();
+            view.data('popover', popover);
+
+            event.stopPropagation();
+        }
+    };
+
+    /**
+     * Called when the user clicks the fullscreen icon in the module. By default throws an exception as it is not
+     * implemented.
+     *
+     * @instance
+     * @param {Object} module the module on which the user clicked the fullscreen icon
+     * @param {Event} event the user event
+     * @param {String} [fullscreenVariant] - allows to distinguish what kind of fullscreen renderer should be used
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.onFullscreenClicked = function(module, event, fullscreenVariant) {
+        (function() {})(module, event, fullscreenVariant);
+
+        throw 'Override onFullscreen to add fullscreen support to your ' +
+        'renderer (or set fullscreen to false in the config)';
+    };
+
+    /**
+     * Called when the user clicks on an item in the list. By default throws an exception as it is not implemented.
+     *
+     * @instance
+     * @param {Object} module the module that the list was configured for
+     * @param {Number} position the position in the list of the item that was clicked
+     * @param {Object} data the data that was specified for this item in the list
+     * @param {Event} event the user event
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.onListItemClicked = function(module, position, data, event) {
+        (function() {})(position, data, event);
+
+        /* do not throw error if user didn't implement onListItemClicked, but requested dummy implementation */
+        if ($.extend(true, { config: {} }, module).config.itemOnClickNoop) {
+            return;
+        }
+
+        throw 'onListItemClicked not implemented by BaseModuleRenderer';
+    };
+
+    /**
+     * Get the context for template resolution.  By default the context contains each mapped store's tree.
+     *
+     * @instance
+     * @param config a previously-resolved config
+     * @returns {Object} an object containing the context
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.getTemplateContext = function(config) {
+        var context = {};
+
+        if (config.storeMapping) {
+            $.each(config.storeMapping, function(key, value) {
+                var store = ContextHub.getStore(value);
+
+                if (store) {
+                    context[key] = store.getTree();
+                } else {
+                    ContextHub.console.log('Could not find store for mapping ' + key + ': ' + value);
+                }
+            });
+        }
+
+        return context;
+    };
+
+    /**
+     * Get the content that should be displayed for this module (next to the image / icon). By default renders the
+     * configured <code>template</code> with the configured <code>storeMapping</code>.
+     *
+     * @instance
+     * @param {Object} module the module to get the content for
+     * @returns {base.HandlebarsEnvironment.SafeString|string|null}
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.getContent = function(module) {
+        var config = $.extend({}, this.defaultConfig, module.config);
+
+        if (config.template) {
+            var context = this.getTemplateContext(config);
+
+            return new handlebars.SafeString(handlebars.compile(config.template)(context));
+        }
+
+        return null;
+    };
+
+    /**
+     * If a popover is currently displayed return it, otherwise return <code>null</code>.
+     *
+     * @instance
+     * @param {Object} [module] the module to get the popover for (return the global popover if null)
+     * @returns {CUI.Popover|null}
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.getPopover = function(module) {
+        if (!popover) {
+            return null;
+        }
+
+        if (module && popover.owner !== module.uuid) {
+            return null;
+        }
+
+        return popover;
+    };
+
+    /**
+     * <p>
+     * Get the content that should be displayed in the popover when the module is clicked. Override this method
+     * to implement more sophisticated behavior. The default implementation can render two types of content:
+     * </p>
+     * <h3>Lists</h3>
+     * <p>
+     * If the configuration contains a <code>list</code> key it is rendered as a HTML list (<code>&lt;ul&gt;</code>). The
+     * configuration value for the list should be an array of objects with the following keys:
+     * </p>
+     * <ul>
+     *     <li><code>title</code> <em>mandatory</em> the text to display for this item</li>
+     *     <li><code>image</code> <em>optional</em> a URL to an image that should be displayed on the left</li>
+     *     <li><code>icon</code> <em>optional</em> a CUI icon class that should be displayed on the left;
+     *         ignored if an image is specified</li>
+     *     <li><code>selected</code> <em>optional</em> whether this item should be displayed as selected (see
+     *         below)</li>
+     *     <li><code>data</code> <em>optional</em> extra data that should be passed to
+     *         {@link ContextHub.UI.BaseModuleRenderer#onListItemClicked|onListItemClicked}</li>
+     * </ul>
+     * <p>
+     * By default, items that have <code>selected = true</code> are displayed with bold. Other options can be
+     * specified by adding a <code>listType</code> key in your configuration with one of the following values:
+     * </p>
+     * <ul>
+     *     <li><code>checkmark</code> - a checkmark icon is displayed next to selected items</li>
+     *     <li><code>checkbox</code> - a checkbox is displayed next to all items, checked for those that are
+     *         selected</li>
+     *     <li><code>radio</code> - a radio button is displayed next to all items, checked for those that are
+     *         selected</li>
+     * </ul>
+     *
+     * <h3>Templates</h3>
+     * <p>
+     *     If the configuration contains a <code>popoverTemplate</code> key it is rendered as a Handlebars template with the
+     *     configured <code>storeMapping</code>. Furthermore, if the template contains a form,
+     *     {@link ContextHub.UI.BaseModuleRenderer#onSave|onSave} will be called when it is submitted and the popover will be hidden.
+     * </p>
+     *
+     * @instance
+     * @param {Object} module - the module for which to generate popover content
+     * @param {String} [popoverVariant] - allows to distinguish what kind of popover renderer should be used
+     * @param {Object} [configOverride] - config
+     * @returns {jQuery|Element|string|null}
+     */
+    // eslint-disable-next-line complexity
+    ContextHub.UI.BaseModuleRenderer.prototype.getPopoverContent = function(module, popoverVariant, configOverride) {
+        var config = $.extend(true, {}, this.defaultConfig, module.config, configOverride);
+
+        /* config merging can also merge the list - we don't want that */
+        if (module.config && module.config.list) {
+            config.list = module.config.list;
+        }
+
+        /* list items are stored in the persistence under listReference key */
+        if (config.listReference) {
+            var listReference = ContextHub.Utils.JSON.tree.sanitizeKey(config.listReference);
+
+            if (listReference && listReference[0] !== 'store') {
+                listReference.unshift('store');
+            }
+
+            listReference = listReference ? ('/' + listReference.join('/')) : null;
+            config.list = ContextHub.getItem(listReference);
+        }
+
+        /* list is array */
+        if (config.list) {
+            var attachOnClick = true;
+            var listType = config.listType;
+            var itemTemplate;
+
+            switch (listType) {
+                case 'checkmark':
+                    itemTemplate = ContextHub.UI.Templates.LIST_ITEM_CHECKMARK;
+                    break;
+
+                case 'checkbox':
+                    itemTemplate = ContextHub.UI.Templates.LIST_ITEM_CHECKBOX;
+                    break;
+
+                case 'radio':
+                    itemTemplate = ContextHub.UI.Templates.LIST_ITEM_RADIO;
+                    break;
+
+                case 'input':
+                    itemTemplate = ContextHub.UI.Templates.LIST_ITEM_INPUT;
+                    config.list = this.prepareGenericList(config.list, config);
+                    attachOnClick = false;
+                    break;
+
+                case 'custom':
+                    itemTemplate = config.listItemTemplate || $('<span/>').text('"listItemTemplate" not defined');
+                    break;
+
+                default:
+                    itemTemplate = ContextHub.UI.Templates.LIST_ITEM_DEFAULT;
+            }
+
+            /* register desired item template */
+            handlebars.registerPartial('item', itemTemplate);
+
+            /* compile template */
+            var template = handlebars.compile(ContextHub.UI.Templates.LIST);
+
+            /* get list html */
+            if (typeof this.postProcessListContext === 'function') {
+                config = this.postProcessListContext(config);
+            }
+
+            var html = $(template(config));
+
+            /* attach image loading error handler */
+            if (config && config.imageErrorHandler) {
+                html.find('img').one('error', config.imageErrorHandler);
+            }
+
+            /* persist changes if persistence keys were provided */
+            html.find('input[data-persistence-key]')
+                .on('blur', this.handleInputBlur.bind(this))
+                .on('keydown', this.handleOnKeyPress.bind(this));
+
+            /* attach row on-click */
+            if (attachOnClick) {
+                html.click('li', function(event) {
+                    this.getPopover().hide();
+                    var position = $(event.target).closest('li').data('position');
+                    module.config = config;
+                    this.onListItemClicked(module, position, config.list[position].data || {}, event);
+                }.bind(this));
+            }
+
+            return html;
+        } else if (config.popoverTemplate) {
+            var context = this.getTemplateContext(config);
+            var content = $(handlebars.compile(config.popoverTemplate)(context));
+            var that = this;
+            var form = content.is('form') ? content : content.find('form');
+
+            if (form && form.length > 0) {
+                form.on('submit', function(event) {
+                    event.preventDefault();
+                    that.onSave(module, this, event);
+                    that.getPopover().hide();
+                });
+            }
+
+            return content;
+        }
+        return null;
+    };
+
+    ContextHub.UI.BaseModuleRenderer.prototype.prepareGenericList = function(list, config) {
+        var result = [];
+        var data;
+        var keys;
+
+        /* it's already list */
+        if (typeof list === 'object') {
+            return list;
+        }
+
+        /* unsupported argument */
+        if (typeof list !== 'string') {
+            return [];
+        }
+
+        /* provided 'list' argument is in fact a path in ContextHub's persistence, where the data is stored - lets fetch it */
+        var path = ContextHub.Utils.JSON.tree.sanitizeKey(list);
+
+        if (path[0] !== 'store') {
+            path = $.merge(['store'], path);
+        }
+
+        path = '/' + path.join('/');
+        data = ContextHub.getItem(path) || [];
+        delete data._;
+        keys = ContextHub.Utils.JSON.tree.getKeys(data);
+
+        /* create a fast lookup of unwanted and disabled for editing properties */
+        var hiddenProperties = {};
+        var disabledProperties = {};
+
+        if (config.editable) {
+            var createLookup = function(userList) {
+                var result = {};
+                var wildcard = {};
+
+                $.each(userList || [], function(idx, key) {
+                    var name = ContextHub.Utils.JSON.tree.sanitizeKey(key);
+
+                    if (name) {
+                        if (name[0] !== 'store') {
+                            name.unshift('store');
+                        }
+
+                        name = '/' + name.join('/');
+
+                        /* wildcard is: 'a/b/*' */
+                        if (name.match(/\/\*$/)) {
+                            wildcard[name.replace(/..$/, '')] = true;
+                        } else {
+                            result[name] = true;
+                        }
+                    }
+                });
+
+                result._wildcard = wildcard;
+
+                return result;
+            };
+
+            hiddenProperties = createLookup(config.editable.hidden);
+            disabledProperties = createLookup(config.editable.disabled);
+        }
+
+        var isOnTheList = function(key, lookup) {
+            var isFound = lookup[key] === true;
+
+            if (!isFound) {
+                $.each(hiddenProperties._wildcard || {}, function(item) {
+                    isFound = key.indexOf(item) === 0;
+                    return isFound === false;
+                });
+            }
+
+            return isFound;
+        };
+
+        /* converts data object { key1: value1, key2: value2 } into [ { key: key1, value: value1 }, { key: key2, value: value2 } ] */
+        // eslint-disable-next-line consistent-return
+        $.each(keys, function(idx, key) {
+            var name = ContextHub.Utils.JSON.tree.sanitizeKey(key);
+
+            if (typeof name === 'undefined') {
+                return true;
+            }
+
+            /* having a key /foo/bar/qwerty, use 'qwerty' as a key name */
+            name = name.pop();
+
+            /* get value and convert js types to string */
+            var value = ContextHub.Utils.JSON.tree.getItem(data, key);
+            var type = typeof value;
+
+            switch (type) {
+                case 'boolean':
+                    value = value ? 'true' : 'false';
+                    break;
+
+                case 'undefined':
+                case 'null':
+                    value = '';
+                    break;
+
+                default:
+            }
+
+            /* skip element as value type is not supported - only string or number is supported */
+            if (typeof value === 'object') {
+                return true;
+            }
+
+            var propertyKey = path + key;
+
+            if (!isOnTheList(propertyKey, hiddenProperties)) {
+                result.push({
+                    key: propertyKey,
+                    name: name,
+                    value: value,
+                    disabled: isOnTheList(propertyKey, disabledProperties)
+                });
+            }
+        });
+
+        return result;
+    };
+
+    ContextHub.UI.BaseModuleRenderer.prototype.handleInputBlur = function(event) {
+        var input = $(event.currentTarget);
+        var previousValue = input.data('previous-value');
+
+        /* if it's null or undefined - use empty string instead */
+        if (previousValue === null || (previousValue) === 'undefined') {
+            previousValue = '';
+        }
+
+        /* convert to string */
+        previousValue = '' + previousValue;
+        var currentValue = input.val();
+
+        if (previousValue !== currentValue) {
+            var persistenceKey = input.data('persistence-key');
+
+            input.data('previous-value', currentValue);
+
+            if (persistenceKey) {
+                ContextHub.setItem(persistenceKey, currentValue);
+            }
+        }
+    };
+
+    ContextHub.UI.BaseModuleRenderer.prototype.handleOnKeyPress = function(event) {
+        var input = $(event.currentTarget);
+        var previousValue = String(input.data('previous-value')).trim();
+
+        if (event.keyCode === 13) {
+            /* leave the input element once enter is pressed */
+            input.blur();
+        } else if (event.keyCode === 27) {
+            /* set previous value and leave input */
+            input
+                .val(previousValue || '')
+                .blur();
+        }
+    };
+
+    /**
+     * <p>
+     *     Called when a popover form is submitted. By default it looks for elements with <code>data-store</code> and
+     *     <code>data-property</code> attributes and saves their values in ContextHub. The <code>data-store</code> attribute should
+     *     have a value that is contained in the configured <code>storeMapping</code>, i.e. not an actual store name.
+     * </p>
+     *
+     * @instance
+     * @see ContextHub.UI.BaseModuleRenderer#getPopoverContent
+     * @param {Object} module the module for which to generate popover content
+     * @param {HTMLFormElement} form the form which was submitted
+     */
+    ContextHub.UI.BaseModuleRenderer.prototype.onSave = function(module, form) {
+        var config = $.extend({}, this.defaultConfig, module.config);
+
+        $(form).find('[data-store][data-property]').each(function(i, element) {
+            var $e = $(element);
+            var storeName = config.storeMapping[$e.data('store')];
+            var property = $e.data('property');
+            var value = $e.val();
+
+            if (storeName && property && value) {
+                var store = ContextHub.getStore(storeName);
+                if (store) {
+                    store.setItem(property, value);
+                }
+            }
+        });
+    };
+
+    /**
+     * Hide the popover when the container is closed
+     */
+    ContextHub.eventing.on(ContextHub.Constants.EVENT_UI_CONTAINER_CLOSED, function () {
+        if (popover) {
+            popover.hide();
+        }
+    });
+
+    ContextHub.UI.ModuleRenderer('contexthub.base', new ContextHub.UI.BaseModuleRenderer());
+
+}(ContextHubJQ));

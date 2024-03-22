@@ -1,0 +1,693 @@
+/*!************************************************************************
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2015 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ *************************************************************************/
+
+(function (window, s7ve, document, Granite, $) {
+    "use strict";
+
+    // Resolve function for s7sdk_loaded promise, this is called when the SDK has loaded,
+    // to inform the rest of the application
+    var fnSDKLoadedResolve;
+
+    /**
+     * ViewerEditor module for instantiation and manipulation of out-of-the-box viewers.
+     */
+    s7ve.ViewerEditor = (function () {
+
+        /********************
+         * Member variables *
+         ********************/
+
+        var _modifierEditor,
+            _styleEditor,
+            _s7sdk,
+            _$viewer,
+            _$appearance,
+            _$behavior,
+            _preset,
+            _inputMarker,
+            _orientation,
+            _mediaSetData;
+
+        /**
+         * Initialize and build ViewerEditor given preset and DOM containers
+         *
+         * @param {s7ve.Preset} preset The preset to apply to the loaded viewer
+         * @param {jQuery} $viewer Container to append viewer
+         * @param {jQuery} $appearance Container to append apperance widgets
+         * @param {jQuery} $behavior Container to append behavior widgets
+         */
+        function init(preset, $viewer, $appearance, $behavior) {
+
+            var cssText = validateCssTextPaths(preset.getCss(), preset.getStyle() || preset.getRefStyle()),
+                presetDirty = preset.getDirty();
+            var ui = $(window).adaptTo("foundation-ui");
+            s7ve.Bootstrap.setViewerElement($viewer, preset);
+
+            _preset = preset;
+            _$viewer = $viewer;
+            _$appearance = $appearance;
+            _$behavior = $behavior;
+            _s7sdk = window.s7viewers.s7sdk;
+
+            // Place wait spinner until initialization is complete
+            ui.wait();
+
+            // Load SDK dependancies
+            _s7sdk.Util.lib.include("s7sdk.modifier.Modifier");
+            _s7sdk.Util.lib.include("s7sdk.model.ModifierModel");
+            _s7sdk.Util.lib.include("s7sdk.model.StyleModel");
+
+            injectedViewerCss(cssText);
+
+            // Set dirty flag back to initial state
+            _preset.setDirty(presetDirty);
+
+            // Convert preset name to kebab case to get preset class
+            var presetClass = _preset.getId() ? _preset.getId().replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase() : "";
+            _$viewer.addClass(presetClass);
+
+            return s7ve.Bootstrap.downloadOotbViewer(preset.getCategory())
+                .then(loadViewer)
+                .then(function (viewerInstance) {
+
+                    // resolve SDK load promise for anyone interested
+                    fnSDKLoadedResolve();
+
+                }).then(s7ve.s7sdk_loaded).then(buildEditor).then(function () {
+                    //enable change event after init (suppress is in place to avoid triggering change event during init for setters
+                    _preset.setSupressChangeEvent(false);
+                    ui.clearWait();
+                }).then(fadeInViewer);
+        }
+
+        /**
+         * Utility to translate url paths given input string
+         */
+        function validateCssTextPaths(cssText, cssPath) {
+
+            cssPath = s7ve.Util.removeLeadingForwardSlash(cssPath || "");
+
+            var absolutePath = Granite.HTTP.getContextPath() + "/" + (cssPath.split(/(.*\/)(.*)/g)[1] || "");
+
+            // Replace relative paths from OOTB CSS to absolute, since our resulting
+            // generated preset CSS will not be relative to viewer package
+            cssText = cssText.replace(/(url\("?).+(html5\/images\/v2)/g, '$1' + s7ve.VIEWER_CONFIG.s7viewerPath + '$2');
+
+            // Callback invoked with every URL path in CSS text
+            cssText = s7ve.Util.replaceCssUrlPaths(cssText, function (path) {
+                // Only translate relative paths (without leading forwardslash) to absolute paths 
+                // using the provided path of CSS file
+                return path.replace(/^(?!.*:\/\/)([^\/].*)/, absolutePath + "$1");
+            });
+            return cssText;
+        }
+
+        /**
+         * Helper to read lookup-table for viewer container markers
+         */
+        function getViewerMarker() {
+            return s7ve.getCategoryDesc(_preset.getCategory()).MARKER;
+        }
+
+        /**
+         * Single point of truth for imageview element
+         */
+        function getPreviewElement() {
+            return _$viewer;
+        }
+
+        /**
+         * Retrieve current OOTB instance
+         */
+        function getViewer() {
+            var element = getPreviewElement(),
+                data = element && element.data();
+
+            return data && data.s7viewer;
+        }
+
+        /**
+         * Simple utility to fade in viewer to minimize load flicker
+         */
+        function fadeInViewer(options) {
+            options = $.extend({
+                duration: 1200
+            }, options);
+
+            $("#s7ve-viewersizer").hide();
+            $("#s7ve-viewersizer").fadeIn(options);
+        }
+
+        /**
+         * Utility function to encapsulate some tricks to force
+         * reload the viewer in either desktop or mobile modes.
+         */
+        function setDeviceType(deviceType) {
+            var $imagepreview = getPreviewElement();
+
+            $imagepreview.removeClass("s7mouseinput s7touchinput");
+
+            if (deviceType === s7ve.ViewerEditor.DESKTOP_DEVICE) {
+                _s7sdk.browser.device.name = "desktop"
+                _inputMarker = "s7mouseinput";
+                _orientation = null;
+            }
+            if (deviceType === s7ve.ViewerEditor.TABLET_DEVICE || deviceType === s7ve.ViewerEditor.PHONE_DEVICE) {
+                _s7sdk.browser.device.name = "mobile"
+                _inputMarker = "s7touchinput";
+                _orientation = s7ve.ViewerEditor.PORTRAIT_ORIENTATION;
+                
+                // CQ-108529 - [Viewer Presets][Editor][Regression] ImageMapEffect: Region image maps not displayed
+                // on tablet or phone tabs
+                s7sdk.browser.supportsTouch = function () {
+                    return true;
+                };
+            }
+            // return a promise to load viewer
+            return loadViewer();
+        }
+
+        /**
+         * Invoke this method to load the viewer using the preview component. Once
+         * complete the initialize function is called which kicks off creation of the
+         * ModifierEditor and StyleEditor panels.
+         */
+        function loadViewer() {
+
+            return new Promise(function (resolve, reject) {
+
+                var $imagepreview = getPreviewElement(),
+                    data = $imagepreview.data(),
+                    s7viewer = data.s7viewer,
+                    imageview_options = {
+                        // Prevent viewer from loading CSS since editor will be dynamically injecting into page
+                        style: "data:text/css;charset=UTF-8,",
+                        fixinputmarker: _inputMarker || "s7mouseinput"
+                    };
+
+                if (s7viewer) {
+                    removeSetCssStyles();
+
+                    // destroy existing viewer instance
+                    if (s7viewer.dispose) {
+                        s7viewer.dispose();
+                    }
+                    $imagepreview.s7preview("destroy");
+                    $imagepreview.empty();
+                }
+
+                /**************************
+                 * SET DEFAULT PARAMETERS
+                 **************************/
+                if (data.s7type.match(/^(INTERACTIVEIMAGE|INTERACTIVEVIDEO|CAROUSELSET)$/)) {
+                    imageview_options["preview"] = "1";
+                }
+                if (data.s7type.match(/^(INTERACTIVEVIDEO)$/)) {
+                    // Read attributes from info component, fallback to blank sample if not available
+                    var vttInfo = $("#dm-sample-vtt").first().data(),
+                        vttAsset = (vttInfo && vttInfo.assetPath) || "";
+
+                    imageview_options["interactivedata"] = vttAsset;
+                }
+                // CQ-35597, CQ-4221511: Work-around to force local videoserverurl on viewer preview
+                imageview_options["videoserverurl"] = Granite.HTTP.externalize('/is/content/');
+                /**************************/
+
+                // Instantiate viewer instance using 'image' preview component
+                $imagepreview.s7preview(imageview_options);
+
+                // Grab reference to new viewer instance
+                s7viewer = $imagepreview.data().s7viewer;
+
+                // If an orientation has been defined and the viewer supports force API, then invoke
+                if (_orientation && s7viewer.forceDeviceOrientationMarker) {
+                    forceViewerOrientationMarker(s7viewer, _orientation);
+                }
+
+                // Modifiers pushed directly to viewer, since preview component does not propagate them
+                // ToDo: Refactor preview component to support propagation of arbitrary modifiers
+                if (data.s7type.match(/^(INTERACTIVEVIDEO)$/)) {
+                    // CQ-4219955 - Fix video playback and missing product swatches. For simplicity we
+                    // use direct JCR paths to the images defined in VTT.
+                    s7viewer.s7params.push("VideoPlayer.playback", "auto");
+                    s7viewer.s7params.push("InteractiveSwatches.serverurl", Granite.HTTP.externalize("/"));
+                    s7viewer.s7params.push("CallToAction.serverurl", Granite.HTTP.externalize("/"));
+
+                    // Product images are not coming from IS, therefore we must set the s7thumb style so
+                    // that the image is contained within the swatch boundary
+                    injectCss("s7ve-stylepatch-s7interactivevideoviewer",
+                        ".s7interactivevideoviewer .s7thumb { background-size: contain }");
+                }
+				else if (data.s7type.match(/^(VIDEO_360)$/)) {
+                    s7viewer.s7params.push("Video360Player.playback", "auto");
+                }
+				else if (data.s7type.match(/^(SMART_CROP_VIDEO)$/)) {
+                    s7viewer.s7params.push("SmartCropVideoPlayer.playback", "auto");
+                }
+                else if (data.s7type.match(/^(VIDEO)$/) || data.s7type.match(/^(MIXEDMEDIASET)$/)) {
+                    s7viewer.s7params.push("VideoPlayer.playback", "auto");
+                }
+                // Manually set all preset modifiers on viewer
+                s7ve.Util.iterate(_preset.getModifiers(), function (modValue, modKey) {
+                    s7viewer.s7params.del(modKey);
+                    s7viewer.s7params.push(modKey, modValue);
+                });
+
+                /**
+                 * Handler when viewer has fully loaded
+                 */
+                function viewerInitComplete() {
+                    if (_modifierEditor) {
+                        // We must reconnect component instances since viewer was reloaded
+                        _modifierEditor.validateComponentInstances();
+                    }
+                    if (_styleEditor) {
+                        _styleEditor.validateComponentInstances();
+                    }
+
+                    var components = getComponents();
+                    components.forEach(function (item) {
+                        initTapEvents(item);
+                    });
+
+                    resolve(s7viewer);
+
+		    //setting aria-label for vpe social share menu button
+                    $("#vpe-viewer_socialShare_socBtn").attr( {"aria-label" : Granite.I18n.get('Share'), "aria-expanded" : "false"} );
+                }
+
+                // set handler on OOTB viewer to respond when loading is complete
+                if (!s7viewer || !s7viewer.handlers) {
+                    throw new Error("Viewer does not support handlers!");
+                }
+
+                s7viewer.handlers.initComplete = viewerInitComplete;
+
+            }).then(function (s7viewer) {
+                // Check for media set data provided to s7ve.ViewerEditor module and configure
+                // the MediaSet component of this new viewer instance if necessary
+                applyMediaSetData(s7viewer);
+                return s7viewer;
+            });
+        }
+
+        /**
+         * To be called once viewer has loaded
+         */
+        function buildEditor() {
+
+            var $imagepreview = getPreviewElement(),
+                data = $imagepreview.data(),
+                s7viewer = data.s7viewer,
+                symbolResolver = new s7ve.SymbolResolver(),
+                viewerMarker = getViewerMarker();
+
+            symbolResolver.locale = "en";
+
+            // remove this dependancy from other code
+            s7ve.s7preview = $imagepreview;
+
+            // Style fields for all viewers except INTERACTIVEIMAGE
+            $("#standardStyleContent").show();
+
+            // Temporary fix for CQ-75206
+            cleanObject(_s7sdk.StyleModel.descriptors);
+
+            // Merge additional supplemental descriptors into existing SDK object
+            $.extend(true, _s7sdk.model.SupplementalModifierDescriptors, s7ve.ModifierEditor.SupplementalModifierDescriptors);
+            $.extend(true, _s7sdk.StyleModel.descriptors, s7ve.StyleEditor.SUPPLEMENTAL_DESCRIPTORS);
+
+            // Check overlay descriptor object for viewer specific configuration
+            var viewerDescriptorOverlay = s7ve.StyleEditor.VIEWER_DESCRIPTOR_OVERLAY[viewerMarker];
+            if (viewerDescriptorOverlay) {
+                $.extend(true, _s7sdk.StyleModel.descriptors, viewerDescriptorOverlay);
+            }
+            var viewerDescriptorReplace = s7ve.StyleEditor.VIEWER_DESCRIPTOR_REPLACE[viewerMarker];
+            if (viewerDescriptorReplace) {
+                $.extend(_s7sdk.StyleModel.descriptors, viewerDescriptorReplace);
+            }
+
+            executeGraniteValidationWorkaround();
+
+            if (_$behavior) {
+                _modifierEditor = new s7ve.ModifierEditor(s7viewer.s7params, _$behavior, symbolResolver);
+            }
+
+            if (_$appearance && viewerMarker) {
+                // Temporary SDK patch until viewer package 1.90 released
+                s7ve.StyleEditor.SDK_patch(s7viewers.s7sdk);
+                _styleEditor = new s7ve.StyleEditor(s7viewer.s7params, _$appearance, viewerMarker);
+            }
+        }
+
+        /**
+         * Attach handlers to select panels when a component is tapped
+         * @param component is the SDK component to handle
+         */
+        function initTapEvents(component) {
+            var dom = component.getObj();
+            if (!dom) {
+                return;
+            }
+            $(dom).on("click", function (event) {
+                var domEvent = event.originalEvent;
+
+                if (domEvent.s7veHandled) {
+                    return;
+                }
+                domEvent.s7veHandled = true;
+                // triggers listeners in ModifierEditor.js and StyleEditor.js
+                $(document).trigger({
+                    type: "s7ve-ComponentSelectEvent",
+                    component: component
+                });
+            });
+        }
+
+        /**
+         * Temporary FIX - to prevent blocking from excessive validation loop in Foundation
+         */
+        function executeGraniteValidationWorkaround() {
+            $.fn.adaptTo = (function (original) {
+                return function (type) {
+                    if (type === "foundation-validation") {
+                        return null;
+                    }
+                    return original.apply(this, arguments);
+                };
+            }($.fn.adaptTo));
+            /* END */
+
+            // turn off form validation
+            $("form").attr("novalidate", "true");
+        }
+
+        /**
+         * Temporary fix for CQ-75206 [AEM][Viewer Presets][Editor] FullScreenButton: Redundant style attributes selector in UI
+         * until viewer package can be updated.
+         */
+        function cleanObject(obj) {
+            for (var i in obj) {
+                if (obj.hasOwnProperty(i)) {
+                    delete obj[i];
+                }
+            }
+        }
+
+        /**
+         * CQ-78476: Work-around to allow forcing viewer orientation on new viewer instance. Reaches into
+         * viewer to perform logic similar to 'forceDeviceOrientationMarker', but without calling resize.
+         */
+        function forceViewerOrientationMarker(viewer, marker) {
+            if (viewer.containerId && viewer.setNewOrientationMarker) {
+                viewer.isOrientationMarkerForcedChanged = true;
+                viewer.setNewOrientationMarker(viewer.containerId, marker);
+            }
+        }
+
+        /**
+         * Inject viewer CSS text into page for preview, or read existing CSS
+         * text if no argument is provided.
+         */
+        function injectedViewerCss(cssText) {
+            var id = "s7ve-injectedCss";
+
+            if ($.type(cssText) === "string") {
+                if (_preset) {
+                    _preset.setCss(cssText);
+                }
+            }
+            return injectCss(id, cssText);
+        }
+
+        /**
+         * General utility function to inject CSS text into the page. This
+         * function will always update the same element using the provided
+         * ID. The stored CSS text is returned if no arguments are provided.
+         */
+        function injectCss(id, cssText) {
+            var $style = $("#" + id);
+
+            if (!$style.length) {
+                $style = $("<style></style>").attr("id", id);
+                $(document.head).append($style);
+            }
+            if ($.type(cssText) === "string") {
+                return $style.text(cssText);
+            }
+            return $style.text();
+        }
+
+        function getComponents() {
+            var s7viewer = getViewer();
+
+            if (!s7viewer || !s7viewer.s7params) {
+                return [];
+            }
+            return s7viewer.s7params.getRegisteredComponents();
+        }
+
+        /**
+         * Returns map of components by instance id
+         */
+        function getComponentsById(id) {
+            var components = getComponents(),
+                mapById = {};
+
+            components.forEach(function (cmp) {
+                mapById[cmp.getId()] = cmp;
+            });
+            return id ? mapById[id] : mapById;
+        }
+
+        /**
+         * Returns map of components by type
+         */
+        function getComponentsByType(type) {
+            var components = getComponents(),
+                mapByType = {};
+
+            components.forEach(function (cmp) {
+                (mapByType[cmp.getClassName()] = mapByType[cmp.getClassName()] || []).push(cmp);
+            });
+
+            return type ? mapByType[type] : mapByType;
+        }
+
+        /**
+         * Utility function to resolve current viewer component instances by names
+         */
+        function getComponent(name) {
+            var s7viewer = getViewer(), registered, result;
+
+            if (!s7viewer) {
+                return null;
+            }
+
+            registered = s7viewer.s7params.getRegisteredComponents();
+
+            if (!name) {
+                return registered;
+            }
+            registered.forEach(function (comp) {
+                var compName = comp.getClassName().toLowerCase();
+                if (compName == name) {
+                    result = comp;
+                }
+            });
+            return result;
+        }
+
+        /**
+         * Invoke asset picker and relaod viewer using selected CSS file
+         */
+        function selectCssAsset() {
+            var cssText, cssPath, validatedCssText;
+
+            return s7ve.Util.selectAsset("csspicker", "css").then(function (response) {
+                var asset = response.data && response.data[0];
+
+                cssPath = asset && asset.path;
+
+                if (!cssPath) {
+                    return Promise.reject();
+                }
+                return Granite.HTTP.getContextPath() + cssPath;
+            }).then(s7ve.Util.downloadCss).then(function (text) {
+                var marker = getViewerMarker(),
+                    isMarkerPresent = Boolean(text.match(marker));
+
+                cssText = text;
+
+                if (!isMarkerPresent) {
+                    s7ve.Util.triggerAlert(Granite.I18n.get("Invalid CSS file"), Granite.I18n.get("The selected CSS file does not appear to define styles for this type of viewer."));
+                    return false;
+                }
+                if (_preset.getDirty()) {
+                    return s7ve.Util.triggerAlert(Granite.I18n.get("Discard appearance changes?"), Granite.I18n.get("Importing this CSS file will discard the appearance changes in progress."), true);
+                }
+                return true;
+
+            }).then(function (proceed) {
+                if (!proceed) {
+                    return;
+                }
+
+                // Adjust any relative paths to absolute given location of CSS file
+                validatedCssText = validateCssTextPaths(cssText, cssPath);
+
+                injectedViewerCss(validatedCssText);
+
+                $(document).trigger({
+                    type: s7ve.ViewerEditor.CSS_CHANGED_EVENT,
+                    text: validatedCssText
+                });
+                return loadViewer();
+            });
+        };
+
+        /**
+         * Remove high specifity rules added to page by SDK calls to setCSS
+         */
+        function removeSetCssStyles() {
+            var id = getPreviewElement().attr("id");
+            $('style[data-instance*="' + id + '_"]').remove();
+        }
+
+        /**
+         * Retrieve instance of s7sdk used when initializing ViewerEditor
+         */
+        function getSdk() {
+            return _s7sdk;
+        }
+
+        /**
+         * Set modifier on preset object.
+         * @param {Object} modifier Simple object with keys "name" and "value" representing modifier
+         */
+        function setModifier(modifier) {
+            var modifiers = _preset.getModifiers();
+            modifiers[modifier.name] = modifier.value;
+            _preset.setModifiers(modifiers);
+        }
+
+        /**
+         * Applies media set data on active viewer
+         */
+        function applyMediaSetData(s7viewer) {
+            if (_mediaSetData && s7viewer && s7viewer.mediaSet && s7viewer.mediaSet.setMediaSetData) {
+                s7viewer.mediaSet.setMediaSetData(_mediaSetData);
+            }
+        }
+
+        /**
+         * Sets custom media set on module, does not propagate to viewer until reload
+         */
+        function setMediaSetData(set) {
+            _mediaSetData = set;
+        }
+
+        /**
+         * Clean up and dispose ViewerEditor. This allows subsequent reload by calling 'init'.
+         */
+        function dispose() {
+            if (!_$viewer) {
+                return;
+            }
+
+            var $imagepreview = getPreviewElement(),
+                data = $imagepreview.data(),
+                s7viewer = data.s7viewer;
+
+            if (s7viewer) {
+                if (s7viewer.dispose) {
+                    s7viewer.dispose();
+                }
+                // destroy existing viewer instance
+                $imagepreview.s7preview("destroy");
+                $imagepreview.empty();
+            }
+
+            removeSetCssStyles();
+
+            // Clear out all DOM children
+            _$appearance.empty();
+            _$behavior.empty();
+            _$viewer.empty();
+
+            _$viewer.attr("data-s7type", null);
+            _$viewer.attr("data-s7asset", null);
+            _$viewer.attr("data-s7preset", null);
+            _$viewer.removeData();
+
+            _modifierEditor = null;
+            _styleEditor = null;
+        }
+
+        // return public interface for s7ve.ViewerEditor singleton
+        return {
+            init: init,
+            // return current Viewer Editor application panel instances
+            getModifierEditor: function () {
+                return _modifierEditor;
+            },
+            getStyleEditor: function () {
+                return _styleEditor;
+            },
+            getViewer: getViewer,
+            injectedViewerCss: injectedViewerCss,
+            reloadViewer: loadViewer,
+            setDeviceType: setDeviceType,
+            removeSetCssStyles: removeSetCssStyles,
+            getComponents: getComponents,
+            getComponent: getComponent,
+            fadeInViewer: fadeInViewer,
+            setModifier: setModifier,
+            getPreviewElement: getPreviewElement,
+            getSdk: getSdk,
+            dispose: dispose,
+            getComponentsById: getComponentsById,
+            getComponentsByType: getComponentsByType,
+            validateCssTextPaths: validateCssTextPaths,
+            setMediaSetData: setMediaSetData,
+            selectCssAsset: selectCssAsset
+        };
+
+    }());
+
+    s7ve.ViewerEditor.PHONE_DEVICE = "phoneDevice";
+    s7ve.ViewerEditor.TABLET_DEVICE = "tabletDevice";
+    s7ve.ViewerEditor.DESKTOP_DEVICE = "desktopDevice";
+    s7ve.ViewerEditor.PORTRAIT_ORIENTATION = "s7device_portrait";
+    s7ve.ViewerEditor.LANDSCAPE_ORIENTATION = "s7device_landscape";
+    s7ve.ViewerEditor.CSS_CHANGED_EVENT = "s7ve-ViewerEditor-cssChanged";
+
+    /**
+     * Provide promise object for the rest of the framework to determine when s7sdk has loaded
+     */
+    s7ve.s7sdk_loaded = new window.Promise(function (resolve, reject) {
+        // Reference resolve function so that we can call once viewer has loaded
+        fnSDKLoadedResolve = resolve;
+    });
+	
+	 $(document).one("foundation-contentloaded", function (e) {
+        $('.vpe-deviceActionBar').attr({"aria-label":Granite.I18n.get('Viewer Toolbar'),"role": "region"});
+        $('.vpe-viewerSizer').attr({"aria-label":Granite.I18n.get('Zoomable Image'),"role": "region"});
+        $('.vpe-panel').attr({"aria-label":Granite.I18n.get('Right Panel'),"role": "region"}); 
+     });
+
+}(window, window.s7ve, window.document, window.Granite, window.Granite.$));

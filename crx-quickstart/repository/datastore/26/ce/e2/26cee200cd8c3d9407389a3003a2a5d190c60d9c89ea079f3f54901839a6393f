@@ -1,0 +1,545 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2015 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+/**
+ * globals
+ * -------
+ *
+ * {@see ContextHub.UI}
+ * {@see ContextHub.UI.handlebars}
+ * {@see ContextHub.UI.initialized}
+ * {@see ContextHub.UI.setConfig}
+ * {@see ContextHub.UI.getConfig}
+ * {@see ContextHub.UI.Container}
+ * {@see ContextHub.UI.Container.toggle}
+ * {@see ContextHub.UI.Container.isExpanded}
+ * {@see ContextHub.UI.Container.fullscreen}
+ * {@see ContextHub.UI.Container.visible}
+ * {@see ContextHub.UI.Container.getActiveMode}
+ * {@see ContextHub.UI.Container.selectMode}
+ * {@see ContextHub.UI.Container.render}
+ */
+
+ContextHub.console.log(ContextHub.Shared.timestamp(), '[loading] contexthub.ui - ContextHub.UI.Core.js');
+
+(function($, window) {
+    'use strict';
+
+    window.ContextHub.UI = window.ContextHub.UI || {};
+
+    /**
+     * ContextHub's UI core.
+     */
+    ContextHub.UI = {};
+
+    /**
+     * Definition of UI config.
+     *
+     * @typedef {Object} ContextHubUIConfig
+     * @property {Object} modes - list of modes
+     * @property {Object} handlebarHelpers - handlebar helpers
+     * @property {String} [error] - potential error message
+     */
+
+    /**
+     * Default UI config.
+     *
+     * @type {ContextHubUIConfig}
+     */
+    var defaultConfig = {
+        modes: [],
+        handlebarHelpers: {
+            i18n: ContextHub.I18n.get
+        }
+    };
+
+    /* helpers */
+    var ns = ContextHub.UI;
+    var uiConfig = $.extend(true, {}, defaultConfig);
+
+    /**
+     * Handlebars initialization.
+     */
+    ns.handlebars = Handlebars.create();
+
+    /**
+     * Indicates if ui was initialized.
+     *
+     * @type {Boolean}
+     */
+    ns.initialized = false;
+
+    /**
+     * Sets the initial config for ContextHub UI.
+     *
+     * @param {ContextHubUIConfig} config - config
+     */
+    ns.setConfig = function(config) {
+        var modeId = ContextHub.persistence.getItem(ContextHub.Constants.ACTIVE_UI_MODE);
+
+        /* store the config */
+        uiConfig = $.extend(true, {}, defaultConfig, config);
+
+        /* initialize handlebars helpers */
+        $.each(uiConfig.handlebarHelpers, function(name, handler) {
+            Handlebars.registerHelper(name, handler);
+        });
+
+        /* register modes */
+        $.each(uiConfig.modes, function(idx, mode) {
+            ns.Mode(mode);
+        });
+
+        /* render */
+        ns.initialized = true;
+        ns.Container.selectMode({ modeId: modeId });
+    };
+
+    /**
+     * Returns UI config.
+     *
+     * @return {ContextHubUIConfig} - ui config
+     */
+    ns.getConfig = function() {
+        return $.extend(true, {}, uiConfig);
+    };
+
+    /**
+     * Definition of Container.
+     *
+     * @typedef {Object} ContextHubContainer
+     * @property {jQuery} element - container element
+     */
+
+    /**
+     * UI container.
+     *
+     * @type {ContextHubContainer}
+     */
+    ns.Container = {
+        indicators: {
+            collapsed: 'contexthub-collapsed',
+            fullscreen: 'full-screen',
+            visible: 'is-visible',
+            activeMode: 'active-mode'
+        },
+        element: $()
+    };
+
+    /**
+     * Definition of possible options for {@see #toggle}.
+     *
+     * @typedef {Object} uiToggleOptions
+     * @property {Boolean} [state] - expands if set to true, collapses otherwise
+     * @property {Boolean} [animate] - animates transition if set to true
+     */
+
+    /**
+     * Toggles (or sets) state of UI's appearance (expanded <-> collapsed).
+     *
+     * @param {uiToggleOptions} [options] - options
+     */
+    ns.Container.toggle = function(options) {
+        var config = options || {};
+        var state = (typeof config.state === 'boolean') ? !config.state : undefined;
+        var animate = config.animate === true;
+        var className = ns.Container.indicators.collapsed;
+        var eventName;
+
+        /* toggle / set requested state and check current state */
+        state = $(ns.Container.element).toggleClass(className, state).hasClass(className);
+        eventName = state ? ContextHub.Constants.EVENT_UI_CONTAINER_CLOSED : ContextHub.Constants.EVENT_UI_CONTAINER_OPENED;
+
+        /* is the container visible */
+        var isVisible = ns.Properties.get('VISIBLE');
+
+        if (isVisible) {
+            /* remember the state */
+            ContextHub.persistence.setItem(ContextHub.Constants.IS_CONTAINER_EXPANDED, !state);
+        }
+
+        /* adjust #ContentScrollView margin depending on contexthub ui visibility */
+        var excIframe = window.parent.document.querySelector('.exc-core-sandbox iframe');
+        var contentDoc = excIframe ? excIframe.contentWindow.document : window.parent.document;
+        var contentScrollView = contentDoc.querySelector('#ContentScrollView');
+
+        if (contentScrollView) {
+            var unifiedShellHeight = ns.Properties.get('UNIFIED_SHELL_HEIGHT') || 48;
+            var iframeTopMargin = ns.Properties.get('IFRAME_TOP_MARGIN') || 0;
+            var contextHubHeight = ns.Properties.get('CONTAINER_EXPANDED_HEIGHT') || 0;
+            var shiftBy = excIframe ? unifiedShellHeight : iframeTopMargin;
+
+            if (isVisible && ns.Container.isExpanded()) {
+                shiftBy += contextHubHeight;
+            }
+
+            contentScrollView.style.top = shiftBy + 'px';
+        }
+
+        ContextHub.eventing.trigger(eventName, {}, { defer: 0, _: { state: !state } });
+
+        /* resize iframe */
+        ns.Container.visible({ animate: animate });
+    };
+
+    /**
+     * Returns true if container is expanded.
+     *
+     * @return {Boolean} - true if container is expanded
+     */
+    ns.Container.isExpanded = function() {
+        return !ns.Container.element.hasClass(ns.Container.indicators.collapsed);
+    };
+
+    /**
+     * Makes ContextHub's iframe regular/fullscreen or checks the current state.
+     *
+     * @param {Boolean} [request] - if provided, will make iframe regular/fullscreen, otherwise will return current state
+     */
+    ns.Container.fullscreen = function(request) {
+        var changeState = typeof request === 'boolean';
+        var iframe = ContextHub.UIFrame;
+        var state = false;
+
+        /* set/check the current state */
+        if (iframe) {
+            var className = ns.Container.indicators.fullscreen;
+
+            /* current state */
+            state = changeState ? request : iframe.hasClass(className);
+
+            /* turning off full-screen? hide all modal windows */
+            if (state === false) {
+                $('.coral-Modal').each(function(idx, el) {
+                    var modal = $(el).data('modal');
+
+                    if (modal) {
+                        modal.hide();
+                    } else {
+                        el.hidden = true;
+
+                        $(el).fadeOut(300, 'linear', function() {
+                            $(this).remove();
+                            $('.coral-Modal-backdrop').remove();
+                        });
+                    }
+                });
+            }
+
+            /* change the state */
+            ns.Properties.set('FULL_SCREEN', state);
+            iframe.toggleClass(className, state);
+            $('body').toggleClass(className, state);
+
+            /* resize iframe */
+            ns.Container.visible();
+        }
+
+        return state;
+    };
+
+    /**
+     * Definition of possible options for {@see #visible}.
+     *
+     * @typedef {Object} uiVisibleOptions
+     * @property {Boolean} [state] - if true, will make iframe visible/invisible, otherwise will return current state
+     * @property {Boolean} [animate] - animates transition if set to true
+     */
+
+    /**
+     * Shows/hides ContextHub's iframe or checks the current state.
+     *
+     * @param {uiVisibleOptions} [options] - options
+     */
+    // eslint-disable-next-line complexity
+    ns.Container.visible = function(options) {
+        var config = options || {};
+        var iframe = ContextHub.UIFrame;
+        var state = false;
+
+        /* set/check the current state */
+        if (iframe) {
+            var changeState = typeof config.state === 'boolean';
+            var container = ns.Container.element;
+            var page = ns.Properties.get('PAGE_CONTAINER') || $('');
+            var pageTop = (page.css('position') === 'absolute') ? 'top' : 'padding-top';
+            var className = ns.Container.indicators.visible;
+
+            /* current state */
+            state = changeState ? config.state : ns.Properties.get('VISIBLE');
+
+            /* store current state and check sizes */
+            ns.Properties.set('VISIBLE', !!state);
+
+            /* check sizes after changing state */
+            var iframeTopMargin = ns.Properties.get('IFRAME_TOP_MARGIN');
+            var iframeHeight = ns.Properties.get('IFRAME_HEIGHT');
+            var openerHeight = ns.Properties.get('CONTAINER_OPENER_HEIGHT');
+            var expectedPosition = iframeTopMargin + iframeHeight - openerHeight;
+
+            /* show / hide opener */
+            container.toggleClass('contexthub-without-opener', ns.Properties.get('HIDE_CONTAINER_DRAWER'));
+
+            if ((config.animate !== true) || (state === false)) {
+                /* set iframe's size and position */
+                iframe
+                    .toggleClass(className, state)
+                    .css({
+                        height: iframeHeight,
+                        zIndex: ns.Properties.get('CONTAINER_UI_Z_INDEX'),
+                        top: iframeTopMargin,
+                        display: state ? 'block' : 'none'
+                    });
+
+                /* vertical-align iframe content to the bottom */
+                if (iframeHeight) {
+                    container.css('margin-top', Math.min(0, iframeHeight - container.outerHeight()) + 'px');
+                }
+
+                /* move page content (except when in full screen mode) or about to be closed */
+                if (!ns.Properties.get('FULL_SCREEN') || state === false) {
+                    var excIframe = window.parent.document.querySelector('.exc-core-sandbox iframe');
+
+                    if (!excIframe) {
+                        page
+                            .css('transition', '')
+                            .css(pageTop, expectedPosition);
+                    }
+                }
+            } else {
+                /* set iframe's position and initial size (before transition) */
+                iframe
+                    .toggleClass(className, state)
+                    .css({
+                        height: Math.max(0, parseFloat(page.css(pageTop)) - iframeTopMargin),
+                        zIndex: ns.Properties.get('CONTAINER_UI_Z_INDEX'),
+                        top: iframeTopMargin,
+                        display: state ? 'block' : 'none'
+                    });
+
+                /* transition watcher */
+                var timestamp;
+                var previousValue;
+
+                /* transition end handler */
+                var onTransitionComplete = function() {
+                    /* set final position */
+                    iframe
+                        .css({
+                            height: iframeHeight,
+                            top: iframeTopMargin,
+                            display: state ? 'block' : 'none'
+                        });
+                };
+
+                /* element observer */
+                var observer = function() {
+                    var now = new Date().getTime();
+                    var value = parseFloat(page.css(pageTop));
+
+                    /* watched element changed its position */
+                    if (previousValue !== value) {
+                        var newHeight = Math.max(0, Math.floor(Math.abs(value)) - iframeTopMargin);
+
+                        if (newHeight) {
+                            container.css('margin-top', Math.ceil(Math.min(0, newHeight - container.outerHeight() + openerHeight)) + 'px');
+                        }
+
+                        iframe.css('height', Math.ceil(newHeight));
+                        previousValue = value;
+                        timestamp = now;
+                    }
+
+                    /* kill observer after 100ms of idle state */
+                    if ((now - (timestamp || now)) < 100) {
+                        requestAnimationFrame(observer);
+                    } else {
+                        onTransitionComplete();
+                    }
+                };
+
+                /* start transition */
+                observer();
+
+                page
+                    .css('transition', pageTop + ' 0.2s linear')
+                    .css(pageTop, expectedPosition);
+            }
+        }
+
+        return state;
+    };
+
+    /**
+     * Returns active mode.
+     *
+     * @return {ContextHub.UI.Mode|null} - active mode or null
+     */
+    ns.Container.getActiveMode = function() {
+        var modeId = ContextHub.persistence.getItem(ContextHub.Constants.ACTIVE_UI_MODE);
+        var annotation = ns.Container.element.data(ns.Container.indicators.activeMode);
+        var mode = ns.ModeManager.getMode(modeId);
+
+        /* if container annotation does not match currently loaded module - return null as it's invalid state */
+        if (annotation && (modeId !== annotation)) {
+            mode = null;
+        }
+
+        return mode;
+    };
+
+    /**
+     * Definition of possible options for {@see #selectMode}.
+     *
+     * @typedef {Object} selectModeOptions
+     * @property {String} modeId - mode id
+     * @property {Boolean} [repaint] - indicates if container should be repaint
+     * @property {Boolean} [animate] - animates transition if set to true
+     */
+
+    /**
+     * Selects requested mode.
+     *
+     * @param {selectModeOptions} options - options
+     */
+    ns.Container.selectMode = function(options) {
+        var config = options || {};
+        var modeId = config.modeId;
+        var repaint = config.repaint === true;
+        var animate = config.animate === true;
+        var activeMode = ns.Container.getActiveMode();
+        var annotation = ns.Container.element.data(ns.Container.indicators.activeMode);
+        var mode = ns.ModeManager.getMode(modeId);
+
+        /* if requested mode doesn't exist, load first one from the list if container annotation is empty (nothing is loaded yet) */
+        if (!mode && !annotation) {
+            mode = ns.ModeManager.getAllModes().shift();
+        }
+
+        /* if mode doesn't exist or it's already loaded */
+        if (!mode || (activeMode && (activeMode.getId() === mode.getId()))) {
+            return;
+        }
+
+        /* switch to a given mode */
+        var id = mode.getId();
+
+        /* remember the choice and trigger event */
+        ContextHub.persistence.setItem(ContextHub.Constants.ACTIVE_UI_MODE, id);
+        ns.Container.element.data(ns.Container.indicators.activeMode, id);
+        ContextHub.eventing.trigger(ContextHub.Constants.EVENT_UI_MODE_SELECTED, {}, { defer: 0, _: { mode: mode } });
+
+        /* render the content */
+        ContextHub.UI.Container.render({ repaint: repaint, animate: animate });
+    };
+
+    /**
+     * Definition of possible options for storeUpdated property.
+     *
+     * @typedef {Object} storeUpdatedOptions
+     * @property {String} storeName - store name
+     * @property {Object} updatedKeys - list of the keys that were updated
+     */
+
+    /**
+     * Definition of possible options for {@see #render}.
+     *
+     * @typedef {Object} uiRenderOptions
+     * @property {ContextHub.UI.Mode|ContextHub.UI.ModuleRenderer} [update] - what to update
+     * @property {storeUpdatedOptions} [storeUpdated] - info about the store which got updated
+     * @property {Boolean} [repaint] - indicates if container should be repaint (update parameter will be ignored)
+     * @property {Boolean} [animate] - animates transition if set to true
+     */
+
+    /**
+     * Renders current mode (and modules) of ContextHub's UI. Update parameter defines what only should be updated: whole mode or module
+     * (of a current mode if any).
+     *
+     * @param {uiRenderOptions} [options] - options
+     */
+    ns.Container.render = function(options) {
+        /* todo: respect update, storeUpdated and repaint properties, create "more ..." button */
+        var config = options || {};
+        var animate = config.animate === true;
+
+        /* do nothing if UI was not yet initialized */
+        if (ns.initialized !== true) {
+            return;
+        }
+
+        /* helpers */
+        var container = ns.Container.element;
+        var containerContent = container.find('.contexthub-content');
+        var activeMode = ns.Container.getActiveMode();
+        var instance = activeMode ? ns.ModeManager.getModeRenderer(activeMode.getType()) : null;
+
+        /**
+         * @type {jQuery}
+         */
+        var newContent = $('<div>');
+
+        /* reset button */
+        newContent.append(ns.handlebars.compile(ContextHub.UI.Templates.BUTTON_RESET)());
+
+        /* is mode renderer registered? */
+        if (instance) {
+            var allModes = ns.ModeManager.getAllModes();
+            var modeRenderer = instance.getRenderer();
+
+            /* create mode selector buttons if there is more than one mode */
+            if (allModes.length > 1) {
+                var activeModeId = activeMode.getId();
+                var modesList = $(ns.Templates.BUTTON_GROUP);
+                var modeTemplate = ns.handlebars.compile(ns.Templates.MODE);
+
+                $.each(allModes, function(idx, mode) {
+                    mode.details.isActive = (mode.details.id === activeModeId) ? 'active-mode' : '';
+                    modesList.append(modeTemplate(mode.details));
+                });
+
+                newContent.append(modesList);
+            }
+
+            /* render modules of a current mode */
+            /* todo: pass storeUpdatedOptions to render only what's needed */
+            var scrollableWrapper = $('<div>')
+                .addClass('module-container')
+                .append(modeRenderer.renderModules(activeMode));
+
+            newContent.append(scrollableWrapper);
+        }
+
+        /* animate transition? */
+        if (animate) {
+            /* fade out */
+            container.addClass('reloading').hasClass('reloading');
+
+            /* wait for animation to complete */
+            window.setTimeout(function() {
+                /* replace the content and fade in */
+                containerContent.html(newContent.children());
+                window.setTimeout(function() { container.removeClass('reloading'); }, 10);
+            }, 100);
+        } else {
+            containerContent.html(newContent.children());
+        }
+
+        /* announce that ui was rendered */
+        ContextHub.eventing.trigger(ContextHub.Constants.EVENT_UI_RENDERED, {}, { defer: 0 });
+    };
+
+})(ContextHubJQ, window);

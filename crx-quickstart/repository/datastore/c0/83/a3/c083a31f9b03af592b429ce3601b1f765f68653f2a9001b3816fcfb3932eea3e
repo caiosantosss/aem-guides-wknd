@@ -1,0 +1,455 @@
+/*
+ ADOBE CONFIDENTIAL
+
+ Copyright 2022 Adobe Systems Incorporated
+ All Rights Reserved.
+
+ NOTICE:  All information contained herein is, and remains
+ the property of Adobe Systems Incorporated and its suppliers,
+ if any.  The intellectual and technical concepts contained
+ herein are proprietary to Adobe Systems Incorporated and its
+ suppliers and may be covered by U.S. and Foreign Patents,
+ patents in process, and are protected by trade secret or copyright law.
+ Dissemination of this information or reproduction of this material
+ is strictly forbidden unless prior written permission is obtained
+ from Adobe Systems Incorporated.
+ */
+(function(document, $) {
+    "use strict";
+
+    var ASSET_DETAILS = "/assetdetails.html";
+
+    $(document).on("foundation-contentloaded", function(e) {
+        if (Granite.Toggles.isEnabled("FT_ASSETS-23002") || !Granite.Toggles.isEnabled("FT_ASSETS-13661")) {
+            // if the toggle isn't enabled, quite and use legacy dialog instead
+            // use a new file for the new dialog so that we can retire the old dialog easily
+            // by remove the reprocessassets.js afterwards
+            return;
+        }
+
+        var assetMetadata = "div.foundation-collection-assets-meta";
+        var assetMetadataType = "foundationCollectionMetaType";
+        var reprocessAssetActivator = ".dam-asset-reprocessassets-action-activator";
+
+        $(document).off("click", reprocessAssetActivator).on("click", reprocessAssetActivator, function(e) {
+            var assets = [];
+            var folders = [];
+            var selectedItems = $(".foundation-selections-item");
+
+            if (selectedItems.length > 0) {
+                selectedItems.each(function() {
+                    // get selection type
+                    var type = $(this).find(assetMetadata).data(assetMetadataType);
+                    // add asset
+                    if (type === "asset") {
+                        assets.push($(this).get(0).getAttribute("data-foundation-collection-item-id"));
+                    }
+                    // add folder
+                    if (type === "directory") {
+                        folders.push($(this).get(0).getAttribute("data-foundation-collection-item-id"));
+                    }
+                });
+            } else {
+                // path name
+                var pathname = location.pathname;
+
+                // assetdetails get asset path
+                if (pathname.indexOf(ASSET_DETAILS) > -1) {
+                    // get asset path
+                    var path = pathname.substring(pathname.indexOf(ASSET_DETAILS) + ASSET_DETAILS.length);
+                    path = decodeURIComponent(path);
+                    // add asset
+                    assets.push(path);
+                }
+            }
+
+            showProcessDialog(assets, folders);
+        });
+    });
+
+    function showProcessDialog(assets, folders) {
+        // create dialog
+        $("#reprocessAssetDialog").each(function() {
+            var $this = $(this);
+            $this.hide();
+            $this.remove();
+        });
+        var dialog = new Coral.Dialog().set({
+            id: "reprocessAssetDialog",
+            header: {
+                innerHTML: Granite.I18n.get("Reprocess Assets")
+            }
+        });
+        document.body.appendChild(dialog);
+
+        var dialogContent = dialog.content;
+        dialogContent.style = "min-width: 400px;";
+
+        addProcessMessage(dialogContent, assets, folders);
+
+        var contentForm = dialogContent.appendChild(document.createElement("form"));
+        contentForm.action = "/bin/asynccommand";
+        contentForm.method = "POST";
+        contentForm.encType = "application/x-www-form-urlencoded";
+
+
+        addProcessTypeOptions(contentForm);
+
+        addAdvancedOptions(contentForm);
+
+        addHiddenValues(contentForm, assets, folders);
+
+        addFooter(dialog, contentForm);
+
+        validateAllOptions();
+
+        dialog.show();
+    }
+
+    function addProcessMessage(dialogContent, assets, folders) {
+        dialogContent.appendChild(function() {
+            var para = document.createElement("p");
+            para.innerHTML = Granite.I18n.get("You are going to reprocess the following:");
+            return para;
+        }());
+        if (folders.length > 1) {
+            dialogContent.appendChild(new Coral.Alert().set({
+                variant: "warning",
+                header: {
+                    innerHTML: Granite.I18n.get("Notice")
+                },
+                content: {
+                    innerHTML: Granite.I18n.get("Process job could only take at most one folder, " +
+                        "only one folder as below will be submitted")
+                }
+            }));
+        }
+
+        dialogContent.appendChild(function() {
+            var processArray = [];
+            if (folders.length > 0) {
+                processArray.push(folders[0]);
+            }
+            processArray = processArray.concat(assets);
+            var para = document.createElement("p");
+            processArray.forEach(function(item) {
+                if (item !== undefined) {
+                    item = item.substring(item.lastIndexOf("/") + 1);
+                    para.appendChild(document.createTextNode(item));
+                    para.appendChild(document.createElement("br"));
+                }
+            });
+            return para;
+        }());
+    }
+
+    function addProcessTypeOptions(contentForm) {
+        contentForm.appendChild(function() {
+            var radio = new Coral.Radio().set({
+                label: {
+                    innerHTML: "Full Process"
+                },
+                name: "processType",
+                value: "full",
+                checked: true
+            });
+            radio.on("change", validateAllOptions);
+            return radio;
+        }());
+
+        addDivider(contentForm);
+
+        contentForm.appendChild(function() {
+            var radio = new Coral.Radio().set({
+                label: {
+                    innerHTML: "Advanced"
+                },
+                name: "processType",
+                value: "advanced"
+            });
+            radio.dataset["trackingelement"] = "reprocess-assets-advanced";
+            radio.on("change", validateAllOptions);
+            return radio;
+        }());
+    }
+
+    function addAdvancedOptions(contentForm) {
+        // 1. asset compute checkbox
+        addDivider(contentForm);
+        addCheckbox(contentForm, "runAssetCompute", Granite.I18n.get("Asset Profiles"));
+
+        // profile select
+        var profileSelect = new Coral.Select().set({
+            name: "profile-select",
+            disabled: true
+        });
+        contentForm.appendChild(profileSelect);
+
+        profileSelect.items.add({
+            content: {
+                innerHTML: Granite.I18n.get("Default")
+            },
+            value: "full-process",
+            selected: true,
+            disabled: false
+        });
+
+        $.ajax({
+            url: "/content/dam.nuiprofiles.json?all=true",
+            cache: false
+        }).done(function(data) {
+            contentForm.appendChild(function() {
+                var profileHidden = document.createElement("input");
+                profileHidden.type = "hidden";
+                profileHidden.name = "profiles";
+                profileHidden.disabled = true;
+                profileHidden.value = JSON.stringify(data);
+                return profileHidden;
+            }());
+
+            var categoryArr = [];
+            data.forEach(function(item) {
+                var category = item.category;
+                if (category !== "standard" && !categoryArr.includes(category)) {
+                    categoryArr.push(category);
+                }
+            });
+            categoryArr.forEach(function(item) {
+                profileSelect.items.add({
+                    content: {
+                        innerHTML: item
+                    },
+                    value: item,
+                    disabled: false
+                });
+            });
+            // enable the select box after the profile data is loaded
+            $("coral-select[name=profile-select]")[0].disabled = false;
+        });
+
+        // 2. dm process checkbox
+        if ($("input[name=dynamic-media-enabled]")[0]) {
+            addDivider(contentForm);
+            addCheckbox(contentForm, "runDMProcess", Granite.I18n.get("Dynamic Media Process"));
+
+            contentForm.appendChild(function() {
+                return new Coral.Tooltip().set({
+                    content: {
+                        innerHTML: Granite.I18n.get("Checking this box does not override the Dynamic Media sync " +
+                            "setting set at the folder level")
+                    },
+                    variant: "info",
+                    target: "[name='runDMProcess']",
+                    placement: "right",
+                    interaction: "on"
+                });
+            }());
+        }
+
+        // 3. post process workflow checkbox
+        addDivider(contentForm);
+        addCheckbox(contentForm, "runPostProcess", Granite.I18n.get("Post-processing Workflow"));
+    }
+
+    function addHiddenValues(contentForm, assets, folders) {
+        contentForm.appendChild(function() {
+            var dom = document.createElement("input");
+            dom.type = "hidden";
+            dom.name = "operation";
+            dom.value = "PROCESS";
+            return dom;
+        }());
+
+        contentForm.appendChild(function() {
+            var dom = document.createElement("input");
+            dom.type = "hidden";
+            dom.name = "description";
+            var description = "Process-";
+            if (folders.length > 0) {
+                description += folders[0];
+            } else if (assets.length > 0) {
+                description += assets[0];
+            }
+            description += "-" + new Date().getTime();
+            dom.value = description;
+            return dom;
+        }());
+
+        if (folders.length > 0) {
+            contentForm.appendChild(function() {
+                var dom = document.createElement("input");
+                dom.type = "hidden";
+                dom.name = "folder";
+                dom.value = folders[0];
+                return dom;
+            }());
+        }
+
+        assets.forEach(function(item) {
+            contentForm.appendChild(function() {
+                var dom = document.createElement("input");
+                dom.type = "hidden";
+                dom.name = "asset";
+                dom.value = item;
+                return dom;
+            }());
+        });
+    }
+
+    function addFooter(dialog, contentForm) {
+        var footer = dialog.footer;
+        footer.appendChild(function() {
+            var cancel = new Coral.Button();
+            cancel.id = "reprocessCancel";
+            cancel.label.textContent = Granite.I18n.get("Cancel");
+            cancel.on("click", function() {
+                dialog.hide();
+            });
+            return cancel;
+        }());
+
+        footer.appendChild(function() {
+            var reprocessButton = new Coral.Button();
+            reprocessButton.id = "reprocessConfirm";
+            reprocessButton.label.textContent = Granite.I18n.get("Reprocess");
+            reprocessButton.variant = "warning";
+            reprocessButton.on("click", function() {
+                onSubmit(dialog, contentForm);
+            });
+            return reprocessButton;
+        }());
+    }
+
+    function addDivider(contentForm) {
+        contentForm.appendChild(function() {
+            var p = document.createElement("p");
+            p.style = "margin: 0.2rem;";
+            return p;
+        }());
+    }
+
+    function addCheckbox(contentForm, name, label) {
+        contentForm.appendChild(function() {
+            var checkbox = new Coral.Checkbox();
+            checkbox.name = name;
+            checkbox.value = "true";
+            checkbox.checked = "true";
+            checkbox.label.innerHTML = label;
+            checkbox.style = "padding-left: 22px;";
+            checkbox.on("change", validateAllOptions);
+            return checkbox;
+        }());
+    }
+
+    function validateAllOptions() {
+        var advancedOptions = [
+            $("coral-checkbox[name=runAssetCompute]")[0],
+            $("coral-checkbox[name=runDMProcess]")[0],
+            $("coral-checkbox[name=runPostProcess]")[0]
+        ];
+        var profileSelect = $("coral-select[name=profile-select]")[0];
+
+        if ($("coral-radio[name=processType] :checked")[0].value === "full") {
+            toggleInputList(advancedOptions, false);
+            toggleInputList([ profileSelect ], false);
+        } else {
+            toggleInputList(advancedOptions, true);
+            toggleInputList([ profileSelect ], $("coral-checkbox[name=runAssetCompute]")[0].checked);
+        }
+
+        validateSubmitButton();
+    }
+
+    function validateSubmitButton() {
+        if ($("coral-radio[name=processType] :checked")[0].value === "advanced" &&
+            !$("coral-checkbox[name=runAssetCompute]")[0].checked &&
+            !$("coral-checkbox[name=runPostProcess]")[0].checked) {
+            if ($("coral-checkbox[name=runDMProcess]")[0]) {
+                if ($("coral-checkbox[name=runDMProcess]")[0].checked) {
+                    $("#reprocessConfirm")[0].disabled = false;
+                } else {
+                    $("#reprocessConfirm")[0].disabled = true;
+                }
+            } else {
+                $("#reprocessConfirm")[0].disabled = true;
+            }
+        } else {
+            $("#reprocessConfirm")[0].disabled = false;
+        }
+    }
+
+    function toggleInputList(inputList, enable) {
+        for (var i = 0; i < inputList.length; i++) {
+            if (inputList[i]) {
+                if (enable) {
+                    inputList[i].show();
+                    inputList[i].disabled = false;
+                } else {
+                    inputList[i].hide();
+                    inputList[i].disabled = true;
+                }
+            }
+        }
+    }
+
+    function onSubmit(dialog, contentForm) {
+        var processType = $("coral-radio[name=processType] :checked")[0].value;
+        var profileCategory = $("coral-select[name=profile-select]")[0].value;
+        var isRunAssetCompute = $("coral-checkbox[name=runAssetCompute]")[0].checked;
+        if (processType === "advanced" && isRunAssetCompute && profileCategory !== "full-process") {
+            var profilesData = JSON.parse($("input[name=profiles]")[0].value);
+            profilesData.forEach(function(item) {
+                if (profileCategory === item.category) {
+                    contentForm.appendChild(function() {
+                        var profileHidden = document.createElement("input");
+                        profileHidden.type = "hidden";
+                        profileHidden.name = "profile";
+                        profileHidden.value = JSON.stringify(item.profile);
+                        return profileHidden;
+                    }());
+                }
+            });
+        }
+        $("coral-select[name=profile-select]")[0].disabled = true;
+
+        var data = $(contentForm).serialize();
+        submitAsyncProcessRequest(data);
+        dialog.hide();
+    }
+
+    function submitAsyncProcessRequest(data) {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        $.ajax({
+            url: "/bin/asynccommand",
+            type: "post",
+            data: data,
+            success: function() {
+                ui.clearWait();
+                var successMessage = Granite.I18n.get("Your async process task has been initiated. " +
+                    "You will be notified on successful completion.");
+                ui.prompt(Granite.I18n.get("Success"), successMessage, "success", [{
+                    text: Granite.I18n.get("OK"),
+                    primary: true
+                }]);
+            },
+            error: function() {
+                ui.clearWait();
+                new Coral.Dialog().set({
+                    id: "reprocessAssetErrorDialog",
+                    variant: "error",
+                    header: {
+                        innerHTML: Granite.I18n.get("Error")
+                    },
+                    content: {
+                        innerHTML: "<p>" + Granite.I18n.get("Failed to submit reprocess job.") + "</p>"
+                    },
+                    footer: {
+                        innerHTML: "<button is='coral-button' variant='primary' " +
+                            "coral-close size='M'>" + Granite.I18n.get("Ok") + "</button>"
+                    }
+                }).show();
+            }
+        });
+    }
+})(document, Granite.$);

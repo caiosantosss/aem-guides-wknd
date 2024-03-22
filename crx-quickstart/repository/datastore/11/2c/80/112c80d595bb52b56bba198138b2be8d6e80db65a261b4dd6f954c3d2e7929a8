@@ -1,0 +1,335 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2015 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+
+--%><%@page session="false" import="com.adobe.cq.launches.api.Launch,
+                                    com.adobe.cq.launches.api.LaunchManager,
+                                    com.adobe.granite.references.Reference,
+                                    com.adobe.granite.ui.components.AttrBuilder,
+                                    com.day.cq.commons.Language,
+                                    com.day.cq.commons.date.RelativeTimeFormat,
+                                    com.day.cq.wcm.api.LanguageManager,
+                                    com.day.cq.wcm.api.Page,
+                                    com.day.cq.commons.inherit.HierarchyNodeInheritanceValueMap,
+                                    com.day.cq.commons.LanguageUtil,
+                                    com.day.cq.wcm.commons.WCMUtils,
+                                    com.day.cq.workflow.exec.Workflow,
+                                    com.day.cq.workflow.status.WorkflowStatus,
+                                    org.apache.jackrabbit.JcrConstants,
+                                    org.apache.sling.api.resource.Resource,
+                                    org.apache.sling.api.resource.ResourceUtil,
+                                    org.apache.sling.api.resource.ValueMap,
+                                    org.apache.sling.api.SlingHttpServletRequest,
+                                    com.day.cq.i18n.I18n,
+                                    org.slf4j.Logger,
+                                    java.net.URLEncoder,
+                                    java.util.*,
+                                    javax.jcr.AccessDeniedException,
+                                    javax.jcr.RepositoryException,
+                                    javax.jcr.Node"%><%
+%><%@include file="/libs/granite/ui/global.jsp" %><%
+
+    AttrBuilder attr = new AttrBuilder(slingRequest, xssAPI);
+    Reference reference = (Reference) request.getAttribute("granite.ui.references.reference");
+    if (reference == null) {
+        return;
+    }
+
+    LanguageManager languageManager = sling.getService(LanguageManager.class);
+    Resource targetRes = reference.getTarget();
+    Page target = targetRes.adaptTo(Page.class);
+    if (target == null) {
+        return;
+    }
+
+    attr.addOther("type", reference.getType());
+    attr.addOther("path", targetRes.getPath());
+    attr.addOther("parent-path", targetRes.getParent().getPath());
+    attr.addClass("granite-references-item");
+
+    // case-sensitive language code as it appears in the node name of the language root - e.g. "de",
+    // "ch_de" or "zh-Hk" - this is important as we rely on the node name later on
+    Resource targetLanguageRoot = languageManager.getLanguageRootResource(targetRes, true);
+    String targetLanguageCode = getDisplayLanguageCode(languageManager, targetLanguageRoot, log);
+
+    // best effort to determine the title:
+    ValueMap languageRootProperties = targetLanguageRoot.adaptTo(ValueMap.class);
+    String targetLanguageTitle = languageRootProperties.get("jcr:title", targetLanguageCode);
+    
+    targetLanguageTitle = LanguageUtil.getLanguage(targetLanguageCode).getLocale().getDisplayName();
+    Resource sourceLanguageRoot = languageManager.getLanguageRootResource(reference.getSource(), true);
+    String sourceLanguageCode = getDisplayLanguageCode(languageManager, sourceLanguageRoot, log);
+
+    // language code of current language copy
+    attr.addOther("language-code", targetLanguageCode);
+    attr.addOther("language-code-title", targetLanguageTitle);
+    // language code of the source language copy (this language is being used as the
+    // source when updating a language copy}
+    attr.addOther("source-language-code", sourceLanguageCode);
+
+    // translation project
+    final HierarchyNodeInheritanceValueMap hierarchyNodeInheritanceValueMap = new HierarchyNodeInheritanceValueMap(target.getContentResource());
+    String translationProjectPaths[] = hierarchyNodeInheritanceValueMap.getInherited("cq:translationProject", String[].class);
+    String latestTranslationProjectPath = (translationProjectPaths != null) ? translationProjectPaths[translationProjectPaths.length-1] : null;
+    attr.addOther("translation-project", latestTranslationProjectPath);
+
+    // translation status
+    String translationStatus = null;
+    long lastTranslationUpdate = 0;
+    if (targetRes != null) {
+        final Resource targetContent = targetRes.getChild(JcrConstants.JCR_CONTENT);
+        if (targetContent != null) {
+            final ValueMap properties = ResourceUtil.getValueMap(targetContent);
+            if (null != properties && properties.containsKey("cq:translationStatus")) {
+                translationStatus = properties.get("cq:translationStatus", String.class);
+                attr.addOther("translation-status", translationStatus);
+            }
+            if (null != properties && properties.containsKey("cq:lastTranslationUpdate")) {
+                Calendar lastTranslationUpdateProperty = properties.get("cq:lastTranslationUpdate", Calendar.class);
+                if (lastTranslationUpdateProperty != null) {
+                    lastTranslationUpdate = lastTranslationUpdateProperty.getTimeInMillis();
+                }
+            }
+        }
+    }
+
+    long lastUpdate = 0;
+    if (target.getLastModified() != null) {
+        lastUpdate = target.getLastModified().getTimeInMillis();
+        attr.addOther("last-update", String.valueOf(lastUpdate));
+    }
+
+    // assemble the workflows this resource and its launches (if any)
+    // are currently running in
+    Set<String> workflowIds = new HashSet<String>();
+
+    // workflows of the resource itself
+    WorkflowStatus status = resource.adaptTo(WorkflowStatus.class);
+    List<Workflow> workflows = status.getWorkflows(true);
+    for (Workflow workflow : workflows) {
+        workflowIds.add(workflow.getWorkflowModel().getId());
+    }
+
+    // workflows of the launches of this resource
+    LaunchManager launchManager = resourceResolver.adaptTo(LaunchManager.class);
+    Launch latestLaunch = null;
+    int iLaunchCount = 0;
+    for (Launch launch : launchManager.getLaunches(resource)) {
+        status = launch.getRootResource().adaptTo(WorkflowStatus.class);
+        workflows = status.getWorkflows(true);
+        for (Workflow workflow : workflows) {
+            workflowIds.add(workflow.getWorkflowModel().getId());
+        }
+        final Resource launchContent = launch.getResource().getChild(JcrConstants.JCR_CONTENT);
+        if (launchContent != null) {
+            final ValueMap properties = ResourceUtil.getValueMap(launchContent);
+            if (properties.get("isUpdateLanguageCopy", false)) {
+                iLaunchCount++;
+                if (latestLaunch == null || latestLaunch.getCreated().compareTo(launch.getCreated()) < 0) {
+                    latestLaunch = launch;
+                }
+            }
+        }
+    }
+    attr.addOther("launch-count", String.format("%d",iLaunchCount));
+    if (latestLaunch != null) {
+        attr.addOther("launch-path", latestLaunch.getResource().getPath());
+        attr.addOther("launch-promoted", String.valueOf(latestLaunch.getLastPromoted() != null));
+    }
+
+    // assemble JSON array string of workflow ids
+    String workflowStr = "";
+    Iterator<String> iterator = workflowIds.iterator();
+    while (iterator.hasNext()) {
+        workflowStr += "\"" + iterator.next() + "\"";
+        if (iterator.hasNext()) {
+            workflowStr += ",";
+        }
+    }
+    // add it as a data attribute
+    attr.addOther("workflows", "[" + workflowStr + "]");
+
+    // true if this language copy references itself
+    boolean isSelfReference = reference.getSource().getPath().equals(reference.getTarget().getPath());
+
+    // "Reveal in Sites" button attributes
+    AttrBuilder revealInSitesAttrs = new AttrBuilder(slingRequest, xssAPI);
+    revealInSitesAttrs.addClass("granite-Reference-Action granite-Reference-Action--reveal");
+
+    // "Compare" button attributes
+    AttrBuilder compareAttrs = new AttrBuilder(slingRequest, xssAPI);
+    compareAttrs.addClass("granite-Reference-Action granite-Reference-Action--compare");
+
+    // "Update" button attributes
+    AttrBuilder updateAttrs = new AttrBuilder(slingRequest, xssAPI);
+    updateAttrs.addClass("update");
+    if (workflowIds.size() > 0 || true) {
+        updateAttrs.add("hidden", "hidden");
+    }
+
+    // "Go to Projects" button attributes
+    AttrBuilder goToProjectsAttrs = new AttrBuilder(slingRequest, xssAPI);
+    goToProjectsAttrs.addClass("gotoprojects");
+    if (latestTranslationProjectPath == null) {
+        goToProjectsAttrs.add("hidden", "hidden");
+    }
+
+%><section <%= attr.build() %>>
+    <div class="info">
+        <div class="right">
+            <div class="badge"><%= xssAPI.encodeForHTML(targetLanguageCode) %></div>
+            <coral-icon icon="alert" size="S"></coral-icon>
+        </div>
+        <div class="left">
+            <h4 class="granite-references-title">
+                <%= xssAPI.encodeForHTML(target.getTitle() == null ? target.getName() : target.getTitle() ) %>
+            </h4>
+            <% if (lastUpdate > 0) { %>
+                <div class="granite-references-subtitle"><%= xssAPI.encodeForHTML(getTranslationStatus(translationStatus, lastUpdate, lastTranslationUpdate, slingRequest, log)) %></div>
+            <% } %>
+        </div>
+    </div>
+    <% if (!isSelfReference) { %>
+        <div class="actions" style="display: block;">
+            <button is="coral-button" block <%= revealInSitesAttrs.build() %>><%= i18n.get("Reveal in Sites") %></button>
+            <a is="coral-anchorbutton" block <%= compareAttrs.build() %> href="<%= xssAPI.getValidHref("/mnt/overlay/wcm/core/content/sites/diffresources.html" + reference.getTarget().getPath() + "?item=" + reference.getSource().getPath() + "&sideBySide&diffDisabled")%>"><%= i18n.get("Compare to Master") %></a>
+            <button is="coral-button" block <%= updateAttrs.build() %>><%= i18n.get("Update") %></button>
+            <button is="coral-button" block <%= goToProjectsAttrs.build() %>><%= i18n.get("Go to Projects") %></button>
+            <% if (latestLaunch != null) { %>
+                <coral-accordion variant="default">
+                    <coral-accordion-item>
+                        <coral-accordion-item-label>
+                            <%= i18n.get("Launch") %>
+                        </coral-accordion-item-label>
+                        <coral-accordion-item-content>
+                            <div class="subtitle"><%= xssAPI.filterHTML(latestLaunch.getTitle()) %></div>
+                            <button is="coral-button" block class="granite-Reference-Action open-languagecopy-launch-page"><%= i18n.get("Open Page") %></button>
+                            <a is="coral-anchorbutton" block <%= compareAttrs.build() %> href="<%= xssAPI.getValidHref("/mnt/overlay/wcm/core/content/sites/diffresources.html" + latestLaunch.getResource().getPath() + reference.getTarget().getPath() + "?item=" + reference.getTarget().getPath() + "&sideBySide")%>"><%= i18n.get("Compare to Previous") %></a>
+                            <button is="coral-button" block class="granite-Reference-Action promote-languagecopy-launch"><%= i18n.get("Promote") %></button>
+                        </coral-accordion-item-content>
+                    </coral-accordion-item>
+                </coral-accordion>
+            <% } %>
+        </div> <%
+    } %>
+</section>
+
+<%!
+    private boolean areLanguageCodesEqual(String lang1, String lang2) {
+        //convert both to language with hyphens
+        String lang1WithHyphen = lang1.replace("_", "-");
+        String lang2WithHyphen = lang2.replace("_", "-");
+        return  lang1WithHyphen.equalsIgnoreCase(lang2WithHyphen);
+    }
+
+    private String getDisplayLanguageCode(LanguageManager languageManager, Resource targetLanguageRoot, Logger log) {
+        String languageCode = getLanguageRootLocale(languageManager, targetLanguageRoot, true, log).toString();
+        String targetLanguageRootName = targetLanguageRoot.getName();
+        if (areLanguageCodesEqual(languageCode, targetLanguageRootName)) {
+            languageCode = targetLanguageRootName;
+        }
+        return languageCode;
+    }
+
+    private String getLanguageRootLocale(LanguageManager languageManager, Resource res, boolean respectContent,
+            Logger log) {
+        if (null == res) {
+            return null;
+        }
+
+        if (respectContent) {
+            // try property based approach
+            if (res != null && !res.getPath().equals("/")) {
+                ValueMap props = res.adaptTo(ValueMap.class);
+                if (props.get(languageManager.IS_LANGUAGE_ROOT_PROP_NAME, false)) {
+                    String iso = props.get(languageManager.ISO_PROP_NAME, "");
+                    Language language = iso.isEmpty() ? null : LanguageUtil.getLanguage(iso);
+                    if (language == null) {
+                        log.warn("Invalid iso code stored in {}: {}", res.getPath(), iso);
+                    } else {
+                        return language.getLocale().toString();
+                    }
+                }
+            }
+        }
+
+        // if not found, try to determine the language from the resource's name
+        Language language = LanguageUtil.getLanguage(res.getName());
+        if (language != null) {
+            return res.getName();
+        }
+
+        return null;
+    }
+
+    private String getTranslationStatus(String status, long lastUpdate, long lastTranslationUpdate, SlingHttpServletRequest request, Logger log) {
+        String translationStatusI18N = null;
+        try {
+            RelativeTimeFormat rtf = new RelativeTimeFormat("r", request.getResourceBundle(request.getLocale()));
+            I18n i18n = new I18n(request);
+            if (status == null) {
+                translationStatusI18N = i18n.get("Updated {0}", "Last update", rtf.format(lastUpdate, Calendar.getInstance().getTimeInMillis(), true));
+                return translationStatusI18N;
+            }
+
+            switch(status) {
+               case "DRAFT":
+                  translationStatusI18N = i18n.get("Updated {0}", "Last update", rtf.format(lastUpdate, Calendar.getInstance().getTimeInMillis(), true));
+                  break;
+               case "TRANSLATION_IN_PROGRESS":
+                  translationStatusI18N = i18n.get("Translation in progress");
+                  break;
+               case "READY_FOR_REVIEW":
+                  translationStatusI18N = i18n.get("Ready for review");
+                  break;
+               case "PENDING_LAUNCH_PROMOTION":
+                  translationStatusI18N = i18n.get("Pending launch promotion");
+                  break;
+               case "APPROVED":
+                  if (lastTranslationUpdate > 0) {
+                    translationStatusI18N = i18n.get("Translated {0}", "Translation update", rtf.format(lastTranslationUpdate, Calendar.getInstance().getTimeInMillis(), true));
+                  } else {
+                    translationStatusI18N = i18n.get("Updated {0}", "Last update", rtf.format(lastUpdate, Calendar.getInstance().getTimeInMillis(), true));
+                  }
+                  break;
+               case "SUBMITTED":
+                  translationStatusI18N = i18n.get("Submitted for translation");
+                  break;
+               case "COMMITTED_FOR_TRANSLATION":
+                  translationStatusI18N = i18n.get("Committed for translation");
+                  break;
+               case "TRANSLATED":
+                  translationStatusI18N = i18n.get("Translation in progress");
+                  break;
+               case "ERROR_UPDATE":
+                  translationStatusI18N = i18n.get("Error in translation process");
+                  break;
+               case "REJECTED":
+                  translationStatusI18N = i18n.get("Translation in progress");
+                  break;
+               case "UNKNOWN_STATE":
+                  translationStatusI18N = i18n.get("Unknown State");
+                  break;
+               default:
+                  translationStatusI18N = i18n.get("Updated {0}", "Last update", rtf.format(lastUpdate, Calendar.getInstance().getTimeInMillis(), true));
+                  break;
+            }
+        } catch (Exception e) {
+            translationStatusI18N = "";
+            log.error("Error in localizing translation status {}", status, e);
+        }
+        return translationStatusI18N;
+    }
+%>

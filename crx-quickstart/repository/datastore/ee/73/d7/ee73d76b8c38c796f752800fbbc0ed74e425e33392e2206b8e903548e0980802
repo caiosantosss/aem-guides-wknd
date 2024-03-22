@@ -1,0 +1,439 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.UserInfo
+ * @extends CQ.Ext.Toolbar
+ * Toolbar item to display the current user name and allow user actions
+ * like editing user properties and impersonation.
+ * @constructor
+ * @param {Object} config The configuration object
+ */
+CQ.UserInfo = CQ.Ext.extend(CQ.Ext.Toolbar, {
+
+    /**
+     * @cfg {String/Object} passwordDialog
+     * (optional) The dialog to set a new password for the current user.
+     * This may be a configuration object or a URL to request the
+     * configuration object from.
+     * <p>Example:
+     * <pre><code>
+{
+    "jcr:primaryType": "cq:Panel",
+    "items": {
+        "jcr:primaryType": "cq:WidgetCollection",
+        "field1": {
+            "xtype":"password",
+            "fieldLabel": "Password",
+            "name": "./rep:password",
+        }
+}
+       </pre></code></p>
+     * <p>Defaults to a dialog with two {@link CQ.form.Password Password} fields,
+     * The first one for the new password, the second one to confirm it.</p>
+     */
+
+    /**
+     * indicates if the current request is impersonated
+     * @private
+     */
+    impersonated:false,
+
+    constructor : function(config) {
+        config = CQ.Util.applyDefaults(config, {
+            "id": "cq-userinfo",
+            "menu": {
+                "items": []
+            },
+            "sudoables" : {
+                "listWidth":150,
+                "typeAhead":true,
+                "triggerAction":"all",
+                "inputType":"text",
+                "displayField":"name",
+                "stateful":false,
+                "width":150,
+                "minChars":0,
+                "editable":true,
+                "tpl" :new CQ.Ext.XTemplate(
+                        '<tpl for=".">',
+                            '<div class="cq-impersonators-list">',
+                                '<div class="cq-impersonators-list-entry">',
+                                    '{[CQ.shared.XSS.getXSSTablePropertyValue(values, \"name\") == "" ? values.id : CQ.shared.XSS.getXSSTablePropertyValue(values, \"name\")]}',
+                                '</div>',
+                            '</div>',
+                        '</tpl>'),
+                "itemSelector" :"div.cq-impersonators-list"
+            },
+            "columnWidth": 0.2,
+            "passwordDialog": CQ.UserInfo.PASSWORD_DIALOG_CFG
+        });
+        CQ.UserInfo.superclass.constructor.call(this, config);
+    },
+
+    initComponent: function() {
+        var cfg = this.initialConfig;
+        var user = CQ.User.getCurrentUser();
+        this.impersonated = user.isImpersonated();
+        if (!cfg.iconCls) {
+            cfg.iconCls = this.impersonated ? "impersonateIcon" : "userIcon";
+            if (CQ.Ext.isIE6) {
+                cfg.iconCls += "-ie6";
+            }
+        }
+        var menu = new CQ.Ext.menu.Menu(cfg.menu);
+
+        if (this.impersonated) {
+            menu.addMenuItem({
+                "iconCls":"revertIcon",
+                "cls": "cq-userinfo-revert",
+                "text":CQ.I18n.getMessage("Revert to self"),
+                "handler":this.revertHandler
+            });
+        } else {
+
+            menu.addMenuItem({
+                "text":CQ.I18n.getMessage("Sign out"),
+                "cls": "cq-userinfo-logout",
+                "handler": this.logout
+            });
+            menu.addSeparator();
+
+            if (user.getUserID()!="admin") {
+                menu.addMenuItem({
+                    "text":CQ.I18n.getMessage("Set Password"),
+                    "cls": "cq-userinfo-pwd",
+                    "handler":this.setPassword,
+                    "scope":this
+                });
+            }
+            menu.addMenuItem({
+                "text":CQ.I18n.getMessage("Notification Inbox"),
+                "cls": "cq-userinfo-inbox",
+                "handler":this.openNotificationInbox
+            });
+            menu.addMenuItem({
+                "text":CQ.I18n.getMessage("Preferences"),
+                "cls": "cq-userinfo-props",
+                "handler":this.openUserProperties
+            });
+
+            menu.addSeparator();
+            menu.addMenuItem({
+                "iconCls":"impersonateIcon",
+                "text":CQ.I18n.getMessage("Impersonate as:"),
+                "hideOnClick":false,
+                "style":{"cursor":"default"},
+                "canActivate":false
+            });
+            var cb = cfg.sudoables;
+            cb = CQ.Util.applyDefaults(cb, {
+                "style": {"cursor":"text"},
+                "cls": "cq-userinfo-impersonate",
+                "triggerScrollOffset": 80,
+                "listeners": {
+                    "expand": {
+                        fn:function(combo) {
+                            var p = menu.getEl().getPositioning();
+                            if (p && combo.list) {
+                                combo.list.setStyle("z-index", p["z-index"] + 6);
+                            }
+
+                            /* onscoll loader */
+                            var scroller = $CQ(combo.innerList.dom);
+
+                            if (scroller && !scroller.scrollerInitialized) {
+                                scroller.scrollerInitialized = true;
+
+                                scroller.on('scroll', function(e) {
+                                    if (combo.refreshing || combo.loading || (combo.store.getCount() >= combo.store.getTotalCount())) {
+                                        return;
+                                    }
+
+                                    if ((this.scrollTop > 0) && ((this.scrollTop + this.clientHeight + combo.triggerScrollOffset) >= this.scrollHeight)) {
+                                        if (!combo.moreStore) {
+                                            combo.moreStore = new CQ.Ext.data.GroupingStore({
+                                                "proxy": new CQ.Ext.data.HttpProxy({
+                                                    "url": combo.store.proxy.url,
+                                                    "method": combo.store.proxy.conn.method
+                                                }),
+                                                "reader": combo.store.reader,
+                                                "listeners": {
+                                                    "load": function() {
+                                                        if (combo.loadingIndicator) {
+                                                            combo.loadingIndicator.remove();
+                                                            combo.loadingIndicator = undefined;
+                                                        }
+
+                                                        for (var i = 0; i < combo.moreStore.getCount(); i++) {
+                                                            var record = combo.moreStore.getAt(i);
+                                                            combo.store.add(record);
+                                                        }
+
+                                                        combo.refreshing = false;
+                                                    }
+                                                },
+                                                "dataView": this
+                                            });
+                                        }
+
+                                        var lastParams = combo.store.lastOptions ? combo.store.lastOptions.params : combo.store.baseParams;
+                                        var moreParams = $CQ.extend({}, lastParams, {
+                                            'limit': combo.store.baseParams ? combo.store.baseParams.limit : 25,
+                                            'start': combo.store.getCount()
+                                        });
+
+                                        combo.loadingIndicator = combo.innerList.createChild({'tag': 'div', "cls": "loading-indicator", 'html': CQ.I18n.getMessage("Loading...")});
+                                        combo.refreshing = true;
+                                        combo.moreStore.load({
+                                            "params": moreParams
+                                        });
+                                    }
+                                });
+                            }
+                        }
+                    },
+                    'select':{
+                        fn:this.sudoHandler,
+                        scope:this
+                    }
+                }
+            });
+            if (!cb.store) {
+                cb.store = new CQ.Ext.data.Store({
+                    "autoLoad":false,
+                    "proxy": new CQ.Ext.data.HttpProxy({
+                        "url":user.getHome() + ".impersonators.html",
+                        "method":"POST"
+                    }),
+                    "baseParams": {
+                        "_charset_":"utf-8",
+                        "start": 0,
+                        "limit": 25
+                    },
+                    "reader": new CQ.Ext.data.JsonReader({
+                        "root": "authorizables",
+                        "totalProperty": "total",
+                        "id": "authorizableId",
+                        "fields": ["name", CQ.shared.XSS.getXSSPropertyName("name"), "authorizableId"]
+                    })
+                });
+            }
+            ;
+            var a = new CQ.Ext.Panel({
+                "border":false,
+                "cls":"impersonateMenu",
+                "items":[new CQ.Ext.form.ComboBox(cb)]});
+            menu.addItem(a);
+            if (CQ.Ext.isIE10) {
+                menu.autoWidth = true;
+            }
+        }
+        this.items = [ "->", {
+            "iconCls":cfg.iconCls,
+            "text": CQ.shared.Util.ellipsis(user.getUserName(true), 120, true),
+            "menu": menu,
+            "xtype": "tbbutton"
+        }];
+        // IE 7 has problems with correctly positioning the menu if right aligned, so as
+        // a workaround, we're using left alignment here (which looks not too good on
+        // large screens, but keeps it at least workable).
+        if (CQ.Ext.isIE6 || CQ.Ext.isIE7) {
+            this.items.splice(0, 1);
+        }
+        CQ.UserInfo.superclass.initComponent.call(this);
+    },
+
+    /**
+     * Opens a dialog to set a new password.
+     * Adds the User's home as action for this dialog.
+     * In case the Dialog was successfully submitted, the User is logged in with
+     * with the new password.
+     * The dialog has to have a {@link CQ.Ext.data.Field form field} with the name
+     * of <i>rep:password</i> that contains the new password.
+     * The value of this field will be used to log in the User.
+     * @private
+     */
+    setPassword: function() {
+        var user = CQ.User.getCurrentUser();
+        if (!(user && user.getHome())) {
+            CQ.Notification.notify(CQ.I18n.getMessage("Failure"),CQ.I18n.getMessage("User not available"));
+            return;
+        }
+
+        var config = this.initialConfig.passwordDialog;
+        CQ.Util.applyDefaults(config, {
+            formUrl: CQ.HTTP.noCaching(CQ.HTTP.externalize(user.getHome() + ".rw.html"))
+        });
+
+        var dialog = CQ.WCM.getDialog(config);
+        if (!dialog) {
+            CQ.Notification.notify(CQ.I18n.getMessage("Failure"),CQ.I18n.getMessage("Dialog not available"));
+            return;
+        }
+        dialog.setElId(CQ.Util.createId("cq-userinfo-passworddialog"));
+        dialog.success = function() {
+            CQ.Notification.notify(CQ.I18n.getMessage("Success"),CQ.I18n.getMessage("Password changed"));
+        };
+        dialog.failure = function(form, action) {
+            try {
+                var response = CQ.HTTP.buildPostResponseFromHTML(action.response.responseText);
+                CQ.Notification.notifyFromResponse(response, null, true);
+            } catch (e) {
+                CQ.Notification.notify(CQ.I18n.getMessage("Failure"),CQ.I18n.getMessage("Could not set Password"));
+            }
+        };
+        dialog.show();
+    },
+
+    /**
+     * Handler starting impersonation.
+     * Used as handler to construct an {@CQ.Ext.Action Action}
+     *
+     * @param {Object} box
+     * @param {Object} rec representing the user to impersonate to
+     * @private
+     */
+    sudoHandler: function(box, rec /*, row */) {
+        CQ.Ext.MessageBox.confirm(
+                CQ.I18n.getMessage("Impersonation"),
+                CQ.I18n.getMessage("Do you want to impersonate as {0}?",
+                        rec.get(CQ.shared.XSS.getXSSPropertyName("name")) ? rec.get(CQ.shared.XSS.getXSSPropertyName("name")) : rec.id),
+                function(but) {
+                    if (but == "yes") {
+                        var admin = CQ.Ext.getCmp(window.CQ_SiteAdmin_id);
+                        if (admin) admin.mask();
+                        CQ.User.getCurrentUser().sudoAs(rec.id);
+                    }
+                },
+                this
+                );
+    },
+
+    /**
+     * Handler to end impersonation.
+     * Used as handler to construct an {@CQ.Ext.Action Action}
+     * @private
+     */
+    revertHandler: function(/*box, rec, row*/) {
+        CQ.Ext.MessageBox.confirm(
+                CQ.I18n.getMessage("Impersonation"),
+                CQ.I18n.getMessage("Do you want to end impersonation to {0}?", CQ.User.getUserName(true)),
+                function(but) {
+                    if (but == "yes") {
+                        var admin = CQ.Ext.getCmp(window.CQ_SiteAdmin_id);
+                        if (admin) admin.mask();
+                        CQ.User.getCurrentUser().revertSelf();
+                    }
+                },
+                this
+                );
+    },
+
+    /**
+     * Handler to logout.
+     * Used as handler to construct an {@CQ.Ext.Action Action}
+     * @private
+     */
+    logout: function() {
+        CQ.User.logout();
+    },
+
+    /**
+     * Handler for opening the notification inbox
+     * @private
+     */
+    openNotificationInbox: function() {
+        CQ.Util.reload(window, CQ.HTTP.externalize("/libs/wcm/core/content/inbox.html"));
+    },
+
+    /**
+     * Handler for opening the notification inbox
+     * todo: since 5.2 Sling allows to post to selectors, so it would be possible
+     * todo: to post to CQ.User.getHome() with some selector and get rid of the
+     * todo: call to the proxy
+
+     * @private
+     */
+    openUserProperties: function() {
+        var dialog = CQ.WCM.getDialog("/libs/cq/security/content/tools/userProperties.infinity.json");
+        dialog.loadContent("/libs/cq/security/preferences/proxy");
+
+        var admin = CQ.Ext.getCmp(window.CQ_SiteAdmin_id);
+        if (admin) dialog.on("beforesubmit", function(){admin.mask();});
+        dialog.success = function(){ CQ.Util.reload(); };
+        dialog.failure = function(){
+            if (admin) admin.unmask();
+            CQ.Ext.Msg.alert(
+                CQ.I18n.getMessage("Error"),
+                CQ.I18n.getMessage("Could not set user properties."));
+        };
+        dialog.show();
+    }
+});
+
+CQ.Ext.reg("userinfo", CQ.UserInfo);
+
+/**
+ * Provide a default dialog to change the password
+ * @see CQ.UserInfo.setPassword()
+ * @static
+ * @private
+ */
+CQ.UserInfo.PASSWORD_DIALOG_CFG = {
+    "width":400,
+    "height":230,
+    "jcr:primaryType": "cq:Dialog",
+    "title":CQ.I18n.getMessage("Set Password"),
+    "params": {
+        "_charset_":"utf-8"
+    },
+    "items": {
+        "jcr:primaryType": "cq:Panel",
+        "items": {
+            "jcr:primaryType": "cq:WidgetCollection",
+            "currentPassword": {
+                "inputType":"password",
+                "fieldLabel":CQ.I18n.getMessage("Current Password"),
+                "name":":currentPassword",
+                "cls":"cq-userinfo-currentpassword",
+                "allowBlank":false,
+                "msgTarget":"under"
+            },
+            "password": {
+                "inputType":"password",
+                "fieldLabel":CQ.I18n.getMessage("Password"),
+                "name":"rep:password",
+                "cls":"cq-userinfo-password1",
+                "allowBlank":false,
+                "msgTarget":"under"
+            },
+            "password2": {
+                "inputType":"password",
+                "fieldLabel":CQ.I18n.getMessage("Confirm Password"),
+                "name":"rep:password",
+                "cls":"cq-userinfo-password2",
+                "allowBlank":false,
+                "msgTarget":"under",
+                "validator":function(value) {
+                    var pwd = this.ownerCt.items.get(1).getRawValue();
+                    if (pwd === value) {
+                        return true;
+                    }
+                    return CQ.I18n.getMessage("Provided passwords do not match.");
+                }
+            }
+        }
+    },
+    "okText":CQ.I18n.getMessage("Set"),
+    "buttons": CQ.Dialog.OKCANCEL
+};

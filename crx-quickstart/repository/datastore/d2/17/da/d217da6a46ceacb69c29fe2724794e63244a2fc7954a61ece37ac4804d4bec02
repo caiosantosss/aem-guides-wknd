@@ -1,0 +1,628 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+  "use strict";
+
+  var template = ns.annotate.Theme.templates.sketch;
+
+  /**
+   *
+   * @class
+   */
+  ns.annotate.Sketch = function (options, annotation) {
+    var self = {}, o;
+
+    /**
+     * self.el DOM of the annotation mark, if present
+     *
+     * @type {jQuery}
+     */
+    self.annotation = (annotation) ? annotation : undefined;
+
+    /**
+     * Annotation sketch initialization.
+     */
+    self._init = function () {
+      var dimensions, sketchData, startPos;
+
+      // Set up the options object, mixing passed options with defaults
+      self.options = o = $.extend(true, {}, ns.annotate.Sketch.defaults, options);
+
+      self.$sketchArea = $(template.SKETCH_AREA); // Use sketchArea as target for $.Annotation.
+      self.annotation.$wrapper.prepend(self.$sketchArea);
+
+      if (o.data) { // There is sketch data, use it to initialize.
+        sketchData = $.parseJSON(o.data);
+        dimensions = sketchData.dimension;
+        self._resize(dimensions, false); // Resize sketch area
+        self.sketch = $(self.$sketchArea).annotation(o.aOptions); // Create the $.Annotation (not to be confused here with ns.annotate.Annotation)
+        self.sketch.open();
+        self.sketch.fromJson(o.data);
+        self.setVisible(true);
+        self._setupUI(); // Draw the manipulation UI
+        self._recolor(o.color); // Use the annotation color, the mark and sketch should use the same.
+        startPos = {
+          "x": self.annotation.getPosElOffset().left + o.offsetX,
+          "y": self.annotation.getPosElOffset().top + o.offsetY
+        };
+        self._reposition(startPos); // Reposition the UI
+        self.sketch.$canvas.off(); // Remove canvas events
+        self._addListeners(); // Setup UI listeners
+
+      } else { // Otherwise, start drawing a new sketch
+        self._resize({"w": self.$sketchArea.parent().width(), "h": self.$sketchArea.parent().height()}); // Resize sketch area
+        self._startSketch();
+        
+        // On clicking outside of sketch area, cancel the sketch mode
+        channel.not(ns.annotate.Theme.attributes.SKETCH_AREA).on('mousedown.outside-sketch-area', self._cancelNewSketch);
+      }
+
+      ns.annotate.ItemsController.add(self); // Register with annotation items controller
+    };
+
+    /**
+     * Cancel the new sketch
+     */
+    self._cancelNewSketch = function() {
+      self.$sketchArea.off();
+      self.sketch.$canvas.off(); // Remove canvas events
+      ns.annotate.ItemsController.setAllEnabled(true);
+      self.destroy();
+      channel.off("mousedown.outside-sketch-area");
+    };
+
+    self._startSketch = function() {
+      if (self.sketch) {
+        self.sketch.$el.off("annotateEnd");
+        self.sketch.clear();
+        self.sketch.close();
+      }
+
+      self.sketch = $(self.$sketchArea).annotation(o.aOptions);
+
+      // We're doing this because the $.Annotation is setting prototype properties
+      // that are maintained for all sketches. close action clears out the properties.
+      // TODO - file bug on $.Annotation
+      self.sketch.open();
+      self.sketch.close();
+
+      self.sketch.open();  // Create the canvas
+      if (self.sketch.$canvas) {
+        self.sketch.$canvas.css('z-index', (2 * ns.annotate.Theme.MAXIMUM_ANNOTATION_ITEMS)); // Ensure canvas sits on top of sketches and marks
+      }
+      self.sketch.start(); // Start the drawing, listens for user input on the canvas
+      self.sketch.damCanvas.color = o.color; // // TODO - Shouldn't set the color of damCanvas here. Cleaner to have an initial color option to the jQuery plugin.
+
+      // Set up annotation end event handling
+      self.sketch.$el.on("annotateEnd", function() {
+        self._onSketchEnd();
+      });
+
+      // Handle canvas clicks - start a new annotation sketch
+      if (self.sketch.$canvas) {
+        self.sketch.$canvas.on('click', function() {
+          if (self.sketch) {
+            self._startSketch();
+          }
+        });
+      }
+    };
+
+    /**
+     * Repositions the annotation sketch based on its stored offset
+     * */
+    self.reposition = function() {
+      var posElOffset, pos;
+
+      if (self.annotation) {
+        posElOffset = self.annotation.getPosElOffset();
+        pos = {
+          "x": Math.round(self.options.offsetX + posElOffset.left),
+          "y": Math.round(self.options.offsetY + posElOffset.top)
+        };
+
+        self._reposition(pos, false);
+      }
+    };
+
+    /**
+     * Reposition the annotation sketch relative to its offset parent
+     * @param {Object} pos {x:?,y:?} The new annotation sketch position
+     * @return {Boolean} reposition success status
+     * */
+    self._reposition = function(pos) {
+      if (self.$sketch) {
+        $(self.$sketch).css({
+          top: pos.y,
+          left: pos.x
+        });
+        return true;
+      }
+      return false;
+    };
+
+    /**
+     * Calculates the offset of the sketch relative to the position element of the annotation
+     * @param {Object} pos {x:?,y:?} The new annotation sketch position
+     * @return {Object} the calculated offset
+     * */
+    self._calcOffset = function(pos) {
+      var posElOffset, offset;
+
+      if (self.annotation) {
+        posElOffset = self.annotation.getPosElOffset();
+        offset = {
+          "x": Math.round((pos.x - posElOffset.left) * 10) / 10,
+          "y": Math.round((pos.y - posElOffset.top) * 10) / 10
+        };
+      }
+
+      return offset;
+    };
+
+    /**
+     * Set the offset internal properties and persist
+     * @param {Object} offset {x:?,y:?} The offset from the position element
+     * @param {Boolean} [persist] Persist the new offset?
+     * */
+    self._setOffset = function(offset, persist) {
+      o.offsetX = offset.x;
+      o.offsetY = offset.y;
+
+      // Persist the new position for the annotation sketch
+      if (persist !== false) {
+        ns.annotate.persistence.moveAnnotationSketch(self, {"x":o.offsetX,"y":o.offsetY});
+      }
+    };
+
+    /**
+     * Resize the annotation sketch to the passed dimensions
+     * @param {Object} [dim] {w:?,h:?} The new annotation sketch dimensions
+     * */
+    self._resize = function(dim) {
+      var dimensions = {
+        "width": dim.w,
+        "height": dim.h
+      };
+
+      if (self.sketch) {
+        self.sketch.dimension = dim;
+        if (self.sketch.$canvas) { // Canvas is only accessible if the sketch is open
+          self.sketch.$canvas.css(dimensions);
+          self.sketch.$canvas.attr(dimensions);
+        }
+      }
+
+      if (self.$sketchArea) { // Also resize sketch area
+        self.$sketchArea.css(dimensions);
+      }
+    };
+
+    /**
+     * Re-draw the sketch based on new sketch data
+     * @param {Object} [sketchData] new sketch data
+     * */
+    self._resketch = function(sketchData) {
+      self.setVisible(false);
+      self.sketch.fromJson(JSON.stringify(sketchData));
+      self.setVisible(true);
+    };
+
+    /**
+     * Change the color of this sketch
+     * @param {String} [color] New color of the sketch (hex)
+     * */
+    self._recolor = function(color) {
+      var sketchData = $.parseJSON(self.sketch.toJson()),
+        shape;
+
+      if (sketchData.shapes && sketchData.shapes.length > 0) {
+        shape = sketchData.shapes[0];
+        if (shape.fillStyle !== undefined) {
+          sketchData.shapes[0].fillStyle = color;
+        }
+        if (shape.strokeStyle !== undefined) {
+          sketchData.shapes[0].strokeStyle = color;
+        }
+        self._resketch(sketchData);
+      }
+    };
+
+    /**
+     * Attach the manipulation user interface
+     * @private
+     * */
+    self._setupUI = function() {
+      self.$sketchArea.add(self.sketch.$canvas).wrapAll(template.SKETCH);
+      self.$sketch = self.sketch.$canvas.parent();
+    };
+
+    /**
+     * Adapt the sketch (crop to shape bounding box and resize)
+     * @param {Object} sketchData The sketch data to adapt
+     * @return {Object} The new sketch - includes sketch data and offset position
+     * */
+    self._adaptSketchData = function(sketchData) {
+      var newSketch = {},
+        sbb = {}, // Current shape bounding box (of shape points)
+        bb = {},  // Computed bounding box
+        dbb = {}, // Domain bounding box
+        dim = {},
+        shape = {},
+        bleed, dp0, dp1, ctl, ctlD,
+        xMax, xMin, yMax, yMin, t, xTemp, yTemp;
+
+      if (sketchData && sketchData.shapes && sketchData.shapes.length > 0) {
+        shape = sketchData.shapes[0];
+
+        if (shape.type === "ellipse") {
+          bleed = 3; // TODO - this has knowledge of / dependence on the $.Annotations implementation
+
+          sbb = shape.box;
+          sbb.w = Math.abs(sbb.x1 - sbb.x0);
+          sbb.h = Math.abs(sbb.y1 - sbb.y0);
+          dim = {w: sbb.w + (2 * bleed), h: sbb.h + (2 * bleed)};
+
+          bb = {x0: bleed, x1: dim.w - bleed, y0: bleed, y1: dim.h - bleed};
+        } else if (shape.type === "arrow") {
+          bleed = 20; // TODO - this has knowledge of / dependence on the $.Annotations implementation
+
+          ctl = {
+            x: Math.floor(shape.box.x0 + shape.box.ctlx),
+            y: Math.ceil(shape.box.y0 + shape.box.ctly)
+          };
+
+          // Place some points on the curve to find the max and min values
+          for (var i = 1; i < 9; i++) {
+            t = i/10;
+            xTemp = (shape.box.x0 - 2*ctl.x + shape.box.x1) * t*t + (-2*shape.box.x0 + 2*ctl.x)*t + shape.box.x0;
+            yTemp = (shape.box.y0 - 2*ctl.y + shape.box.y1) * t*t + (-2*shape.box.y0 + 2*ctl.y)*t + shape.box.y0;
+
+            if (xMax == null) {
+              xMax = xTemp;
+              yMax = yTemp;
+              xMin = xTemp;
+              yMin = yTemp;
+            }
+
+            xMax = Math.max(xTemp, xMax);
+            xMin = Math.min(xTemp, xMin);
+            yMax = Math.max(yTemp, yMax);
+            yMin = Math.min(yTemp, yMin);
+          }
+
+          sbb = {
+            x0: Math.min(shape.box.x0, shape.box.x1, xMin),
+            x1: Math.max(shape.box.x0, shape.box.x1, xMax),
+            y0: Math.min(shape.box.y0, shape.box.y1, yMin),
+            y1: Math.max(shape.box.y0, shape.box.y1, yMax)
+          };
+
+          // Calculate some extra space for the added arrow
+          if (Math.abs(ctl.x - shape.box.x1) > 10) {
+            if (ctl.x < shape.box.x1) {
+              sbb.x1 += 20;
+            } else {
+              sbb.x0 -= 20;
+            }
+          } else {
+            sbb.x1 += 10;
+            sbb.x0 -= 10;
+          }
+          if (Math.abs(ctl.y - shape.box.y1) > 10) {
+            if (ctl.y < shape.box.y1) {
+              sbb.y1 += 20;
+            } else {
+              sbb.y0 -= 20;
+            }
+          } else {
+            sbb.y1 += 10;
+            sbb.y0 -= 10;
+          }
+
+          sbb.w = Math.abs(sbb.x1 - sbb.x0);
+          sbb.h = Math.abs(sbb.y1 - sbb.y0);
+          dim = {w: sbb.w + (2 * bleed), h: sbb.h + (2 * bleed)};
+
+          bb = {
+            x0: shape.box.x0 - sbb.x0 + bleed,
+            x1: shape.box.x1 - sbb.x0 + bleed,
+            y0: shape.box.y0 - sbb.y0 + bleed,
+            y1: shape.box.y1 - sbb.y0 + bleed
+          };
+
+          ctlD = self._V2DMapping({x:shape.box.ctlx, y:shape.box.ctly}, dim);
+          dbb.ctlx = ctlD.x;
+          dbb.ctly = ctlD.y;
+        }
+
+        dp0 = self._V2DMapping({x:bb.x0, y:bb.y0}, dim);
+        dp1 = self._V2DMapping({x:bb.x1, y:bb.y1}, dim);
+
+        dbb.x0 = dp0.x;
+        dbb.x1 = dp1.x;
+        dbb.y0 = dp0.y;
+        dbb.y1 = dp1.y;
+
+        // Setup the data
+        sketchData.shapes[0].box = bb;
+        sketchData.shapes[0].domainBox = dbb;
+        sketchData.dimension = dim;
+
+        newSketch = {
+          "data" : sketchData,
+          "offsetX" : sbb.x0 - bleed,
+          "offsetY" : sbb.y0 - bleed
+        };
+
+        return newSketch;
+      }
+    };
+
+    /* EVENTING
+     -------------*/
+
+    /**
+     * Add listeners.
+     * */
+    self._addListeners = function() {
+      self._removeListeners();
+
+      if (self.$sketch) {
+        if (o.draggable) {
+          self._dragAction = new Coral.DragAction(self.$sketch[0]);
+          self._dragAction.scroll = true;
+
+          self.$sketch[0].addEventListener('coral-dragaction:dragstart', self._onDragStart);
+          self.$sketch[0].addEventListener('coral-dragaction:dragend', self._onDragEnd);
+        }
+      }
+    };
+
+    self._onDragStart = function() {
+      self.setActive(true);
+    };
+
+    self._onDragEnd = function() {
+      var dropPosition = { x : self.$sketch[0].offsetLeft, y : self.$sketch[0].offsetTop };
+      self._setOffset(self._calcOffset(dropPosition), true);
+      ns.annotate.Layer.handleItemsBeyondVisibleArea();
+    };
+
+    /**
+     * Remove listeners.
+     * */
+    self._removeListeners = function() {
+      $(self.$sketch).off();
+
+      if (self.$sketch) {
+        self.$sketch[0].removeEventListener('coral-dragaction:dragstart', self._onDragStart);
+        self.$sketch[0].removeEventListener('coral-dragaction:dragend', self._onDragEnd);
+      }
+    };
+
+    /**
+     * Finished-sketching handler
+     * */
+    self._onSketchEnd = function() {
+      var sketchData = $.parseJSON(self.sketch.toJson()),
+        newSketch = self._adaptSketchData(sketchData); // Adapt the sketch data (crop and resize)
+
+      self.$sketchArea.off();
+      self._resize(newSketch.data.dimension); // Do the actual resize
+      self._setupUI(); // Attach the manipulation UI
+      self._setOffset(self._calcOffset({"x": newSketch.offsetX, "y": newSketch.offsetY}), false);
+      self.reposition();
+      o.data = newSketch.data; // Set up the new data
+      self._resketch(o.data); // Redraw sketch from adapted sketch data
+      ns.annotate.persistence.createAnnotationSketch(self);
+      self.sketch.$canvas.off(); // Remove canvas events
+      self._addListeners(); // Setup UI listeners
+      o.data = newSketch.data; // Cache the new data
+
+      channel.off("mousedown.outside-sketch-area");
+    };
+
+    /**
+     * After annotation sketch create handler.
+     * @param [data] The server-returned annotation sketch data
+     */
+    self.afterCreate = function(data) {
+      o.path = $(data).find("#Path").text(); // Grab the new path
+      ns.annotate.ItemsController.setAllEnabled(true); /* TODO - items controller call */
+      ns.annotate.ItemsController.setActive(self); /* TODO - items controller call */
+    };
+
+    /**
+     * Executes the afterdelete listener.
+     * */
+    self.afterDelete = function () {
+      self.destroy();
+    };
+    /**
+     * Removes all of the associated DOM elements,
+     * destroying children and associated data and events.
+     * @private
+     */
+    self.unrender = function() {
+      if (self.sketch) {
+        self.sketch.close();
+      }
+      if (self.$sketch) {
+        self.$sketch.remove();
+      }
+      if (self.$sketchArea) {
+        self.$sketchArea.remove();
+      }
+    };
+
+    /**
+     * Un-renders and destroys this annotation's references.
+     */
+    self.destroy = function () {
+      self.unrender();
+
+      channel.off("keyup.delete-sketch-area");
+
+      // Remove all references
+      self.$sketch = null;
+      self.$sketchArea = null;
+      self.sketch = null;
+
+      ns.annotate.ItemsController.remove(self);
+    };
+
+    /* STATES
+     -------------*/
+
+    /**
+     * Sets the annotation sketch to be visible or hidden.
+     * @param {Boolean} [condition] show or hide this annotation sketch
+     * @return {Object} this annotation sketch
+     */
+    self.setVisible = function (condition) {
+      if (self.sketch) {
+        if (condition === true || condition === undefined) {
+          self.sketch.show();
+        } else if (condition === false) {
+          self.sketch.hide();
+        }
+      }
+    };
+
+    /**
+     * Sets the annotation to be enabled or disabled.
+     * @param {Boolean} [condition] enable or disable this annotation
+     * @return {Object} this annotation
+     */
+    self.setEnabled = function (condition) {
+      if (condition === true || condition === undefined) {
+        self.isDisabled = false;
+        self._addListeners();
+        if (self.$sketch != undefined) {
+          self.$sketch.toggleClass(ns.annotate.Theme.attributes.CLASS_DISABLED, self.isDisabled);
+        }
+        
+      } else if (condition === false) {
+        self.isDisabled = true;
+        self._removeListeners();
+        if (self.$sketch != undefined) {
+          self.$sketch.toggleClass(ns.annotate.Theme.attributes.CLASS_DISABLED, self.isDisabled); 
+        }        
+      }
+
+      return self;
+    };
+
+    /**
+     * Sets the annotation sketch as active or inactive.
+     * @param {Boolean} [condition] activate or deactivate this annotation sketch
+     * @return {Object} this annotation sketch
+     */
+    self.setActive = function(condition) {
+      if (condition === true || condition === undefined) {
+        self.isActive = true;
+        self.$sketch.addClass(ns.annotate.Theme.attributes.CLASS_ACTIVE);
+        self.annotation.setOverlaySelected(true);
+        ns.annotate.ItemsController.setActive(self); /* TODO */
+
+        // deactivate active sketch on click outside
+        channel.off('mousedown.outside-active-sketch');
+        channel.on('mousedown.outside-active-sketch', function(event) {
+          if (!self.$sketch[0].contains(event.target)) {
+            self.setActive(false);
+            channel.off('mousedown.outside-active-sketch');
+          }
+        });
+
+        channel.off("keyup.delete-sketch-area");
+        channel.on("keyup.delete-sketch-area", function (e) {
+          if ( (e.keyCode === 46 || e.keyCode === 8) && self.sketch) {
+            ns.annotate.actions.doDeleteSketch(self);
+          }
+        });
+
+      } else if (condition === false) {
+        self.isActive = false;
+        self.$sketch.removeClass(ns.annotate.Theme.attributes.CLASS_ACTIVE);
+        self.annotation.setOverlaySelected(false);
+
+        channel.off("keyup.delete-sketch-area");
+      }
+
+      return self;
+    };
+
+    /**
+     * Set the z-index of the annotation mark
+     * @param {String|Number} [ZIndex] valid css ZIndex property
+     * @return {Object} this annotation sketch
+     * */
+    self.setZIndex = function (ZIndex) {
+      if (self.$sketch) {
+        self.$sketch.css("z-index", ZIndex);
+      }
+
+      return self;
+    };
+
+    /**
+     * Gets the position of this sketch relative to its offset parent
+     * @return {Object|undefined} The position of the sketch element, undefined if the sketch hasn't been drawn
+     */
+    self.getPosition = function() {
+      return (self.$sketch) ? self.$sketch.position() : undefined;
+    };
+
+    /* HELPERS
+     -------------*/
+
+    /**
+     * Map point to domain
+     * @param {Object} [p] {x:?,y:?} The new sketch shape position
+     * @param {Object} [dim] {x:?,y:?} The sketch dimensions
+     * */
+    self._V2DMapping = function(p, dim) {
+      var newP = {};
+
+      if (dim.w && dim.h) {
+        newP.x = p.x / dim.w * 1000;
+        newP.y = p.y / dim.h * 1000;
+      }
+      return newP;
+    };
+
+    self._init(); // Initialize the annotation sketch
+
+    return self;
+  };
+
+  /**
+   * Annotation sketch default options.
+   * @type {Object}
+   */
+  ns.annotate.Sketch.defaults = {
+    "draggable" : "true",      // Can the annotation sketch be dragged?
+    "aOptions"  : {            // Granite.UI.Annotation options
+      "resizeWatch" : "true"
+    },
+    "offsetX" : 0,      // The X offset of the annotation mark relative to the left of the position element
+    "offsetY" : 0,      // The Y offset of the annotation mark relative to the top of the position element
+    "color" : "#3287d2" // TODO - it would be nice to reference the Annotation default color, if it were in hex format
+  };
+
+}(jQuery, Granite.author, jQuery(document), this));

@@ -1,0 +1,479 @@
+<%@page session="false"
+        import="com.adobe.granite.ui.components.AttrBuilder,
+                com.adobe.granite.ui.components.ComponentHelper,
+                com.adobe.granite.ui.components.ExpressionHelper,
+                com.adobe.granite.ui.components.Config,
+                com.adobe.granite.xss.XSSAPI,
+                com.day.cq.commons.jcr.JcrConstants,
+                com.day.cq.dam.api.Asset,
+                com.day.cq.dam.api.Rendition,
+                com.day.cq.dam.commons.util.UIHelper,
+                com.day.cq.dam.commons.util.S73DHelper,
+                org.apache.sling.featureflags.Features,
+                com.day.cq.i18n.I18n,
+                com.day.cq.wcm.api.Page,
+                org.apache.jackrabbit.util.Text,
+                org.apache.sling.api.resource.Resource,
+                org.apache.sling.api.resource.ValueMap,
+                org.apache.sling.api.resource.ResourceResolver,
+                org.apache.commons.lang.StringUtils,
+                javax.jcr.Node,
+                javax.jcr.NodeIterator,
+                javax.jcr.Property,
+                java.util.Arrays,
+                com.day.cq.dam.commons.util.DamUtil,
+                java.util.Iterator,
+                javax.jcr.security.AccessControlManager,
+                javax.jcr.lock.LockManager,
+                org.apache.jackrabbit.api.security.user.User,
+                javax.jcr.security.Privilege,
+                javax.jcr.Session,
+                com.day.cq.dam.api.s7dam.constants.S7damConstants,
+				com.adobe.granite.ui.components.AttrBuilder,
+                com.day.cq.dam.entitlement.api.EntitlementConstants,
+                org.apache.sling.featureflags.Features,
+                java.util.Collection,
+                java.util.List,
+                java.util.Set,
+                java.util.HashSet,
+				java.util.Calendar"%>
+<%@taglib prefix="sling" uri="http://sling.apache.org/taglibs/sling/1.0"%>
+<%@taglib prefix="cq" uri="http://www.day.com/taglibs/cq/1.0" %><%
+%><%@taglib prefix="ui" uri="http://www.adobe.com/taglibs/granite/ui/1.0"%><%
+%><cq:defineObjects />
+
+<%
+    I18n i18n = new I18n(slingRequest);
+    ComponentHelper cmp = new ComponentHelper(pageContext);
+    ExpressionHelper ex = cmp.getExpressionHelper();
+
+    AccessControlManager acm = resourceResolver.adaptTo(Session.class).getAccessControlManager();
+    boolean dynamicMediaInstalled = false;
+    final Features featureManager = sling.getService(Features.class);
+    if (featureManager.getFeature(EntitlementConstants.ASSETS_DYNAMICMEDIA_FEATURE_FLAG_PID)!=null &&
+            featureManager.isEnabled(EntitlementConstants.ASSETS_DYNAMICMEDIA_FEATURE_FLAG_PID)) {
+        dynamicMediaInstalled = true;
+    }
+    String assetDetailsVanity = "/assetdetails.html";
+    ValueMap contentVm = resource.adaptTo(ValueMap.class);
+    if (null != contentVm) {
+        assetDetailsVanity = contentVm.get("assetDetailsVanity", assetDetailsVanity);
+        request.setAttribute ("assetDetailsVanity",  assetDetailsVanity);
+        String requestPrefix = contentVm.get("com.adobe.cq.item.requestPrefix", "");
+        String requestSuffix = ex.get(contentVm.get("com.adobe.cq.item.requestSuffix", ""), String.class);
+        request.setAttribute ("requestPrefix",  requestPrefix);
+        request.setAttribute ("requestSuffix",  requestSuffix);
+
+        // We do not want to enable dynamic media preview for link sharing, therefore an additional condition is checked 
+        // which is present only on link share preview page.
+        if (dynamicMediaInstalled) {
+            Boolean skipDynamicMedia = contentVm.get("skipDynamicMedia", false);
+            if (skipDynamicMedia) {
+                dynamicMediaInstalled = false;
+            }
+        }
+    }
+	boolean isDMPreviewEnabled = false;
+	boolean isVideo = false;
+	boolean isEncodedVideo = false;
+
+//todo: Get the title from the contet/dam/* node
+//Page contentPage = slingRequest.getResourceResolver().getResource(contentPath).adaptTo(Asset.class);
+    Resource currentResource = UIHelper.getCurrentSuffixResource(slingRequest);
+    if (currentResource == null) {
+        return;
+    }
+    Node childNode = currentResource.adaptTo(Node.class);
+    if(!childNode.isNodeType("dam:Asset")) {
+        return;
+    }
+
+    Asset asset = currentResource.adaptTo(Asset.class);
+    String subAssetPath = "";
+
+    Set<String> suppporteTypes = new HashSet<String>();
+    //Populate HashMap with mappings for File mimeType vs First Page Name
+    suppporteTypes.add("application/pdf");
+    suppporteTypes.add("application/x-indesign");
+    suppporteTypes.add("application/postscript");
+    suppporteTypes.add("application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    suppporteTypes.add("application/vnd.ms-powerpoint");
+
+   
+    String subAssetParentURL = "";
+    if (asset.isSubAsset()) {
+        subAssetParentURL = request.getContextPath() + assetDetailsVanity + Text.escapePath(childNode.getParent().getParent().getPath());
+    }
+    com.adobe.granite.asset.api.Asset graniteAsset = currentResource.adaptTo(com.adobe.granite.asset.api.Asset.class);
+    Iterator<?> pages = graniteAsset.listRelated("pages");
+    if (suppporteTypes.contains(asset.getMimeType()) && pages.hasNext() ){
+        Asset page1 = ((com.adobe.granite.asset.api.Asset)pages.next()).adaptTo(Asset.class);
+        subAssetPath = page1.getPath();
+    }
+    String firstPageURL = !subAssetPath.equals("")? request.getContextPath() + assetDetailsVanity + Text.escapePath(subAssetPath) : "";
+
+    Config cfg = new Config(resource);
+    AttrBuilder attrs = new AttrBuilder(request, xssAPI);
+    attrs.addClass(cfg.get("class", String.class));
+
+    String prop = "jcr:content/metadata/dc:format";
+    String editorMimeTypes = null;
+    String dataMimeType = asset.getMimeType();
+    if(dataMimeType == null || dataMimeType.trim().equals("")) {
+        if(childNode.hasProperty(prop)){
+            dataMimeType = childNode.getProperty("jcr:content/metadata/dc:format").getString();
+        }
+    }
+    if(dataMimeType == null) {
+        dataMimeType = "";
+    }
+    boolean canAnnotate = false;
+    String[] annotatableMimeTypes = { "image/jpeg", "image/jpg", "image/png", "image/gif" };
+    if (UIHelper.hasPermission(acm, currentResource, Privilege.JCR_ADD_CHILD_NODES)) {
+        if (contains(annotatableMimeTypes, dataMimeType) || UIHelper.getBestfitRendition(asset, 319) != null) {
+            canAnnotate = true;
+        }
+    }
+
+    boolean canEdit = false;
+
+    boolean isLocked = isLocked(resourceResolver, childNode);
+    if (!isLocked && UIHelper.hasPermission(acm, currentResource, Privilege.JCR_WRITE)) {
+        Resource editors = resource.getResourceResolver().getResource("/libs/dam/gui/content/assets/editors");
+        for (Iterator<Resource> it = editors.listChildren(); it.hasNext();) {
+            Resource child = it.next();
+            Config editorPropCfg = new Config(child);
+            String[] mimeTypes = editorPropCfg.get("mimetypes", String[].class);
+            if (mimeTypes != null && contains(mimeTypes, dataMimeType)) {
+                canEdit = true;
+                break;
+            }
+        }
+    }
+
+    boolean isAssetExpired = false;
+	boolean isSubAssetExpired = false;
+	Calendar now = Calendar.getInstance();
+	Calendar assetExpiryTime = DamUtil.getExpiryTime(asset);
+	if (null != assetExpiryTime) {
+		isAssetExpired = DamUtil.isExpiredAsset(asset);
+	}
+
+	if (!isAssetExpired) {
+		isSubAssetExpired = DamUtil.isExpiredSubAsset(resource);
+	}
+
+	canEdit = canEdit && !isAssetExpired && !isSubAssetExpired;
+
+	boolean canDwld = !isAssetExpired && !isSubAssetExpired;
+
+    boolean canUploadRendition = UIHelper.hasPermission(acm, currentResource, Privilege.JCR_ADD_CHILD_NODES);
+    
+    boolean is3D = S73DHelper.isS73D(currentResource);
+    if(is3D)
+    {
+		canEdit=false;
+		canAnnotate=false;
+    }
+
+    if("text/csv".equals(asset.getMimeType())) {
+%>
+<div <%= attrs.build() %> data-can-edit="<%=canEdit %>" data-can-download="<%=canDwld %>" data-can-annotate="<%= canAnnotate %>"  data-can-upload-rendition = "<%=canUploadRendition %>">
+<sling:include path="<%= asset.getPath() %>" resourceType="dam/gui/components/admin/csv" />
+</div>
+<%
+}
+else {
+    Node parentNode = null;
+    try {
+     // Next & Prev asset's path for navigation
+        parentNode = childNode.getParent();
+        NodeIterator nodeItr = parentNode.getNodes();
+        Node prevNode = null;
+        boolean found = false;
+        while(nodeItr.hasNext() &&!found)
+        {
+            Node nextNode = nodeItr.nextNode();
+            if(nextNode.isNodeType("dam:Asset"))
+            {
+                if(nextNode.getPath().equals(childNode.getPath()))
+                {
+                    found = true;
+                    break;
+                }
+                else
+                {
+                    prevNode = nextNode;
+                }
+            }
+        }
+        if(prevNode == null)
+        {
+            prevNode = childNode;
+        }
+        String prevURL = request.getContextPath() + assetDetailsVanity + Text.escapePath(prevNode.getPath());
+        nodeItr = parentNode.getNodes();
+        Node nextNode = null;
+        Node tempNode = null;
+        found = false;
+        while(nodeItr.hasNext() && !found)
+        {
+            nextNode = nodeItr.nextNode();
+            if(nextNode.isNodeType("dam:Asset"))
+            {
+                if(nextNode.getPath().equals(childNode.getPath()))
+                {
+                    while(nodeItr.hasNext() && !found)
+                    {
+                        Node n = nodeItr.nextNode();
+                        if(n.isNodeType("dam:Asset"))
+                        {
+                            tempNode = n;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if(tempNode == null)
+        {
+            tempNode = childNode;
+        }
+        String nextURL = request.getContextPath() + assetDetailsVanity + Text.escapePath(tempNode.getPath());
+
+        request.setAttribute ("prevURL",    (String) prevURL);
+        request.setAttribute ("nextURL",    (String) nextURL);
+
+    } catch(Exception e) {
+        log.error("Exception occured while obtaining next and prev pages for ["+childNode.getPath()+"]: "+e.getMessage());
+        log.debug("Exception occured while obtaining next and prev pages for ["+childNode.getPath()+"]: ",e);
+    }
+    
+// attempt to find a editor that can handle this resource if has the
+// permission to edit
+    if (UIHelper.hasPermission(acm, currentResource, Privilege.JCR_WRITE)) {
+        Resource editors = resource.getResourceResolver().getResource("/libs/dam/gui/content/assets/editors");
+        for (Iterator<Resource> it = editors.listChildren(); it.hasNext();) {
+            Resource child = it.next();
+            Config editorPropCfg = new Config(child);
+            String[] mimeTypes = editorPropCfg.get("mimetypes", String[].class);
+            if (mimeTypes != null && contains(mimeTypes, dataMimeType)) {
+                canEdit = true;
+                break;
+            }
+        }
+    }
+
+    boolean isMP4 = false;//check video type - S7 viewer can only rendering MP4
+	boolean isAVSRendition = false;
+
+    if ("application/x-shockwave-flash".equals(dataMimeType)) {
+        isVideo = true;
+    }
+    if (dataMimeType.contains("video")) {
+        String oggRenditionPath = "";
+        String mp4RenditionPath = "";
+
+        for (Iterator<Rendition> it = asset.listRenditions(); it
+                .hasNext();) {
+            Rendition rendition = it.next();
+
+            if (rendition.getMimeType().equals("video/ogg")) {
+                oggRenditionPath = rendition.getPath();
+				canAnnotate = true;
+            }
+
+            if (rendition.getMimeType().equals("video/mp4")) {
+                mp4RenditionPath = rendition.getPath();
+                isMP4 = true;
+				canAnnotate = true;
+            }
+
+            if(rendition.getName().indexOf("avs") != -1) {
+                isAVSRendition = true;
+            }
+
+        }
+        if (dataMimeType.equals("video/mp4")
+                || dataMimeType.equals("video/ogg")
+                || dataMimeType.equals("video/webm")
+                || !oggRenditionPath.equals("")
+                || !mp4RenditionPath.equals("")) {
+            isVideo = true;
+
+        }
+
+        String s7damType = "";
+        if (childNode.hasNode(JcrConstants.JCR_CONTENT) &&
+            childNode.getNode(JcrConstants.JCR_CONTENT).hasProperty("dam:s7damType")) {
+            s7damType = childNode.getNode(JcrConstants.JCR_CONTENT).getProperty("dam:s7damType").getString();
+        }
+
+		if (dataMimeType.contains("video") && (s7damType.equals(S7damConstants.S7_VIDEO_AVS) || s7damType.equals(S7damConstants.S7_VIDEO))) {
+        	isEncodedVideo = true;
+    	}
+
+        //canAnnotate = !dynamicMediaInstalled; // we need see annotate button from top menu bar of video Detail view
+    }
+
+    boolean isAudio = false;
+    if (dataMimeType.contains("audio")) {
+        String oggAudioRenditionPath = "";
+        String mpegAudioRenditionPath = "";
+        String wavAudioRenditionPath = "";
+        for (Iterator<Rendition> it = asset.listRenditions(); it
+                .hasNext();) {
+            Rendition rendition = it.next();
+
+            if (rendition.getMimeType().equals("audio/ogg")) {
+                oggAudioRenditionPath = rendition.getPath();
+                //canAnnotate = true; // annotation is disabled for audio files
+            }
+
+            if (rendition.getMimeType().equals("audio/mpeg")) {
+                mpegAudioRenditionPath = rendition.getPath();
+                //canAnnotate = true; // annotation is disabled for audio files
+            }
+            if( rendition.getMimeType().equals("audio/x-wav") || rendition.getMimeType().equals("audio/wav") ) {
+                wavAudioRenditionPath = rendition.getPath();
+                //canAnnotate = true; // annotation is disabled for audio files
+            }
+
+        }
+        if (dataMimeType.equals("audio/mpeg")
+                || dataMimeType.equals("audio/ogg")
+                || dataMimeType.equals("audio/x-wav")
+                || !oggAudioRenditionPath.equals("")
+                || !mpegAudioRenditionPath.equals("")
+                || !wavAudioRenditionPath.equals("")) {
+            isAudio = true;
+
+        }
+
+    }
+
+    boolean isSlingResourceType = false;
+    String slingRenderPath = "";
+    if (childNode.hasProperty("jcr:content/sling:resourceType")) {
+        isSlingResourceType = true;
+        slingRenderPath = asset.getPath() + "/jcr:content";
+        Resource jcrContentRes = resourceResolver.getResource(slingRenderPath);
+        if (jcrContentRes.isResourceType("fd/fm/af/render")) {
+            slingRenderPath = slingRenderPath + "?wcmmode=disabled";
+        }
+    }
+
+%>
+
+<div id="videocommentinfo" class="alert right info" style="position: absolute; right: 3rem; top: 6rem; display: none;">
+    <button class="close" data-dismiss="alert">x</button>
+    <strong>INFO</strong><div></div>
+</div>
+<% if (isSlingResourceType) {
+%>
+<iframe src="<%= request.getContextPath() + slingRenderPath %>" height=100% width=100%> </iframe>
+<% } %>
+
+<div <%= attrs.build() %> data-can-edit="<%=canEdit %>" data-can-download="<%=canDwld %>" data-can-annotate="<%= canAnnotate %>"  data-can-upload-rendition = "<%=canUploadRendition %>"  data-first-page-url="<%= xssAPI.encodeForHTMLAttr(firstPageURL) %>" isSubAsset="<%= asset.isSubAsset() %>" subasset-parent-url="<%=xssAPI.encodeForHTMLAttr(subAssetParentURL) %>">
+    <div id="comments" class="commentinfo"></div>
+    <script type="text/javascript">
+        $('.unified-renditions').removeAttr('s7presetPath');
+    </script>
+
+    <%
+        boolean hadS7damType = childNode.hasProperty("jcr:content/dam:s7damType");
+        boolean hadPTiff = (asset.getRendition("cqdam.pyramid.tiff") != null); //check for PTiff
+        if( (!dynamicMediaInstalled)
+                || ( dynamicMediaInstalled && !hadPTiff )
+                || ( dynamicMediaInstalled && ( !hadS7damType && !isVideo ) )  )  {
+        //If dynamic media is disabled, use DAM default rendering
+        //If dynamic media is enabled and asset doesn't have ptiff, use DAM default rendering
+        //If dynamic media is enabled and asset doesn't have dam:s7damType(sets, videoAVS handling), use DAM default rendering
+            Resource renditionPicker = resource.getChild("renditionpicker");
+            Resource videoPicker  = resource.getChild("videopreview");
+            Resource audioPicker = resource.getChild("audiopreview");
+            Resource v3DPicker = (is3D)? resource.getChild("webGLViewer") : null;
+
+    if (is3D && v3DPicker != null) {
+        log("3D Asset Encountered");    
+    %>
+     <sling:include path="<%= v3DPicker.getPath() %>" resourceType="<%= v3DPicker.getResourceType()%>" />
+    <% } else if (isVideo && videoPicker  != null) {
+    %>
+    <sling:include path="<%= videoPicker .getPath() %>" resourceType="<%= videoPicker .getResourceType()%>" />
+    <% }  else if (isAudio && audioPicker != null) {
+    %>
+    <sling:include path="<%= audioPicker.getPath() %>" resourceType="<%= audioPicker.getResourceType()%>" />
+
+    <% }
+    else if (!isSlingResourceType) {
+    %>
+    <sling:include path="<%= renditionPicker.getPath() %>" resourceType="<%= renditionPicker.getResourceType()%>" />
+    <%     if (parentNode != null && parentNode.getName().equals("subassets")) { %>
+           <sling:include path="<%= asset.getPath() %>" resourceType="dam/gui/components/admin/assetview/pagesnavigator" />
+    <%      }
+            else {
+                %>
+                <sling:include path="<%= asset.getPath() %>" resourceType="dam/gui/components/admin/assetview/zoomviewer" />
+                <%
+            }
+        }
+    } else {
+        Resource s7previewer = resource.getChild("s7previewer");
+    %>
+    <sling:include path="<%= s7previewer.getPath() %>" resourceType="<%= s7previewer.getResourceType()%>" />
+    <% } %>
+    <ui:includeClientLib categories="dam.gui.assetview" />
+</div>
+<%}%>
+
+<%!
+    boolean contains(String[] mimeTypes, String mimeType) {
+        for (String item:mimeTypes) {
+            if (item.equalsIgnoreCase(mimeType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    boolean isLocked(ResourceResolver resourceResolver, Node node) {
+        boolean isLocked = false;
+
+        try {
+            String lockedBy="";
+            final LockManager lockManager = resourceResolver.adaptTo(
+                    Session.class).getWorkspace().getLockManager();
+            if(node != null) {
+                if (node.isLocked()) {
+                    isLocked=true;
+                    lockedBy = lockManager.getLock(
+                            node.getPath()).getLockOwner();
+
+                }else if (node.hasNode(JcrConstants.JCR_CONTENT)){
+                    Node contentNode = node.getNode(JcrConstants.JCR_CONTENT);
+                    if(contentNode.isLocked()){
+                        isLocked = true;
+                        lockedBy = lockManager.getLock(contentNode.getPath()).getLockOwner();
+                    }
+                }
+                if(isLocked){
+                    User self = resourceResolver.adaptTo(User.class);
+                    String selfId = self.getID();
+                    isLocked = !selfId.equals(lockedBy);
+                }
+                return isLocked;
+            }
+        } catch (Exception ex) {
+            log("Exception occurred while checking whether the node is locked: "
+                    + ex.getMessage());
+        }
+        return true;
+    }
+%>
+
+<script>
+    dynamicMediaInstalled = <%=dynamicMediaInstalled%>;
+    isDMPreviewEnabled = <%=isDMPreviewEnabled%>;
+    isEncodedVideo = <%=isEncodedVideo %>    
+</script>

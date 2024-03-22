@@ -1,0 +1,833 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2015 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (window, document, Granite, $) {
+    "use strict";
+
+    //Keys
+    var DATA_STATE_KEY = 'cs-states',
+        DATA_STATE_IDX_KEY = 'cs-current-index',
+        DATA_PENDING_STATE = 'cs-pending-state',
+        DATA_ASSET_PATH = 'asset-path',
+        DATA_ASSET_JCRPATH = 'asset-jcrpath',
+        DATA_ASSET_TYPE = 'asset-type',
+        DATA_IMAGESERVER = 'imageserver',
+        DATA_ASSET_PUBLISHED = 'asset-ispublished',
+        DATA_CS_METADATA_KEY = 'carousel',
+        DATA_SELECTED_PRESET = 'cs-selected-preset';
+
+    //Metadata object keys
+    var DC_VIEWERPRESET = 'dc:s7viewerpreset';
+
+    var EDITOR_INFO_ID = '.dm-setup-info';
+
+
+    //Asset Type
+    var CAROUSEL_TYPE = 'CarouselSet';
+
+    //events
+    var EVENT_DATA_READY = 'cs-data-ready',
+        EVENT_DATA_PRESETS = 'cs-data-presets',
+        EVENT_DATA_SELECTED_PRESET = 'cs-data-selected-preset',
+        EVENT_DATA_CHANGE = 'cs-data-change',
+        EVENT_MOD_SLIDE = 'cs-mod-slide',
+        EVENT_MOD_MAP = 'cs-mod-map',
+        EVENT_DEL_MAP = 'cs-del-map',
+        EVENT_DEL_SLIDE = 'cs-del-slide',
+        EVENT_REORDER_SLIDE = 'cs-reorder-slide',
+        EVENT_UNDO_STATE = "cs-undo",
+        EVENT_REDO_STATE = "cs-redo",
+        EVENT_STATE_SHIFT = "cs-shift",
+        EVENT_SUBMIT_DATA = "cs-submit-data",
+        EVENT_REMOVE_DATA = "cs-delete-data",
+        EVENT_SAVE_SUCCESS = "cs-save-success",
+        EVENT_SAVE_FAIL = "cs-save-fail",
+        EVENT_NO_OP = "cs-no-op",
+        EVENT_USER_SELECTED_PRESET = 'cs-user-selected-preset',
+        EVENT_EMPTY_SET = 'cs-empty-set',
+        EVENT_NON_EMPTY_SET = 'cs-non-empty-set',
+        EVENT_WARNING = 'cs-warning';
+
+
+    //Data Submission 
+    var PARAM_OP = ':operation',
+        PARAM_SLIDES = 'slides',
+        PARAM_TITLE = 'title',
+        PARAM_METADATA = 'metadata',
+        PARAM_PROP = 'prop',
+        PARAM_CHARSET = '_charset_',
+        SERVLET_SELECTOR = '.set.carousel.json',
+        OP_CREATE = 'create',
+        OP_UPDATE = 'update',
+        CHARSET_UTF8 = 'utf-8';
+
+    var HOTSPOT_SIZE = 10;
+    var NEW_SET_DATA = { slides : [], order: []}; //new set is empty
+
+    // Model
+    var assetPath = "",
+        operation = "",
+        dataDirty = false,
+        preset;
+
+    $(document).one('foundation-contentloaded', function(){
+        var assetType=  $(EDITOR_INFO_ID).data(DATA_ASSET_TYPE);
+        assetPath =  $(EDITOR_INFO_ID).data(DATA_ASSET_JCRPATH);
+        if (assetPath.charAt(assetPath.length-1) == '/') {
+            assetPath = assetPath.substring(0,assetPath.length-1)
+        }
+        $.dmcs = $.dmcs || dmUtils
+        if (assetType == CAROUSEL_TYPE) {
+            operation = OP_UPDATE;
+            initDataState();
+        }
+        else {
+            operation = OP_CREATE;
+            //initialize data for new set
+            setInitData(NEW_SET_DATA);
+            setPreset({});
+        }
+        $(document).on(EVENT_MOD_SLIDE, modifySlide);
+        $(document).on(EVENT_MOD_MAP, modifyMap);
+        $(document).on(EVENT_DEL_SLIDE, deleteSlide);
+        $(document).on(EVENT_DEL_MAP, deleteMap);
+        $(document).on(EVENT_REORDER_SLIDE, reorderSlide);
+        $(document).on(EVENT_NO_OP, function(){console.log('no-op')});
+        $(document).on(EVENT_UNDO_STATE, back);
+        $(document).on(EVENT_REDO_STATE, forward);
+        $(document).on(EVENT_SUBMIT_DATA, save);
+        $(document).on(EVENT_USER_SELECTED_PRESET, userSelectedPreset);
+        $(document).on(EVENT_DATA_READY, checkEmptySet);
+        $(document).on(EVENT_DATA_CHANGE, checkEmptySet);
+
+        loadPresets();
+
+    });
+
+
+    var dmUtils = {
+        item: {
+        	buildArea: function(x, y, w, h) {
+                return { "x" : x,
+                    "y" : y,
+                    "wid" : w,
+                    "hei" : h };
+            },
+            buildHotspot: function(x, y) {
+                return this.buildArea(x, y, x + HOTSPOT_SIZE, y + HOTSPOT_SIZE);
+            },
+            buildMap: function(area, url, target, label, fragment, mapType, actionType){
+                return {
+                    "area": area,
+                    "url": fixDefault(url,''),
+                    "target": fixDefault(target,'_blank'),
+                    "label": fixDefault(label,''),
+                    "actionType": fixDefault(actionType,'quickview:'),
+                    "fragment": fixDefault(actionType === 'fragment' ? fragment : '' ,''),
+                    "type": mapType
+                };
+            },
+            buildSlide: function(assetPath, width, height, maps, assetId){
+                return {
+                    "assetPath" : assetPath,
+                    "width" : width,
+                    "height" : height,
+                    "maps" : maps,
+                    "assetId" : assetId
+                };
+            }
+        },
+        event: {
+            /**
+             * Build slide event object based on provided settings
+             * @param sid slide ID. when null, it implies adding a new one at the end
+             * @param assetPath path to JCR asset. when unset, it means delete
+             * @param width asset width
+             * @param height asset height
+             * @param assetId Scene7 Asset ID
+             * @return JSON for event based on assetPath
+             *
+             */
+            buildSlide: function(sid, assetPath, width, height, assetId){
+                if ( isUndefined(sid) ||
+                    ( isNull(sid) && isUndefined(assetPath) ) ){
+                    //cannot do anything when no sid or with sid = null while assetPath undefined
+                    return { 'type' : EVENT_NO_OP };
+                }
+                if ( isUndefined(assetPath) ) {
+                    return {
+                        'type': EVENT_DEL_SLIDE,
+                        'sid': sid
+                    };
+                }
+                if ( isNull(sid) ) { //if null on sid, add a new one
+                    sid = dmUtils.getSlideCount();
+                }
+                return {
+                    'type': EVENT_MOD_SLIDE,
+                    'sid': sid,
+                    'assetPath': assetPath,
+                    'height' : height,
+                    'width' : width,
+                    'assetId' : assetId
+                };
+
+            },
+            /**
+             * Build map event object based on provided settings
+             * @param sid slide ID
+             * @param mid map ID
+             * @param map JSON of map. When null, delete
+             *
+             */
+            buildMap: function(sid, mid, map) {
+                if (isNull(sid) || isNull(mid)) {
+                    //cannot do anything when no sid + mid
+                    return { 'type' : EVENT_NO_OP };
+                }
+                if ( !isUndefined(map) ) {
+                    return {
+                        'type': EVENT_MOD_MAP,
+                        'sid': sid,
+                        'mid': mid,
+                        'map': map
+                    };
+                }
+                else {
+                    return {
+                        'type': EVENT_DEL_MAP,
+                        'sid': sid,
+                        'mid': mid
+                    };
+                }
+            },
+            buildReorder: function(order) {
+                if (order && order.length == dmUtils.getSlideOrder().length ) {
+                    return {
+                        'type': EVENT_REORDER_SLIDE,
+                        'order': order
+                    };
+                }
+                //do nothing if the lenght of new order doesn't match existing one
+                return { 'type' : EVENT_NO_OP };
+            }
+        },
+        /**
+         * @return current state
+         */
+        getCurrentState: function(){
+            return peek();
+        },
+        /**
+         * @param sid slide ID
+         * @return slide with sid
+         */
+        getSlide: function(sid) {
+            var slides = this.getSlides();
+            return slides[sid];
+        },
+        /**
+         * @return all slides in current state
+         */
+        getSlides: function(){
+            var state = peek();
+            var slides = state.slides;
+            return slides;
+        },
+        /**
+         * @param sid slide ID
+         * @return all maps in the slide
+         */
+        getMaps: function(sid){
+            var slides = this.getSlides();
+            return slides[sid].maps;
+        },
+        /**
+         * @param sid slide ID
+         * @param mid map ID (position of map in array maps under this slide
+         * @return map setup for slide ID + map ID
+         */
+        getMap: function(sid, mid) {
+            var maps = this.getMaps(sid);
+            if (maps.length < mid) {
+                return null;
+            }
+            return maps[mid];
+        },
+        /**
+         * @param sid slide ID to get map count
+         * @return current map count of slide ID
+         */
+        getMapCount: function(sid){
+            var maps = this.getMaps(sid);
+            return maps.length;
+        },
+        /**
+         * Number of slide can also be used as index for the new slide
+         * @return number of slide
+         */
+        getSlideCount: function(){
+            var slides = this.getSlides();
+            return slides.length;
+        },
+        /**
+         *
+         * @return the current order of slide ID
+         */
+        getSlideOrder: function(){
+            var state = peek();
+            var order = state.order;
+            return order;
+        },
+        /**
+         * @return array of assets
+         */
+        getAssetList: function(){
+            var slides = this.getSlides();
+            var assets = [];
+            for (var i = 0; i < slides.length; i++) {
+                assets.push((slides[i] ? slides[i].assetPath : null));
+            }
+            return assets;
+        },
+        /**
+         * @return array of asset IDs
+         */
+        getAssetIdList: function(){
+            var slides = this.getSlides();
+            var assets = [];
+            for (var i = 0; i < slides.length; i++) {
+                if (slides[i]) {
+                	assets.push((slides[i].assetId ? slides[i].assetId : slides[i].assetPath));
+                }
+                else {
+                    assets.push(null);
+                }
+            }
+            return assets;
+        },
+        /**
+         *
+         * @returns {boolean} true if there are more state from current state index
+         */
+        hasNext: function(){
+            var states = $(document).data(DATA_STATE_KEY);
+            var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+            return (states.length-1 > currentIdx);
+
+        },
+        /**
+         *
+         * @returns {boolean} true if there are state before current state index
+         */
+        hasPrevious: function() {
+            var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+            return (currentIdx > 0);
+        },
+        getOrderedSlides: function(){
+            var orderedSlides = [];
+            var slideOrder = this.getSlideOrder();
+            var slideList = this.getSlides();
+            for (var i=0; i < slideOrder.length; i++) {
+                var slideIdx = slideOrder[i];
+                var slide = JSON.stringify(slideList[slideIdx]);
+                orderedSlides.push($.parseJSON(slide));
+            }
+            return orderedSlides;
+        },
+        getOrderedSlideCount: function(){
+            return this.getOrderedSlides().length;
+        },
+        /**
+         * @return true if there is any pending data to be saved
+         */
+        hasPendingData: function(){
+            return (dataDirty || this.hasPendingPreset());
+        },
+        hasPendingPreset: function(){
+            return (preset && preset.getDirty());
+        }
+    }
+
+    /**
+     * Load all preset data, and filter by carousel set type
+     */
+    function loadPresets() {
+
+        return s7ve.Preset.getAllPresetJson().then(function (presets) {
+            var result = {};
+            var filteredPresets = $.map(presets, function(item) {
+                // Keep only presets matching category
+                if(item.category === "CAROUSEL_SET" && item.isactive) {
+                    result[item.id] = item;
+                    return item;
+                }
+            });
+            $(document).trigger({
+                type: EVENT_DATA_PRESETS,
+                presets: result
+            });
+        });
+    }
+
+    /**
+     * Handle user triggered preset load
+     */
+    function userSelectedPreset(event) {
+        if (preset && preset.getDirty()) {
+             $(document).trigger({ 'type': EVENT_WARNING,
+                'message': Granite.I18n.get("Your current preset changes will be discarded. Are you sure?"),
+                'title': Granite.I18n.get("Warning"),
+                'isconfirm': true,
+                'confirm': function(){
+                    setPreset(event);
+                }
+            });
+        }
+        else { //set preset when there is no pending preset data change
+            setPreset(event);
+        }
+    }
+
+    /**
+     * Set and fetch preset given preset id. Notify observers when complete.
+     */
+    function setPreset(event) {
+        // Resolve presetId from event, otherwise use hard-coded default
+        var presetId = event && event.presetId || "Carousel_Dotted_light";
+
+        preset = new s7ve.Preset(presetId);
+        preset.fetch().then(function () {
+            $(document).trigger({
+                type: EVENT_DATA_SELECTED_PRESET,
+                preset: preset
+            });
+        });
+    }
+
+    function modifySlide(e) {
+        mergeSlide(e.sid, e.assetPath, e.width, e.height, e.assetId);
+    }
+
+    function modifyMap(e) {
+        var slideId = e.sid,
+            mapId = e.mid,
+            map = e.map;
+        mergeMap(slideId, mapId, map);
+    }
+
+    function deleteSlide(e) {
+        mergeSlide(e.sid, null);
+    }
+
+    function deleteMap(e) {
+        var slideId = e.sid,
+            mapId = e.mid;
+        mergeMap(slideId, mapId, null);
+    }
+
+    function reorderSlide(e) {
+        if ( !isUndefined(e.order) && isValidOrder(e.order)) {
+            var state = getJSON(peek()); // need to do this to clone array
+            state.order = e.order;
+            push(state);
+        }
+    }
+
+    //Fix data when no value set
+    function fixDefault(val, defVal) {
+        if ( isNull(val) ) {
+            return defVal;
+        }
+        return val;
+    }
+
+    /**
+     * Workaround to dereference json from origina obj
+     * @return JSON without reference to original object
+     */
+    function getJSON(json) {
+        return $.parseJSON(JSON.stringify(json));
+    }
+
+    /**
+     * Check that the input order is valid based on the current state order
+     * @param order an array of order based on existing slide number
+     * @return true if order is valid
+     */
+    function isValidOrder(order){
+        if (!$.isArray(order)) { //reject since it's not array
+            return false;
+        }
+        var currentOrder = getJSON(dmUtils.getSlideOrder());
+
+        if (order.length != currentOrder.length) { //reject since it doesn't match number of current order
+            return false;
+        }
+
+        for (var i=0; i < order.length; i++) {
+            for (var j=0; j < currentOrder.length; j++) {
+                if(order[i] == currentOrder[j]) {
+                    currentOrder.splice(j,1);
+                }
+            }
+        }
+        if(currentOrder.length != 0) { //reject since some content doesn't exist in current order
+            return false;
+        }
+        return true;
+    }
+
+
+    function isNull(val){
+        return (isUndefined(val) || val == null);
+    }
+
+    function isUndefined(val) {
+        return (typeof val == 'undefined');
+    }
+
+    /**
+     * Initial data load
+     */
+    function initDataState() {
+        var url = assetPath + SERVLET_SELECTOR;
+        $.ajax({
+            cache: false,
+            url: Granite.HTTP.externalize(url)
+        }).done(function(res){
+            var presetId = res.metadata && res.metadata[DC_VIEWERPRESET];
+            var csOrder = [];
+            var assets = res.assets;
+            var metadata = res.metadata;
+            for (var i=0; i < assets.length; i++){
+                csOrder.push(i);
+            }
+            setInitData({'slides': assets, 'order': csOrder});
+            setPreset({
+                "presetId": presetId
+            });
+        })
+        .fail(function(res){
+            console.log('cannot load set');
+        });
+    }
+
+    function setInitData(data) {
+        //initial index
+        $(document).data(DATA_STATE_IDX_KEY, -1);
+        push(data);
+        $(document).data(DATA_PENDING_STATE, false);
+        $(document).trigger({
+            "type": EVENT_DATA_READY,
+            "slides": data,
+            "operation": operation
+        });
+    }
+
+    //State management
+
+    function push(state) {
+        var states = $(document).data(DATA_STATE_KEY) || [];
+        states = getJSON(states);
+        var currentIdx =  $(document).data(DATA_STATE_IDX_KEY);
+        var originalInx = currentIdx;
+        // this is to clean up the state that we don't need 
+        // i.e. modify something after undo/redo
+        if (states.length > currentIdx + 1) {
+            var newStates = [];
+            for (var i = 0; i < currentIdx + 1; i++) {
+                newStates.push(states[i]);
+            }
+            states = newStates;
+        }
+        states.push(state);
+        currentIdx++ ;
+        $(document).data(DATA_STATE_KEY, states);
+        $(document).data(DATA_STATE_IDX_KEY, currentIdx);
+        $(document).data(DATA_PENDING_STATE, true);
+        //data change only trigger for non-initial one 
+        if (originalInx >= 0) {
+            triggerDataChange();
+        }
+    }
+
+    function peek(){
+        var states = $(document).data(DATA_STATE_KEY);
+        var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+        var peekData = [];
+        if (states.length > 0) {
+            peekData = states[ currentIdx ];
+        }
+        return peekData;
+
+    }
+    /**
+     * Merge current data with the slide based on ID
+     * @param sid ID of slide to be merged
+     * @param assetPath path to slide asset
+     * @param width asset width
+	 * @param height asset height
+     * @param assetId Scene7 asset ID
+     */
+    function mergeSlide(sid, assetPath, width, height, assetId){
+        var state = getJSON(peek()); // need to do this to clone array
+        var order = getJSON(dmUtils.getSlideOrder());
+        var slides = getJSON(dmUtils.getSlides());
+        var changed = false;
+        if (slides.length <= sid && assetPath != null) {
+            slides.push(dmUtils.item.buildSlide(assetPath, width, height, [], assetId)); //add new slide
+            order.push(slides.length - 1); //new slide always added at the end
+            changed = true;
+        }
+        else if (slides.length > sid) {
+            if (assetPath == null) {
+                slides[sid] = null; //delete slide
+                var newOrder = [];
+                for (var i = 0; i < order.length; i++ ) {
+                    if (order[i] != sid) {
+                        newOrder.push(order[i]);
+                    }
+                }
+                order = newOrder;
+            }
+            else if(slides[sid] == null) {
+                slides[sid] = dmUtils.item.buildSlide(assetPath, width, height, [], assetId);
+                order.push(sid);
+            }
+            else {
+                slides[sid].assetPath = assetPath;
+            }
+            changed = true;
+        }
+        if (changed) {
+            state.order = order;
+            state.slides = slides;
+            push(state);
+        }
+    }
+
+    function mergeMap(sid, mid, map) {
+        var state = getJSON(peek()); // need to do this to clone array
+        if (sid > dmUtils.getSlideCount() || sid < 0) {
+            return;
+        }
+        var currentSlide = getJSON(dmUtils.getSlide(sid));
+        var currentMaps = currentSlide.maps;
+        if ((currentMaps.length <= mid || mid == null) && map != null) {
+            //if map id is larger than what we have or null, we add a new map at the end
+            currentMaps.push(map);
+        }
+        else {
+            currentMaps[mid] = map;
+        }
+        currentSlide.maps = currentMaps;
+        state.slides[sid] = currentSlide;
+        push(state);
+    }
+
+
+    /**
+     * History back
+     */
+
+    function back(){
+        var states = $(document).data(DATA_STATE_KEY);
+        states = getJSON(states);
+        var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+        if (currentIdx > 0) {
+            currentIdx-- ;
+        }
+        else {
+            //for undo at 0 - then no pending data
+            $(document).data(DATA_PENDING_STATE, false);
+        }
+        shiftState(currentIdx);
+    }
+
+    /**
+     * History forward
+     */
+    function forward(){
+        var states = $(document).data(DATA_STATE_KEY);
+        states = getJSON(states);
+        var currentIdx =  parseInt($(document).data(DATA_STATE_IDX_KEY));
+        if (currentIdx + 1 < states.length) {
+            currentIdx++ ;
+            $(document).data(DATA_PENDING_STATE, true);
+        }
+        shiftState(currentIdx);
+    }
+
+    /**
+     * State shift base on index
+     * @param currentIdx
+     *
+     */
+    function shiftState(currentIdx) {
+        var states = $(document).data(DATA_STATE_KEY),
+            hadBack = false,
+            hadForward = false;
+        if (states.length > currentIdx - 1) {
+            hadForward = true;
+        }
+        if (currentIdx > 0) {
+            hadBack = true;
+        }
+        $(document).data(DATA_STATE_IDX_KEY, currentIdx);
+
+        $(document).trigger({ 'type': EVENT_STATE_SHIFT,
+            'back': hadBack,
+            'forward': hadForward});
+        triggerDataChange();
+    }
+
+    /**
+     * Data change event
+     */
+    function triggerDataChange(){
+        dataDirty = true;
+        $(document).trigger({ 'type': EVENT_DATA_CHANGE,
+            'state': dmUtils.getCurrentState()});
+    }
+
+
+    /**
+     * Kick off complete save workflow, commiting carousel set, then preset.
+     */
+    function save(event) {
+
+        var assetName = event.setTitle;
+        if(operation === OP_UPDATE) {
+            // If updating an existing set we must use the node name provided by servlet
+            assetName = $(EDITOR_INFO_ID).data().assetName;
+        }
+
+        // set contents of submit form to model
+        var submitModel = {
+            'assetName': assetName,
+            'presetId': event.presetId || preset.getId(),
+            'presetOption': event.presetOption
+        };
+
+        return savePreset(submitModel).then(function () {
+            // Set saved succesfully, now kick off preset commit
+            return saveSet(submitModel);
+        }).then(function (result) {
+            dataDirty = false;
+            $(document).trigger({
+                'type': EVENT_SAVE_SUCCESS,
+                'response': result
+            });
+        }, function (result) {
+            $(document).trigger({
+                'type': EVENT_SAVE_FAIL,
+                'response': result
+            });
+        });
+    }
+
+    /**
+     * Return promise to save carousel set
+     */
+    function saveSet(submitModel) {
+        var postUrl = Granite.HTTP.externalize(assetPath + SERVLET_SELECTOR),
+            params = generateParams(submitModel);
+
+        return new Promise(function (resolve, reject) {
+            $.post(postUrl, params)
+                .done(function (res) {
+                    if (!res.success) {
+                        reject(res);
+                    }
+                    resolve(res);
+                })
+                .fail(reject);
+        });
+    }
+
+    /**
+     * Save preset given option. TODO: Use enumerated type or constant.
+     */
+    function savePreset(submitModel) {
+        if(submitModel.presetOption == "keep") {
+            return Promise.resolve();
+        }
+        if(submitModel.presetOption == "overwrite") {
+            // Passing 'true' will prevent Preset class from making subsequent fetch requests
+            return preset.commit(true);
+        }
+        if(submitModel.presetOption == "create") {
+            preset = preset.localClone(submitModel.presetId);
+            return preset.commit(true);
+        }
+    }
+
+    /**
+     * Generate parameters for save
+     */
+    function generateParams(submitModel) {
+        var params = {};
+
+        params[PARAM_OP] = operation;
+        params[PARAM_TITLE] = submitModel.assetName;
+        params[PARAM_SLIDES] = JSON.stringify(dmUtils.getOrderedSlides());
+        params[PARAM_METADATA] = JSON.stringify(generateMetadata({
+            presetId: submitModel.presetId
+        }));
+        params[PARAM_PROP] = JSON.stringify(generateProp());
+        params[PARAM_CHARSET] = CHARSET_UTF8;
+        
+        // Remove "null" entries from maps:[]  from params[PARAM_SLIDES] "maps[null]" 
+        // Entries cause save to fail... 
+        params[PARAM_SLIDES] = params[PARAM_SLIDES].replace(/null/g, '');
+        
+        //Additional cleanup for other possible scenarios --> "},,{"  "[,,]" "[,]"
+        params[PARAM_SLIDES] = params[PARAM_SLIDES].replace(/,,/g, ',');
+        params[PARAM_SLIDES] = params[PARAM_SLIDES].replace(/\[,,\]/g, '[]');
+        params[PARAM_SLIDES] = params[PARAM_SLIDES].replace(/\[,\]/g, '[]');
+        params[PARAM_SLIDES] = params[PARAM_SLIDES].replace(/\[,/g, '[');
+        params[PARAM_SLIDES] = params[PARAM_SLIDES].replace(/,\]/g, ']');
+        return params;
+    }
+
+    //placeholder for metadata extension
+    //sample {"mtest" : "val"}
+    function generateMetadata(metadata) {
+        return {
+            "dc:s7viewerpreset": metadata.presetId
+        };
+    }
+
+    //placeholder for prop extension
+    //sample  {"ptest" : "pval"}
+    function generateProp(){
+        return {}
+    }
+
+    /**
+     * check for empty set and trigger appropriate event
+     */
+    function checkEmptySet() {
+        if (!$.dmcs.getOrderedSlideCount()){
+            $(document).trigger(EVENT_EMPTY_SET);
+        }
+        else {
+            $(document).trigger(EVENT_NON_EMPTY_SET);
+        }
+    }
+
+})(window, document, Granite, Granite.$);

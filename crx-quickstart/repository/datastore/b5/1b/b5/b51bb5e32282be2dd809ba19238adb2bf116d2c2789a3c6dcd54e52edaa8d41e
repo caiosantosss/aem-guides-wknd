@@ -1,0 +1,514 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.CreateSiteWizard
+ * @extends CQ.Dialog
+ * The CreateSiteWizard is a step-by-step wizard to create (MSM) sites.
+ * @constructor
+ * Create a new CreateSiteWizard
+ * @param {Object} config The config object
+ */
+CQ.wcm.CreateSiteWizard = CQ.Ext.extend(CQ.Dialog, {
+
+    blueprintPath: null,
+
+    sitePath: null,
+
+    activePage: 0,
+
+    wizPanel: null,
+
+    actListId: null,
+
+    dataView: null,
+
+    progressStore: null,
+
+    progressTemplate: null,
+
+    progressPanel: null,
+
+    firstPanel: null,
+
+    lastPanel: null,
+
+    loadMask: null,
+
+    constructor: function(config) {
+        var dlg = this;
+
+        //----------------------------------------------------------------------
+        // Template List
+        //----------------------------------------------------------------------
+
+        var templatesStore = new CQ.Ext.data.Store({
+            "proxy": new CQ.Ext.data.HttpProxy({ "url":"/bin/wcm/templates", "method":"GET" }),
+            "reader": new CQ.Ext.data.JsonReader({
+                    "totalProperty":"results",
+                    "root":"templates",
+                    "id":"path"
+                }, [
+                    "path",
+                    "title",
+                    "description",
+                    "thumbnailPath",
+                    "iconPath",
+                    "ranking",
+                    "hidden",
+                    "sitePath"
+                ]),
+                "baseParams": {
+                    "_charset_":"utf-8",
+                    "path": "/content", // todo: make dynamic
+                    "type": "site"
+                },
+                "listeners": {
+                    "load": function() {
+                        this.filterBy(function(record) {
+                            return !record.get("hidden");
+                        });
+                        this.sort("ranking");
+                    }
+                }
+            }
+        );
+
+        var defThumb = CQ.HTTP.externalize("/libs/cq/ui/widgets/themes/default/widgets/wcm/CreateSiteWizard/thumb-bp-default.png");
+        var dataView = new CQ.Ext.DataView({
+            "multiSelect": false,
+            "singleSelect": true,
+            "emptyText": CQ.I18n.getMessage("No template available"),
+            "store": templatesStore,
+            "overClass": "x-view-over",
+            "itemSelector" :"div.template-item",
+            "tpl":new CQ.Ext.XTemplate(
+                '<tpl for=".">',
+                    '<div class="template-item">',
+                        '<tpl if="thumbnailPath">',
+                            '<img class="template-thumbnail" src="{thumbnailPath}">',
+                        '</tpl>',
+                        '<tpl if="!thumbnailPath">',
+                            '<img class="template-thumbnail" src="{this.defThumb}">',
+                        '</tpl>',
+                        '<div class="template-title">{title}</div>',
+                        '<div class="template-description">{description}</div>',
+                        '<div style="clear:both"></div>',
+                    '</div>',
+                '</tpl>',
+                '<div style="height:5px;overflow:hidden"></div>', {
+                defThumb: defThumb
+            }),
+            "prepareData": function(data) {
+                // 900000000: move to the end of the list
+                data.ranking = data.ranking != null ? data.ranking : 900000000;
+                data.title = CQ.I18n.getVarMessage(data.title);
+                data.description = (data.description ? CQ.I18n.getVarMessage(data.description) : "");
+                data.thumbnailPath = CQ.shared.HTTP.externalize(data.thumbnailPath);
+                return data;
+            },
+            listeners: {
+                selectionchange: function(dv/*, s */) {
+                    var r = dv.getSelectedRecords()[0];
+                    if(r && r.data) {
+                        dlg.setBlueprintInfo(r.data);
+                    }
+                }
+            }
+        });
+        this.dataView = dataView;
+
+        //----------------------------------------------------------------------
+        // Progress Bar
+        //----------------------------------------------------------------------
+
+        // we need some text, otherwise the bottom bar is rendered incorrectly
+        var progressStore = [{
+                idx: 0,
+                title: "Select Blueprint"
+            }, {
+                idx: 1,
+                title: "Finish"
+            }];
+
+        this.progressStore = progressStore;
+
+        var progressTemplate = new CQ.Ext.XTemplate(
+                '<div class="x-toolbar x-small-editor">',
+                    '<table cellspacing="0"><tr>',
+                    '<tpl for=".">',
+                        '<tpl if="values.idx != 0">',
+                            '<td><span class="wiz-sep">&rarr;</span></td>',
+                        '</tpl>',
+                        '<td><span class="wiz-step {[this.isActive(values.idx) ? "wiz-step-active" : ""]}">{#}. {title}</span></td>',
+                    '</tpl>',
+                    '</table>',
+                '</div>',
+                {
+                    isActive: function(idx) {
+                        return idx == dlg.activePage;
+                    }
+                });
+        this.progressTemplate = progressTemplate;
+
+        var progressPanel = new CQ.Ext.Panel({
+            id: "cq-createsitewizard-info",
+//            cls: "cq-wizard-progress",
+            border: false,
+            html: progressTemplate.apply(progressStore)
+        });
+        this.progressPanel = progressPanel;
+
+        //----------------------------------------------------------------------
+        // Hard coded Panels
+        //----------------------------------------------------------------------
+
+        var firstPanel = new CQ.Ext.Panel({
+            id: "cq-card-first",
+            layout: "form",
+            autoScroll: true,
+            title: CQ.I18n.getMessage("Select Blueprint"),
+            header: false,
+            bodyStyle: CQ.themes.Dialog.TAB_BODY_STYLE,
+            labelWidth: CQ.themes.Dialog.LABEL_WIDTH,
+            defaultType: "textfield",
+            "stateful": false,
+            defaults: {
+                msgTarget: CQ.themes.Dialog.MSG_TARGET,
+                anchor: CQ.themes.Dialog.ANCHOR,
+                "stateful": false
+            },
+            "items": [{
+                    "xtype": "hidden",
+                    "name": "destPath"
+                }, {
+                    "xtype": "hidden",
+                    "name": "srcPath"
+                },{
+                    "fieldLabel": CQ.I18n.getMessage("Title"),
+                    "fieldDescription": CQ.I18n.getMessage("Page title of the new site."),
+                    "allowBlank": false,
+                    "name": "./jcr:title"
+                }, {
+                    "fieldLabel": CQ.I18n.getMessage("Name"),
+                    "fieldDescription": CQ.I18n.getMessage("Page name of the new site."),
+                    "name": "label",
+                    "vtype": "itemname"
+                }, {
+                    "xtype": "panel",
+                    "border": false,
+                    "cls": "cq-template-view",
+                    "autoScroll":true,
+                    "width": "100%",
+                    "autoHeight":false,
+                    "height": 370,
+                    "layout": "fit",
+                    "items": dataView,
+                    "listeners": {
+                        "render" : {
+                            fn: function() {
+                                templatesStore.load();
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        this.firstPanel = firstPanel;
+
+        var lastPanel = new CQ.Ext.Panel({
+            id: "cq-card-last",
+            layout: "form",
+            autoScroll: true,
+            title: CQ.I18n.getMessage("Finish"),
+            header: false,
+            bodyStyle: CQ.themes.Dialog.TAB_BODY_STYLE,
+            labelWidth: CQ.themes.Dialog.LABEL_WIDTH,
+            "stateful": false,
+            defaults: {
+                msgTarget: CQ.themes.Dialog.MSG_TARGET,
+                anchor: CQ.themes.Dialog.ANCHOR,
+                "stateful": false
+            },
+            "items": [{
+                border: false,
+                cls: "cq-card-last x-form-item",
+                html: CQ.I18n.getMessage("<h1>Setup Complete</h1><p>You completed all steps. <br><br>Click the <em>Create Site</em> button below to create the new site.</p>")
+                }
+            ]
+        });
+        this.lastPanel = lastPanel;
+
+        var nextStep = function() {
+            dlg.navHandler.call(dlg, 1);
+        };
+        var prevStep = function() {
+            dlg.navHandler.call(dlg, -1);
+        };
+
+        //----------------------------------------------------------------------
+        // Wizard Panel
+        //----------------------------------------------------------------------
+
+        var wizPanel = new CQ.Ext.Panel({
+            id: "cq-createsite-wizpanel",
+            layout:'card',
+            deferredRender: false,
+            plain: CQ.themes.Dialog.TABPANEL_PLAIN,
+            border: false,
+            "stateful": false,
+            activeItem: 0, // make sure the active item is set on the container config!
+            bbar: progressPanel,
+            defaults: {
+                // applied to each contained panel
+                border:false
+            },
+            items: [firstPanel, lastPanel]
+        });
+        this.wizPanel = wizPanel;
+
+        //----------------------------------------------------------------------
+        // Dialog Panel
+        //----------------------------------------------------------------------
+
+        this.prevButton = new CQ.Ext.Button({
+            "text": CQ.I18n.getMessage("Prev"),
+            "cls": "cq-btn-prev",
+            "handler": prevStep,
+            "disabled": true,
+            "minWidth": CQ.themes.Dialog.MIN_BUTTON_WIDTH
+        });
+
+        this.nextButton = new CQ.Ext.Button({
+            "text": CQ.I18n.getMessage("Next"),
+            "cls": "cq-btn-next",
+            "handler": nextStep,
+            "disabled": true,
+            "minWidth": CQ.themes.Dialog.MIN_BUTTON_WIDTH
+        });
+
+        config = {
+            "id":"cq-createsitewizard",
+            "title":CQ.I18n.getMessage("Create Site"),
+            "formUrl":"/bin/wcmcommand",
+            "params": {
+                "cmd":"createSite",
+                "_charset_":"utf-8"
+            },
+            "height": 560,
+            "width": 600,
+            "items": [wizPanel],
+            "buttons": [
+                this.prevButton,
+                this.nextButton,
+                CQ.Dialog.CANCEL
+            ]
+        };
+
+        CQ.wcm.CreateSiteWizard.superclass.constructor.call(this, config);
+    },
+
+    loadContent: function(data) {
+        // this initialized the dialog
+        this.getField("destPath").setValue(data.dstPath);
+        this.activePage = 0;
+        this.actListId = null;
+        this.blueprintPath = null;
+        this.sitePath = null;
+
+        // clear all tabs
+        this.wizPanel.items.each(function(item){
+            if (item.id != "cq-card-first" && item.id != "cq-card-last") {
+                this.remove(item, true);
+            }
+        }, this.wizPanel);
+        this.updateProgressBar();
+        this.wizPanel.layout.setActiveItem(0);
+        this.doLayout();
+        this.updateButtons();
+    },
+    navHandler: function(d) {
+        var num = this.wizPanel.items.getCount();
+        var idx = this.activePage + d;
+        if (idx == num) {
+            this.ok();
+        } else if (idx >= 0 && idx < num) {
+            this.activePage = idx;
+            this.wizPanel.layout.setActiveItem(idx);
+            this.updateButtons();
+        }
+    },
+
+    setBlueprintInfo: function(data) {
+        this.blueprintPath = data.path;
+        this.sitePath = data.sitePath;
+        this.getField("srcPath").setValue(data.path);
+        this.loadPanels();
+    },
+
+    loadPanels: function() {
+        var id = this.blueprintPath;
+        if (id != this.actListId) {
+            if (!this.loadMask) {
+                this.loadMask = new CQ.Ext.LoadMask(this.wizPanel.body, {msg:"Loading..."});
+            }
+            this.loadMask.show();
+            if (this.actListId) {
+                // remove old cards
+                this.wizPanel.items.each(function(item){
+                    if (item.id != "cq-card-first") {
+                        this.remove(item, item.id != "cq-card-last");
+                    }
+                }, this.wizPanel);
+            }
+            this.actListId = id;
+            // load the dialog from the blueprint info.
+            var url = CQ.HTTP.externalize(id + "/jcr:content/dialog.infinity.json");
+            var data = CQ.HTTP.eval(url);
+            if (data) {
+                var ct = CQ.utils.Util.formatData(data);
+                this.processExternalDialog(ct);
+            }
+
+            // re-add last panel
+            // todo: check if dialog provided a 'cq-card-last' and then ignore ours
+            this.wizPanel.add(this.lastPanel);
+
+            // initialize special fields (e.g. load options of selections)
+            this.processPath(this.sitePath);
+            this.updateProgressBar();
+            this.doLayout();
+            this.updateButtons();
+            this.loadMask.hide();
+        }
+    },
+
+    updateProgressBar: function() {
+        // update the bottom steps
+        var infos = [];
+        var idx = 0;
+        this.wizPanel.items.each(function(){
+           infos.push({ title: this.title, idx: idx++ });
+        });
+        this.progressStore = infos;
+    },
+
+    processExternalDialog: function(data) {
+        if (data && data.items) {
+            if (data.items instanceof Array) {
+                for (var i = 0; i < data.items.length; i++) {
+                    this.processExternalItem(data.items[i]);
+                }
+            } else {
+                this.processExternalItem(data.items);
+            }
+        }
+    },
+
+    processExternalItem: function(tab) {
+        if (tab["xtype"] == "tabpanel") {
+            this.processExternalDialog(tab);
+        } else {
+            if (tab instanceof Array) {
+                for (var i=0; i<tab.length; i++) {
+                    this.processExternalItem(tab[i]);
+                }
+            } else {
+                var include = CQ.Util.applyDefaults(tab, this.configDefaults["panel"]);
+                var title = include.title;
+                if (!title) {
+                    title = "untitled";
+                }
+                include.header = false;
+                this.wizPanel.add(include);
+            }
+        }
+    },
+
+    updateButtons: function() {
+        var num = this.wizPanel.items.getCount();
+        if (this.activePage < num && this.actListId) {
+            this.nextButton.enable();
+            if (this.activePage == num-1) {
+                this.nextButton.setText(CQ.I18n.getMessage("Create Site"));
+            } else {
+                this.nextButton.setText(CQ.I18n.getMessage("Next"));
+            }
+        } else {
+            this.nextButton.disable();
+            this.nextButton.setText(CQ.I18n.getMessage("Next"));
+        }
+        if (this.activePage > 0) {
+            this.prevButton.enable();
+        } else {
+            this.prevButton.disable();
+        }
+        // update toolbar buttons
+        this.progressTemplate.overwrite(this.progressPanel.body, this.progressStore);
+    }
+
+});
+
+// CQ <= 5.3
+CQ.wcm.CreateSiteWizard.setLanguagesCB = function(path) {
+    this.setOptions(CQ.wcm.CreateSiteWizard.getLanguagesCB(path));
+};
+
+// CQ > 5.4
+CQ.wcm.CreateSiteWizard.getLanguagesCB = function(path) {
+    // fill language map
+    var flagRoot = CQ.HTTP.externalize("/libs/wcm/msm/resources/flags/");
+    var data = CQ.HTTP.eval(path+".languages.json");
+    var opts = [];
+    if (data.rows){
+        var langTitles = CQ.I18n.getLanguages();
+
+        for (var i = 0; i<data.rows.length; i++){
+            var row = data.rows[i];
+            var img = row['country'] ? ("<img style=\'position:absolute;left:2px;top:4px;height:12px;\' src=\'"+flagRoot+row['country']+".gif\'>") : "";
+            var lang = CQ.tagging.getTagLocaleCode(row['iso'] + "_" + row['country']);
+            var lbl = "<span style='padding-left: 32px'>" + (langTitles[lang] ? langTitles[lang].title : row['language']) + "</span>";
+            opts.push({
+                "text": img + lbl,
+                "value": row['path'],
+                "checked": i == 0
+            });
+        }
+    }
+    return opts;
+};
+
+// CQ <= 5.3
+CQ.wcm.CreateSiteWizard.setChaptersCB = function(path) {
+    this.setOptions(CQ.wcm.CreateSiteWizard.getChaptersCB(path));
+};
+
+// CQ > 5.4
+CQ.wcm.CreateSiteWizard.getChaptersCB = function(path) {
+    // fill chapters map
+    var url = "/libs/wcm/msm/content/commands/chapters.json?path=" + path;
+    var data = CQ.HTTP.eval(url);
+    var opts = [];
+    if (data.rows){
+        for (var i = 0; i<data.rows.length; i++){
+            var row = data.rows[i];
+            opts.push({
+                "text": row['displayText'],
+                "value": row['path'],
+                "checked": true
+            });
+        }
+    }
+    return opts;
+};
+
+CQ.Ext.reg("createsitewizard", CQ.wcm.CreateSiteWizard);

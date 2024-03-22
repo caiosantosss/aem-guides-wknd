@@ -1,0 +1,681 @@
+<%--
+    Copyright 1997-2007 Day Management AG
+    Barfuesserplatz 6, 4001 Basel, Switzerland
+    All Rights Reserved.
+
+    This software is the confidential and proprietary information of
+    Day Management AG, ("Confidential Information"). You shall not
+    disclose such Confidential Information and shall use it only in
+    accordance with the terms of the license agreement you entered into
+    with Day.
+--%><%
+%><%@page session="false" %><%
+%><%@page import="javax.jcr.Session,
+                  com.day.cq.commons.JSONWriterUtil,
+                  com.day.cq.commons.TidyJSONWriter,
+                  org.apache.sling.commons.json.JSONException,
+                  org.apache.sling.commons.json.JSONObject,
+                  org.apache.sling.commons.json.io.JSONWriter,
+                  java.util.Calendar,
+                  java.util.Iterator,
+                  java.util.List,
+                  javax.jcr.Node,
+                  javax.jcr.lock.LockManager,
+                  com.adobe.granite.security.user.util.AuthorizableUtil,
+                  com.adobe.granite.taskmanagement.TaskAction,
+                  com.adobe.granite.workflow.collection.util.ResultSet,
+                  com.day.cq.replication.ReplicationQueue,
+                  com.day.cq.replication.ReplicationStatus,
+                  com.day.cq.wcm.api.WCMException,
+                  com.day.cq.wcm.core.stats.PageViewStatistics,
+                  com.adobe.granite.workflow.WorkflowSession,
+                  com.day.cq.xss.XSSProtectionService,
+                  org.apache.jackrabbit.api.security.user.Authorizable,
+                  org.apache.jackrabbit.api.security.user.UserManager,
+                  org.apache.sling.api.resource.ResourceMetadata,
+                  org.apache.sling.api.resource.ResourceResolverFactory,
+                  com.adobe.granite.workflow.model.WorkflowModel,
+                  com.day.cq.i18n.I18n,
+                  com.adobe.granite.security.user.UserPropertiesManager,
+                  com.adobe.granite.security.user.UserProperties,
+                  com.adobe.granite.workflow.exec.InboxItem,
+                  org.apache.commons.lang.StringUtils,
+                  com.adobe.granite.workflow.payload.PayloadInfoBuilderManager,
+                  com.adobe.granite.workflow.payload.PayloadInfo,
+                  com.adobe.granite.workflow.payload.PayloadInfoBuilderContext,
+                  com.day.cq.commons.servlets.AbstractListServlet"%><%
+%><%@taglib prefix="sling" uri="http://sling.apache.org/taglibs/sling/1.0"%><%
+%><sling:defineObjects/><%
+%><%@include file="/libs/cq/workflow/global.jsp"%><%
+%><%!
+
+    private static final String FAILURE_STACK = "failureStack";
+    private static final String FAILED_NODE_TITLE = "failedNodeTitle";
+    private static final String FAILED_WORK_ITEM_ID = "failedWorkItemId";
+
+   
+        
+
+    protected void writeScheduledActivationState(JSONWriter out,
+                                                 WorkflowStatus wfState) throws JSONException {
+        List<Workflow> workflows = wfState.getWorkflows(false);
+        out.key("scheduledTasks").array();
+        for (Workflow workflow : workflows) {
+            if (workflow.getWorkflowModel().getId().equals(
+            		AbstractListServlet.ListItem.SCHEDULED_ACTIVATION_WORKFLOW_ID)
+                    || workflow.getWorkflowModel().getId().equals(
+                    		AbstractListServlet.ListItem.SCHEDULED_DEACTIVATION_WORKFLOW_ID) || workflow.getWorkflowModel().getId().equals(
+                    				AbstractListServlet.ListItem.SCHEDULED_ACTIVATION_WORKFLOW_ID_VAR)
+                            || workflow.getWorkflowModel().getId().equals(
+                            		AbstractListServlet.ListItem.SCHEDULED_DEACTIVATION_WORKFLOW_ID_VAR)) {
+                String version = workflow.getWorkflowData().getMetaDataMap().get(
+                        "resourceVersion", String.class);
+                long time = Long.valueOf(workflow.getWorkflowData()
+                        .getMetaDataMap().get("absoluteTime", String.class));
+                out.object();
+                out.key("version").value(version != null ? version : "");
+                out.key("scheduled").value(time);
+                out.key("scheduledBy").value(workflow.getInitiator());
+                out
+                        .key("type")
+                        .value(
+                        		(workflow.getWorkflowModel().getId().equals(
+                        				AbstractListServlet.ListItem.SCHEDULED_ACTIVATION_WORKFLOW_ID_VAR) || workflow.getWorkflowModel().getId().equals(
+                        						AbstractListServlet.ListItem.SCHEDULED_ACTIVATION_WORKFLOW_ID)) ? "activation"
+                                        : "deactivation");
+                out.endObject();
+            }
+        }
+        out.endArray();
+    }
+
+    protected void writeWorkflowState(JSONWriter out, WorkflowStatus wfState, XSSProtectionService xss)
+            throws JSONException {
+        List<Workflow> workflows = wfState.getWorkflows(true);
+        out.key("workflows").array();
+        for (Workflow workflow : workflows) {
+            out.object();
+            JSONWriterUtil.write(out, "model", workflow.getWorkflowModel().getTitle(), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+            out.key("started").value(workflow.getTimeStarted().getTime());
+            out.key("startedBy").value(workflow.getInitiator());
+            out.key("suspended").value(!workflow.isActive());
+            out.key("workItems").array();
+            List<WorkItem> items = workflow.getWorkItems();
+            for (WorkItem item : items) {
+                out.object();
+                JSONWriterUtil.write(out, "item", item.getNode().getTitle(), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+                out.key("assignee").value(item.getCurrentAssignee());
+                out.endObject();
+            }
+            out.endArray();
+            out.endObject();
+        }
+        out.endArray();
+    }
+
+    protected void writeWorkflowState(JSONWriter out, Resource resource, XSSProtectionService xss)
+            throws JSONException {
+        // asset "hack": it might be the case that the asset itself is in the
+        // workflow or the <asset name>/jcr:content/renditions/original
+        WorkflowStatus wfState = resource.adaptTo(WorkflowStatus.class);
+        if (wfState == null || !wfState.isInRunningWorkflow(true)) {
+            Resource original = resource.getResourceResolver().getResource(
+                    resource.getPath() + "/jcr:content/"
+                            + "renditions/original");
+            wfState = (original == null) ? wfState : original
+                    .adaptTo(WorkflowStatus.class);
+        }
+        out.key("inWorkflow").value(wfState.isInRunningWorkflow(true));
+        List<Workflow> workflows = wfState.getWorkflows(true);
+        out.key("workflows").array();
+        for (Workflow workflow : workflows) {
+            out.object();
+            JSONWriterUtil.write(out, "model", workflow.getWorkflowModel().getTitle(), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+            out.key("started").value(workflow.getTimeStarted().getTime());
+            out.key("startedBy").value(workflow.getInitiator());
+            out.key("suspended").value(!workflow.isActive());
+            out.key("workItems").array();
+            List<WorkItem> items = workflow.getWorkItems();
+            for (WorkItem item : items) {
+                out.object();
+                JSONWriterUtil.write(out, "item", item.getNode().getTitle(), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+                out.key("assignee").value(item.getCurrentAssignee());
+                out.endObject();
+            }
+            if (items.size() == 0) {
+                String itemId = workflow.getWorkflowData().getMetaDataMap().get(
+                        "currentJobs", String.class);
+                if (itemId != null && itemId.length() > 0) {
+                    String splits[] = itemId.split("_");
+                    if (splits.length > 1) {
+                        String nodeId = splits[1];
+                        String title = (workflow.getWorkflowModel().getNode(
+                                nodeId) != null) ? workflow.getWorkflowModel()
+                                .getNode(nodeId).getTitle() : "";
+                        out.object();
+                        JSONWriterUtil.write(out, "item", title, JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+                        out.key("assignee").value("process");
+                        out.endObject();
+                    }
+                }
+            }
+            out.endArray();
+            out.endObject();
+        }
+        out.endArray();
+    }
+
+    private void write(JSONWriter out, String key, String value) throws JSONException {
+        if (value != null) {
+            out.key(key).value(value);
+        }
+    }
+
+    private void write(JSONWriter out, String key, Calendar value) throws JSONException {
+        if (value != null) {
+            out.key(key).value(value.getTimeInMillis());
+        }
+    }
+
+    private void writePayloadSummary(JSONWriter out, String description, String icon) throws JSONException {
+        out.key("payloadSummary").object();
+        if (StringUtils.isNotBlank(description)) {
+            out.key("description").value(description.trim());
+        }
+        if (StringUtils.isNotBlank(icon)) {
+            out.key("icon").value(icon.trim());
+        }
+        out.endObject();
+    }
+
+    private void writeInstanceMetaData(XSSProtectionService xss, JSONWriter writer, InboxItem inboxItem) throws JSONException {
+        if (inboxItem instanceof WorkItem) {
+            WorkItem wi = (WorkItem) inboxItem;
+            Iterator<String> keys;
+            keys = wi.getWorkflow().getMetaDataMap().keySet().iterator();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                String val = wi.getWorkflow().getMetaDataMap().get(key, String.class);
+                JSONWriterUtil.write(writer, key, val, JSONWriterUtil.WriteMode.BOTH, xss);
+            }
+        }
+    }
+
+    private void writeModelInfo(JSONWriter writer, InboxItem inboxItem) throws JSONException {
+        if (inboxItem instanceof WorkItem) {
+            WorkItem wi = (WorkItem) inboxItem;
+            WorkflowModel workflowModel = wi.getWorkflow().getWorkflowModel();
+
+            writer.key("id").value(workflowModel.getId());
+            writer.key("title").value(workflowModel.getTitle());
+            writer.key("description").value(workflowModel.getDescription());
+        }
+    }
+
+    private void writeWorkItemMetadata(JSONWriter writer, InboxItem inboxItem) throws JSONException {
+        if (inboxItem instanceof WorkItem) {
+            WorkItem wi = (WorkItem) inboxItem;
+            boolean isFailure = false;
+            if (FAILURE_ITEMTYPE.equals(inboxItem.getItemSubType())) {
+                isFailure = true;
+            }
+            Iterator<String> keys = wi.getMetaDataMap().keySet().iterator();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                // skip over failure info that we included earlier ...
+                if (isFailure &&
+                        (    FAILURE_MESSAGE.equals(key)
+                                || FAILURE_STACK.equals(key)
+                                || FAILED_WORK_ITEM_ID.equals(key)
+                                || FAILED_NODE_TITLE.equals(key))) {
+                    continue;
+                }
+                String val = wi.getMetaDataMap().get(key, String.class);
+                writer.key(key).value(val);
+            }
+        }
+    }
+
+    private void writeTaskInfo(JSONWriter w, Task task) throws JSONException {
+        w.object();
+        w.key("id").value(task.getId());
+        w.key("parentTaskId").value(task.getParentId());
+
+        w.key("actionNames");
+        w.array();
+        List<TaskAction> taskActions = task.getActions();
+        if (taskActions != null) {
+            for (TaskAction action : taskActions) {
+                w.value(action.getActionID());
+            }
+        }
+        w.endArray();
+
+        Calendar calendar = Calendar.getInstance();
+
+        if (task.getLastModified() != null) {
+            calendar.setTime(task.getLastModified());
+            write(w, "updateTime", calendar);
+        }
+
+        if (task.getTimeStarted() != null) {
+            calendar.setTime(task.getTimeStarted());
+            write(w,  "createTime", calendar);
+        }
+
+        if (task.getTimeEnded() != null) {
+            calendar.setTime(task.getTimeEnded());
+            write(w,  "completeTime", calendar);
+        }
+
+        w.key("description").value(task.getDescription());
+        w.key("instructions").value(task.getInstructions());
+        w.key("contentPath").value(task.getContentPath());
+        w.key("hasSubTasks").value(task.hasSubTasks());
+        w.key("name").value(task.getName());
+        w.key("ownerId").value(task.getCurrentAssignee());
+        w.key("createdBy").value(task.getCreatedBy());
+        String selectedActionId = null;
+        if (task.getSelectedAction()!=null) {
+            selectedActionId = task.getSelectedAction().getActionID();
+        }
+        w.key("selectedAction").value(selectedActionId);
+
+        w.key("properties");
+
+        w.object();
+        Iterator<String> propertyNameIterator = task.getPropertyNames();
+        if (propertyNameIterator!=null) {
+            while (propertyNameIterator.hasNext()) {
+                String key = propertyNameIterator.next();
+                Object propertyValue = task.getProperty(key);
+                if (propertyValue != null) {
+                    w.key(key).value(propertyValue);
+                }
+            }
+        }
+        w.endObject();
+
+        w.key("status").value(task.getStatus());
+        w.key("taskType").value(task.getTaskTypeName());
+
+        w.endObject();
+    }
+
+    private String getPayloadSummaryJSON(SlingHttpServletRequest slingRequest, HttpServletResponse response, String path)
+            throws ServletException, IOException {
+
+        // Response wrapper that captures into a String
+        final HttpServletResponse wrapper = new SlingHttpServletResponseWrapper((SlingHttpServletResponse)response) {
+            private final StringWriter writer = new StringWriter();
+            private final PrintWriter pw = new PrintWriter(writer);
+
+            public PrintWriter getWriter() {
+                return pw;
+            }
+
+            public String toString() {
+                return writer.toString();
+            }
+        };
+
+        // Dispatch request, describe errors in JSON
+        try {
+            slingRequest.getRequestDispatcher(path).include(slingRequest, wrapper);
+        } catch(Exception e) {
+            return "{ exception : '" + e.toString() + " (" + path + ")'}";
+        }
+        return wrapper.toString();
+    }
+
+    private String getParticipant(InboxItem inboxItem, UserManager usrMgr, JSONWriter writer, UserPropertiesManager upm) throws JSONException {
+        String participant = "";
+
+        if (inboxItem instanceof WorkItem) {
+            WorkItem wi = (WorkItem) inboxItem;
+            if (wi.getNode().getType().equals("PROCESS")) {
+                participant = "PROCESS";
+
+            } else if (wi.getNode().getType().equals("PARTICIPANT")) {
+                participant = wi.getNode().getMetaDataMap().get("PARTICIPANT", String.class);
+                try {
+                    if (participant != null) {
+                        Authorizable auth = (participant.startsWith("/") ? usrMgr.getAuthorizableByPath(participant) : usrMgr.getAuthorizable(participant));
+                        if (auth != null) {
+                            UserProperties props = AuthorizableUtil.getProfile(upm, auth.getID());
+                            participant = (props == null ? auth.getPrincipal().getName() : props.getDisplayName());
+                        }
+                    }
+                } catch (RepositoryException e) {
+                    // Ignore, likely access issue.  Will use id from metadata.
+                }
+            }
+            // write dialog path
+            String dialogPath = wi.getNode().getMetaDataMap().get("DIALOG_PATH", String.class);
+            if (dialogPath != null) {
+                writer.key("dialog").value(dialogPath);
+            }
+        } else if (inboxItem instanceof Task) {
+            Task task = (Task)inboxItem;
+            participant = task.getCurrentAssignee();
+        } else {
+            participant = "";
+        }
+        return participant;
+    }
+%><%
+
+    response.setContentType("application/json");
+    response.setCharacterEncoding("utf-8");
+
+    XSSProtectionService xss = sling.getService(XSSProtectionService.class);
+
+    long start = 0;
+    String startParam = request.getParameter("start");
+    if ((startParam != null) && (!startParam.equals(""))) {
+        start = Long.valueOf(startParam);
+    }
+
+    String noPayloadMapInfoString = request.getParameter("noPayloadMapInfo");
+    boolean includePayloadInfo = !Boolean.parseBoolean(noPayloadMapInfoString);
+
+    long limit = -1;
+    String limitParam = request.getParameter("limit");
+    if ((limitParam != null) && (!limitParam.equals(""))) {
+        limit = Long.valueOf(limitParam);
+    }
+
+    long maxCount = -1;
+    String maxCountParam = request.getParameter("maxCount");
+    if ((maxCountParam != null) && (!maxCountParam.equals(""))) {
+        maxCount = Long.valueOf(maxCountParam);
+        maxCount ++;
+    }
+
+    ResourceResolver resolver = slingRequest.getResourceResolver();
+    Session session = resolver.adaptTo(Session.class);
+    LockManager lockManager = session.getWorkspace().getLockManager();
+
+    UserManager usrMgr = slingRequest.getResourceResolver().adaptTo(UserManager.class);
+
+    UserPropertiesManager upm = resolver.adaptTo(UserPropertiesManager.class);
+
+    final ResourceResolverFactory rrf = sling.getService(ResourceResolverFactory.class);
+
+    PageViewStatistics statistics = sling.getService(PageViewStatistics.class);
+
+    InboxFilter filter = new InboxFilter(usrMgr, session);
+
+    String pathFilterParam = request.getParameter("filter-path");
+    if ((pathFilterParam != null) && (!pathFilterParam.equals(""))) {
+        filter.setPath(pathFilterParam);
+    }
+    String modelFilterParam = request.getParameter("filter-model");
+    if ((modelFilterParam != null) && (!modelFilterParam.equals(""))) {
+        filter.setModel(modelFilterParam);
+    }
+    String stepFilterParam = request.getParameter("filter-step");
+    if ((stepFilterParam != null) && (!stepFilterParam.equals(""))) {
+        filter.setStep(stepFilterParam);
+    }
+    String authTypeFilterParam = request.getParameter("filter-authType");
+    if ((authTypeFilterParam != null) && (!authTypeFilterParam.equals(""))) {
+        filter.setAuthorizableType(authTypeFilterParam);
+    }
+    String itemTypeFilterParam = request.getParameter("filter-itemType");
+    if ((itemTypeFilterParam != null) && (!itemTypeFilterParam.equals(""))) {
+        filter.setItemType(itemTypeFilterParam);
+    }
+    String authorizableFilterParam = request.getParameter("filter-authorizable");
+    if ((authorizableFilterParam != null) && (!authorizableFilterParam.equals(""))) {
+        filter.setAssignee(authorizableFilterParam);
+    }
+
+    filter.setMaxCount(maxCount);
+
+    com.adobe.granite.workflow.WorkflowSession graniteWorkflowSession = resolver.adaptTo(com.adobe.granite.workflow.WorkflowSession.class);
+    ResultSet<InboxItem> inboxItems = graniteWorkflowSession.getActiveInboxItems(start, limit, filter);
+
+    InboxItem[] items = inboxItems.getItems();
+
+    JSONWriter writer = new JSONWriter(response.getWriter());
+
+    //writer.setTidy(true);
+    writer.object();
+
+    {
+        long totalSize = inboxItems.getTotalSize();
+        if (totalSize >= maxCount) {
+            totalSize = -1;
+        }
+        writer.key("results").value(totalSize);
+    }
+    writer.key("items").array();
+
+    for (InboxItem inboxItem : items) {
+        writer.object();
+        writer.key("item").value(inboxItem.getId());
+        JSONWriterUtil.write(writer, "title", getTitle(inboxItem), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+        JSONWriterUtil.write(writer, "description", getDescription(inboxItem), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+
+        String participant = getParticipant(inboxItem, usrMgr, writer, upm);
+
+        JSONWriterUtil.write(writer, "participant", participant, JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+
+        String currentAssigneeType = "user";
+        String currAssignee = inboxItem.getCurrentAssignee();
+        if (currAssignee != null) {
+            Authorizable auth = (currAssignee.startsWith("/") ? usrMgr.getAuthorizableByPath(currAssignee) : usrMgr.getAuthorizable(currAssignee));
+            if (auth != null) {
+                UserProperties props = AuthorizableUtil.getProfile(upm, auth.getID());
+                currAssignee = (props == null ? auth.getPrincipal().getName() : props.getDisplayName());
+
+                if (auth.isGroup()) {
+                    currentAssigneeType = "group";
+                }
+            }
+            writer.key("currentAssigneeType").value(currentAssigneeType);
+            JSONWriterUtil.write(writer, "currentAssignee", currAssignee, JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+        }
+
+
+        writer.key("startTime").value(inboxItem.getTimeStarted() != null ? inboxItem.getTimeStarted().getTime() : null);
+
+        boolean isFailure = false;
+        String itemType = inboxItem.getItemType();
+        String computedInboxType = getComputedInboxType(inboxItem);
+
+        if (FAILURE_ITEMTYPE.equals(inboxItem.getItemSubType())) {
+            itemType = computedInboxType = FAILURE_ITEMTYPE;
+            isFailure = true;
+        }
+
+        if (inboxItem instanceof Task) {
+            Task task = (Task) inboxItem;
+
+            writer.key("actionNames");
+            writer.array();
+            List<TaskAction> taskActions = task.getActions();
+            if (taskActions != null) {
+                for (TaskAction action : taskActions) {
+                    writer.value(action.getActionID());
+                }
+            }
+            writer.endArray();
+
+            writer.key("taskInfo");
+            writeTaskInfo(writer, task);
+
+        } else if (isFailure && inboxItem instanceof WorkItem) {
+            WorkItem item = (WorkItem) inboxItem;
+            writer.key("failureInfo");
+            writer.object();
+
+            if (item.getMetaDataMap().get(FAILURE_MESSAGE, String.class) != null) {
+                writer.key(FAILURE_MESSAGE).value(
+                        item.getMetaDataMap().get(FAILURE_MESSAGE, String.class));
+            }
+            if (item.getMetaDataMap().get(FAILURE_STACK, String.class) != null) {
+                writer.key(FAILURE_STACK).value(
+                        item.getMetaDataMap().get(FAILURE_STACK, String.class));
+            }
+            if (item.getMetaDataMap().get(FAILED_WORK_ITEM_ID, String.class) != null) {
+                writer.key(FAILED_WORK_ITEM_ID).value(
+                        item.getMetaDataMap().get(FAILED_WORK_ITEM_ID, String.class));
+            }
+            if (item.getMetaDataMap().get(FAILED_NODE_TITLE, String.class) != null) {
+                writer.key(FAILED_NODE_TITLE).value(
+                        item.getMetaDataMap().get(FAILED_NODE_TITLE, String.class));
+            }
+
+            writer.endObject();
+        }
+
+        writer.key("inboxItemType").value(itemType);
+        writer.key("computedItemType").value(firstUpper(computedInboxType));
+
+        // write metadata
+        writer.key("metaData").object();
+
+        // work item
+        writer.key("workItem").object();
+        writeWorkItemMetadata(writer, inboxItem);
+        writer.endObject();
+
+        // instance
+        writer.key("instance").object();
+        writeInstanceMetaData(xss, writer, inboxItem);
+        writer.endObject();
+
+        writer.endObject();
+
+        // write the model info
+        writer.key("model").object();
+        writeModelInfo(writer, inboxItem);
+        writer.endObject();
+
+        //
+
+        String payloadType = getPayloadType(inboxItem);
+        String payloadPath = inboxItem.getContentPath();
+
+        if (StringUtils.isNotBlank(payloadPath)) {
+            if (TYPE_JCR_PATH.equals(payloadType)) {
+                // #29932: Add a try catch to avoid whole layout being broken if there is an instance in a bad status
+                try {
+                    PayloadInfoBuilderManager builder = resolver.adaptTo(PayloadInfoBuilderManager.class);
+                    PayloadInfo info = builder.getPayloadInfo(inboxItem, PayloadInfoBuilderContext.INITIATOR_HINT.TOUCH_INBOX.name());
+                    final Resource res = resolver.getResource(payloadPath);
+
+                    if (res != null) {
+                        JSONWriterUtil.write(writer, "payload", info.getBrowserPath(), JSONWriterUtil.WriteMode.BOTH, xss);
+
+                        JSONWriterUtil.write(writer, "payloadPath", payloadPath, JSONWriterUtil.WriteMode.BOTH, xss);
+                        writePayloadSummary(writer, info.getDescription(), info.getThumbnailPath());
+
+                        if (info.getTitle() != null) {
+                            JSONWriterUtil.write(writer, "payloadTitle", info.getTitle(), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+                        }
+
+                        if (info.getPayloadType() != null) {
+                            writer.key("payloadType").value(info.getPayloadType());
+                        }
+
+                        JSONWriterUtil.write(writer, "lastModifiedBy", info.getLastModifiedBy(), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+                        if (info.getLastModified() != null) {
+                            writer.key("lastModified").value(info.getLastModified().getTimeInMillis());
+                        } else {
+                            writer.key("lastModified").value(0);
+                        }
+                        JSONWriterUtil.write(writer, "lockedBy", info.getLockedBy(), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+                        writer.key("timeUntilValid").value(info.getTimeUntilValid());
+                        if (info.getOnTime() != null) {
+                            writer.key("onTime").value(info.getOnTime().getTimeInMillis());
+                        } else {
+                            writer.key("onTime").value(0);
+                        }
+                        if (info.getOffTime() != null) {
+                            writer.key("offTime").value(info.getOffTime().getTimeInMillis());
+                        } else {
+                            writer.key("offTime").value(0);
+                        }
+                        writer.key("monthlyHits").value(info.getMonthlyHits());
+
+                        // replication
+
+                        ReplicationStatus rs = res.adaptTo(ReplicationStatus.class);
+                        writer.key("replication").object();
+
+                        if (rs != null) {
+                            // get pending information
+                            int maxQueuePos = 0;
+                            for (ReplicationQueue.Entry e : rs.getPending()) {
+                                if (e.getQueuePosition() > maxQueuePos) {
+                                    maxQueuePos = e.getQueuePosition();
+                                }
+                            }
+                            writer.key("numQueued").value(maxQueuePos);
+                            write(writer, "published", rs.getLastPublished());
+                            JSONWriterUtil.write(writer, "publishedBy", AuthorizableUtil.getFormattedName(resolver, rs.getLastPublishedBy()), JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+                            if (rs.getLastReplicationAction() != null) {
+                                write(writer, "action", rs.getLastReplicationAction().name());
+                            }
+                        }
+                        writer.endObject();
+
+                        if (includePayloadInfo) {
+                            WorkflowStatus wfStatus = res.adaptTo(WorkflowStatus.class);
+                            writeScheduledActivationState(writer, wfStatus);
+
+                            if (wfStatus != null) {
+                                if (info.getPayloadType() != null && info.getPayloadType().equals(PayloadInfo.PAYLOAD_TYPE.ASSET.name())) {
+                                    writeWorkflowState(writer, res, xss);
+                                } else {
+                                    writeWorkflowState(writer, wfStatus, xss);
+                                }
+                                writeScheduledActivationState(writer, wfStatus);
+                            }
+                        }
+
+                    } else /* if (res == null) */ {
+                        final String NULL_URL = "#";
+                        
+                        JSONWriterUtil.write(writer, "payload", NULL_URL, JSONWriterUtil.WriteMode.BOTH, xss);
+                        JSONWriterUtil.write(writer, "payloadTitle",
+                            I18n.get(slingRequest, "The resource used to start this instance does not exist."),
+                            JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+
+                        log.error("Payload not found for work item: " + inboxItem.getId() + " (" + payloadPath + ")");
+                    }
+                } catch (Exception e) {
+                    log.error("Unable to process inboxitem: " + inboxItem.getId(), e);
+                }
+            } else if ("URL".equals(payloadType)) {
+                try {
+                    // payload is of type URL -> it's a string.
+                    JSONWriterUtil.write(writer, "payload", payloadPath, JSONWriterUtil.WriteMode.BOTH, xss);
+                    JSONWriterUtil.write(writer, "payloadPath", payloadPath, JSONWriterUtil.WriteMode.BOTH, xss);
+                    JSONWriterUtil.write(writer, "payloadTitle", payloadPath, JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+                    writer.key("payloadType").value("URL");
+                } catch (Exception e) {
+                    log.error("Unable to process inboxitem: " + inboxItem.getId(), e);
+                }
+            }
+
+            String comment = getComment(session, inboxItem);
+
+            if (comment != null && !comment.equals("")) {
+                JSONWriterUtil.write(writer, "comment", comment, JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+            }
+
+            String workflowTitle = getWorkflowTitle(inboxItem);
+            if (workflowTitle != null) {
+                JSONWriterUtil.write(writer, "workflowTitle", workflowTitle, JSONWriterUtil.WriteMode.AVOID_XSS, xss);
+            }
+        }
+
+        writer.endObject();
+    }
+    writer.endArray();
+    writer.endObject();
+%>

@@ -1,0 +1,414 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2016 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(window, document, $, URITemplate, Coral) {
+    "use strict";
+
+    var DATA_ATTRIBUTE_FOUNDATION_PICKER_BUTTONLIST_PREFIX = "foundationPickerButtonlistCustom";
+
+    function generateId(el) {
+        if (!el.id) {
+            el.id = Coral.commons.getUID();
+        }
+        return el.id;
+    }
+
+    function startsWith(s1, s2) {
+        return s1.substring(0, s2.length) === s2;
+    }
+
+    function isElementAbove(el1, el2) {
+        var rect1 = el1.getBoundingClientRect();
+        var rect2 = el2.getBoundingClientRect();
+        return rect1.top < rect2.top;
+    }
+
+
+    var registry = $(window).adaptTo("foundation-registry");
+
+    registry.register("foundation.adapters", {
+        type: "foundation-picker",
+        selector: "coral-overlay.foundation-picker-buttonlist",
+        adapter: function(overlayEl) {
+            var overlay = $(overlayEl);
+            var currentDeferred = null;
+            var currentContext = null;
+            var currentSetValue = null;
+            var currentQuery = null;
+            var isInputDeletion = false;
+            var loaderEl = $(document.createElement("div"))
+                .addClass("foundation-picker-buttonlist-loader")
+                .attr("role", "progressbar")
+                .append(new Coral.Wait().set({
+                    centered: true
+                }));
+
+            var Paginator = $(window).adaptTo("foundation-util-paginator");
+
+            var paginator = new Paginator({
+                el: overlayEl,
+                limit: overlayEl.dataset.foundationPickerButtonlistLimit || 10,
+                resolveURL: function(paginator) {
+                    return URITemplate.expand(overlayEl.dataset.foundationPickerButtonlistSrc, {
+                        offset: paginator.offset,
+                        limit: paginator.limit,
+                        query: currentQuery
+                    });
+                },
+                wait: function(paginator) {
+                    overlay.append(loaderEl);
+
+                    return {
+                        clear: function() {
+                            loaderEl.remove();
+                        }
+                    };
+                },
+                processResponse: function(paginator, html) {
+                    var paginatorDeferred = $.Deferred();
+
+                    var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+                    parser.parse(html).then(function(fragment) {
+                        var buttonlist = $(fragment).children();
+
+                        if (!buttonlist.is("coral-buttonlist")) {
+                            return;
+                        }
+
+                        var items = buttonlist.children("button");
+                        items.attr("tabindex", -1);
+
+                        var current = overlay.children("coral-buttonlist");
+                        current.append(items);
+
+                        if (paginator.offset === 0) {
+                            var firstItem = current.children("button").first();
+                            if (firstItem.length) {
+                                var firstItemValue = firstItem.val();
+
+                                if (
+                                    currentQuery.length > 0 &&
+                                    !isInputDeletion &&
+                                    startsWith(firstItemValue, currentQuery)
+                                ) {
+                                    if ($(currentContext).is("foundation-autocomplete")) {
+                                        currentContext.field.value = firstItemValue;
+                                        currentContext.field.setSelectionRange(
+                                            currentQuery.length,
+                                            firstItemValue.length
+                                        );
+                                    }
+
+                                    firstItem.siblings(".is-focused").removeClass("is-focused");
+                                    firstItem.addClass("is-focused");
+                                }
+                            }
+                        }
+
+                        var hasNext = buttonlist[0].dataset.foundationPickerButtonlistHasnext;
+                        if (hasNext === "true") {
+                            hasNext = true;
+                        } else if (hasNext === "false") {
+                            hasNext = false;
+                        } else {
+                            hasNext = items.length >= paginator.limit;
+                        }
+
+                        // Wait for custom element upgrade so that the sizing calculation is correct
+                        requestAnimationFrame(function() {
+                            paginatorDeferred.resolve({
+                                length: items.length,
+                                hasNext: hasNext
+                            });
+                        });
+                    });
+
+                    return paginatorDeferred.promise();
+                }
+            });
+
+            var resetValue = function() {
+                if (!currentSetValue) {
+                    return;
+                }
+                currentSetValue(currentQuery);
+            };
+
+            var resetState = function() {
+                currentDeferred = null;
+                currentContext = null;
+                currentSetValue = null;
+            };
+
+            /**
+             * Extracts the data under the given namespace from the given element dataset
+             *
+             * @param {{HTMLElement}} element       - Element carrying the data
+             * @param {String} namespace            - Namespace under which are stored the desired data
+             * @returns {{}} Registry containing the key/value pairs for the given namespace
+             */
+            var getData = function(element, namespace) {
+                var data = {};
+
+                for (var key in element.dataset) {
+                    if (element.dataset.hasOwnProperty(key)) {
+                        if (key.length <= namespace.length || !key.startsWith(namespace)) {
+                            continue;
+                        }
+
+                        var firstCharacter = key.charAt(namespace.length);
+                        if (firstCharacter !== firstCharacter.toUpperCase()) {
+                            continue;
+                        }
+
+                        var dataKey = key.substr(namespace.length);
+                        data[dataKey.toLowerCase()] = element.dataset[key];
+                    }
+                }
+
+                return data;
+            };
+
+            paginator.start();
+
+            overlayEl.tabIndex = -1;
+            overlayEl.placement = "bottom";
+            overlayEl.collision = "flip";
+
+            overlay.on("coral-overlay:open", function(e) {
+                if (e.target !== overlayEl || !currentContext) {
+                    return;
+                }
+                overlayEl.scrollTop = 0;
+
+                if (currentContext.field.getAttribute("role") === "combobox") {
+                    currentContext.field.setAttribute("aria-expanded", "true");
+                }
+
+                if (isElementAbove(overlayEl, currentContext)) {
+                    overlay.addClass("is-above");
+                } else {
+                    overlay.removeClass("is-above");
+                }
+            });
+
+            overlay.on("coral-overlay:close", function(e) {
+                if (e.target !== overlayEl) {
+                    return;
+                }
+
+                overlay.find("> coral-buttonlist > button.is-focused").removeClass("is-focused");
+
+                if (currentContext.field.getAttribute("role") === "combobox") {
+                    currentContext.field.removeAttribute("aria-activedescendant");
+                    currentContext.field.setAttribute("aria-expanded", "false");
+                }
+
+                resetState();
+            });
+
+            overlay.on("mouseover", "coral-buttonlist > button", function(e) {
+                var currentItem = $(this);
+                currentItem.siblings(".is-focused").removeClass("is-focused");
+                currentItem.addClass("is-focused");
+            });
+
+            overlay.on("click", "coral-buttonlist > button", function(e) {
+                var selections = [{
+                    value: this.value,
+                    text: this.getAttribute("foundation-picker-buttonlist-text") || this.content.textContent,
+                    data: getData(this, DATA_ATTRIBUTE_FOUNDATION_PICKER_BUTTONLIST_PREFIX)
+                }];
+
+                currentDeferred.resolve(selections);
+                overlayEl.open = false;
+            });
+
+            $(document).on("click", function(e) {
+                if (!overlayEl.open || !currentContext) {
+                    return;
+                }
+                if (!currentContext.contains(e.target)) {
+                    resetValue();
+                    currentDeferred.reject();
+                    overlayEl.open = false;
+                }
+            });
+
+            return {
+                attach: function(context) {
+                    overlay.appendTo(context);
+                    overlay.trigger("foundation-contentloaded");
+                },
+                detach: function() {
+                    overlay.detach();
+                },
+                pick: function(context, selections, input, setValue) {
+                    var isSameQuery = input === currentQuery;
+                    isInputDeletion = currentQuery &&
+                                        input.length < currentQuery.length &&
+                                        startsWith(currentQuery, input);
+
+                    currentDeferred = $.Deferred();
+                    currentContext = context;
+                    currentQuery = input;
+                    currentSetValue = setValue;
+
+                    var isCombobox = currentContext.field.getAttribute("role") === "combobox";
+
+                    if (isCombobox) {
+                        currentContext.field.setAttribute("aria-autocomplete", "both");
+                    }
+
+                    if (!isSameQuery) {
+                        var list = overlay.children("coral-buttonlist");
+                        if (!list.length) {
+                            var listEl = new Coral.ButtonList().set({
+                                interaction: "off"
+                            });
+                            listEl.setAttribute("role", "listbox");
+                            overlay.append(listEl);
+
+                            if (isCombobox) {
+                                var controlList = context.field.getAttribute("aria-controls");
+                                generateId(listEl);
+                                controlList = controlList ? controlList + " " + listEl.id : listEl.id;
+                                currentContext.field.setAttribute(
+                                    "aria-controls",
+                                    controlList
+                                );
+                            }
+                        } else {
+                            list.children("button").remove();
+                        }
+
+                        paginator.restart(undefined, undefined, true);
+                    }
+
+                    if (!overlayEl.open) {
+                        var anchorAPI = $(context).adaptTo("foundation-overlay-anchor");
+                        var target = anchorAPI ? anchorAPI.getElement() : context;
+
+                        overlay.outerWidth($(target).outerWidth());
+                        overlayEl.target = target;
+                        overlayEl.focusOnShow = "off";
+                        overlayEl.open = true;
+                    }
+
+                    return currentDeferred.promise();
+                },
+                cancel: function() {
+                    resetValue();
+                    overlayEl.open = false;
+                },
+                resolve: function(rawInputs) {
+                    var deferred = $.Deferred();
+
+                    var selections = rawInputs.map(function(v) {
+                        var matchedButton = overlay.find("> coral-buttonlist > button").filter(function() {
+                            return this.value === v;
+                        }).first();
+
+                        if (matchedButton.length) {
+                            return {
+                                value: matchedButton[0].value,
+                                text: matchedButton[0].getAttribute("foundation-picker-buttonlist-text") ||
+                                    matchedButton[0].content.textContent,
+                                data: getData(matchedButton[0], DATA_ATTRIBUTE_FOUNDATION_PICKER_BUTTONLIST_PREFIX)
+                            };
+                        } else {
+                            return null;
+                        }
+                    });
+
+                    deferred.resolve(selections);
+
+                    return deferred.promise();
+                },
+                focus: function(last) {
+                    // We are going to implement focus differently.
+                    // We have to maintain the focus at the input instead of our own element to follow
+                    // https://www.w3.org/TR/wai-aria-practices-1.1/#autocomplete
+
+                    // When focus() is called with last = false, it means we focus on the next item.
+                    // Likewise, when focus() is called with last = true, it means we focus on the prev item.
+
+                    if (!currentSetValue) {
+                        return;
+                    }
+
+                    var buttonlist = overlay.children("coral-buttonlist");
+                    var currentItem = buttonlist.children(".is-focused");
+
+                    var updateValue = function(itemEl) {
+                        if (!itemEl) {
+                            return;
+                        }
+
+                        itemEl.classList.add("is-focused");
+
+                        var rect = itemEl.getBoundingClientRect();
+                        var scrollContainerRect = overlayEl.getBoundingClientRect();
+
+                        if (rect.top < scrollContainerRect.top) {
+                            itemEl.scrollIntoView();
+                        } else if (rect.top + rect.height > scrollContainerRect.bottom) {
+                            itemEl.scrollIntoView(false);
+                        }
+
+                        generateId(itemEl);
+                        if (currentContext.field.getAttribute("role") === "combobox") {
+                            currentContext.field.setAttribute("aria-activedescendant", itemEl.id);
+                        } else {
+                            currentContext.setAttribute("aria-activedescendant", itemEl.id);
+                        }
+
+                        currentSetValue(itemEl.value);
+                    };
+
+                    if (last) {
+                        if (currentItem.length) {
+                            currentItem.removeClass("is-focused");
+
+                            var prev = currentItem.prev("button");
+                            if (prev.length) {
+                                updateValue(prev[0]);
+                            } else {
+                                resetValue();
+                            }
+                        } else {
+                            updateValue(buttonlist.children("button:last-of-type")[0]);
+                        }
+                    } else {
+                        if (currentItem.length) {
+                            currentItem.removeClass("is-focused");
+
+                            var next = currentItem.next("button");
+                            if (next.length) {
+                                updateValue(next[0]);
+                            } else {
+                                resetValue();
+                            }
+                        } else {
+                            updateValue(buttonlist.children("button:first-of-type")[0]);
+                        }
+                    }
+                }
+            };
+        }
+    });
+})(window, document, Granite.$, Granite.URITemplate, Coral);

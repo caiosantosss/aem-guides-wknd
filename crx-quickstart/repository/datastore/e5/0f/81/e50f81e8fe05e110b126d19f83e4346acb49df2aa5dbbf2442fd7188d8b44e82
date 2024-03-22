@@ -1,0 +1,525 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+CQ.Workflow.Console.InstancesPanel = function(config) {
+    this.construct.call(this, config);
+};    
+
+CQ.Ext.extend(CQ.Workflow.Console.InstancesPanel, CQ.Workflow.Console.GridPanel, {
+    id:'cq.workflow.instances',
+    
+    title:CQ.I18n.getMessage('Instances'),
+    tabTip:CQ.I18n.getMessage('Lists active workflow instances'),
+    
+    listeners: {
+        rowcontextmenu: function(grid, index, e) {
+            if (!this.contextMenu) {
+                this.contextMenu = new CQ.Ext.menu.Menu({
+                    items: this.actions
+                });
+            }
+            var xy = e.getXY();
+
+            this.checkSelectionForSuspendResumeRestart(grid.getSelectionModel());
+            this.contextMenu.showAt(xy);
+            e.stopEvent();
+        }
+    },
+    
+    view: new CQ.Ext.grid.GroupingView({
+        forceFit:true,
+        groupTextTpl: '{text} ({[values.rs.length]} {[values.rs.length > 1 ? "'+CQ.I18n.getMessage("Items")+'" : "'+CQ.I18n.getMessage("Item")+'"]})'
+    }),
+
+    checkSelectionForSuspendResumeRestart: function(selectionModel) {
+        if (selectionModel.hasSelection()) {
+            var allowSuspend = true;
+            var allowResume = true;
+            var allowRestart = true;
+
+            var selections = selectionModel.getSelections();
+            for (var selectionIndex = 0; selectionIndex < selections.length; selectionIndex++) {
+                if (selections[selectionIndex]
+                    && selections[selectionIndex].data
+                    && selections[selectionIndex].data.state) {
+                    if ("RUNNING" !== selections[selectionIndex].data.state) {
+                        allowSuspend = false;
+                        if (!allowResume && !allowRestart) {
+                            break;
+                        }
+                    }
+                    if ("SUSPENDED" !== selections[selectionIndex].data.state) {
+                        allowResume = false;
+                        if (!allowSuspend && !allowRestart) {
+                            break;
+                        }
+                    }
+                    if ("STALE" !== selections[selectionIndex].data.state) {
+                        allowRestart = false;
+                        if (!allowResume && !allowSuspend) {
+                            break;
+                        }
+                    }
+                }
+            }
+            this.suspendAction.setDisabled(!allowSuspend);
+            this.resumeAction.setDisabled(!allowResume);
+            this.restartAction.setDisabled(!allowRestart);
+        } else {
+            this.suspendAction.setDisabled(true);
+            this.resumeAction.setDisabled(true);
+            this.restartAction.setDisabled(true);
+        }
+
+    },
+
+    construct: function(config) {
+        var myThis = this;
+        this.resourcePath = config.resourcePath;
+        
+        // store
+        this.store = new CQ.Ext.data.GroupingStore({
+            proxy: new CQ.Ext.data.HttpProxy({ 
+                url:this.resourcePath + "/instances.json",
+                method:"GET",
+
+            }),
+            listeners: {
+                exception: function(obj, action, data, it, response) {
+                    CQ.shared.HTTP.handleForbidden(response);
+                }
+            },
+            autoLoad:false,
+            reader: new CQ.Ext.data.JsonReader({
+                root: 'workflows',
+                totalProperty: 'results',
+                id: 'item',
+                fields: [
+                    'state',
+                    'initiator',
+                    'startTime',
+                    'model',
+                    'modelVersion',
+                    'payload',
+                    'comment',
+                    'title',
+                    CQ.shared.XSS.getXSSPropertyName('title')
+                ]
+            })
+        });
+        this.store.setDefaultSort('startTime', 'DESC');
+        
+        // column model
+        this.cm = new CQ.Ext.grid.ColumnModel([new CQ.Ext.grid.RowNumberer(),
+            {
+                header: CQ.I18n.getMessage("Status"),
+                dataIndex: 'state'
+            },{
+                header: CQ.I18n.getMessage("Initiator"),
+                dataIndex: 'initiator',
+                renderer:myThis.renderInitiator
+            },{
+                header: CQ.I18n.getMessage("Start Time"),
+                dataIndex: 'startTime',
+                renderer: function(v, params, record) {
+                    return myThis.formatDate(v);
+                }
+            },{
+                header: CQ.I18n.getMessage("Workflow Model"),
+                dataIndex: 'model'
+            },{
+                header: CQ.I18n.getMessage("Model Version"),
+                dataIndex: 'modelVersion'
+            },{
+                header: CQ.I18n.getMessage("Payload"),
+                dataIndex: 'payload',
+                renderer:myThis.renderPayload
+            },{
+                header: CQ.I18n.getMessage("Comment"),
+                dataIndex: 'comment'
+            },{
+                header: CQ.I18n.getMessage("Workflow Title"),
+                dataIndex: 'title',
+                renderer: function(val, meta, rec) {
+                    return CQ.shared.XSS.xssPropertyRenderer(val, meta, rec, this);
+                }
+            }
+        ]);
+        this.cm.defaultSortable = true;
+
+        // selection model
+        this.sm = new CQ.Ext.grid.RowSelectionModel({
+            singleSelect:false,
+            listeners: {
+                selectionchange: function(selectionModel) {
+                    myThis.terminateAction.setDisabled(!selectionModel.hasSelection());
+                    myThis.openHistoryAction.setDisabled(!selectionModel.hasSelection());
+                    myThis.renameWorkflowTitleAction.setDisabled(!selectionModel.hasSelection());
+                    myThis.checkSelectionForSuspendResumeRestart(selectionModel);
+                }
+            }
+        });
+        
+        // actions
+        this.terminateAction = new CQ.Ext.Action({
+            cls:'cq.workflow.instances.terminate',
+            text:CQ.I18n.getMessage('Terminate'),
+            handler: function() {
+                var terminateDialogConfig = {
+                    xtype: 'dialog',
+                    title:CQ.I18n.getMessage('Terminate Workflow'),
+                    params: {
+                        "_charset_":"utf-8"
+                    },
+                    items: {
+                        xtype:'panel',
+                        items:[
+                            {
+                                xtype: 'textarea',
+                                name:'terminateComment',
+                                fieldLabel:CQ.I18n.getMessage('Comment'),
+                                id:"cq.workflow.instances.terminateComment"
+                            },{
+                                xtype: 'textfield',
+                                name:'state',
+                                hidden:true,
+                                value:'ABORTED'
+                            }
+                        ]
+                    },
+                    responseScope: myThis,
+                    buttons:[{
+                        "text": CQ.I18n.getMessage("OK"),
+                        //"disabled": true,
+                        "handler": function() {
+                                this.hide();
+                                var success = true;
+                                var selections = myThis.getSelectionModel().getSelections();
+                                for (var i=0; i<selections.length; i++) {
+                                    var selection = selections[i];
+                                    CQ.HTTP.post(
+                                        selection.id,
+                                        function(options, success, response) {
+                                            if (success) {
+                                                success &= true;
+                                            } else {
+                                                success = false;
+                                            }
+                                        },
+                                        {
+                                            "state":"ABORTED",
+                                            "_charset_":"utf-8",
+                                            "terminateComment": CQ.Ext.getCmp("cq.workflow.instances.terminateComment").getValue()
+                                        }
+                                    );
+                                }
+                                if (success) {
+                                        myThis.getStore().reload({
+                                            callback: function() {
+                                                myThis.checkSelectionForSuspendResumeRestart(myThis.getSelectionModel());
+                                            }
+                                        });
+                                        CQ.Ext.getCmp('cq.workflow.archive').reload();
+                                    } else {
+                                        CQ.Ext.Msg.alert(
+                                            CQ.I18n.getMessage("Error"),
+                                            CQ.I18n.getMessage("Could not terminate workflow"));
+                                    }
+                            }
+                        },
+                        CQ.Dialog.CANCEL
+                    ]
+                };
+                var terminateDialog = CQ.WCM.getDialog(terminateDialogConfig, "cq.workflow.instances.terminate.dialog");
+                terminateDialog.show();
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Terminate Workflow'),
+                text:CQ.I18n.getMessage('Terminates the selected workflow instance'),
+                autoHide:true
+            }
+        });
+        this.terminateAction.setDisabled(true);
+
+        this.suspendAction = new CQ.Ext.Action({
+            cls:'cq.workflow.instances.suspend',
+            text:CQ.I18n.getMessage('Suspend'),
+            handler: function() {
+                var selectionModel = myThis.getSelectionModel();
+                if (selectionModel.hasSelection()) {
+                    var selections = selectionModel.getSelections();
+                    for (var selectionIndex = 0; selectionIndex < selections.length; selectionIndex++) {
+                        var con = new CQ.Ext.data.Connection();
+                        con.request({
+                            scope:this,
+                            url: selections[selectionIndex].id,
+                            params: {
+                                state:'SUSPENDED',
+                                "_charset_":"utf-8"
+                            },
+                            success:function(response, options) {
+
+                                myThis.getStore().reload({
+                                    callback: function() {
+                                        myThis.checkSelectionForSuspendResumeRestart(myThis.getSelectionModel());
+                                    }
+                                });
+                            },
+                            failure:function(response, options) {
+                                CQ.Ext.Msg.alert(
+                                    CQ.I18n.getMessage("Error"),
+                                    CQ.I18n.getMessage("Could not suspend workflow"));
+                            }
+                        });
+                    }
+                }
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Suspend Workflow Instance'),
+                text:CQ.I18n.getMessage('Suspends the selected workflow instance'),
+                autoHide:true
+            }
+        });
+        this.suspendAction.setDisabled(true);
+
+        this.resumeAction = new CQ.Ext.Action({
+            cls:'cq.workflow.instances.resume',
+            text:CQ.I18n.getMessage('Resume'),
+            handler: function() {
+                var selectionModel = myThis.getSelectionModel();
+                if (selectionModel.hasSelection()) {
+                    var selections = selectionModel.getSelections();
+                    for (var selectionIndex = 0; selectionIndex < selections.length; selectionIndex++) {
+                        var con = new CQ.Ext.data.Connection();
+                        con.request({
+                            scope:this,
+                            url: selections[selectionIndex].id,
+                            params: {
+                                state:'RUNNING',
+                                "_charset_":"utf-8"
+                            },
+                            success:function(response, options) {
+                                myThis.getStore().reload({
+                                    callback: function() {
+                                        myThis.checkSelectionForSuspendResumeRestart(myThis.getSelectionModel());
+                                    }
+                                });
+                            },
+                            failure:function(response, options) {
+                                CQ.Ext.Msg.alert(
+                                    CQ.I18n.getMessage("Error"),
+                                    CQ.I18n.getMessage("Could not resume workflow"));
+                            }
+                        });
+                    }
+                }
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Resume suspended Workflow Instance'),
+                text:CQ.I18n.getMessage('Resumes the selected workflow instance'),
+                autoHide:true
+            }
+        });
+        this.resumeAction.setDisabled(true);
+        
+        this.openHistoryAction = new CQ.Ext.Action({
+            cls:'cq.workflow.instances.openHistory',
+            text:CQ.I18n.getMessage('Open History'),
+            handler: function() {
+                var grid = new CQ.Ext.grid.GridPanel({
+                    store: new CQ.Ext.data.GroupingStore({
+                        proxy: new CQ.Ext.data.HttpProxy({ 
+                            url:myThis.resourcePath + "/history.json?workflow=" + myThis.getSelectionModel().getSelected().id 
+                        }),
+                        listeners: {
+                            exception: function(obj, action, data, it, response) {
+                                CQ.shared.HTTP.handleForbidden(response);
+                            }
+                        },
+                        autoLoad:true,
+                        reader: new CQ.Ext.data.JsonReader({
+                            root: 'historyItems',
+                            totalProperty: 'results',
+                            id: 'item',
+                            fields: [
+                                'status',
+                                'process',
+                                'user',
+                                'startTime',
+                                'endTime',
+                                'action',
+                                'comment'
+                            ]
+                        })
+                    }),
+                    cm:new CQ.Ext.grid.ColumnModel([
+                        new CQ.Ext.grid.RowNumberer(),
+                        {
+                            header:CQ.I18n.getMessage("Status"),
+                            dataIndex: 'status'
+                        },{
+                            header:CQ.I18n.getMessage("Title"),
+                            dataIndex: 'process'
+                        },{
+                            header:CQ.I18n.getMessage("User"),
+                            dataIndex: 'user'
+                        },{
+                            header:CQ.I18n.getMessage("Start Time"),
+                            dataIndex: 'startTime',
+                            renderer: function(v, params, record) {
+                                return myThis.formatDate(v);
+                            }
+                        },{
+                            header:CQ.I18n.getMessage("End Time"),
+                            dataIndex: 'endTime',
+                            renderer: function(v, params, record) {
+                                if (v) {
+                                    return myThis.formatDate(v);
+                                }
+                                return "";
+                            }
+                        },{
+                            header:CQ.I18n.getMessage("Action"),
+                            dataIndex: 'action'
+                        },{
+                            header:CQ.I18n.getMessage("Comment"),
+                            dataIndex: 'comment'
+                        }
+                    ]),
+                    viewConfig: {
+                        forceFit: true,
+                        groupTextTpl: '{text} ({[values.rs.length]} {[values.rs.length > 1 ? '+CQ.I18n.getMessage("Items")+' : '+CQ.I18n.getMessage("Item")+']})'
+                    },
+                    sm: new CQ.Ext.grid.RowSelectionModel({singleSelect:true})
+                });
+                win = new CQ.Ext.Window({
+                    title:CQ.I18n.getMessage('Workflow Instance History'),
+                    width:800,
+                    height:400,
+                    autoScroll:true,
+                    items: grid,
+                    layout:'fit',
+                    y:200
+                }).show();
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Open workflow history'),
+                text:CQ.I18n.getMessage('Opens the workflow history dialog'),
+                autoHide:true
+            }
+        });
+        this.openHistoryAction.setDisabled(true);
+
+        this.renameWorkflowTitleAction = new CQ.Ext.Action({
+            cls:'cq.workflow.instances.rename',
+            text:CQ.I18n.getMessage('Rename Workflow Title'),
+            handler: function() {
+                var newDialogConfig = {
+                    xtype: 'dialog',
+                    title:CQ.I18n.getMessage('Rename Workflow Title'),
+                    params: { "_charset_":"utf-8", "action":"UPDATE" },
+                    items: {
+                        xtype:'panel',
+                        items:[
+                            {
+                                xtype: 'textfield',
+                                name:'workflowTitle',
+                                fieldLabel:CQ.I18n.getMessage('Workflow Title'),
+                                value: myThis.getSelectionModel().getSelected().data.title
+                            }
+                        ]
+                    },
+                    responseScope: myThis,
+                    success: function(){ myThis.reload(); },
+                    failure: function(){
+                        CQ.Ext.Msg.alert(
+                            CQ.I18n.getMessage("Error"),
+                            CQ.I18n.getMessage("Could not change workflow title."));
+                    },
+                    buttons:CQ.Dialog.OKCANCEL
+                };
+                var newDialog = CQ.WCM.getDialog(newDialogConfig);
+                newDialog.form.url = myThis.getSelectionModel().getSelected().id;
+                newDialog.show();
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Rename workflow title'),
+                text:CQ.I18n.getMessage('Renames the workflow title'),
+                autoHide:true
+            }
+        });
+        this.renameWorkflowTitleAction.setDisabled(true);
+
+        this.restartAction = new CQ.Ext.Action({
+            cls:'cq.workflow.instances.restart',
+            text:CQ.I18n.getMessage('Restart'),
+            handler: function() {
+                var success = true;
+                var selections = myThis.getSelectionModel().getSelections();
+                for (var i=0; i<selections.length; i++) {
+                    var selection = selections[i];
+                    CQ.HTTP.post(
+                        "/libs/cq/workflow/restarter",
+                        function(options, success, response) {
+                            if (success) {
+                                success &= true;
+                            } else {
+                                success = false;
+                            }
+                        },
+                        {
+                            "state":"ABORTED",
+                            "_charset_":"utf-8",
+                            "path":selection.id
+                        }
+                    );
+                }
+                if (success) {
+                    myThis.getStore().reload({
+                        callback: function() {
+                            myThis.checkSelectionForSuspendResumeRestart(myThis.getSelectionModel());
+                        }
+                    });
+                } else {
+                    CQ.Ext.Msg.alert(
+                        CQ.I18n.getMessage("Error"),
+                        CQ.I18n.getMessage("Could not restart workflow."));
+                }
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Restart Workflow'),
+                text:CQ.I18n.getMessage('Restarts the selected workflow instance'),
+                autoHide:true
+            }
+        });
+        this.restartAction.setDisabled(true);
+        
+        this.actions = [ this.terminateAction, 
+                         this.suspendAction, 
+                         this.resumeAction,
+                         this.restartAction, "-", 
+                         this.openHistoryAction,
+                         this.renameWorkflowTitleAction ];
+        this.tbar = this.actions;
+        
+        this.bbar = new CQ.Ext.PagingToolbar({
+            pageSize:this.pageSize,
+            store:this.store,
+            displayInfo:true,
+            displayMsg:CQ.I18n.getMessage("Displaying entries {0} - {1} of {2}"),
+            emptyMsg:CQ.I18n.getMessage("No entries to display")
+        });
+    
+        CQ.Workflow.Console.InstancesPanel.superclass.constructor.call(this, config);
+        this.store.load({params:{start:0, limit:this.pageSize}});
+    }
+});

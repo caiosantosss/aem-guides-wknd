@@ -1,0 +1,453 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+;(function ($, ns, channel, window, undefined) {
+    'use strict';
+
+    /**
+     * The statuses of the current resource have been loaded.
+     *
+     * @event Document#cq-editor-statusbar-loaded
+     */
+
+    /**
+     * Creates a StatusBar instance.
+     *
+     * @class Granite.author.ui.StatusBar
+     * @classdesc Loads and displays statuses about the current editor content and provides simple interaction with them.
+     *
+     * Statuses can be loaded from the server ({@link Granite.author.ui.StatusBar#loadStatuses}) or added and removed manually ({@link Granite.author.ui.StatusBar#addStatus} and {@link Granite.author.ui.StatusBar#removeStatus}).
+     *
+     * Statuses can display actions, which are rendered as clickable links. A client library can implement an action by listening to clicks on elements of class <code>editor-StatusBar-action</code> and with the attribute <code>data-status-action-id</code> equals to the desired action id. The following data is associated with the link elements, and can be retrieved inside the event handler using <code>$(this).data(key)</code>:<ul><li><code>statusType</code>: the status type</li><li><code>statusId</code>: the status id</li><li><code>statusActionId</code>: the status action id</li><li><code>statusData</code>: the status object containing all status data</li></ul>
+     */
+    ns.ui.StatusBar = ns.util.createClass(/** @lends Granite.author.ui.StatusBar.prototype */{
+
+        /**
+         * Root path used to load the statuses.
+         *
+         * @private
+         * @ignore
+         */
+        rootPath: null,
+
+        /**
+         * Status type used when loading the statuses (empty string to load all).
+         *
+         * @private
+         * @ignore
+         */
+        statusType: '',
+
+        /**
+         * Used to assign status ids.
+         *
+         * @private
+         * @ignore
+         */
+        nextId: 0,
+
+        /**
+         * Tracks the number of statuses.
+         *
+         * @private
+         * @ignore
+         */
+        counter: 0,
+
+        /**
+         * Stores the status objects indexed by their id.
+         *
+         * @private
+         * @ignore
+         */
+        statuses: {},
+
+        /**
+         * Stores the ids of the statuses sorted by status priority.
+         *
+         * @private
+         * @ignore
+         */
+        ids: [],
+
+        /**
+         * Index into 'ids' tracking the status that is currently being displayed.
+         *
+         * @private
+         * @ignore
+         */
+        currentStatus: -1,
+
+        /**
+         * Flag indicating if the statuses of the current resource have already been loaded.
+         */
+        loaded: false,
+
+        constructor: function () {
+            // find elements in the dom
+            this.$dom = $('.editor-StatusBar');
+            this.$navigation = this.$dom.find('.js-editor-StatusBar-navigation');
+            this.$badge = this.$dom.find('.js-editor-StatusBar-badge');
+            this.$popover = this.$dom.find('.js-editor-StatusBar-popover');
+            this.$statusList = this.$dom.find('.js-editor-StatusBar-statusList');
+            this.status = this.$dom.find('.js-editor-StatusBar-status').get(0);
+            Coral.commons.ready(this.status, function() {
+                // we need to wait for the alert dom to be ready to be able to find the icon
+                this.icon = $(this.status).find('coral-icon').get(0);
+            }.bind(this));
+            // read root path and status type from markup
+            this.rootPath = this.$dom.attr('data-rootPath');
+            this.statusType = this.$dom.attr('data-statusType') || '';
+
+            // handle clicks on 'previous' and 'next'
+            channel.on('click', '.js-editor-StatusBar-previous', this.showPreviousStatus.bind(this));
+            channel.on('click', '.js-editor-StatusBar-next', this.showNextStatus.bind(this));
+        },
+
+        /**
+         * Clears all statuses and resets the state of the status bar.
+         *
+         * @private
+         * @ignore
+         */
+        _reset: function () {
+            this.nextId = 0;
+            this.counter = 0;
+            this.statuses = {};
+            this.ids = [];
+            this.currentStatus = -1;
+            // empty the list of statuses in the popover
+            this.$statusList.empty();
+            this.loaded = false;
+        },
+
+        /**
+         * Translates the specified field of a status, which can be either a string or an array of strings.
+         *
+         * Translation snippets and comments are looked up in the additional status data and can be provided as properties of type array or string, respectively. These properties' keys need to adhere to a special naming convention, which is illustrated for the following sample fields <code>foo</code> (string) and <code>bar</code> (array of strings): <ul><li><code>i18n.foo.snippets</code> (snippets for <code>foo</code>)</li><li><code>i18n.foo.comment</code> (comment for <code>foo</code>)</li><li><code>i18n.bar.0.snippets</code> (snippets for <code>bar[0]</code>)</li><li><code>i18n.bar.0.comment</code> (comment for <code>bar[0]</code>)</li><li><code>i18n.bar.1.snippets</code> (snippets for <code>bar[1]</code>)</li><li><code>i18n.bar.1.comment</code> (comment for <code>bar[1]</code>)</li><li><code>...</code></li>
+         *
+         * @param status - the status object
+         * @param {string} key - the key of the property to be translated
+         * @returns {string|string[]}the translated string or array of strings
+         * @private
+         * @ignore
+         */
+        _translate: function (status, key) {
+            var value = status[key] || null;
+            if (value instanceof Array) {
+                return $.map(value, function (value, i) {
+                    return Granite.I18n.get(value, status['i18n.'+key+'.'+i+'.snippets'],
+                        status['i18n.'+key+'.'+i+'.comment']);
+                });
+            }
+            return Granite.I18n.get(value, status['i18n.'+key+'.snippets'], status['i18n.'+key+'.comment']);
+        },
+
+        /**
+         * Adds a new status to the status bar.
+         *
+         * @param {Object} status - the status object
+         * @param {string} status.statusType - the status type
+         * @param {number} [status.statusPriority] - the status priority (if omitted, a default is assumed based on the variant)
+         * @param {string} status.title - the status title describing the module or feature the status is associated with
+         * @param {string} status.message - the status message
+         * @param {string} [status.shortMessage] - a short message to be displayed in the popover list
+         * @param {string} [status.variant=info] - the status variant, in line with Coral.Alert variants ('success', 'info', 'warning' or 'error')
+         * @param {string} [status.icon] - the name of a CoralUI icon (if omitted, a default is assumed based on the variant)
+         * @param {Object[]} [status.actionIds] - the action ids
+         * @param {Object[]} [status.actionLabels] - the action labels
+         * @returns {number} the status id
+         * @private
+         * @ignore
+         */
+        _addStatus: function (status) {
+            // add default values for priority and icon if they don't exist
+            var defaults = {
+                success: { priority: 0, icon: 'checkCircle' },
+                info: { priority: 10000, icon: 'infoCircle' },
+                warning: { priority: 20000, icon: 'alert' },
+                error: { priority: 30000, icon: 'alert' }
+            };
+            $.extend(status, {
+                statusPriority: status.statusPriority == null ? defaults[status.variant].priority : status.statusPriority,
+                icon: status.icon || defaults[status.variant].icon
+            });
+
+            // get new id, store status and increase counter
+            var id = this.nextId++;
+            this.statuses[id] = status;
+            this.counter++;
+
+            // insert status id at correct index in list sorted ids, depending on its priority
+            for (var index = 0; index < this.ids.length; index++) {
+                // continue the loop as long as the status priority is smaller than current priority
+                if (status.statusPriority >= this.statuses[this.ids[index]].statusPriority) {
+                    break;
+                }
+            }
+            this.ids.splice(index, 0, id);
+            // adjust current status id if necessary
+            if (this.currentStatus >= index) {
+                this.currentStatus++;
+            }
+
+            // create item for status list in popover
+            var title = this._translate(status, 'title');
+            var shortMessage = this._translate(status, 'shortMessage');
+            var $content = $('<div/>');
+            $content.append($('<span/>').addClass('editor-StatusBar-listItemTitle').text(title));
+            $content.append($('<span/>').addClass('editor-StatusBar-listItemText').html(shortMessage));
+            var $anchor = $('<a is="coral-anchorlist-item" icon="'+status.icon+'" data-id="'+id+'">'+$content.html()+'</a>');
+            $anchor.click(function () {
+                this.showStatus(id);
+            }.bind(this));
+
+            // add it add the correct location
+            if (this.$statusList.children().length == 0 || index == 0) {
+                this.$statusList.prepend($anchor);
+            } else {
+                this.$statusList.children().eq(index-1).after($anchor);
+            }
+
+            // set the current status id if this is the first status added
+            if (this.currentStatus < 0) {
+                this.currentStatus = 0;
+            }
+
+            return id;
+        },
+
+        /**
+         * Renders the currently selected status and the navigation elements.
+         *
+         * @private
+         * @ignore
+         */
+        _render: function () {
+            // ignore if no status is currently set
+            if (this.currentStatus < 0) {
+                return;
+            }
+
+            var id = this.ids[this.currentStatus];
+            var status = this.statuses[id];
+            // title
+            var title = this._translate(status, 'title');
+            this.status.header.innerHTML = title;
+            // message and actions
+            var message = $('<span/>').addClass('editor-StatusBar-message')
+                .html(this._translate(status, 'message'));
+            var $content = $('<span/>').html(message);
+            if (status.actionIds && status.actionLabels) {
+                var actionLabels = this._translate(status, 'actionLabels');
+                for (var i = 0; i < status.actionIds.length; i++) {
+                    var $a = $('<a href="#"/>').addClass('coral-Link coral-Link--subtle editor-StatusBar-action')
+                        .attr('data-status-type', status.statusType)
+                        .attr('data-status-id', id)
+                        .attr('data-status-action-id', status.actionIds[i])
+                        .data('statusData', status)
+                        .text(actionLabels[i]);
+                    $content.append($a);
+                }
+            }
+            $(this.status.content).html($content);
+            // variant
+            this.status.variant = status.variant;
+            // icon
+            if (this.icon) {
+                this.icon.icon = status.icon;
+            }
+
+            // update badge
+            this.$badge.text(this.counter);
+            // show or hide navigation
+            this.$navigation.toggle(this.counter > 1)
+            // hide popover if there are less than two statuses
+            if (this.counter < 2) {
+                this.$popover.hide();
+            }
+        },
+
+        /**
+         * Shows the status bar.
+         */
+        show: function () {
+            this._render();
+            this.$dom.show();
+            ns.ContentFrame.resetContentHeight();
+            ns.ContentFrame.updateTopOffset();
+        },
+
+        /**
+         * Hides the status bar.
+         */
+        hide: function () {
+            this.$dom.hide();
+            ns.ContentFrame.resetContentHeight();
+            ns.ContentFrame.updateTopOffset();
+        },
+
+        /**
+         * Retrieves the statuses for a given resource and adds them to the status bar. Current statuses are reset and the status bar will be shown if it is hidden.
+         *
+         * @param {string} path - the path to a resource for which to load the statuses
+         * @fires Document#cq-editor-statusbar-loaded
+         */
+        loadStatuses: function (path) {
+            this._reset();
+            var url = Granite.HTTP.externalize(this.rootPath + '/' + (this.statusType || '') + path + '.1.json');
+            $.get(url, function (data) {
+                if (data && data['0']) {
+                    // add all statuses
+                    for (var i = 0; data[i] !== undefined; i++) {
+                        this._addStatus(data[i]);
+                    }
+                    // show status with highest priority
+                    this.showStatus(0);
+                }
+                // set flag and trigger event
+                this.loaded = true;
+                channel.trigger("cq-editor-statusbar-loaded");
+            }.bind(this));
+        },
+
+        /**
+         * Checks if the statuses of the current resource have already been loaded.
+         *
+         * @returns {boolean} <code>true</code> if the statuses have been loaded, <code>false</code> otherwise
+         */
+        hasLoaded: function () {
+            return this.loaded;
+        },
+
+        /**
+         * Adds a new status to the status bar. The status will be inserted into the list of existing statuses according to its priority. The status bar will be made visible if it is hidden.
+         *
+         * This method must only be called after the statuses of the current resource have been loaded, i.e. when {@link Granite.author.ui.StatusBar#hasLoaded} returns <code>true</code> or after {@link Document#event:cq-editor-statusbar-loaded} has been fired.
+         *
+         * @param {string} type - the status type
+         * @param {string} title - the status title describing the module or feature the status is associated with
+         * @param {string} message - the status message
+         * @param {string} [shortMessage] - a short message to be displayed in the popover list
+         * @param {number} [priority] - the status priority (if omitted, a default is assumed based on the variant)
+         * @param {string} [variant=info] - the status variant, in line with Coral.Alert variants ('success', 'info', 'warning' or 'error')
+         * @param {string} [icon] - the name of a CoralUI icon (if omitted, a default is assumed based on the variant)
+         * @param {Object} [data] - additional data to be associated with this status (e.g. to implement an action)
+         * @param {Object[]} [actions] - actions to act upon the status
+         * @param {string} actions[].id - the id of the action
+         * @param {string} actions[].label - the label of the action
+         *
+         * @returns {number} the status id
+         */
+        addStatus: function (type, title, message, shortMessage, priority, variant, icon, data, actions) {
+            // assemble status object
+            var status = $.extend({}, data, {
+                statusType: type,
+                statusPriority: priority,
+                title: title,
+                message: message,
+                shortMessage: shortMessage,
+                variant: variant || 'info',
+                icon: icon,
+                actionIds: actions ? actions.map(function (action) { return action.id }) : null,
+                actionLabels: actions ? actions.map(function (action) { return action.label }) : null
+            });
+
+            // add status and render
+            var id = this._addStatus(status);
+            this._render();
+            if (!this.$dom.is(':visible')) {
+                this.show();
+            }
+
+            return id;
+        },
+
+        /**
+         * Removes the status with the specified id from the status bar. The status bar will be hidden if no more statuses are present after the removal.
+         *
+         * @param {number} id - the id of the status to remove
+         */
+        removeStatus: function (id) {
+            // get index of status
+            var index = this.ids.indexOf(id);
+            if (index < 0) {
+                // there is no status with the specified id
+                return;
+            }
+
+            // remove status
+            this.counter--;
+            delete this.statuses[id];
+            this.ids.splice(index, 1);
+            this.$statusList.find('a[data-id='+id+']').remove();
+
+            // adjust current status id if necessary
+            if (index <= this.currentStatus) {
+                this.currentStatus--;
+            }
+            // if status with index 0 was removed and there are still other statuses...
+            if (this.currentStatus < 0 && this.counter > 0) {
+                // ...set current status id
+                this.currentStatus = 0;
+            }
+            // hide status bar if the last status was removed, else render
+            this.currentStatus < 0 ? this.hide() : this._render();
+        },
+
+        /**
+         * Shows the status with the specified id. The status bar will be made visible if it is hidden.
+         *
+         * @param {number} id - the status id
+         */
+        showStatus: function (id) {
+            var index = this.ids.indexOf(id);
+            if (index < 0) {
+                return;
+            }
+            this.currentStatus = index;
+            this._render();
+            if (!this.$dom.is(':visible')) {
+                this.show();
+            }
+        },
+
+        /**
+         * Shows the status previous to the one currently displayed (having equal or higher priority).
+         */
+        showPreviousStatus: function () {
+            this.currentStatus--;
+            if (this.currentStatus < 0) {
+                this.currentStatus = this.counter - 1;
+            }
+            this._render();
+        },
+
+        /**
+         * Shows the status next to the one currently displayed (having equal or lower priority).
+         */
+        showNextStatus: function () {
+            this.currentStatus++;
+            if (this.currentStatus >= this.counter) {
+                this.currentStatus = 0;
+            }
+            this._render();
+        }
+
+    });
+
+}(jQuery, Granite.author, jQuery(document), this));

@@ -1,0 +1,861 @@
+/**
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;
+(function ($, ns, channel, window, undefined) {
+
+    var ACTION_SAVE_OFFER = "SAVE_OFFER";
+    var ACTION_CHOOSE_OFFER = "CHOOSE_OFFER";
+
+    var DO_NOT_CONVERT = ["screens/core",
+        "cq/experience-fragments/editor/components/experiencefragment",
+        "cq/experience-fragments/editor/components/buildingblock",
+        "wcm/foundation/components/responsivegrid/new"];
+
+    var TXT_CONVERT_XF_AND_TARGET = Granite.I18n.get('Use Experience Fragment'),
+        TXT_RECOMMENDED = Granite.I18n.get('(Recommended)'),
+        TXT_TARGET_OFFER = Granite.I18n.get('Use Offer Template')
+
+    /**
+     * Checks if page is a LiveCopy and specified {@code editable} has its
+     * inheritance cancelled. If page is not a LiveCopy the method will return
+     * {@code true}. If page is a LiveCopy the method will return {@code true}
+     * if the editable's inheritance is cancelled or it was created manually.
+     *
+     * @param {Object}
+     *                editable
+     */
+    var _isLiveCopyCancelled = function (editable) {
+        if (MSM && MSM.MSMCommons && MSM.MSMCommons.isLiveCopyPage(ns)) {
+            var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+            var editableToCheck = targetEditable || editable;
+            return MSM.MSMCommons.isInheritanceCancelled(editableToCheck)
+                       || MSM.MSMCommons.isManuallyCreated(editableToCheck);
+        }
+        return true;
+    };
+
+    /**
+     * Checks if the specified {@code editable} is placed on the current page content
+     * @param (Object} editable
+     * @private
+     */
+    var _isPageOwnedContent = function (editable) {
+        var currentPagePath = ns.pageInfo.status.path;
+        var editablePath = editable.path;
+
+        return editablePath.startsWith(currentPagePath);
+    };
+
+    // Following function is copied from
+    // https://git.corp.adobe.com/CQ/wcm/blob/3ccbe6d/content/jcr_root/libs/wcm/msm/content/touch-ui/authoring/editor/js/msmEditorHook.js#L209
+    var _renderInheritanceToggleCondition = function(editable, actionName) {
+        if (!_isPageOwnedContent(editable)) {
+            // this inheritance toggle may only be applied to the content owned by the current path
+            return false;
+        }
+
+        if (ns.MsmAuthoringHelper.isLiveCopy(editable) && ns.pageInfoHelper.canModify()) {
+            var addMSMAction = ns.MsmAuthoringHelper.isInheritanceCancelled(editable) ? "MSM_REENABLE_INHERITANCE" : "MSM_CANCEL_INHERITANCE";
+
+            // hook in a handler for the "beforedelete" and cancel the default delete functionality
+            var defaultBeforeDeleteFunc = editable.config.editConfig.listeners["beforedelete"];
+            editable.config.editConfig.listeners["beforedelete"] = function () {
+                // only delete the paragraph from the backend, but don't remove the editable
+                ns.persistence.deleteParagraph(editable).done(function () {
+                    editable.refresh(false).then(function() {
+                        ns.overlayManager.recreate(editable);
+                        if (ns.layerManager.getCurrentLayer() === "msm") {
+                            $(editable.overlay.dom[0]).addClass("is-bordered");
+                        }
+                    });
+                });
+
+                // restore old "beforedelete" handler
+                editable.config.editConfig.listeners["beforedelete"] = defaultBeforeDeleteFunc;
+
+                // cancel the normal delete operation
+                return false;
+            };
+
+            return addMSMAction == actionName;
+        }
+
+        return false;
+    };
+
+    // Following function is copied with (commented) modification from
+    // https://git.corp.adobe.com/CQ/wcm/blob/3ccbe6d/content/jcr_root/libs/wcm/msm/content/touch-ui/authoring/editor/js/msmEditorHook.js#L36
+    var _sendInheritanceToggleXHR = function(editable, target, cancelInheritance, callback) {
+
+        // ensure we cancel inheritance for the target component container
+        var parent = CQ.TargetedContentManager.getTargetParent(editable);
+        if (parent !== undefined) {
+            editable = parent;
+        }
+
+        var params = {};
+        params[ MSM.MSMCommons.Constants.PARAM_STATUS + "/" + MSM.MSMCommons.Constants.PARAM_IS_CANCELLED ] = cancelInheritance;
+        // deepCancel = true if component is not container and false if component is container
+        params[ MSM.MSMCommons.Constants.PARAM_STATUS + "/" + MSM.MSMCommons.Constants.PARAM_IS_CANCELLED_FOR_CHILDREN ] = !editable.config.isContainer;
+
+        $.ajax({
+            type: "POST",
+            url: editable.path + ".msm.conf",
+            data: params
+        }).done(function( data, textStatus, jqXHR ) {
+            if (!_g.HTTP.isOkStatus(jqXHR.status)) {
+                return;
+            }
+
+            ns.edit.actions.doRefresh(editable).then(function() {
+                ns.overlayManager.recreate(editable);
+            }).then(function() {
+                // Targeting Layer specific; reload offers for editable otherwise children/droptarget are not rendered properly
+                CQ.TargetedContentManager.loadOffers(editable, CQ.TargetedContentManager.selectedExperience);
+            });
+
+            if (callback) {
+                callback.call(this);
+            }
+        });
+    };
+
+    // Following function is copied without modification from
+    // https://git.corp.adobe.com/CQ/wcm/blob/3ccbe6d/content/jcr_root/libs/wcm/msm/content/touch-ui/authoring/editor/js/msmEditorHook.js#L83
+    var _showConfirmationModal = function(editable, target) {
+        var cancelInheritance = !ns.MsmAuthoringHelper.isInheritanceCancelled(editable);
+        var modalHeader = cancelInheritance ?
+            Granite.I18n.get("Cancel inheritance") :
+            Granite.I18n.get("Revert inheritance");
+        var modalMessage = cancelInheritance ?
+            Granite.I18n.get("Do you really want to cancel the inheritance?") :
+            Granite.I18n.get("Do you really want to revert the inheritance?");
+
+        var $message = $(document.createElement("div"));
+        $(document.createElement("p"))
+            .text(modalMessage)
+            .appendTo($message);
+
+        if (!cancelInheritance) {
+            MSM.MSMCommons.buildSyncAfterRevertOption(false).appendTo($message);
+        }
+
+        var modalConfirmationHandler = function() {
+            if (!cancelInheritance && MSM.MSMCommons.checkDoSyncPageAfterRevert()) {
+                var blueprintPath = ns.MsmAuthoringHelper.getBlueprintPath(editable);
+                var livecopyPath = ns.MsmAuthoringHelper.getLiveCopyPath(editable);
+                if (blueprintPath && livecopyPath) {
+                    _sendInheritanceToggleXHR(editable, target, cancelInheritance, function() {
+                        MSM.MSMCommons.syncPage(blueprintPath, livecopyPath, false);
+                    });
+                } else {
+                    ns.ui.alert(Granite.I18n.get("Error"), Granite.I18n.get("An error occurred while" +
+                        " synchronizing the Live Copy."), "error");
+                }
+            } else {
+                _sendInheritanceToggleXHR(editable, target, cancelInheritance)
+            }
+        };
+
+        var promptConfig = {
+            title:modalHeader,
+            message: $message.html(),
+            type:ns.ui.helpers.PROMPT_TYPES["NOTICE"],
+            actions:[{
+                id:"OK",
+                text:Granite.I18n.get("Yes"),
+                primary:true
+            },{
+                id:"CANCEL",
+                text:Granite.I18n.get("No"),
+                primary:false
+            }],
+            callback: function(actionId){
+                if ("OK" === actionId) {
+                    modalConfirmationHandler()
+                }
+            }
+        };
+
+        ns.ui.helpers.prompt(promptConfig);
+    };
+
+
+    /**
+     * A set of toolbar actions grouped by editable type.
+     * This is useful for rendering different set of toolbar actions according to the type of the editable. This way the actions conditions are much clearer.
+     * @type {Object}
+     */
+
+    var selectParentAction = new ns.ui.ToolbarAction({
+        name: "SELECT_PARENT",
+        icon: "selectContainer",
+        text: Granite.I18n.getMessage("Parent"),
+        execute: function (editable, param, target) {
+            target.addClass("is-active");
+            ns.edit.actions.doSelectParent(editable, target);
+            // do not close toolbar
+            return false;
+        },
+        condition: function (editable) {
+            return editable.hasAction("PARENT") && ns.editables.getSelectableParents(editable).length > 0;
+        }
+    });
+
+    // actions for the target parsys
+    // editable.type = cq/personalization/components/targetparsys
+    var targetParsysActions = {
+        "TARGET_COMPONENT_OPTIONS": new ns.ui.ToolbarAction({
+            icon: "gear",
+            text: Granite.I18n.getMessage("Target component settings"),
+            execute: function (editable) {
+                var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                ns.DialogFrame.openDialog(new ns.edit.Dialog(targetEditable));
+            },
+            condition: function (editable) {
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                return (typeof targetEditable !== "undefined");
+            }
+        }),
+        "DELETE_OFFER": new ns.ui.ToolbarAction({
+            icon: "closeCircle",
+            text: Granite.I18n.getMessage("Remove offer from activity"),
+            execute: function (editable) {
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function () {
+                    var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                    CQ.TargetedContentManager.deleteOffer(targetEditable);
+                });
+            },
+            condition: function (editable) {
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                return (typeof targetEditable !== "undefined"
+                            && !CQ.TargetedContentManager.isDefaultExperienceSelected()
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && CQ.TargetedContentManager.hasOffer(targetEditable));
+            }
+        }),
+        "ADD_OFFER": new ns.ui.ToolbarAction({
+            icon: "add",
+            text: Granite.I18n.getMessage("Add offer"),
+            execute: function (editable) {
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                    if (typeof targetEditable !== "undefined") {
+                        CQ.TargetedContentManager.createOffer(targetEditable);
+                    }
+                });
+            },
+            condition: function (editable) {
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                // must have at least one activity selected
+                if (CQ.TargetedContentManager.isSimulation()) {
+                    return false;
+                }
+                var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                return (typeof targetEditable !== "undefined"
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && !CQ.TargetedContentManager.hasOffer(targetEditable));
+            }
+        }),
+        "SAVE_OFFER": new ns.ui.ToolbarAction({
+            icon: "upload",
+            text: Granite.I18n.getMessage("Save offer to offer library"),
+            execute: function (editable) {
+                CQ.ui.TargetedContentManagerUi.doSaveToOfferLibrary(editable);
+            },
+            condition: function (editable) {
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                // render condition:
+                // - we have an experience selected (other than default)
+                // - we have more than one children (parsys has at least one, which is the /new)
+                if (CQ.TargetedContentManager.isSimulation()) {
+                    return false;
+                }
+                return (!CQ.TargetedContentManager.isDefaultExperienceSelected()
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && editable.getChildren().length > 1
+                            && renderConditionXF(ACTION_SAVE_OFFER, editable));
+            }
+        }),
+        "SELECT_PARENT": selectParentAction
+    }
+
+    // actions for the target responsivegrid
+    // editable.type = cq/personalization/components/targetresponsivegrid
+    var targetResponsiveGridActions = $.extend({}, targetParsysActions);
+
+    // actions for the target component
+    // editable.type = cq/personalization/components/target
+    var targetComponentActions = {
+        "MSM_CANCEL_INHERITANCE": new ns.ui.ToolbarAction({
+            icon: MSM.MSMCommons.Constants.ICON_LOCKED,
+            text: Granite.I18n.getMessage("Cancel Inheritance"),
+            execute: function(editable, param, target) {
+                _showConfirmationModal(editable, target);
+            },
+            condition: function (editable) {
+                return _renderInheritanceToggleCondition(editable, "MSM_CANCEL_INHERITANCE");
+            }
+        }),
+        "MSM_REENABLE_INHERITANCE": new ns.ui.ToolbarAction({
+            icon: MSM.MSMCommons.Constants.ICON_UNLOCKED,
+            text: Granite.I18n.getMessage("Re-enable Inheritance"),
+            execute: function(editable, param, target) {
+                _showConfirmationModal(editable, target);
+            },
+            condition: function (editable) {
+                return _renderInheritanceToggleCondition(editable, "MSM_REENABLE_INHERITANCE");
+            }
+        }),
+        "DISABLE_TARGET": new ns.ui.ToolbarAction({
+            icon: "exclude",
+            text: Granite.I18n.getMessage("Disable targeting"),
+            execute: function (editable) {
+                var targetParent = CQ.TargetedContentManager.getTargetParent(editable);
+                if (typeof targetParent !== "undefined") {
+                    $.get(targetParent.path + "/default.json")
+                        .done(function(data, jqXHR) {
+                            CQ.TargetedContentManager.targetComponent(targetParent, true, data["sling:resourceType"]);
+                        })
+                        .fail(function(reason) {
+                            CQ.TargetedContentManager.ui.showOperationResult("Failed to disable targeting", true, reason.statusText);
+                        });
+                }
+            },
+            condition: function (editable) {
+                if (!ns.pageInfoHelper.canModify()) {
+                    return false;
+                }
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                var targetParent = CQ.TargetedContentManager.getTargetParent(editable);
+                return (typeof targetParent !== "undefined"
+                            || CQ.TargetedContentManager.isTargetComponent(editable["type"]))
+            }
+        }),
+        "DELETE_OFFER": new ns.ui.ToolbarAction({
+            icon: "closeCircle",
+            text: Granite.I18n.getMessage("Remove offer from activity"),
+            execute: function (editable) {
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                    CQ.TargetedContentManager.deleteOffer(targetEditable);
+                });
+            },
+            condition: function (editable) {
+                return (!CQ.TargetedContentManager.isDefaultExperienceSelected()
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && CQ.TargetedContentManager.hasOffer(editable)
+                            && editable.dom && (editable.dom.hasClass("target") || editable.dom.hasClass("targeted")));
+            }
+        }),
+        "ADD_OFFER": new ns.ui.ToolbarAction({
+            icon: "add",
+            text: Granite.I18n.getMessage("Add offer"),
+            execute: function (editable) {
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                    if (typeof targetEditable !== "undefined") {
+                        CQ.TargetedContentManager.createOffer(targetEditable);
+                    }
+                });
+            },
+            condition: function (editable) {
+                return (CQ.TargetedContentManager.currentActivity !== null
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && !CQ.TargetedContentManager.hasOffer(editable)
+                            && editable.dom && (editable.dom.hasClass("target") || editable.dom.hasClass("targeted")));
+            }
+        }),
+        "CHOOSE_OFFER": new ns.ui.ToolbarAction({
+            icon: "folder",
+            text: Granite.I18n.getMessage("Choose from offer library"),
+            execute: function (editable, whatever, element) {
+                CQ.OfferPicker.loadOfferPicker(CQ.TargetedContentManager.getCurrentBrand(), editable, element);
+            },
+            condition: function (editable) {
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                return (CQ.TargetedContentManager.currentActivity !== null
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && !CQ.TargetedContentManager.hasOffer(editable)
+                            && editable.dom && (editable.dom.hasClass("target") || editable.dom.hasClass("targeted"))
+                            && renderConditionXF(ACTION_CHOOSE_OFFER, editable));
+            }
+        }),
+        "TARGET_COMPONENT_OPTIONS": new ns.ui.ToolbarAction({
+            icon: "gear",
+            text: Granite.I18n.getMessage("Target component settings"),
+            execute: function (editable) {
+                ns.DialogFrame.openDialog(new ns.edit.Dialog(editable));
+            },
+            condition: function (editable) {
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                return true;
+            }
+        }),
+        "MAKE_INLINE_OFFER": new ns.ui.ToolbarAction({
+            icon: "linkOff",
+            text: Granite.I18n.getMessage("Convert to inline offer"),
+            execute: function (editable) {
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    CQ.TargetedContentManager.convertInlineOffer(editable);
+                });
+            },
+            condition: function (editable) {
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                return CQ.TargetedContentManager.hasLockedOffer(editable);
+            }
+        }),
+        "EDIT_IN_NEW_TAB": new ns.ui.ToolbarAction({
+            icon:"edit",
+            text: Granite.I18n.getMessage("Open in new tab for editing"),
+            execute: function(editable){
+                // ensure inheritance is broken if the target activity is a LC
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    CQ.TargetedContentManager.editOfferNewTab(editable);
+                });
+            },
+            condition: function(editable) {
+                if (_isPageOwnedContent(editable)
+                        && !_isLiveCopyCancelled(editable)) {
+                    // require current page LC cancel for editing the content on the current page
+                    return false;
+                }
+                return CQ.TargetedContentManager.hasLockedOffer(editable);
+            }
+        }),
+        "SELECT_PARENT": selectParentAction
+    };
+
+    // actions for any editable, except for the two above
+    var defaultEditableActions = {
+        "MSM_CANCEL_INHERITANCE": new ns.ui.ToolbarAction({
+            icon: MSM.MSMCommons.Constants.ICON_LOCKED,
+            text: Granite.I18n.getMessage("Cancel Inheritance"),
+            execute: function(editable, param, target) {
+                _showConfirmationModal(editable, target);
+            },
+            condition: function (editable) {
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                return _renderInheritanceToggleCondition(editable, "MSM_CANCEL_INHERITANCE");
+            }
+        }),
+        "MSM_REENABLE_INHERITANCE": new ns.ui.ToolbarAction({
+            icon: MSM.MSMCommons.Constants.ICON_UNLOCKED,
+            text: Granite.I18n.getMessage("Re-enable Inheritance"),
+            execute: function(editable, param, target) {
+                _showConfirmationModal(editable, target);
+            },
+            condition: function (editable) {
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                return _renderInheritanceToggleCondition(editable, "MSM_REENABLE_INHERITANCE");
+            }
+        }),
+        "INSERT": new ns.ui.ToolbarAction ({
+            name: "INSERT",
+            icon: "add",
+            text: Granite.I18n.get("Insert component"),
+            execute: function openInsertDialog(editable) {
+                ns.edit.ToolbarActions.INSERT.execute.call(this, editable);
+            },
+            condition: function (editable) {
+                if (_isPageOwnedContent(editable)
+                        && !_isLiveCopyCancelled(editable)) {
+                    // require current page LC cancel for editing the content on the current page
+                    return false;
+                }
+                return (ns.edit.ToolbarActions.INSERT.condition(editable)
+                            && CQ.TargetedContentManager.isInParsys(editable));
+            },
+            isNonMulti: true
+        }),
+        "TARGET": new ns.ui.ToolbarAction({
+            icon: "targeted",
+            text: Granite.I18n.getMessage("Target"),
+            execute: function (editable, param, target) {
+                if (false === canConvertToXF(editable) || CQ.TargetedContentManager.isExperienceFragmentPage(editable.path)) {
+                    CQ.TargetedContentManager.targetComponent(editable, false);
+                    return true;
+                }
+                displayTargetPopoverAndBindEvents(editable);
+                //return false ensures editable toolbar is not closed
+                return false;
+            },
+            condition: function (editable) {
+                if (!ns.pageInfoHelper.canModify()) {
+                    return false;
+                }
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                var allowLegacyOffers = ns.pageInfo.allowLegacyOffers;
+                if (!((typeof allowLegacyOffers === 'boolean' && allowLegacyOffers)
+                    || CQ.TargetedContentManager.hasExperienceFragment(editable)
+                    || CQ.TargetedContentManager.isExperienceFragmentPage(editable.path))) {
+                    return false;
+                }
+                return (!editable.config.editConfig["disableTargeting"]
+                            && CQ.TargetedContentManager.currentActivity !== null
+                            && !CQ.TargetedContentManager.isParSys(editable["type"])
+                            && editable.config.editConfig["actions"] && editable.config.editConfig["actions"].length > 0
+                            && !CQ.TargetedContentManager.getTargetParent(editable));
+            }
+        }),
+        "DISABLE_TARGET": new ns.ui.ToolbarAction({
+            icon: "exclude",
+            text: Granite.I18n.getMessage("Disable targeting"),
+            execute: function (editable, param, target) {
+                var targetParent = CQ.TargetedContentManager.getTargetParent(editable);
+                if (typeof targetParent !== "undefined") {
+                    CQ.TargetedContentManager.targetComponent(targetParent, true);
+                }
+            },
+            condition: function (editable) {
+                if (!ns.pageInfoHelper.canModify()) {
+                    return false;
+                }
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                var targetParent = CQ.TargetedContentManager.getTargetParent(editable);
+                return (typeof targetParent !== "undefined"
+                            || CQ.TargetedContentManager.isTargetComponent(editable["type"]))
+            }
+        }),
+        "DELETE_OFFER": new ns.ui.ToolbarAction({
+            icon: "closeCircle",
+            text: Granite.I18n.getMessage("Remove offer from activity"),
+            execute: function (editable) {
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                    CQ.TargetedContentManager.deleteOffer(targetEditable);
+                });
+            },
+            condition: function (editable) {
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                return (typeof CQ.TargetedContentManager.getTargetParent(editable) != "undefined"
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && !CQ.TargetedContentManager.hasLockedOffer(editable)
+                            && !CQ.TargetedContentManager.isDefaultExperienceSelected());
+            }
+        }),
+        "SAVE_OFFER": new ns.ui.ToolbarAction({
+            icon: "upload",
+            text: Granite.I18n.getMessage("Save offer to offer library"),
+            execute: function (editable) {
+                CQ.ui.TargetedContentManagerUi.doSaveToOfferLibrary(editable);
+            },
+            condition: function (editable) {
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                return (typeof targetEditable !== "undefined"
+                            && !CQ.TargetedContentManager.isDefaultExperienceSelected()
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && CQ.TargetedContentManager.hasOffer(editable)
+                            && renderConditionXF(ACTION_SAVE_OFFER, editable));
+            }
+        }),
+        "ADD_OFFER": new ns.ui.ToolbarAction({
+            icon: "add",
+            text: Granite.I18n.getMessage("Add offer"),
+            execute: function (editable) {
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                    if (typeof targetEditable !== "undefined") {
+                        CQ.TargetedContentManager.createOffer(targetEditable);
+                    }
+                });
+            },
+            condition: function (editable) {
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                // must have at least one activity selected
+                if (CQ.TargetedContentManager.currentActivity === null) {
+                    return false;
+                }
+                var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                return (typeof targetEditable !== "undefined"
+                            && CQ.TargetedContentManager.showOfferActions()
+                            && !CQ.TargetedContentManager.hasOffer(targetEditable));
+            }
+        }),
+        "EDIT": new ns.ui.ToolbarAction({
+            icon: "edit",
+            text: Granite.I18n.get("Edit"),
+            execute: function (editable, param, target) {
+                // go through the MSM-target extension to handle the case where the activity is a LC
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    ns.edit.actions.doInPlaceEdit(editable);
+                });
+
+                if (editable.config.editConfig.inplaceEditingConfig.editorType === "hybrid") {
+                    return false;
+                }
+            },
+            condition: function (editable) {
+                if (_isPageOwnedContent(editable)
+                        && !_isLiveCopyCancelled(editable)) {
+                    // LC canceling only required to edit page owned content
+                    return false;
+                }
+                return ns.pageInfoHelper.canModify() && editable.hasAction("EDIT") && editable.canInPlaceEdit();
+            },
+            isNonMulti: true
+        }),
+        "CONFIGURE": new ns.ui.ToolbarAction({
+            icon:"wrench",
+            text: Granite.I18n.get("Configure"),
+            execute: function (editable, param, target) {
+                // ensure inheritance is broken if the target activity is a LC
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    ns.edit.actions.doConfigure(editable);
+                });
+            },
+            condition: function (editable) {
+                if (_isPageOwnedContent(editable)
+                        && !_isLiveCopyCancelled(editable)) {
+                    // require current page LC cancel for configuring the content on the current page
+                    return false;
+                }
+                return ns.pageInfoHelper.canModify() && editable.hasAction("CONFIGURE") && !!editable.config.dialog;
+            },
+            isNonMulti: true
+        }),
+        "DELETE": new ns.ui.ToolbarAction({
+            icon: "delete",
+            text: Granite.I18n.getMessage("Delete"),
+            execute: function (editable, param, target) {
+                TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function() {
+                    ns.selection.deselectAll();
+                    ns.edit.actions.doDelete([editable]);
+                });
+            },
+            condition: function (editable) {
+                if (_isPageOwnedContent(editable)
+                        && !_isLiveCopyCancelled(editable)) {
+                    // require current page LC cancel for configuring the content on the current page
+                    return false;
+                }
+                return (CQ.TargetedContentManager.isInParsys(editable)
+                            && !CQ.TargetedContentManager.isParSys(editable["type"]));
+            }
+        }),
+        "TARGET_COMPONENT_OPTIONS": new ns.ui.ToolbarAction({
+            icon: "gear",
+            text: Granite.I18n.getMessage("Target component settings"),
+            execute: function (editable) {
+                var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                ns.DialogFrame.openDialog(new ns.edit.Dialog(targetEditable));
+            },
+            condition: function (editable) {
+                if (!_isLiveCopyCancelled(editable)) {
+                    return false;
+                }
+                if (CQ.TargetedContentManager.isInParsys(editable)) {
+                    return false;
+                }
+                var targetEditable = CQ.TargetedContentManager.getTargetParent(editable);
+                return (typeof targetEditable !== "undefined");
+            }
+        }),
+        // This action is copied from [0] with modifications, due to current design of personalization repo
+        // [0] - https://git.corp.adobe.com/CQ/experience-fragments/blob/master/content/jcr_root/libs/cq/experience-fragments/editor/clientlibs/experiencefragments/js/editor/actions/edit.EditableActions.XFCONVERT.js
+        "XFCONVERT" : new ns.ui.ToolbarAction({
+            name: "XFCONVERT",
+            icon: "filingCabinet",
+            text: Granite.I18n.get("Convert to experience fragment variation"),
+            isNonMulti: true,
+            execute: function () {
+                CQ.XF.convertToXf();
+            },
+            condition: function (editable) {
+                return canConvertToXF(editable);
+            }
+        }),
+        "SELECT_PARENT": selectParentAction,
+        "LAYOUT": new ns.ui.ToolbarAction({
+            name: "LAYOUT",
+            icon: "switch",
+            order: "last",
+            text: Granite.I18n.get("Layout"),
+            execute: function (editable) {
+                ns.edit.ToolbarActions.LAYOUT.execute.call(this, editable);
+            },
+            condition: function (editable) {
+                if (_isPageOwnedContent(editable)
+                        && !_isLiveCopyCancelled(editable)) {
+                    // require current page LC cancel for editing the content on the current page
+                    return false;
+                }
+                return (ns.edit.ToolbarActions.LAYOUT.condition.call(this, editable)
+                            && CQ.TargetedContentManager.isInParsys(editable));
+            },
+            render: function (dom) {
+                return ns.edit.ToolbarActions.LAYOUT.render.call(this, dom);
+            },
+            isNonMulti: true
+        })
+    };
+
+    var renderConditionXF = function(actionName, editable) {
+        if (Granite.Toggles.isEnabled(CQ.TargetingConstants.FEATURE_TOGGLE_ENABLE_XF_OFFERS) && CQ.TargetedContentManager.hasExperienceFragment(editable)
+            && (actionName === ACTION_SAVE_OFFER || actionName === ACTION_CHOOSE_OFFER)) {
+            return false;
+        }
+        return true;
+    }
+
+    var displayTargetPopoverAndBindEvents = function (editable) {
+        var popover = new Coral.Popover().set({
+          content: {
+              innerHTML: ''
+          },
+          target: '#EditableToolbar',
+          open: true
+        });
+        popover.on("coral-overlay:close", function() {
+            $(popover).remove();
+        });
+        var $buttonList = $('<coral-buttonlist></coral-buttonlist>');
+        addListItemsToTargetPopoverButtonList($buttonList, editable);
+        $buttonList.appendTo(popover.content);
+        $(popover).appendTo(document.body);
+    }
+
+    var addListItemsToTargetPopoverButtonList = function ($buttonList, editable) {
+        var listItemsConfig = targetPopoverListItemsConfig(editable)
+        Object.keys(listItemsConfig).forEach(function(configKey) {
+            var itemConfig = listItemsConfig[configKey];
+            var item = new Coral.ButtonList.Item().set({
+               content: {
+                   innerHTML: itemConfig.displayText
+               },
+               properties: {
+                   actionFunc: itemConfig.actionFunc,
+                   args: itemConfig.args
+               }
+            });
+            $buttonList.append(item);
+            item.on("click", function (event) {
+                var actionFunc = event.currentTarget.properties.actionFunc;
+                if (actionFunc) {
+                    var args = event.currentTarget.properties.args;
+                    actionFunc.apply(null, args);
+                }
+                var $target = $(event.target);
+                event.stopPropagation();
+                $target.closest("coral-popover").remove();
+                Granite.author.EditorFrame.editableToolbar.close();
+            });
+        });
+    }
+
+    var targetPopoverListItemsConfig = function(editable) {
+        return {
+            item1: {
+                displayText: TXT_CONVERT_XF_AND_TARGET + '<br>' + TXT_RECOMMENDED,
+                actionFunc: CQ.TargetedContentManager.convertToXfAndTargetComponent,
+                args: [editable, false]
+            },
+            item2: {
+                displayText: TXT_TARGET_OFFER,
+                actionFunc: CQ.TargetedContentManager.targetComponent,
+                args: [editable, false]
+            }
+        };
+    }
+
+    var canConvertToXF = function (editable) {
+        if(!Granite.Toggles.isEnabled(CQ.TargetingConstants.FEATURE_TOGGLE_ENABLE_XF_OFFERS)
+           || !CQ.TargetedContentManager.isDefaultExperienceSelected()
+           || CQ.TargetedContentManager.hasExperienceFragment(editable)) {
+            return false;
+        }
+
+        var hasBuildingBlocks = false, isInBuildingBlock = false, fromTemplate = editable.isStructure();
+        var currentEditable = editable;
+        while (currentEditable.getParent()) {
+            if (currentEditable.getParent().type == DO_NOT_CONVERT[2]) {
+                isInBuildingBlock = true;
+                break;
+            }
+            currentEditable = currentEditable.getParent();
+        }
+
+        var setHasBuildingBlockChildren = function (editable) {
+            editable.getChildren().forEach(function (child) {
+                if (child.type == "cq/experience-fragments/editor/components/buildingblock") {
+                    hasBuildingBlocks = true;
+                } else {
+                    setHasBuildingBlockChildren(child);
+                }
+            });
+        };
+
+        setHasBuildingBlockChildren(editable);
+
+        var isRestricted = DO_NOT_CONVERT.filter(function(type){
+            return editable.type.indexOf(type) != -1;
+        });
+
+        return isRestricted.length == 0 && !hasBuildingBlocks && !isInBuildingBlock && !fromTemplate;
+    }
+
+    ns.TargetingActions = {};
+
+    ns.TargetingActions[CQ.TargetingConstants.TARGET_PARSYS_RTYPE] = targetParsysActions;
+    ns.TargetingActions[CQ.TargetingConstants.TARGET_RESPONSIVEGRID_RTYPE] = targetResponsiveGridActions;
+    ns.TargetingActions[CQ.TargetingConstants.TARGET_COMPONENT_RTYPE] = targetComponentActions;
+    ns.TargetingActions[CQ.TargetingConstants.TARGET_RESPONSIVEGRID_COMPONENT_RTYPE] = targetComponentActions;
+    ns.TargetingActions["default"] = defaultEditableActions;
+
+}(jQuery, Granite.author, jQuery(document), this));

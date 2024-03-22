@@ -1,0 +1,428 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2014 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%><%
+%><%-- CQ-4236823 - copied /libs/cq/gui/components/common/wcm/datasources/childpages/childpages.jsp todo - use servlet.--%><%
+%><%@include file="/libs/granite/ui/global.jsp"%><%
+%><%@page session="false"
+          import="com.adobe.granite.ui.components.Config,
+                  com.adobe.granite.ui.components.ExpressionHelper,
+                  com.adobe.granite.ui.components.PagingIterator,
+                  com.adobe.granite.ui.components.ds.AbstractDataSource,
+                  com.adobe.granite.ui.components.ds.DataSource,
+                  com.adobe.granite.ui.components.ds.EmptyDataSource,
+                  com.adobe.granite.workflow.exec.WorkItem,
+                  com.adobe.granite.workflow.exec.Workflow,
+                  com.adobe.granite.workflow.status.WorkflowStatus,
+                  com.day.cq.replication.ReplicationStatus,
+                  com.day.cq.wcm.api.Page,
+                  com.day.cq.wcm.api.PageInfoAggregator,
+                  com.day.cq.wcm.api.Template,
+                  com.day.cq.wcm.msm.api.Blueprint,
+                  com.day.cq.wcm.msm.api.BlueprintManager,
+                  com.day.cq.wcm.api.WCMException,
+                  org.apache.commons.collections.IteratorUtils,
+                  org.apache.commons.collections.Predicate,
+                  org.apache.commons.collections.Transformer,
+                  org.apache.commons.collections.iterators.FilterIterator,
+                  org.apache.commons.collections.iterators.TransformIterator,
+                  org.apache.jackrabbit.api.security.user.Authorizable,
+                  org.apache.jackrabbit.api.security.user.Group,
+                  org.apache.jackrabbit.api.security.user.User,
+                  org.apache.jackrabbit.api.security.user.UserManager,
+                  org.apache.sling.api.resource.Resource,
+                  org.apache.sling.api.resource.ResourceWrapper,
+                  org.apache.sling.api.SlingHttpServletRequest,
+                  javax.jcr.RepositoryException,
+                  javax.jcr.Session,
+                  java.util.ArrayList,
+                  java.util.Set,
+                  java.util.HashSet,
+                  java.util.Calendar,
+                  java.util.Collections,
+                  java.util.Comparator,
+                  java.util.Iterator,
+                  java.util.LinkedHashMap,
+                  java.util.List,
+                  java.util.Map,
+                  java.util.regex.Pattern"%><%
+    /**
+     A datasource returning child pages and folders.
+     Folders can be hidden by configuration (showFolders = false)
+     Which resources should not be shown can be configured with the "notAllowed" property
+
+     @datasource
+     @name ChildPages
+     @location /libs/cq/gui/components/common/wcm/datasources/childpages
+
+     @property {StringEL} path The path of the parent page
+     @property {String} itemResourceType
+     */
+    ExpressionHelper ex = cmp.getExpressionHelper();
+    Config dsCfg = new Config(resource.getChild(Config.DATASOURCE));
+
+    final Integer offset = ex.get(dsCfg.get("offset", String.class), Integer.class);
+    final Integer limit = ex.get(dsCfg.get("limit", String.class), Integer.class);
+    final boolean showFolders = ex.getBoolean(dsCfg.get("showFolders", "true"));
+    final String filter = ex.get(dsCfg.get("exclude", ""), String.class);
+    final Pattern pattern = Pattern.compile(filter);
+    final String query = ex.getString(dsCfg.get("query", String.class));
+    final boolean applyWeighting = ex.getBoolean(dsCfg.get("applyWeighting", "false"));
+    final String sortName = ex.getString(dsCfg.get("sortName", String.class));
+    final String sortDir = ex.getString(dsCfg.get("sortDir", String.class));
+    final String[] supportedResourceTypes = dsCfg.get("supportedResourceTypes", String[].class);
+    final boolean sortDefined = (sortName != null && sortDir != null);
+    final Authorizable currentUser = resourceResolver.adaptTo(Authorizable.class);
+
+    final String parentPath;
+    final String searchName;
+
+    if (query != null) {
+        final String rootPath = ex.getString(dsCfg.get("rootPath", "/content"));
+
+        final int slashIndex = query.lastIndexOf('/');
+
+        if (slashIndex < 0) {
+            parentPath = rootPath;
+            searchName = query.toLowerCase();
+        } else if (!query.startsWith(rootPath)) {
+            parentPath = rootPath;
+            searchName = null;
+        } else if (slashIndex == query.length() - 1) {
+            parentPath = query;
+            searchName = null;
+        } else {
+            parentPath = query.substring(0, slashIndex + 1);
+            searchName = query.substring(slashIndex + 1).toLowerCase();
+        }
+    } else {
+        parentPath = ex.getString(dsCfg.get("path", String.class));
+        searchName = null;
+    }
+
+    final Resource parent = parentPath != null ? resourceResolver.getResource(parentPath) : null;
+
+    DataSource ds;
+    if (parent == null) {
+        ds = EmptyDataSource.instance();
+    } else {
+        Iterator<Resource> sortedChildren = null;
+        Iterator<Resource> weightedChildren = null;
+
+        if (sortDefined) {
+            PageInfoAggregator piAggregatorService = sling.getService(PageInfoAggregator.class);
+            LinkedHashMap<String, Map<String, Object>> showColumnInfo = (LinkedHashMap<String, Map<String, Object>>) request.getAttribute("sites.listView.info.providers");
+
+            Comparator comparator = getComparator(slingRequest, piAggregatorService, showColumnInfo, sortName, sortDir);
+            sortedChildren = sortChildren(IteratorUtils.toList(parent.listChildren()), comparator);
+        } else if (applyWeighting) {
+            weightedChildren = sortChildren(IteratorUtils.toList(parent.listChildren()), new Comparator<Resource>() {
+                public int compare(Resource r1, Resource r2) {
+                    return getWeighting(r2, currentUser).compareTo(getWeighting(r1, currentUser));
+                }
+            });
+        }
+
+        final String itemRT = dsCfg.get("itemResourceType", String.class);
+        final Iterator<Resource> resultIterator = (sortDefined) ? sortedChildren : (applyWeighting)
+                ? weightedChildren : parent.listChildren();
+
+        BlueprintManager bpManager = slingRequest.getResourceResolver().adaptTo(BlueprintManager.class);
+        if (bpManager == null) {
+            log.error("Could not get BlueprintManager instance");
+            return;
+        }
+        final Set<String> bluePrintSources = getBluePrintSources(bpManager);
+
+
+        @SuppressWarnings("unchecked")
+        DataSource datasource = new AbstractDataSource() {
+            public Iterator<Resource> iterator() {
+                Iterator<Resource> it = new PagingIterator<Resource>(new FilterIterator(resultIterator, new Predicate() {
+                    public boolean evaluate(Object o) {
+                        Resource r = ((Resource) o);
+
+                        if (pattern.matcher(r.getPath()).matches()) {
+                            return false;
+                        }
+
+                        boolean searchMatches = true;
+                        if (searchName != null) {
+                            final Pattern searchNamePattern = Pattern.compile(Pattern.quote(searchName), Pattern.CASE_INSENSITIVE);
+                            searchMatches = searchNamePattern.matcher(r.getName()).lookingAt();
+                        }
+
+                        Page p = r.adaptTo(Page.class);
+                        boolean isFolder = r.isResourceType("sling:Folder") ||
+                                r.isResourceType("sling:OrderedFolder") ||
+                                r.isResourceType("nt:folder");
+                        boolean bSupportedResourceType = false;
+                        if(supportedResourceTypes!=null && supportedResourceTypes.length>0){
+                            for(String strType: supportedResourceTypes){
+                                if(r.isResourceType(strType)){
+                                    bSupportedResourceType = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        boolean blueprintExits = false;
+                        if (bluePrintSources.contains(r.getPath())) {
+                            blueprintExits = true;
+                        }
+
+                        return ((showFolders && isFolder) || bSupportedResourceType || (p != null && p.getDeleted() == null && searchMatches) && !blueprintExits);
+                    }
+                }), offset, limit);
+
+                return new TransformIterator(it, new Transformer() {
+                    public Object transform(Object o) {
+                        Resource r = ((Resource) o);
+
+                        return new ResourceWrapper(r) {
+                            public String getResourceType() {
+                                return itemRT;
+                            }
+                        };
+                    }
+                });
+            }
+        };
+
+        ds = datasource;
+    }
+
+    request.setAttribute(DataSource.class.getName(), ds);
+%><%!
+    private String getTitle(Resource resource) {
+        Page cqPage = resource.adaptTo(Page.class);
+        String title = resource.getValueMap().get("jcr:content/jcr:title", resource.getValueMap().get("jcr:title", resource.getName()));
+
+        if (cqPage != null) {
+            title = cqPage.getTitle() == null ? cqPage.getName() : cqPage.getTitle();
+        }
+
+        return title;
+    }
+
+    private String getLastModified(Resource resource) {
+        Page cqPage = resource.adaptTo(Page.class);
+        return (cqPage != null) ? Long.toString(cqPage.getLastModified().getTimeInMillis()) : "0";
+    }
+
+    private String getPublished(Resource resource) {
+        ReplicationStatus replicationStatus = resource.adaptTo(ReplicationStatus.class);
+        Calendar publishedDate = null;
+        Boolean isDeactivated = false;
+
+        if (replicationStatus != null) {
+            publishedDate = replicationStatus.getLastPublished();
+            isDeactivated = replicationStatus.isDeactivated();
+        }
+
+        return (!isDeactivated && publishedDate != null) ? Long.toString(publishedDate.getTimeInMillis()) : "0";
+    }
+
+    private String getTemplate(Resource resource) {
+        String templateTitle = "";
+        Page cqPage = resource.adaptTo(Page.class);
+        if (cqPage != null) {
+            Template template = cqPage.getTemplate();
+            if (template != null) {
+                templateTitle = template.getTitle();
+                if ("".equals(templateTitle) || templateTitle == null) {
+                    templateTitle = template.getName();
+                }
+            }
+        }
+        return templateTitle;
+    }
+
+    private boolean isNew(Page page) {
+        Calendar created = page.getProperties().get("jcr:created", Calendar.class);
+        Calendar lastModified = page.getLastModified();
+
+        Calendar twentyFourHoursAgo = Calendar.getInstance();
+        twentyFourHoursAgo.add(Calendar.DATE, -1);
+
+        if (created == null || (lastModified != null && lastModified.before(created))) {
+            created = lastModified;
+        }
+
+        return created != null && twentyFourHoursAgo.before(created);
+    }
+
+    private List<WorkItem> getWorkItems(Authorizable user, WorkflowStatus workflowStatus, UserManager userManager)
+            throws RepositoryException {
+        List<WorkItem> workItems = new ArrayList<WorkItem>();
+
+        if (workflowStatus != null && workflowStatus.isInRunningWorkflow(true)) {
+            List<Workflow> workflows = workflowStatus.getWorkflows(true);
+            for (Workflow workflow : workflows) {
+                for (WorkItem item : workflow.getWorkItems()) {
+                    boolean isAssigned = false;
+                    String assigneeId = item.getCurrentAssignee();
+                    Authorizable assignee = assigneeId != null ? userManager.getAuthorizable(assigneeId) : null;
+
+                    if (assignee != null) {
+                        if (((User) user).isAdmin()) {
+                            isAssigned = true;
+                        } else if (assignee.isGroup()) {
+                            Group group = (Group) assignee;
+                            isAssigned = group.isMember(user);
+                        } else {
+                            isAssigned = assignee.getID().equals(user.getID());
+                        }
+                    }
+                    if (isAssigned) {
+                        workItems.add(item);
+                    }
+                }
+            }
+        }
+
+        return workItems;
+    }
+
+    /**
+     * Gets a weighting for a resource
+     *
+     * @param resource The resource
+     * @param currentUser The current user
+     * @return The resource weight
+     */
+    private Integer getWeighting(Resource resource, Authorizable currentUser) {
+        Page cqPage = resource.adaptTo(Page.class);
+        boolean isNew = false;
+        boolean hasWorkItem = false;
+
+        try {
+            UserManager userManager = resource.adaptTo(UserManager.class);
+            WorkflowStatus workflowStatus = resource.adaptTo(WorkflowStatus.class);
+            List<WorkItem> workItems = getWorkItems(currentUser, workflowStatus, userManager);
+
+            isNew = (cqPage != null) && isNew(cqPage);
+            hasWorkItem = !workItems.isEmpty();
+        } catch (RepositoryException ignore) {
+        }
+
+        return (isNew) ? 10 : (hasWorkItem) ? 20 : 0;
+    }
+
+    /**
+     * Gets a custom property for a page resource from a sortName in a columnInfo map
+     *
+     * @param slingRequest The request
+     * @param piAggregatorService Page info aggregator
+     * @param showColumnInfo The column info
+     * @param sortName The ID of the sort term
+     * @return The value of the custom property
+     */
+    private String getCustomPropertyValue(SlingHttpServletRequest slingRequest, PageInfoAggregator piAggregatorService, final LinkedHashMap<String, Map<String, Object>> showColumnInfo, Resource resource, String sortName) {
+        Map<String, Object> customPageData = piAggregatorService.getAggregatedPageInfo(slingRequest, resource);
+
+        for (Map.Entry<String, Map<String, Object>> columnInfoEntry : showColumnInfo.entrySet()) {
+            String providerName = columnInfoEntry.getKey();
+            Map<String, Object> providerCustomProperties = (Map<String, Object>) customPageData.get(providerName);
+
+            if (providerCustomProperties != null) {
+                for (String columnProviderProperty : (List<String>) columnInfoEntry.getValue().get("properties")) {
+                    if (columnProviderProperty.equals(sortName)) {
+                        Object propValue = providerCustomProperties.get(columnProviderProperty);
+
+                        if (propValue != null) {
+                            return propValue.toString();
+                        }
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Gets a comparator suitable for the provided sortName
+     *
+     * @param slingRequest The request
+     * @param piAggregatorService Page info aggregator
+     * @param showColumnInfo The column info
+     * @param sortName The ID of the sort term
+     * @param sortDir The sort direction
+     * @return Comparator for sorting page resources
+     */
+    private Comparator<Resource> getComparator(final SlingHttpServletRequest slingRequest, final PageInfoAggregator piAggregatorService, final LinkedHashMap<String, Map<String, Object>> showColumnInfo, final String sortName, final String sortDir) {
+        Comparator comparator = new Comparator<Resource>() {
+            public int compare(Resource r1, Resource r2) {
+                if (sortName.toLowerCase().equals("main")) {
+                    return getTitle(r2).compareTo(getTitle(r1));
+                } else if (sortName.toLowerCase().equals("name")) {
+                    return r2.getName().compareTo(r1.getName());
+                } else if (sortName.toLowerCase().equals("modified")) {
+                    return getLastModified(r2).compareTo(getLastModified(r1));
+                } else if (sortName.toLowerCase().equals("published")) {
+                    return getPublished(r2).compareTo(getPublished(r1));
+                } else if (sortName.toLowerCase().equals("template")) {
+                    return getTemplate(r2).compareTo(getTemplate(r1));
+                } else {
+                    // Analytics
+                    if (piAggregatorService != null && showColumnInfo != null) {
+                        String v1 = getCustomPropertyValue(slingRequest, piAggregatorService, showColumnInfo, r1, sortName);
+                        String v2 = getCustomPropertyValue(slingRequest, piAggregatorService, showColumnInfo, r2, sortName);
+
+                        if (v1 != null && v2 != null) {
+                            return v1.compareTo(v2);
+                        }
+                    }
+                }
+
+                return 0;
+            }
+        };
+
+        // reverses order if necessary
+        boolean ascending = (sortDir.toLowerCase().equals("asc"));
+        return (ascending) ? comparator : Collections.reverseOrder(comparator);
+    }
+
+    /**
+     * Sorts child resources
+     *
+     * @param children The list of child resources
+     * @param comparator The comparator for sorting the children
+     * @return Iterator for the list of sorted resources
+     */
+    private Iterator<Resource> sortChildren(List<Resource> children, Comparator comparator) {
+        Collections.sort(children, comparator);
+        return children.iterator();
+    }
+%><%
+%><%!
+
+private Set<String> getBluePrintSources(BlueprintManager bpManager) {
+    try {
+        Iterator<Blueprint> allBlueprintConfigs = new ArrayList<Blueprint>(bpManager.getBlueprints()).iterator();
+        Set<String> bluePrintSources = new HashSet<String>();
+        while (allBlueprintConfigs.hasNext()) {
+            Blueprint bp = allBlueprintConfigs.next();
+            bluePrintSources.add(bp.getSitePath());
+        }
+        return bluePrintSources;
+    } catch(WCMException we) {
+        return Collections.emptySet();
+        // do nothing
+    }
+}
+%>

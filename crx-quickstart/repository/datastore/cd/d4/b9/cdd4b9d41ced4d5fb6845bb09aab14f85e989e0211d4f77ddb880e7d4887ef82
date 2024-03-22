@@ -1,0 +1,1020 @@
+/*!************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * ___________________
+ *
+ *  Copyright 2015 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+
+/*********************
+ * JSLint Directives *
+ *********************/
+
+/*global s7sdk, console */
+/*jslint vars: true */
+
+/**
+ * Declare package, and requirements.
+ */
+(function (s7ve, $, Granite) {
+    "use strict";
+
+    /**
+     * StyleEditor module responsible for invoking SDK model generation based on detected
+     * viewer components and dynamically building and wiring up UI widgets. This module relies
+     * on utilities provided by the 's7ve' library as well as the 's7ve.ViewerEditor' module.
+     */
+    s7ve.StyleEditor = function StyleEditor(parameterManager, $container, viewerClass) {
+
+        this.$container = $container;
+        this.viewerClass = viewerClass;
+        
+        this.parsedViewerCSS = [];
+        this.cssEditorVisible = false;
+        this.widgets = {};
+        this.modelChainsByComponent = {};
+
+        // build editor panels
+        this.createUI($container);
+        
+        // opportunity for editor to intercept properties and hook onto special cases
+        s7viewers.s7sdk.model.SelectorModel.globalPropertyPipe = this.globalPropertyPipe.bind(this);
+
+        this.initDebouncers();
+        
+        $(document).on(s7ve.ViewerEditor.CSS_CHANGED_EVENT, this.viewerCssChanged.bind(this));
+        
+        // Parse CSS and kick off initialization
+        this.parseViewerCSS(this.initialize.bind(this));
+    };
+    
+    /**
+     * Debouncers for common triggers
+     */
+    s7ve.StyleEditor.prototype.initDebouncers = function () {
+
+        // Debounce widget update and viewer reload when CSS text is manually edited
+        this.parseCssEditorDebounce = s7ve.Util.debounce(function () {
+            this.parseCSSEditor();
+        }.bind(this), 500);
+
+        // Debounce updates to CSS text widget
+        this.updateCssEditorDebounce = s7ve.Util.debounce(function () {
+            return this.updateCSSEditor();
+        }.bind(this), 100);
+
+        // Debounce requests to reload viewer
+        this.reloadViewerDebounce = s7ve.Util.debounce(function () {
+            this.fadeInViewer();
+            return s7ve.ViewerEditor.reloadViewer();
+        }.bind(this), 1000);
+
+        // Debounce requests to reparse and re-apply CSS to all selector models
+        this.reloadCssDebounce = s7ve.Util.debounce(function () {
+            this.reloadCss();
+        }.bind(this), 50);
+    };
+
+    /**
+     * On completion of parsed CSS, process viewer components and build UI
+     */
+    s7ve.StyleEditor.prototype.initialize = function () {
+
+        var selectorModels = this.processComponents();
+
+        this.notifyAll();
+        this.createWidgetUI();
+
+        // Add to DOM all at once, since widgets are now built in memory
+        this.section.append(this.s7ve_panelStack.$element);
+        //this.section.append(this.$widgetFlow);
+        this.section.append(this.$cssEditor);
+
+        // append to provided container ID
+        this.$container.append(this.section);
+
+        this.section.hide();
+        this.section.fadeIn();
+
+        // set initial component selection
+        this.componentSelect.setValue(this.componentSelect.getValue());
+        
+        this.s7ve_panelStack.showIndex(0);
+
+        this.updateCssEditorDebounce.press();
+    };
+
+    /**
+     * This callback is invoked by SelectorModel instances from the SDK to allow style editor
+     * to hook special reload cases for particular properties.
+     */
+    s7ve.StyleEditor.prototype.globalPropertyPipe = function (property, oldValue, newValue, selector) {
+        // The return value of this handler indicates whether the SDK will invoke 'setCSS' on the component. Here
+        // we can define special cases for situations that are unsupported or otherwise not working correctly.
+        var skipSetCss = false,
+            className = selector.sdkClassName || selector.className;
+        
+        this.updateCssEditorDebounce.press().then(this.injectViewerCss.bind(this));
+
+        if (className == "s7cursor" && (property == "height" || property == "width")) {
+            this.reloadViewerDebounce.press();
+        }
+        if ((className == "s7interactiveswatches" || className == "s7swatches") && (property == "height" || property == "width")) {
+            this.reloadViewerDebounce.press();
+        }
+        if (!oldValue.equal(newValue) && newValue.property === "background-image") {
+            this.reloadCssDebounce.press();
+        }
+        return skipSetCss;
+    };
+
+    /**
+     * Proxy to inject css text into page
+     */
+    s7ve.StyleEditor.prototype.injectViewerCss = function (cssText) {
+        s7ve.ViewerEditor.injectedViewerCss(cssText);
+    };
+
+    /**
+     * Set contents of CSS editor using parsed viewer CSS object, returns resulting text
+     */
+    s7ve.StyleEditor.prototype.updateCSSEditor = function () {
+
+        // remember current scroll and cursor positions
+        var scrollTop = $(".CodeMirror-scroll").scrollTop();
+        this.cursor = this.myCodeMirror.getCursor();
+
+        var cssText = s7ve.Parser.CSSParserRegex.generateCSS(this.parsedViewerCSS);
+        this.myCodeMirror.setValue(cssText);
+
+        // restore scroll and cursor positions
+        this.myCodeMirror.setCursor(this.cursor);
+        $(".CodeMirror-scroll").scrollTop(scrollTop);
+
+        return cssText;
+    };
+    
+    /**
+     * Update editor contents when ViewerEditor module notifies of CSS update
+     */
+    s7ve.StyleEditor.prototype.viewerCssChanged = function (event) {
+        this.parsedViewerCSS = s7ve.Parser.CSSParserRegex.parseString(event.text);
+        this.updateCssEditorDebounce.press();
+        this.reloadCss();
+    };
+
+    /**
+     * Update viewer and editor using current CSS editor text
+     */
+    s7ve.StyleEditor.prototype.parseCSSEditor = function () {
+
+        var cssText = this.myCodeMirror.getValue();
+        s7ve.ViewerEditor.injectedViewerCss(cssText);
+
+        this.parsedViewerCSS = s7ve.Parser.CSSParserRegex.parseString(cssText);
+
+        // reparse CSS object and notify models
+        this.reloadCss();
+    };
+
+    /** 
+     * Trigger update of all widgets
+     */
+    s7ve.StyleEditor.prototype.notifyAll = function () {
+        iterate(this.widgets, function (widget, key) {
+            widget.propertyModel.notifyAll();
+        });
+    };
+
+    /**
+     * Lazily create UI for all generated widgets
+     */
+    s7ve.StyleEditor.prototype.createWidgetUI = function () {
+        //return;
+        iterate(this.widgets, s7ve.Util.spacer(function (widget, key) {
+            widget.createUI();
+        }, 50));
+    };
+    
+    /**
+     * Return key uniquely identifying viewer component 
+     */
+    function getComponentKey(component) {
+        return component.getClassName() + "_" + component.getId();
+    }
+    
+    /**
+     * Return key uniquely identifying widget and corresponding selector
+     */    
+    function getWidgetKey(propertyModel) {
+        return getComponentKey(propertyModel.selectorModel.component) + ":" + propertyModel.selectorModel.toFullSelectorString() + ":" + s7ve.Util.getFnName(propertyModel.constructor);
+    }
+    
+    /**
+     * Wrapper to invoke SDK call to retrieve user friendly component name 
+     */
+    function getComponentDisplayName(component) {
+        var result = component.getClassName();
+        if(s7viewers.s7sdk.StyleModel.getComponentDisplayName) {
+            result = s7viewers.s7sdk.StyleModel.getComponentDisplayName(component);
+        }
+        return result;
+    }
+
+
+    /** 
+     * Build widget instances given viewer components and built SelectorModel chains
+     */
+    s7ve.StyleEditor.prototype.buildComponentSection = function (component, rootSelectorModel) {
+
+        var componentName = getComponentKey(component);
+
+        this.componentSelect.addOption({
+            value: "StyleEditor_" + componentName,
+            display: getComponentDisplayName(component)
+        });
+
+        // Create section element container for component
+        //var $componentSection = $("<section/>").addClass("s7ve-StyleEditor-Component s7ve-" + componentName).hide().appendTo(this.$widgetFlow);
+        var $componentSection = this.s7ve_panelStack.addPanel("StyleEditor_" + componentName);
+        
+        /**
+         * Helper to add general component tip
+         */
+        function addComponentTip() {
+            if(!s7viewers.s7sdk.StyleModel.getComponentTip) {
+                // if viewers package does not support API, then skip
+                return;
+            }
+            var tipText = s7viewers.s7sdk.StyleModel.getComponentTip(component);
+            if (tipText) {
+                $componentSection.append(s7ve.UI.createAlert({
+                    text: tipText
+                }).$element.addClass("s7ve-ComponentTip"));
+            }
+        }
+        
+        addComponentTip();
+        this.createCssButtons($componentSection);
+
+        /**
+         * Helper to build widgets for particular SelectorModel in chain
+         */
+        var processSelectorModel = function processSelectorModel(selectorModel, $container) {
+            
+            // Temp fix for CQ-93983: Complete hotspot gallery configuration -- this should be configurable!
+            if(this.viewerClass === "s7interactiveimage" && selectorModel.toFullSelectorString().match(/s7region/)) {
+                return;
+            }
+
+            // Only create section if we have property models
+            if (selectorModel.propertyModels.length) {
+
+                var includeTitle = !(selectorModel instanceof s7viewers.s7sdk.model.AttributeSelectorModel);
+
+                // Get tip text, check if API exists in SDK and invoke (otherwise we require viewers package update)
+                var tip = (selectorModel.getTip && selectorModel.getTip()) || "";
+
+                // WidgetBundle is a helper class to organize widgets within an Accordion
+                var widgetBundle = new s7ve.StyleEditor.WidgetBundle(selectorModel.getName(), includeTitle, tip);
+                widgetBundle.$section.appendTo($container);
+
+                // Iterate property models and determine widgets to build
+                selectorModel.propertyModels.forEach(function (propertyModel) {
+                    // Identifier for widget type
+                    var widgetKey = getWidgetKey(propertyModel);
+
+                    // console.log("buildComponentSection - Building widget: " + widgetKey);
+                    var widget = propertyModel.createWidget(new s7ve.StyleWidgetFactory(this));
+
+                    // Add instantiated widget to map
+                    this.widgets[widgetKey] = widget;
+
+                    if(this.viewerClass === "s7mixedmediaviewer" && propertyModel instanceof s7viewers.s7sdk.model.CSSSpriteModel) {
+                        // CQ-75462: [AEM][Viewer Presets][Editor] Mixed Media: Button components: Sprites displaying incorrectly
+                        // Do not display sprite widgets for mixed media viewer. Describing this in the descriptor object would have
+                        // been very tedious.
+                        return;
+                    }
+
+                    var widgetSection = widgetBundle.addWidgetSection(widget);
+                    $(widgetSection.content).append(widget.domElement);
+
+                }.bind(this));
+
+                // If we didn't end up creating any widgets, then hide section
+                if(widgetBundle.length == 0) {
+                    widgetBundle.$section.hide();
+                }
+            }
+        }.bind(this);
+
+        /**
+         * Use given selectorModel to drive instantiation of widgets and UI generation
+         */
+        function process(selectorModel, container) {
+            processSelectorModel(selectorModel, container);
+
+            var containers = {};
+
+            // We have attribute children, build attribute selector UI
+            if (selectorModel.childNodes.length > 1 && selectorModel.childNodes[0] instanceof s7viewers.s7sdk.model.AttributeSelectorModel) {
+
+                var buttonGroup = s7ve.UI.createButtonGroup({});
+                var panelStack = s7ve.UI.createPanelStack();
+
+                buttonGroup.$wrapper.addClass("s7ve-AttributeButtonGroup");
+
+                selectorModel.childNodes.forEach(function (attributeSelectorModel) {
+                    var itemName = attributeSelectorModel.attributeValue;
+                    buttonGroup.addItem({ label: itemName });
+                    containers[itemName] = panelStack.addPanel(itemName);
+                });
+
+                // TODO: move inline styles to CSS
+                var title = s7ve.UI.createHeading(3).text(selectorModel.childNodes[0].name);
+
+                container.append(title);
+                container.append(buttonGroup.$wrapper);
+                container.append(panelStack.$element);
+
+                buttonGroup.onChange(function(value) {
+                    panelStack.showPanel(value);
+                });
+                panelStack.showIndex(0);
+            }
+
+            selectorModel.childNodes.forEach(function (childSelectorModel, index) {
+                if (childSelectorModel instanceof s7viewers.s7sdk.model.AttributeSelectorModel) {
+                    var newContainer = containers[childSelectorModel.attributeValue];
+                    process(childSelectorModel, newContainer);
+                } else {
+                    process(childSelectorModel, container);
+                }
+            });
+        }
+        process(rootSelectorModel, $componentSection);
+    };
+
+    /**
+     * Create main panel elements for StyleEditor
+     */
+    s7ve.StyleEditor.prototype.createUI = function (container) {
+
+        this.s7ve_panelStack = s7ve.UI.createPanelStack();
+        this.$cssEditor = $("<section>").addClass("s7ve-CSSEditor").hide();
+        this.section = $("<section>").addClass("s7ve-StyleEditor");
+
+        // Add an id for the CSS Editor region to reference with aria-controls on Show/Hide CSS button.
+        // Add aria-label to expose CSS Editor as a landmark region.
+        this.$cssEditor.attr({
+            "id": Coral.commons.getUID(),
+            "aria-label": Granite.I18n.get("CSS Editor")
+        });
+
+        // Build code mirror component
+        this.myCodeMirror = CodeMirror(this.$cssEditor[0], {
+            // Adds aria-label to CodeMirror's textarea element.
+	    "screenReaderLabel": Granite.I18n.get("Edit CSS"),
+            "mode": "css",
+            "extraKeys": {
+                Tab: function (cm) {
+                    var spaces = Array(cm.getOption("indentUnit") + 1).join(" ");
+                    cm.replaceSelection(spaces);
+                    cm.setCursor(cm.getCursor());
+                }
+            }
+        });
+        this.myCodeMirror.on("change", function (codeMirror, event) {
+            if (event.origin != "setValue") {
+                this.parseCssEditorDebounce.press();
+                this.reloadViewerDebounce.press();
+            }
+        }.bind(this));
+
+        // Build component selector and wire up to panels TODO: This could be moved
+        // into JCR since it is not very dynamic
+        this.componentSelectWidget = s7ve.UI.createComponentSelectWidget({
+            label: Granite.I18n.get("Component Appearance"),
+            name: "s7ve-StyleEditor-componentSelect"
+        });
+
+        this.componentSelect = this.componentSelectWidget.s7ve_select;
+
+        this.componentSelect.onChange(function (value) {
+            this.s7ve_panelStack.showPanel(value);
+		}.bind(this));
+
+        /** Style Editor Control Overlay event listener **/
+        $(document).on("s7ve-ComponentSelectEvent", function(event) {
+            var component = "StyleEditor_" + getComponentKey(event.component);
+            this.componentSelect.setValue(component); //Style Editor Set Value takes component key
+            this.s7ve_panelStack.showPanel(component);
+        }.bind(this));
+        
+        this.section.append(this.componentSelectWidget.$section);
+
+        $(document).on("s7ve-switchMarker", function (event) {
+            var markerDesc = this.getMarkers()[event.marker];
+            this.switchToMarker(markerDesc);
+        }.bind(this));
+
+        //Esc key to get focus from expanded CSS editor 
+        this.$cssEditor.on("keydown", function(e){
+           if(e.which === 27){
+             this.toggleCSSEditor();
+           }
+        }.bind(this));
+
+    };
+
+    /**
+     * Create and add CSS show/hide and import buttons to given container
+     */
+    s7ve.StyleEditor.prototype.createCssButtons = function ($container) {
+        var $cssToggle = $(s7ve.UI.createButton({
+            label: Granite.I18n.get("Show/Hide CSS"),
+            variant: "quiet"
+        })).addClass("s7ve-WidgetButton");
+        
+        // CQ-106298 - Hide when CodeMirror library is unavailable
+        $cssToggle.toggle(Boolean(CodeMirror.isDummy) === false);
+
+        // Set aria-* state props
+        $cssToggle.attr({
+            "aria-expanded": false,
+            "aria-controls": this.$cssEditor.attr("id")
+        });
+
+        // create a persistent jQuery object and add the new $cssToggle button for this $container to it.
+        this.$cssToggle = (this.$cssToggle || $()).add($cssToggle);
+
+        var $importCss = $(s7ve.UI.createButton({
+            label: Granite.I18n.get("Import CSS"),
+            variant: "quiet"
+        })).addClass("s7ve-WidgetButton");
+
+        $cssToggle.on("click", function (event) {
+            event.preventDefault();
+            this.toggleCSSEditor();
+        }.bind(this));
+
+        $importCss.on("click", function (event) {
+            event.preventDefault();
+            s7ve.ViewerEditor.selectCssAsset();
+        }.bind(this));
+
+        this.$section = $("<section></section>").addClass("s7ve-WidgetBundle-wrapper");
+        this.$section.append($importCss);
+        this.$section.append($cssToggle);
+        $container.append(this.$section);
+    };
+
+    /**
+     * Toggle visbility of CSS editor
+     */
+    s7ve.StyleEditor.prototype.toggleCSSEditor = function () {
+
+        if (this.cssEditorVisible) {
+            // TODO: this styling could be defined in CSS file
+
+            this.s7ve_panelStack.$element.toggleClass("s7ve-StyleEditor--short");
+            this.$cssEditor.hide();
+           // Restore focus to the CSS toggle button for this panel
+            this.$cssToggle.filter(function(index, item) {
+                return !!item.closest("coral-panel.is-selected");
+            }).focus();
+
+        } else {
+            this.s7ve_panelStack.$element.toggleClass("s7ve-StyleEditor--short");
+            this.$cssEditor.show();
+            // using timeout for screen reader to get focus
+            setTimeout(() => {
+                // Set focus to the code mirror text editor.
+	    	this.myCodeMirror.focus();
+            }, 0);
+        }
+        this.cssEditorVisible = !this.cssEditorVisible;
+
+        // update the aria-expanded state for all CSS toggle button instances.
+        this.$cssToggle.attr("aria-expanded", this.cssEditorVisible);
+
+        this.updateCssEditorDebounce.press();
+    };
+
+    /**
+     * Process all registered components from ParameterManager and build
+     * models defined in descriptor object.
+     */
+    s7ve.StyleEditor.prototype.processComponents = function () {
+
+        var components = s7ve.ViewerEditor.getComponents();
+
+        components.forEach(function (component) {
+            var compName = getComponentKey(component);
+
+            // Create bucket in hash-map to store model chains for component
+            var bucket = this.modelChainsByComponent[compName] = this.modelChainsByComponent[compName] || {};
+            var deviceSpecificity = new s7viewers.s7sdk.model.SelectorModel.Specificity(0, 2, 0);
+
+            // Build model chains for each device type
+            bucket.desktopModelChain = s7viewers.s7sdk.StyleModel.buildComponentModel(component, "." + this.viewerClass + ".s7mouseinput", deviceSpecificity);
+            bucket.tabletModelChain = s7viewers.s7sdk.StyleModel.buildComponentModel(component, "." + this.viewerClass + ".s7size_medium.s7touchinput", deviceSpecificity);
+            bucket.phoneModelChain = s7viewers.s7sdk.StyleModel.buildComponentModel(component, "." + this.viewerClass + ".s7size_small.s7touchinput", deviceSpecificity);
+
+            if (bucket.desktopModelChain && bucket.desktopModelChain.childNodes.length) {
+                s7viewers.s7sdk.model.SelectorModel.applyParsedCssToChain(this.parsedViewerCSS, bucket.desktopModelChain);
+                s7viewers.s7sdk.model.SelectorModel.applyParsedCssToChain(this.parsedViewerCSS, bucket.phoneModelChain);
+                s7viewers.s7sdk.model.SelectorModel.applyParsedCssToChain(this.parsedViewerCSS, bucket.tabletModelChain);
+                this.buildComponentSection(component, bucket.desktopModelChain);
+            }
+        }.bind(this));
+    };
+
+    /**
+     * Apply parsed CSS to selector model chains, which will in-turn update the widgets.
+     */
+    s7ve.StyleEditor.prototype.reloadCss = function () {
+
+        var components = s7ve.ViewerEditor.getComponents();
+
+        components.forEach(function (component) {
+            var compName = getComponentKey(component);
+            var bucket = this.modelChainsByComponent[compName] = this.modelChainsByComponent[compName] || {};
+
+            // Check if model chains were created for this component
+            if (bucket.desktopModelChain) {
+                s7viewers.s7sdk.model.SelectorModel.applyParsedCssToChain(this.parsedViewerCSS, bucket.desktopModelChain);
+                s7viewers.s7sdk.model.SelectorModel.applyParsedCssToChain(this.parsedViewerCSS, bucket.phoneModelChain);
+                s7viewers.s7sdk.model.SelectorModel.applyParsedCssToChain(this.parsedViewerCSS, bucket.tabletModelChain);
+            }
+        }.bind(this));
+
+        this.notifyAll();
+    };
+
+    /**
+     * Update models to reference correct viewer component instances in the event of
+     * viewer reload
+     */
+    s7ve.StyleEditor.prototype.validateComponentInstances = function () {
+
+        var cmpById = s7ve.ViewerEditor.getComponentsById();
+
+        s7ve.Util.iterate(this.modelChainsByComponent, function (bucket, key) {
+            var desktop = bucket.desktopModelChain,
+                targetId, validCmp, component;
+
+            if (!desktop) {
+                return;
+            }
+            component = bucket.desktopModelChain.component;
+
+            if(component instanceof s7viewers.s7sdk.ControlComponent === false) {
+                // We only work with components that implement ControlComponent
+                return;
+            }
+
+            targetId = bucket.desktopModelChain.component.getId();
+            validCmp = cmpById[targetId];
+
+            if (!validCmp) {
+                // We will no longer throw error since viewer may instantiate fewer components
+                // when reloading in mobile format
+                // throw new Error("Unable to validate component. Cannot find: " + targetId);
+            }
+            else {
+                s7viewers.s7sdk.model.SelectorModel.applyComponentToChain(validCmp, bucket.desktopModelChain);
+                s7viewers.s7sdk.model.SelectorModel.applyComponentToChain(validCmp, bucket.tabletModelChain);
+                s7viewers.s7sdk.model.SelectorModel.applyComponentToChain(validCmp, bucket.phoneModelChain);
+            }
+        });
+    };
+
+    /**
+     * TODO: This is no longer an async operation, this could be moved into initialization
+     */
+    s7ve.StyleEditor.prototype.parseViewerCSS = function (onComplete) {
+        var injectedCss = s7ve.ViewerEditor.injectedViewerCss(),
+            parsedCss = s7ve.Parser.CSSParserRegex.parseString(injectedCss);
+
+        this.parsedViewerCSS = parsedCss;
+        onComplete.call();
+    };
+
+    /**
+     * Helper to fade in viewer so that we hide reload flicker
+     */
+    s7ve.StyleEditor.prototype.fadeInViewer = function (marker) {
+        s7ve.ViewerEditor.fadeInViewer({
+            duration: 700
+        });
+    };
+
+    /**
+     * This function is responsible for triggering the transformation of the viewer preview as well
+     * as displaying the appropriate widget flow.
+     */
+    s7ve.StyleEditor.prototype.switchToMarker = function (marker) {
+
+        var doNotify = false;
+
+        iterate(this.modelChainsByComponent, function (componentChains) {
+
+            if (!componentChains.desktopModelChain) {
+                return;
+            }
+            var chainMap = {
+                "desktop": componentChains.desktopModelChain,
+                "phone": componentChains.phoneModelChain,
+                "tablet": componentChains.tabletModelChain
+            };
+            var chain = chainMap[marker.id];
+
+            if (chain) {
+                this.connectWidgetsToModelChain(chain);
+                doNotify = true;
+            } else {
+                throw new Error("Could not recognize chain!");
+            }
+
+        }.bind(this));
+
+        if (marker.width && marker.height) {
+            this.fadeInViewer();
+            $(".vpe-viewerSizer").width(marker.width);
+            $(".vpe-viewerSizer").height(marker.height);
+        }
+
+        if (marker.id == "phone") {
+            s7ve.ViewerEditor.setDeviceType(s7ve.ViewerEditor.PHONE_DEVICE);
+        }
+        if (marker.id == "tablet") {
+            s7ve.ViewerEditor.setDeviceType(s7ve.ViewerEditor.TABLET_DEVICE);
+        }
+        if (marker.id == "desktop") {
+            s7ve.ViewerEditor.setDeviceType(s7ve.ViewerEditor.DESKTOP_DEVICE);
+        }
+        if (doNotify) {
+            // Delay notification incase fighting against viewer
+            // TODO: See if we can use an event to hook this logic
+            setTimeout(function () {
+                this.notifyAll();
+            }.bind(this), 10);
+        }
+    };
+
+    /**
+     * Wire up widgets to provided model chain
+     */
+    s7ve.StyleEditor.prototype.connectWidgetsToModelChain = function (chain) {
+
+        var processSelectorModel = function processSelectorModel(selectorModel) {
+            // Only create section if we have property models
+            if (selectorModel.propertyModels.length) {
+
+                selectorModel.propertyModels.forEach(function (propertyModel) {
+
+                    // Identifier for widget type
+                    var widgetKey = getWidgetKey(propertyModel);
+                    var widget = this.widgets[widgetKey];
+
+                    widget.setPropertyModel(propertyModel);
+
+                }.bind(this));
+            }
+        }.bind(this);
+
+        function process(selectorModel) {
+            processSelectorModel(selectorModel);
+
+            selectorModel.childNodes.forEach(function (childSelectorModel, index) {
+                process(childSelectorModel);
+            });
+        }
+        process(chain);
+    };
+    /**
+     * Determine markers present in viewer so that models and marker tabs can be built
+     */
+    s7ve.StyleEditor.prototype.getMarkers = function () {
+        return {
+            "desktop": {
+                "label": Granite.I18n.get("Desktop"),
+                "id": "desktop",
+                "width": "100%",
+                "height": "100%"
+            },
+            "tablet": {
+                "label": Granite.I18n.get("Tablet"),
+                "id": "tablet",
+                "width": "830px",
+                "height": "1105px"
+            },
+            "phone": {
+                "label": Granite.I18n.get("Phone"),
+                "id": "phone",
+                "width": "415px",
+                "height": "730px"
+            }
+        };
+    };
+
+    /**
+     * @private
+     * Helper to iterate over objects
+     */
+    function iterate(object, callback) {
+        for (var property in object) {
+            if (object.hasOwnProperty(property)) {
+                callback(object[property], property);
+            }
+        }
+    }
+
+}(window.s7ve, window.$, window.Granite));
+
+(function (s7ve, $) {
+    "use strict";
+
+    /**
+     * @class
+     *
+     * StyleWidgetFactory implements the createWidget interface and maps/instantiates StyleWidget
+     * subclasses given model.
+     *
+     * @augments s7sdk.Observable
+     */
+    if (!s7ve.StyleWidgetFactory) {
+
+        /**
+         * Widget factory implementation by editor appliaction
+         */
+        s7ve.StyleWidgetFactory = function (styleEditor, type) {
+            this.styleEditor = styleEditor;
+            this.type = type;
+        };
+
+        /**
+         * Get class name of provided CSSPropertyModel instance. This is safe when SDK is
+         * minified and function names are compressed.
+         */
+        s7ve.StyleWidgetFactory.getModelClassName = function (propertyModel) {
+            var sdk = s7ve.ViewerEditor.getSdk(),
+                result = "";
+
+            if (!sdk || !sdk.model) {
+                throw new Error("Cannot find SDK 'model' package!");
+            }
+            s7ve.Util.iterate(sdk.model, function (ctor, name) {
+                if (typeof ctor === "function" && propertyModel instanceof ctor) {
+                    result = name;
+                }
+            });
+            return result;
+        }
+
+        /**
+         * Maps Model classes to Widgets
+         */
+        s7ve.StyleWidgetFactory.prototype.widgetMap = {
+            "CSSBackgroundModel": "BackgroundWidget",
+            "CSSSizeModel": "SizeWidget",
+            "CSSPositionModel": "PositionWidget",
+            "CSSBorderModel": "BorderWidget",
+            "CSSTextModel": "DebugWidget",
+            "CSSBoxShadowModel": "ShadowWidget",
+            "CSSFontModel": "FontWidget",
+            "CSSSpriteModel": "SpriteWidget"
+        };
+
+        /**
+         * Client application implementation of WidgetFactory interface. Here we determine
+         * which StyleWidget subclass to instantiate given the propertyModel
+         */
+        s7ve.StyleWidgetFactory.prototype.createWidget = function (selectorModel, propertyModel) {
+
+            var modelClassName = s7ve.StyleWidgetFactory.getModelClassName(propertyModel),
+                widgetClassName = this.type || this.widgetMap[modelClassName] || "GenericWidget",
+                WidgetClass = s7ve.StyleEditor[widgetClassName],
+                widget;
+
+            if (WidgetClass) {
+                widget = new WidgetClass(propertyModel);
+            }
+
+            return widget;
+        };
+    }
+
+}(window.s7ve, window.$));
+
+(function (s7ve, $) {
+    "use strict";
+
+    if (!s7ve.StyleEditor.StyleWidget) {
+
+        /**
+         * @class
+         * Base StyleWidget class.
+         */
+        s7ve.StyleEditor.StyleWidget = function StyleWidget(propertyModel) {
+
+            var prop;
+
+            // Invoke superclass constructor
+            s7ve.StyleEditor.StyleWidget.superclass.apply(this, []);
+
+            // Set reference to source property model
+            this.propertyModel = propertyModel;
+
+            // Adopt all properties found on source PropertyModel
+            for (prop in propertyModel.properties) {
+                if (propertyModel.properties.hasOwnProperty(prop)) {
+                    this.properties[prop] = propertyModel[prop];
+                }
+            }
+            this.modelPropertyChanged = this.modelPropertyChanged.bind(this);
+
+            // Listen to all property property notifications from source PropertyModel
+            propertyModel.addPropertyListeners(this.modelPropertyChanged);
+            
+            // Create 'section' container element for StyleWidget UI
+            this.domElement = s7ve.UI.createWidgetSection();
+            
+            this.name = "None";
+
+            // Helper reference
+            this.Property = s7viewers.s7sdk.css.Property;
+
+            this.createdUI = false;
+            this.doUpdateUI = false;
+            this.dirtyProps = {};
+        };
+
+        /**
+         * Disconnect old property model, and connect new property model
+         */
+        s7ve.StyleEditor.StyleWidget.prototype.setPropertyModel = function (propertyModel) {
+
+            this.propertyModel.removePropertyListeners(this.modelPropertyChanged);
+            this.propertyModel.disconnectWidget(this);
+
+            this.propertyModel = propertyModel;
+
+            // Listen to all property property notifications from new PropertyModel
+            this.propertyModel.addPropertyListeners(this.modelPropertyChanged);
+            this.propertyModel.connectWidget(this);
+        };
+        
+        /**
+         * Create widget UI, invoke sub-class helper 'createFields'
+         */
+        s7ve.StyleEditor.StyleWidget.prototype.createUI = function () {
+            this.createFields(this.domElement, this.name);
+            this.createdUI = true;
+        };    
+
+        s7ve.StyleEditor.StyleWidget.prototype.getId = function () {
+            var className = null;
+            if (this.propertyModel.selectorModel.className != null) {
+                className = this.propertyModel.selectorModel.className;
+            } else if ((this.propertyModel.selectorModel.parentModel != null) &&
+                (this.propertyModel.selectorModel.parentModel.className != null) &&
+                (this.propertyModel.selectorModel.attributeName != null)) {
+                className = this.propertyModel.selectorModel.parentModel.className + "-" + this.propertyModel.selectorModel.attributeName;
+            }
+            className = className.replace(/[*=.\[\]]/g,'_');
+            return "vse-" + this.propertyModel.selectorModel.componentName + "-" + className + "-" + this.name.toLowerCase().replace(/ /g,'_');
+        };
+
+        s7ve.StyleEditor.StyleWidget.prototype.getPanelId = function () {
+            return this.getId() + "-panel";
+        };
+
+        /**
+         * Base class implementation to handle changes on property model
+         */
+        s7ve.StyleEditor.StyleWidget.prototype.modelPropertyChanged = function (property, oldValue, newValue) {
+
+            // We want to store the existing value of the property on the widget before we update to the new value
+            var myWidgetValue = this.properties[property];
+
+            if (myWidgetValue && myWidgetValue.equal(newValue)) {
+                return;
+            }
+
+            // Assign new value from the model
+            this.properties[property] = newValue;
+
+            // Mark properties that have changed, so that we can minimize UI updates
+            this.dirtyProps[property] = true;
+
+            // Finally notify using the new value from model and the previous value from widget
+            this.notifyPropertyChanged(property, myWidgetValue, newValue);
+
+            // Asynchronously invoke routine to update UI if necessary
+            if (this.createdUI && !this.doUpdateUI) {
+                this.doUpdateUI = true;
+
+                // update UI after all observers have settled
+                setTimeout(this.updateUI.bind(this), 0);
+            }
+        };
+
+        /**
+         * Helper to aysnchronosuly call setUI sub-class with properties that are dirty
+         */
+        s7ve.StyleEditor.StyleWidget.prototype.updateUI = function () {
+            // clear flag since we are now updating the UI
+            this.doUpdateUI = false;
+
+            for (var prop in this.dirtyProps) {
+                if (this.dirtyProps.hasOwnProperty(prop)) {
+                    // call for dirty properties only
+                    this.setUI(prop, this.properties[prop]);
+                }
+            }
+            this.dirtyProps = {};
+        };
+
+        /**
+         * Helper to update property internal property and notify observers
+         */
+        s7ve.StyleEditor.StyleWidget.prototype.updateProperty = function (propertyName, newValue) {
+            var myValue = this.properties[propertyName];
+
+            if (myValue.equal(newValue)) {
+                return;
+            }
+
+            newValue = newValue.clone({
+                "set": true,
+                "inherited": false
+            });
+
+            // set internal property
+            this.properties[propertyName] = newValue;
+
+            this.notifyPropertyChanged(propertyName, myValue, newValue);
+        };
+
+        /**
+         * Wire up inheritance using mechanism from SDK
+         */
+        s7ve.s7sdk_loaded.then(function () {
+            // we use inheritance framework provided by s7sdk
+            s7viewers.s7sdk.Class.inherits("s7ve.StyleEditor.StyleWidget", "s7sdk.Observable");
+        });
+
+    }
+
+}(window.s7ve, window.$));
+
+
+(function (s7ve, $) {
+    "use strict";
+
+    if (!s7ve.StyleEditor.WidgetBundle) {
+
+        /**
+         * @class
+         * Base WidgetSection class.
+         */
+        s7ve.StyleEditor.WidgetBundle = function WidgetBundle(title, includeTitle, tip) {
+            this.title = title;
+            this.length = 0;
+
+            this.$section = $("<section></section>").addClass("s7ve-WidgetBundle");
+
+            if (includeTitle) {
+                var label = s7ve.UI.createHeading(3).text(this.title);
+                this.$section.append(label);
+            }
+            this.$section.addClass("s7ve-" + this.title);
+            
+            if(tip) {
+                this.$section.append(s7ve.UI.createAlert({ text: tip }).$element);
+            }
+            
+            this.accordionInterface = s7ve.UI.createAccordion({variant: "quiet"});
+            this.$section.append(this.accordionInterface.$wrapper);
+        };
+
+        s7ve.StyleEditor.WidgetBundle.prototype.addWidgetSection = function (widget) {
+            this.length += 1;
+            return this.accordionInterface.addPanel({ label: widget.name, content: "", id: widget.getPanelId()});
+        };
+    }
+
+}(window.s7ve, window.$));

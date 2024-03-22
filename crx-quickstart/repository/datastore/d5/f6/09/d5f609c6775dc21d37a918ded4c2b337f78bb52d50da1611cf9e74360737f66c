@@ -1,0 +1,592 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function ($, ns, window, document) {
+    //"use strict";
+    // Cannot be that much strict here because of ns.util.sanitizeCQHandler
+    // and legacy handlers (e.g.: afterdelete="afterdelete=function(){}"
+
+    /**
+     * Window mode preference - Indicates if URLs should be opened as new windows or inside of the current one
+     */
+    var winMode = $("meta[name='user.preferences.winmode']").attr("content");
+
+    ns.util = ns.util || {};
+
+    /**
+     * list of css styles to be filtered out when cloning
+     * @type {string[]}
+     */
+    var CSS_STYLE_FILTER = ['pointer-events'];
+
+    /**
+     * Converts a map of parameters into a string of request parameters suitable to be used within a URL
+     *
+     * @param {{}} map  - map of pre-encoded request parameters
+     * @returns {*}
+     */
+    function parameterMapToString(map) {
+        if (!map) {
+            return '';
+        }
+
+        var result = '';
+
+        for (var key in map) {
+            if (map.hasOwnProperty(key)) {
+                result += `${key}=${map[key]}&`;
+            }
+        }
+
+        if (result.endsWith('&')) {
+            return result.substr(0, result.length - 1);
+        }
+
+        return result;
+    }
+
+    /**
+     * Returns the re-constituted path from the path info
+     *
+     * @returns {string}
+     */
+    function pathInfoToString() {
+        var path = this.resourcePath || '';
+        path += this.selectors && this.selectors.length > 0 ? '.' + this.selectors.join('.') : '';
+        path += this.extension ? '.' + this.extension : '';
+        path += this.suffix ? '/' + this.suffix : '';
+
+        var parameters = parameterMapToString(this.parameters);
+        path += parameters ? '?' + parameters : '';
+
+        return path;
+    }
+
+    /**
+     * <p>Splits the raw selector string into a list of selectors and an extension.</p>
+     *
+     * <p>The {@link input} parameter is expected to contain all the selectors separated with a dot. The input is expected to end with the URL extension</p>
+     *
+     * @param {string} input    - string representation of the selectors and extension
+     * @returns {*}
+     */
+    function splitSelectors(input) {
+        if (!input || input.length < 1) {
+            return {
+                selectors: [],
+                extension: ''
+            };
+        }
+
+        if (input.indexOf('.') === -1) {
+            return {
+                selectors: [],
+                extension: input
+            };
+        }
+
+        var selectors = input.split('.');
+        var extension = selectors.pop();
+
+        return {
+            selectors: selectors,
+            extension: extension
+        };
+    }
+
+    /**
+     * Concatenates the selectors the extension and the suffix
+     *
+     * @param {string} [selectorStr]    - raw string representation of the selectors including the dot separator
+     * @param {string} [extension]      - URL extension
+     * @param {string} [suffix]         - URL suffix
+     * @returns {string}
+     */
+    function getSlingParts(selectorStr, extension, suffix) {
+        var slingParts = selectorStr ? '.' + selectorStr : '';
+        slingParts += extension ? '.' + extension : '';
+        slingParts += suffix ? '/' + suffix : '';
+
+        return slingParts;
+    }
+
+    /**
+     * clones a node structure and assigns its styles inline
+     * this will decouple the clone from any stylesheet
+     * @param src {HTMLElement}
+     * @returns {HTMLElement}
+     */
+    ns.util.cloneToIndependentNode = function (src) { // AdobePatentID="3547US01"
+        var dest = createElement(src),
+            rect = src.getBoundingClientRect();
+
+        function createElement(src) {
+            var node;
+            // CQ-93055 [Editor] Drag host creates incorrect markup when using coral elements
+            // Workaround for coral tags:
+            // document.createElement initializes the Coral object and creates the whole structure of the Coral element.
+            // We use div as fallback for these complex elements in the drag host
+            if (src.childNodes.length) {
+                node = document.createElement("div");
+            } else {
+                node = document.createElement(src.tagName);
+            }
+            return node;
+        }
+
+        function getStyleAttribute(elem) {
+            var cssObj,
+                props = {},
+                i;
+
+            if ('getComputedStyle' in window) {
+                cssObj = window.getComputedStyle(elem, '');
+
+                for (i = 0; i < cssObj.length; i++) {
+                    props[cssObj.item(i)] = cssObj.getPropertyValue(cssObj.item(i));
+                }
+            } else if ('currentStyle' in elem) {
+                cssObj= elem.currentStyle;
+                for (i in cssObj) {
+                    props[i] = cssObj[i];
+                }
+            }
+
+            return props;
+        }
+
+        function copyAttributes(src, dest) {
+            for(var i = src.attributes.length - 1; i >= 0; i--) {
+                dest.setAttribute(src.attributes[i].name, src.attributes[i].value);
+            }
+
+            dest.removeAttribute('style');
+
+            var props = getStyleAttribute(src);
+
+            for (var prop in props) {
+                if (CSS_STYLE_FILTER.indexOf(prop) === -1) {
+                    dest.style[prop] = props[prop]
+                }
+            }
+
+            // classes are obsolete for styling and would just manipulate the result
+            dest.removeAttribute('class');
+        }
+
+        function recursiveCopy(src, dest) {
+            var node;
+
+            for (var i = 0; i < src.childNodes.length; i++) {
+                if (src.childNodes[i].nodeType === Node.ELEMENT_NODE) {
+                    node = createElement(src.childNodes[i]);
+                    dest.appendChild(node);
+
+                    copyAttributes(src.childNodes[i], node);
+                    recursiveCopy(src.childNodes[i], node);
+                } else if (src.childNodes[i].nodeType === Node.TEXT_NODE) {
+                    node = document.createTextNode(src.childNodes[i].textContent);
+                    dest.appendChild(node);
+                }
+
+            }
+        }
+
+        copyAttributes(src, dest);
+        recursiveCopy(src, dest);
+
+        dest.style.margin = '0';
+        dest.style.width = rect.width + 'px';
+        dest.style.height = rect.height + 'px';
+        dest.style.minWidth = '0';
+        dest.style.maxWidth = 'none';
+        dest.style.minHeight = '0';
+        dest.style.maxHeight = 'none';
+
+        return dest;
+    };
+
+    ns.util.positionAt = function (elem, x, y) {
+        var halfDivider = 2;
+        // make it a free element
+        elem.style.position = 'absolute';
+        elem.style.left = `${(x - elem.clientWidth / halfDivider)}px`;
+        elem.style.top = `${(y - elem.clientHeight / halfDivider)}px`;
+        elem.style.zIndex = '99999';
+    };
+
+    /**
+     * Returns the property under the given "property path" to the passed object
+     * e.g., resolve({ a: { b: 42 } }, "a.b") => 42
+     *
+     * @param {{}} obj                      - Object from which to extract a property
+     * @param {string} path                 - path to the property
+     * @param {string} [separator='/']      - Symbol separating the parent fields of the targeted property
+     *
+     * @returns {*}
+     */
+    ns.util.resolveProperty = function (obj, path, separator) {
+        separator = separator || "/";
+
+        return path.split(separator).reduce(function(prev, curr) {
+            return prev ? prev[curr] : undefined;
+        }, obj)
+    };
+
+    /**
+     * NB: The evaluated code could still produce errors when it gets executed if it uses some functions that are not defined in TouchUI
+     *
+     * @param code
+     * @returns {*}
+     */
+    ns.util.sanitizeCQHandler = function (code) {
+        var handler;
+
+        try {
+            handler = eval('(' + code + ')');
+        } catch (ex) {
+            handler = $.noop;
+            $(document).trigger($.Event("error", {
+                message: "Handler of component is invalid",
+                exception: ex
+            }));
+        }
+
+        return handler;
+    };
+
+    /**
+     * Based on a provided resource path, returns an object containing Sling resourcePath, selectors, extension and suffix
+     *
+     * @param {string} path - Content path of the jcr content
+     * @return {{resourcePath: string, selectors: Array.<string>, extension: string, suffix: string, selectorStr: string, slingParts: string}} pathInfo - Provides direct access to all the different parts contained in the content path
+     */
+    ns.util.getPathInfo = function (path) {
+        if (!path || path.length === 0 || !(typeof path === 'string' || path instanceof String)) {
+            return null;
+        }
+
+        let dummyOrigin = "http://dummy";
+        let url = new URL(path, dummyOrigin);
+        let sanitizedPath = url.pathname;
+        let {resourcePath, pathWithoutResource} = extractResourcePath(sanitizedPath, path);
+        let {selectorsArray, extension, suffix} = extractSlingArtefacts(pathWithoutResource);
+        let parameterMap = extractParameterMap(url);
+        let selectorStr = selectorsArray.join('.');
+        let pathInfo = {
+            resourcePath: resourcePath,
+            selectors: selectorsArray,
+            extension: extension,
+            suffix: suffix,
+            parameters: parameterMap,
+            search: url.searchParams,
+            selectorStr: selectorStr,
+            slingParts: getSlingParts(selectorStr, extension, suffix)
+        };
+        pathInfo.toString = pathInfoToString.bind(pathInfo);
+        return pathInfo;
+
+        function extractResourcePath(path, originalPath) {
+            let slingElements = path.split(".");
+            let resourcePath = slingElements[0];
+            if (url.origin === dummyOrigin) {
+                // No base, need to check if path is absolute or relative
+                if (!(originalPath[0] === '/')) {
+                    resourcePath = resourcePath.substr(1);
+                }
+            } else {
+                resourcePath = url.origin + resourcePath
+            }
+            slingElements.shift();
+            let pathWithoutResource = slingElements.join(".");
+            return {resourcePath, pathWithoutResource};
+        }
+
+        function extractParameterMap(url) {
+            let parameterMap = {};
+
+            // This is shadowing query parameters in case there are multiple with the same key.
+            url.searchParams.forEach(function(value, key) {
+                parameterMap[encodeURI(key)] = encodeURI(value);
+            });
+            return parameterMap;
+        }
+
+        function extractSlingArtefacts(pathWithoutResource) {
+            let selectorsArray = [];
+            let extension = '';
+            let suffix = '';
+            if (pathWithoutResource.length > 0) {
+                let slingElementsWithoutResource = pathWithoutResource.split("/");
+                let selectorAndExtension = slingElementsWithoutResource[0];
+                let selectorSplit = splitSelectors(selectorAndExtension);
+                selectorsArray = selectorSplit.selectors;
+                extension = selectorSplit.extension;
+
+                slingElementsWithoutResource.shift();
+                if (slingElementsWithoutResource.length > 0) {
+                    suffix = slingElementsWithoutResource.join("/");
+                }
+            }
+            return {selectorsArray, extension, suffix};
+        }
+    };
+
+    /**
+     * Extends a resource path with Sling parts.
+     * If no resource path is provided as a source reference, resource path is extracted from {@linkcode document.location.pathname}
+     *
+     * @param {String} resourcePath - Naked resource path to be enriched with the isolated sling parts
+     * @param {String} [slingResourcePathReference] - Resource path containing Sling parts
+     * @returns {String} Target resource path extended with the Sling parts
+     */
+    ns.util.getSlingResourcePath = function (resourcePath, slingResourcePathReference) {
+        if (!resourcePath || ns.util.getPathInfo(resourcePath).slingParts.length > 0) {
+            return resourcePath;
+        }
+
+        if (!slingResourcePathReference) {
+            // In the context of authoring (pathname starts with the resource path of the editor e.g. /editor.html),
+            // Extract the resource path of the content from that pathname
+            slingResourcePathReference = document.location.pathname.replace(/^\/([a-zA-Z0-9._-]+)\.([a-zA-Z]+)/g, '');
+        }
+
+        var pathInfo = ns.util.getPathInfo(slingResourcePathReference);
+        var path = resourcePath;
+        if (pathInfo && pathInfo.slingParts) {
+            path += pathInfo.slingParts;
+        }
+
+        return path;
+    };
+
+    /**
+     * Returns the preferred window mode
+     * @returns {String} The preferred window mode ("single" or "multi")
+     */
+    ns.util.getWinMode = function () {
+        return winMode;
+    };
+
+    /**
+     * Opens the passed URL according to the preferred window mode
+     * @param {String} url - The URL to be opened
+     */
+    ns.util.open = function (url) {
+        if (winMode === "single") {
+            window.location.href = url;
+        } else {
+            window.open(url);
+        }
+    };
+
+    /**
+     * Transform the given HTML string into a Node object
+     *
+     * @param {string} html     - HTML in string format
+     * @returns {Element}
+     */
+    ns.util.htmlToNode = function (html) {
+        var wrapper = document.createElement('div');
+        wrapper.innerHTML = html;
+
+        return wrapper.firstElementChild;
+    };
+
+    /**
+     * Returns the content of the first visible text node inside the given element
+     *
+     * @param {HTMLElement} element The element
+     * @returns {String} The first text or an empty string if no visible text node is found
+     */
+    ns.util.getFirstVisibleTextContent = function(element) {
+        var name = element.nodeName.toLowerCase();
+        if (name !== "script" && name !== "noscript" && name !== "style") {
+            for (var i = 0; i < element.childNodes.length; i++) {
+                var child = element.childNodes[i];
+                if (child.nodeType === Node.TEXT_NODE) {
+                    var text = child.textContent;
+                    if (text.trim() !== "") {
+                        var nextSibling = child.nextSibling;
+                        while (nextSibling !== null) {
+                            text += nextSibling.textContent;
+                            nextSibling = nextSibling.nextSibling;
+                        }
+                        return text.trim();
+                    }
+                } else {
+                    if (child.nodeType === Node.ELEMENT_NODE) {
+                        var style = window.getComputedStyle(child);
+                        if (style.display !== "none" && style.visibility !== "hidden" && style.opacity !== 0) {
+                            text = ns.util.getFirstVisibleTextContent(child);
+                            if (text) {
+                                return text;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return "";
+    };
+
+    /**
+     * Returns the first effective coordinates holding object of the cursor
+     *
+     * @param event
+     * @returns {*|originalEvent|{currentTarget}}
+     */
+    ns.util.getPoint = function (event) {
+        return event.originalEvent.changedTouches && event.originalEvent.changedTouches.length > 0 ?
+            event.originalEvent.changedTouches[0] :
+            event.originalEvent.touches && event.originalEvent.touches.length > 0 ?
+                event.originalEvent.touches[0] :
+                event.originalEvent;
+    };
+
+    /**
+     * Returns the x and y coordinates of the cursor on the client
+     *
+     * @param event
+     * @returns {{x: (Number|number|*), y: (number|Number|*)}}
+     */
+    ns.util.getClientXY = function (event) {
+        var ev = ns.util.getPoint(event);
+
+        return {
+            x: ev.clientX,
+            y: ev.clientY
+        }
+    };
+
+    /**
+     * Returns the x and y coordinates of the cursor on the page
+     *
+     * @param event
+     * @returns {{x: (Number), y: (Number)}}
+     */
+    ns.util.getPageXY = function (event) {
+        var ev = ns.util.getPoint(event);
+
+        return {
+            x: ev.pageX,
+            y: ev.pageY
+        }
+    };
+
+    /**
+     * Returns the array after removing duplicates
+     *
+     * @param {array} arrayWithDuplicates   - Array with duplicate values
+     * @returns {array}
+     */
+     ns.util.getUnique = function (arrayWithDuplicates) {
+         var result, auxObj;
+         result = [];
+         auxObj = {};
+         for (var i = 0; i < arrayWithDuplicates.length; i++) {
+             var t = arrayWithDuplicates[i];
+             if (!auxObj.hasOwnProperty(t)) {
+                 result.push(t);
+                 auxObj[t] = true;
+             }
+         }
+         return result;
+     }
+
+    /**
+     * Checks if the provided path is an valid absolute path
+     * Validate that the provided path start with exact one single slash '/'
+     *
+     * @param {String} path - The path to be validated
+     * @return {Boolean} The validity of the provided path
+     */
+    ns.util.isValidPath = function (path) {
+        return path ? (path.startsWith('/') && !path.startsWith('//')) : false;
+    }
+
+    /**
+     * Checks if the url is a valid url.
+     *
+     * @param {String} url - The url to be validated
+     * @returns {URL} A valid URL object
+     */
+    ns.util.getValidURL = function (url) {
+        let validURL = null;
+
+        try {
+            validURL = new URL(url);
+        } catch (err) {
+            // this should be logged in debug mode.
+            // We don't have debug mode.
+        }
+
+        return validURL;
+    }
+
+    let showDeprecationOnce = {};
+
+    // TODO: deprecationWarningEnabled is a workaround - to be removed once GRANITE-32624 is done
+    ns.util.deprecationWarningEnabled = null;
+
+    // Marker to see if isEnabled already taking place.
+    // CQ-4314316
+    // This is to break infinite loop in case someone overrides $.ajax call and uses deprecated api in the override.
+    let isFeatureToggleIsEnabledPending = false;
+
+    /**
+     * Displays a message of deprecation in console.
+     */
+    ns.util.deprecated = function(msg) {
+        // ---8<---
+        // TODO: some calls are silenced/not tracked while isFeatureToggleIsEnabledPending
+        if (ns.util.deprecationWarningEnabled === null) {
+            if (isFeatureToggleIsEnabledPending) {
+                return;
+            }
+
+            try {
+                isFeatureToggleIsEnabledPending = true;
+                ns.util.deprecationWarningEnabled = Granite.Toggles.isEnabled('ft-cq-4303977');
+            } catch(e) {
+            } finally {
+                isFeatureToggleIsEnabledPending = false;
+            }
+        }
+        // ---8<---
+
+        const stack = new Error().stack
+            .split(/ns.util.deprecated.*\n/)
+            .pop()
+            .split(/\n/);
+        const callee = stack[0].replace(/^\s*at /, '');
+        const funcName = stack.slice(0, 3)
+            .map(x => x.replace(/^\s*at /, '')
+                    .replace(/( \()?http:\/\/.*/, ''))
+            .filter(Boolean)
+            .join(' <- ');
+        
+        if (!showDeprecationOnce[callee]) {
+            if (ns.util.deprecationWarningEnabled) {
+                console.warn(`[Deprecated] Function ${callee} is deprecated and might be removed in future release. ${msg || ''}`);
+            }
+
+            showDeprecationOnce[callee] = true;
+            ns.editorTracker.trackDeprecated(funcName);
+        }
+    }
+
+}(jQuery, Granite.author, this, document));

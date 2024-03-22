@@ -1,0 +1,590 @@
+/*
+ ADOBE CONFIDENTIAL
+
+ Copyright 2018 Adobe Systems Incorporated
+ All Rights Reserved.
+
+ NOTICE:  All information contained herein is, and remains
+ the property of Adobe Systems Incorporated and its suppliers,
+ if any.  The intellectual and technical concepts contained
+ herein are proprietary to Adobe Systems Incorporated and its
+ suppliers and may be covered by U.S. and Foreign Patents,
+ patents in process, and are protected by trade secret or copyright law.
+ Dissemination of this information or reproduction of this material
+ is strictly forbidden unless prior written permission is obtained
+ from Adobe Systems Incorporated.
+ */
+(function(document, Granite, $, channel, ns, authorization, resultParser, remoteConfig) {
+    "use strict";
+
+    remotedam.ui.remoteTab = (function() {
+        var self = {};
+        var INDEX_TAG_PARAM = "indexTag";
+
+        self.SIDE_PANEL_SELECTOR  = "#SidePanel";
+        /**
+         * Selector of Remote Asset Finder Tab.
+         * @type {string}
+         */
+        self.SELECTOR = self.SIDE_PANEL_SELECTOR + " .sidepanel-tab-remote-assets";
+
+        /**
+         * Selector for Remote Dam configuration meta element
+         * @type {string}
+         */
+        self.SELECTOR_CONFIGMETA = self.SELECTOR + " .remotedam-config-container";
+
+
+        /**
+         *
+         */
+        self.SELECTER_ASSET_TYPE = self.SELECTOR + " coral-select.remote-assetfilter.type";
+
+        /**
+         * Selector for Remote Dam Fulltext Search input field
+          * @type {string}
+          */
+        self.FULLTEXT_SEARCH_SELECTOR = self.SELECTOR + " #remoteassetsearch";
+
+        /**
+         * Selector for Remote Dam Filter panel filter-detail.
+         * @type {string}
+         */
+        self.FILTER_DETAIL_SELECTOR = self.SELECTOR + " #remote-assetfinder-filter-detail";
+
+
+        /**
+         * Status of Remote Asset Finder Tab.
+         * {Volatile} This should not be cached.
+         * @return {Boolean} - returns True if side panel is opened and remote asset tab is selected
+         */
+        self.isActive = function() {
+            var $remoteTabContent = $(self.SELECTOR);
+
+            return $(self.SIDE_PANEL_SELECTOR).hasClass("sidepanel-opened") &&
+                ($remoteTabContent.parents(".js-SidePanel-content").is(":visible")) &&
+                ($remoteTabContent.length > 0) &&
+                ($("coral-tab:selected").attr("aria-controls") ===
+                $remoteTabContent.parents("coral-panel").attr("id"));
+        };
+
+        var pageSize = 20; // amount of data to be loaded on scroll
+        var defaultLimit = 20; // amount of data to be loaded on initial load
+        var startLimit = 0; // show results beginning from start limit
+        var endLimit = defaultLimit; // show results til end limit
+        var MASONRY_LAYOUT_SETTINGS = {
+            layout: "variable",
+            columnWidth: 140,
+            spacing: 15
+        };
+
+
+        var eventTypeLoad = "loadAssets";
+        var isAllDataLoaded = false;// check if all data got loaded, needed for scrolling
+        var offscrollTimer = null; // timer for scrolling
+        var assetsLoaded = false;
+        var spinnerVisible = false;
+
+        var FULLTEXT_SEARCH_SELECTOR = self.SELECTOR + " #remoteassetsearch";
+        var RESULT_SPINNER_SELECTOR = self.SELECTOR + " .resultspinner";
+        var RESULT_EMPTYRESULT_SELECTOR = self.SELECTOR + " .emptyresult";
+        var RESULT_ERRORMSG_SELECTOR = self.SELECTOR + " .errormsg";
+        var CONTENT_PANEL_SELECTOR = self.SELECTOR + " .remoteasset-content-panel";
+        var LOGIN_BUTTON_SELECTOR = CONTENT_PANEL_SELECTOR + " .remote-login-button";
+
+        var controllersMap = {};
+
+        self.authHandler = {};
+
+        self.authHandler.handleAuthCompleted = function() {
+            hideLoginButton();
+            clearResult();
+            startAssetsLoad(false);
+        };
+
+        /**
+         * Sample Controller for asset types.
+         */
+        self.Controller = function(){
+            this.type = "Default";
+            /**
+             * A Controller should show it's filters in this call.
+             */
+            this.setUpFilterPanel = function() {
+                throw new Error("Not implemented");
+            };
+
+            /**
+             * A Controller should reset it's filters in this call.
+             */
+            this.resetFilterPanel = function() {
+                throw new Error("Not implemented");
+            };
+
+            /**
+             * A Controller should add search parameters specific to the asset type;
+             * @param params - search parameters map.
+             */
+            this.addFilterParams = function(params) {
+                // default no-op
+            };
+
+            /**
+             * A Controller should return configuration for Asset Card specific to asset type..
+             */
+            this.getCardConfig = function() {
+                throw new Error("Not implemented");
+            };
+        };
+
+
+        /**
+         * registers a controller for a asset-type.
+         * @param name {String} - Name of asset type
+         * @param controller {Object} - An object with defined action handler functions.
+         */
+        self.register = function(name, controller) {
+            controllersMap[name] = controller;
+        };
+
+        /**
+         * Controller should call this when the filter content changes.
+         * This should trigger loading assets as per new filters.
+         */
+        self.handleFilterChange = function() {
+            clearResult();
+            startAssetsLoad(false);
+        };
+
+        function showLoginButton() {
+            var loginButton = $(LOGIN_BUTTON_SELECTOR);
+            if (loginButton.length === 0) {
+                loginButton = new Coral.Button().set({
+                    variant: "default",
+                    label: {
+                        innerText: Granite.I18n.get("Log in to Connected Assets")
+                    }
+                });
+                loginButton = $(loginButton);
+                loginButton.addClass("remote-login-button");
+                $(CONTENT_PANEL_SELECTOR).append(loginButton);
+                loginButton.on("click", function() {
+                    authorization.start(remoteConfig.getRemoteOrigin(),
+                        remoteConfig.getLoginLandingPage(), self.authHandler);
+                });
+            } else {
+                loginButton.show();
+            }
+        }
+
+        function hideLoginButton() {
+            var loginButton = $(LOGIN_BUTTON_SELECTOR);
+            if (loginButton.length > 0) {
+                loginButton.hide();
+            }
+        }
+
+        function showSpinner() {
+            var $spinner = $(RESULT_SPINNER_SELECTOR);
+            if ($spinner.length === 0) {
+                // add spinner
+                $spinner = $('<div class="resultspinner">')
+                    .append('<coral-wait size="L"></coral-wait>');
+                var $div = $('<div class="status"></div>');
+                $div.text(Granite.I18n.get("Loading results"));
+                $spinner.append($div);
+                $(CONTENT_PANEL_SELECTOR).append($spinner);
+            }
+            spinnerVisible = true;
+
+            // show spinner at the bottom of result set
+            var $parent = $spinner.parent();
+
+            $spinner = $spinner.detach();
+            $parent.append($spinner);
+            $spinner.show();
+
+            // if the Mansory container is visible - scroll to the recently appended spinner
+            var parentTop = $parent.position().top,
+                parentBottom = parentTop + $parent.height(),
+                h = $(window).height();
+
+            if ((parentTop <= h) && (parentBottom >= 0)) {
+                $spinner[0].scrollIntoView(false);
+            }
+        }
+
+        function hideSpinner() {
+            var $spinner = $(RESULT_SPINNER_SELECTOR);
+            if ($spinner.length === 0) {
+                return;
+            }
+            var noResultsFound = $(".editor-AssetFinder .emptyresult:visible").length;
+            var masonryItems = $(self.SELECTOR + " coral-masonry");
+            if (masonryItems.length) {
+                masonryItems = masonryItems[0].querySelectorAll("coral-masonry-item");
+            }
+            var allItemsReady = Array.from(masonryItems).filter(function(el) {
+                return window.getComputedStyle(el).opacity !== "1";
+            }).length === 0;
+
+            // hide spinner once container got updated
+            if (noResultsFound || allItemsReady) {
+                spinnerVisible = false;
+                $spinner.hide();
+                return;
+            }
+
+            // paging request is done, but elements are not yet added to the DOM
+            window.requestAnimationFrame(hideSpinner);
+        }
+
+
+        function showEmptyResult() {
+            $(RESULT_EMPTYRESULT_SELECTOR).show();
+        }
+
+        function hideEmptyResult() {
+            $(RESULT_EMPTYRESULT_SELECTOR).hide();
+        }
+
+        function showErrorMsg() {
+            $(RESULT_ERRORMSG_SELECTOR).show();
+        }
+
+        function hideErrorMsg() {
+            $(RESULT_ERRORMSG_SELECTOR).hide();
+        }
+
+        function addResult(masonry) {
+            $(CONTENT_PANEL_SELECTOR).append(masonry);
+            assetsLoaded = true;
+        }
+
+        function clearResult() {
+            $(self.SELECTOR + " coral-masonry").remove();
+            assetsLoaded = false;
+        }
+
+        function clearAssetFinder() {
+            // clear fulltext search
+            $(FULLTEXT_SEARCH_SELECTOR).val("");
+            clearResult();
+            hideSpinner();
+            hideErrorMsg();
+            hideEmptyResult();
+            hideLoginButton();
+        }
+
+        /**
+         * This doesn't take care of clearing search filters.
+         * For fresh asset load clearAssetFinder should be called before this.
+         * @param append {Boolean}  - If true, the results will be appended
+         * else previous results will be cleared and then result will be added.
+         */
+        function startAssetsLoad(append) {
+            // append may be undefined
+            append = !!append;
+
+            if ((!append && !assetsLoaded) || append) {
+                $(CONTENT_PANEL_SELECTOR).trigger({
+                    type: eventTypeLoad,
+                    append: append
+                });
+            }
+        }
+
+        /**
+         * This should be called on user Un-Authorize detection
+         */
+        function handleUnauthorized() {
+            clearAssetFinder();
+            showLoginButton();
+        }
+
+        /**
+         * This sync filter panel for asset type selected.
+         */
+        function syncFilterPanel(type) {
+            // ask type controllers to reset Filter panel of all types.
+            var controllers = Object.values(controllersMap);
+            for (var idx in controllers) {
+                controllers[idx].resetFilterPanel();
+            }
+
+            // ask type controller to setup Filter panel for current type.
+            var controller = controllersMap[type];
+            if (controller === undefined) {
+                throw new Error("No controller for asset type: " + type);
+            }
+            controller.setUpFilterPanel();
+        }
+
+        /**
+         * This should return config to create Asset Card for current asset type.
+         */
+        function getCardConfig() {
+            var $typeSelect = $(self.SELECTER_ASSET_TYPE);
+            var selectedType = $typeSelect.val();
+            var controller = controllersMap[selectedType];
+            return controller.getCardConfig();
+        }
+
+        /**
+         * Add search params from selected filter.
+         */
+        function addFilterParams(commonParams) {
+            var $typeSelect = $(self.SELECTER_ASSET_TYPE);
+            var selectedType = $typeSelect.val();
+            var controller = controllersMap[selectedType];
+            controller.addFilterParams(commonParams);
+        }
+
+        /**
+         * Add index tag, if present
+         */
+        function addIndexTag(commonParams) {
+            var indexTag = remoteConfig.getRemoteSearchIndexTag();
+            if (indexTag) {
+                commonParams[INDEX_TAG_PARAM] = indexTag;
+            }
+        }
+
+        /**
+         * to reduce the calls on the contentfinder servlet, use debounce
+         */
+        function handleLoadAssets(event) {
+            var appendData = event.append;
+            if (!appendData) {
+                // reset internal variables, search and filters
+                _resetInternal();
+            }
+            _getAndShowResults(appendData);
+
+            /**
+             * reset the internal status parameters
+             */
+            function _resetInternal() {
+                startLimit = 0;
+                endLimit = defaultLimit;
+            }
+
+            /**
+             * Load and display the data
+             */
+            function _getAndShowResults(appendData) {
+                hideErrorMsg();
+                hideEmptyResult();
+                showSpinner();
+
+                var fulltextSearch = "";
+                var $elSearch = $(self.FULLTEXT_SEARCH_SELECTOR);
+                if ($elSearch.length && $elSearch.val().length) {
+                    fulltextSearch = $elSearch.val().trim();
+                }
+
+                var param = {
+                    "_dc": new Date().getTime(),  // cache killer
+                    "fullText": fulltextSearch,
+                    "limit": startLimit + ".." + endLimit,
+                    "_charset_": "utf-8"
+                };
+                // add asset type specific params
+                addFilterParams(param);
+                addIndexTag(param);
+
+                $.ajax({
+                    type: "GET",
+                    dataType: "json",
+                    url: remoteConfig.getRemoteOrigin() + remoteConfig.getRemoteSearchSrc(),
+                    data: param,
+                    xhrFields: {
+                        withCredentials: true
+                    }
+                }).done(function(response, textStatus, jqXHR) {
+                    var isAuthorized = authorization.detectUnAuthorization(jqXHR, response);
+                    if (!isAuthorized) {
+                        handleUnauthorized();
+                    } else {
+                        // results found
+
+                        _insertCardsToMasonry(resultParser.createCards(JSON.stringify(response), getCardConfig())
+                            , appendData);
+                        // Update global pagination
+                        startLimit = endLimit;
+                        endLimit = endLimit + pageSize;
+                    }
+                }).fail(function(jqXHR, textStatus, error) {
+                    var isAuthorized = authorization.detectUnAuthorization(jqXHR);
+                    if (!isAuthorized) {
+                        handleUnauthorized();
+                    } else if (textStatus === "error") {
+                        showErrorMsg();
+                    } else {
+                        showEmptyResult();
+                    }
+                }).always(function() {
+                    hideSpinner();
+                });
+
+            }
+
+            function _getMasonry(appendData) {
+                var $masonry = $(self.SELECTOR).find("coral-masonry"), // get the current masonry element
+                    // get the Coral.Masonry
+                    masonry = $masonry[0];
+
+                if (!appendData && masonry) {
+                    // we have to create a new masonry, so remove the existing one
+                    $masonry[0].remove();
+                    masonry = undefined;
+                }
+
+                // first call of assetfinder: masonry got never defined
+                if (!masonry) {
+                    // create a masonry as it doesn't exist
+                    masonry = new Coral.Masonry().set(MASONRY_LAYOUT_SETTINGS);
+
+                    // update reference, as old masonry was earlier removed from DOM
+                    self.masonry = masonry;
+
+                    addResult(masonry);
+                }
+                return masonry;
+            }
+
+            function _insertCardsToMasonry(cards, appendData) {
+                // set flag if all data has been loaded
+                isAllDataLoaded = (cards.length < (endLimit - startLimit));
+
+                // hide masonry default empty message
+                $(self.SELECTOR).find(".foundation-layout-masonry-empty").toggle(true);
+
+                // get the current masonry
+                self.masonry = _getMasonry(appendData);
+
+                if (cards.length) {
+                    hideErrorMsg();
+                    hideEmptyResult();
+                    cards.forEach(function(card) {
+                        var item = new Coral.Masonry.Item();
+                        item.content.appendChild(card);
+                        self.masonry.items.add(item);
+                    });
+
+                    // show custom empty message in case masonry is empty
+                    $(self.SELECTOR).find(".editor-SidePanel-resultMessage").toggle(false);
+
+                    // Cards not shown in IE11 because of the coral-masonry's <object>
+                    if (ns.device.isIE11) {
+                        $(self.masonry).find("object").css("display", "none");
+                    }
+                } else {
+                    // no results
+                    if (!startLimit && !cards.length) {
+                        showEmptyResult();
+                    }
+                }
+            }
+        }
+
+        function handleTabSwitch() {
+            if (self.isActive()) {
+                // Initialize  Remote Dam Configuration
+                remoteConfig.init($(self.SELECTOR_CONFIGMETA));
+                // sync filter panel for selected asset type.
+                syncFilterPanel($(self.SELECTER_ASSET_TYPE).val());
+
+                startAssetsLoad(false);
+            }
+        }
+
+        function handleFulltextSearch() {
+            var keycode = Granite.Util.getKeyCode(event);
+            // on enter , clear previous results and issue new query
+            if (keycode === 13) {
+                clearResult();
+                startAssetsLoad(false);
+            }
+        }
+
+        function handleFulltextSearchClear() {
+            clearResult();
+            startAssetsLoad(false);
+        }
+
+        function handleTypeSelection() {
+            syncFilterPanel(this.value);
+            clearResult();
+            startAssetsLoad(false);
+        }
+
+        /**
+         * Handler for infinite scrolling
+        */
+        function handleScroll(event) {
+
+            var elem = $(event.currentTarget),
+                scrollTop = elem.scrollTop(),
+                scrollHeight = elem.get(0).scrollHeight,
+                clientHeight = elem.get(0).clientHeight;
+
+            // while scrolling, disable all other events
+            // ipad scroll issue: gives the wrong target object in the event (swipe origin instead of touch that stopped
+            // the scroll. see #CQ5-32293
+            $.toe.off();
+
+            if (offscrollTimer) {
+                clearTimeout(offscrollTimer);
+            }
+
+            offscrollTimer = setTimeout(function() {
+                // restore events
+                $.toe.on();
+
+                offscrollTimer = null;
+            }, 500);
+            var margin = 5;
+            if (!spinnerVisible && (scrollTop > 0) && (scrollTop + clientHeight + margin) >= scrollHeight) {
+                if (!isAllDataLoaded) {
+                    // load more data
+                    startAssetsLoad(true);
+                }
+            }
+        }
+
+
+        function init() {
+
+            // Initialize DragDrop controller
+            remotedam.ui.dragDropController.init();
+
+            channel.on("cq-sidepanel-tab-switched", handleTabSwitch);
+
+            /**
+             * Content panel - events handlers
+             */
+
+            // Load assets
+            $(CONTENT_PANEL_SELECTOR).on(eventTypeLoad, $.debounce(125, false, handleLoadAssets));
+
+            // Fulltext search
+            $(FULLTEXT_SEARCH_SELECTOR).on("keyup", handleFulltextSearch);
+            var $clear = $(FULLTEXT_SEARCH_SELECTOR).siblings("button");
+            $clear.on("click", handleFulltextSearchClear);
+
+            var $typeSelect = $(self.SELECTER_ASSET_TYPE);
+            $typeSelect.on("change", handleTypeSelection);
+
+            // Handle infinite scrolling
+            $(CONTENT_PANEL_SELECTOR).on("scroll", handleScroll);
+        }
+
+        channel.one("cq-sidepanel-loaded", init);
+        return self;
+    })();
+    // export this namespace
+    // window.remotedam = remotedam;
+
+})(document, Granite, Granite.$, Granite.$(document), Granite.author,
+    remotedam.ui.authorization, remotedam.ui.resultParser, remotedam.config);

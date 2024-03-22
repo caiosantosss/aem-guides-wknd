@@ -1,0 +1,510 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2015 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;
+(function(document, Granite, $, undefined) {
+    "use strict";
+    var bTranslationProject = false;
+    var translation_method_span = '.human-machine-translation-span';
+    var cloudConfigPathInputElement, cloudConfigNameInputElement, selectedProviderHT, selectedProviderMT;
+    var target_language_selector = '.cq-project-translation-target-language-form-field';
+    var conf_path_selector = ".cq-cloudconfig-configpathbrowser foundation-autocomplete";
+    var job_count_input_selector = '.project-jobs-count-input';
+    var autoPromoteLaunchCheckboxSelector = ".cq-translation-scheduler-repeat-launch-enable-check";
+    var autoApproveCheckboxSelector = ".cq-translation-automatic-approve-enable-check";
+    var ui = $(window).adaptTo("foundation-ui");
+    var machine_dropdown, human_dropdown;
+    var machine_dropdown_span, human_dropdown_span, translationSchedulerSpan;
+    var content_category_span;
+    var currentConfigurations = [];
+    var machineTranslationProviders = null;
+    var humanTranslationProviders = null;
+
+
+    function getDropdownValue(inputClass) {
+        try {
+            var dropdown = $(inputClass);
+            var select = dropdown.find('coral-select').get(0);
+            var retVal = select.value;
+            return retVal;
+        } catch (e) {}
+        return "";
+    }
+
+    function getCloudNameFromPath(path) {
+        for (var index = 0; index < currentConfigurations.length; index++) {
+            var currentConfig = currentConfigurations[index];
+            if (currentConfig.path == path) {
+                return currentConfig.title;
+            }
+        }
+        return "";
+    }
+
+    function updateCloudConfigPathInput(newPath) {
+        cloudConfigPathInputElement.val(newPath);
+        cloudConfigNameInputElement.val(getCloudNameFromPath(newPath))
+    };
+
+    function updateProviderPathInput() {
+        selectedProviderHT = $(".human-translation-provider-select")[0].selectedItem;
+        selectedProviderMT = $(".machine-translation-provider-select")[0].selectedItem;
+    };
+
+    function addCurrentCloudPathToInputElement() {
+        var currentPath = getDropdownValue('.cloud-config-translation-span');
+        updateCloudConfigPathInput(currentPath);
+    };
+
+    function updateCloudConfigSelection(configurations) {
+        currentConfigurations = configurations;
+
+        var cloudConfigSpan = $($.find('.cloud-config-translation-span')[0]);
+
+        var bSelected = false;
+        var select = $('.cloud-config-translation-select').get(0);
+        if (select) {
+            if (select.items != undefined) {
+                select.items._deselectAllExcept();
+                select.items.clear();
+            }
+        }
+
+        for (var index = 0; index < currentConfigurations.length; index++) {
+            var bSelectedOption = false;
+            if (currentConfigurations[index].path == cloudConfigPathInputElement.val()) {
+                bSelectedOption = true;
+                bSelected = true;
+            }
+            select.items.add({
+                selected: bSelectedOption,
+                content: {
+                    textContent: currentConfigurations[index].title
+                },
+                disabled: false,
+                value: currentConfigurations[index].path
+            });
+        }
+
+        if (select.items && currentConfigurations.length == 0) {
+            select.items.add({
+                selected: '',
+                content: {
+                    innerHTML: ''
+                },
+                disabled: false,
+                value: ''
+            });
+        }
+
+        cloudConfigSpan.off('change').on('change', function(event) {
+            addCurrentCloudPathToInputElement();
+        });
+
+        if (!bSelected && currentConfigurations.length > 0) {
+            select.items._getFirstSelectable().selected = true;
+            addCurrentCloudPathToInputElement();
+        }
+    };
+
+    function updateTranslationState() {
+        var currentState = getDropdownValue(translation_method_span);
+
+        machine_dropdown_span.hide();
+        human_dropdown_span.hide();
+        content_category_span.hide();
+
+        machine_dropdown.removeAttr("name");
+        human_dropdown.removeAttr("name");
+        if (currentState == 'HUMAN_TRANSLATION') {
+            human_dropdown_span.show();
+            //we should check if human provider is not selected
+            var transProvider = getCurrentSelectedTranslationProvider();
+            if (transProvider.length == 0) {
+                //set the default value now
+                var select = human_dropdown_span.find('coral-select').get(0);
+                if (select.items.length > 1) {
+                    select.items.getAll()[1].selected = true;
+                }
+            }
+            human_dropdown.attr("name", "translationProvider");
+        } else {
+            machine_dropdown_span.show();
+            content_category_span.show();
+            machine_dropdown.attr("name", "translationProvider");
+        }
+        updateCloudConfigDropdown();
+    };
+
+    function getCurrentSelectedTranslationProvider() {
+        var currentState = getDropdownValue(translation_method_span);
+        var currentTranslationProviderSpan = ".machine-translation-provider-span";
+        if (currentState == 'HUMAN_TRANSLATION') {
+            currentTranslationProviderSpan = ".human-translation-provider-span";
+        }
+        return getDropdownValue(currentTranslationProviderSpan);
+
+    }
+
+    function getCloudConfigRootFromCurrentSelection() {
+        var currentServiceName = getCurrentSelectedTranslationProvider();
+        var retVal = null;
+        for (var index = 0; index < serviceToCloudConfigMap.length; index++) {
+            var obj = serviceToCloudConfigMap[index];
+            if (obj.serviceName == currentServiceName) {
+                retVal = obj.rootPath;
+                break;
+            }
+        }
+        return retVal;
+    };
+
+    function updateCloudConfigDropdown() {
+        var currentCloudConfigPath = cloudConfigPathInputElement.val();
+        var currentServiceCloudRootPath = getCloudConfigRootFromCurrentSelection();
+        var configValue = $(conf_path_selector)[0].value;
+        if (currentServiceCloudRootPath != null) {
+            var url = "/libs/cq/gui/components/projects/admin/translation";
+            var options = {
+                url: Granite.HTTP.externalize(url),
+                data: {
+                    operation: "cloudConfigList",
+                    rootPath: currentServiceCloudRootPath,
+                    confPath: configValue,
+                    currentTime: (new Date()).getTime()
+                },
+                cache: false,
+                type: "get",
+                success: function(output, textStatus, jqXHR) {
+                    ui.clearWait();
+                    updateCloudConfigSelection(output.configurations);
+                },
+                error: function(xhr, error, errorThrown) {
+                    ui.clearWait();
+                    updateCloudConfigSelection([]);
+                }
+            };
+            $.ajax(options);
+        } else {
+            updateCloudConfigSelection([]);
+        }
+    };
+
+    function updateSchedulerSelect(event) {
+        var currentSelectedItem = getDropdownValue('.cq-translation-scheduler-repeat-span');
+        updateDivBoxVisibility('.cq-translation-scheduler-repeat-box', false);
+        updateDivBoxVisibility('.cq-translation-scheduler-repeat-box-' + currentSelectedItem, true);
+    };
+
+
+    function updateDivBoxVisibility(className, bState) {
+        var selectList = $.find(className);
+        for (var index = 0; index < selectList.length; index++) {
+            var item = $(selectList[index]);
+            bState ? item.show() : item.hide();
+        }
+    }
+
+    function updateTranslationProvider(event) {
+        var currentDropdown = event.currentTarget;
+        updateCloudConfigPathInput(getDropdownValue(currentDropdown))
+        updateCloudConfigDropdown();
+    }
+
+    function parseDropdownOnce() {
+        var selectList = $.find('.cq-project-translation-coral-select');
+        for (var index = 0; index < selectList.length; index++) {
+            var selectItem = selectList[index];
+            if (selectItem && selectItem.items && selectItem.items.first()) {
+                var selectedItem = selectItem.items._getFirstSelected();
+                var currentInput = $($(selectItem).find('input')[0]);
+                currentInput.val($(selectedItem).val());
+            }
+        }
+    }
+
+    function checkForCreateProjectMode() {
+        bTranslationProject = true;
+        var properties = $(".cq-projects-admin-createproject-properties");
+        var selected = $(".foundation-selections-item");
+        if (properties != null && selected != null && properties.length > 0 && selected.length > 0) {
+            var selectedTemplate = selected.find("input.projectinput[type=hidden]").val();
+            bTranslationProject = false;
+            if ("/libs/cq/core/content/projects/templates/translation-project" == selectedTemplate) {
+                var topDiv = $(".cq-project-translation-form-properties");
+                topDiv.css('display', 'block');
+                bTranslationProject = true;
+            }
+        }
+        var projectTranslationElementList = $('.cq-project-translation-form-field');
+        for (var index = 0; index < projectTranslationElementList.length; index++) {
+            var projectTranslationElement = $(projectTranslationElementList[index]);
+            if (!bTranslationProject) {
+                if (projectTranslationElement.attr('name') != null) {
+                    projectTranslationElement.attr('data-name', projectTranslationElement.attr('name'));
+                    projectTranslationElement.removeAttr('name');
+                }
+            } else {
+                if (projectTranslationElement.attr('data-name') != null) {
+                    projectTranslationElement.attr('name', projectTranslationElement.attr('data-name'));
+                    projectTranslationElement.removeAttr('data-name');
+                }
+            }
+
+        }
+    }
+
+    function _updateLaunchCheck(event) {
+        var autoPromoteCheckbox = $.find(autoPromoteLaunchCheckboxSelector)[0];
+        if (event) {
+            var autoApproveCheckbox = $.find(autoApproveCheckboxSelector)[0];
+            // Check Auto Approve translation checkbox if auto promote translation is checked
+            if (autoPromoteCheckbox.checked) {
+                autoApproveCheckbox.checked = true;
+            }
+        }
+        // Handle launch delete checkbox behavior
+        var enableclass = $(autoPromoteCheckbox).data('enableclass');
+        var items = $.find('.' + enableclass);
+        for (var index = 0; index < items.length; index++) {
+            var item = $(items[index]);
+            if (autoPromoteCheckbox.checked) {
+                item.removeAttr('disabled');
+                if(event){
+                    item[0].checked = true;
+                }
+            } else {
+                items[index].checked = false;
+                item.attr('disabled', '');
+            }
+        }
+    }
+
+    function _OnUpdateYearMonthElement() {
+        var currentElement = $('.cq-translation-scheduler-repeat-month-select-element');
+        var max_days = 30;
+        var currentSelectedMonth = parseInt(currentElement.val()) + 1;
+        switch (currentSelectedMonth) {
+            case 2: //Feb
+                max_days = 28;
+                break;
+            case 1: //Jan
+            case 3: //Mar
+            case 5: //May
+            case 7: //July
+            case 8: //Aug
+            case 10: //Oct
+            case 12: //Dec
+                max_days = 31;
+                break;
+            case 4: //Apr
+            case 6: //June
+            case 9: //Sep
+            case 11: //Nov
+                max_days = 30;
+                break;
+        }
+        var dayElement = $.find('.cq-translation-scheduler-repeat-day-numberinput')[0];
+        dayElement.max = max_days;
+        if(parseInt(dayElement.value) >max_days){
+            dayElement.value = max_days;
+        }
+    }
+
+    function setDraftJobCount(event) {
+        var languageCount = $(target_language_selector)[0].selectedItems.length;
+        if (languageCount > 0) {
+            var job_count_input = $(job_count_input_selector)[0];
+            if (job_count_input != null) {
+                job_count_input.setAttribute("value", languageCount);
+            }
+        }
+    }
+
+    function _setUpdateHandlers() {
+        //we need to add handlers for cq-translation-scheduler-repeat-sync-element
+        var items = $.find('.cq-translation-scheduler-repeat-sync-element');
+        for (var index = 0; index < items.length; index++) {
+            var item = items[index];
+            $(item).on('change', function(event) {
+                var currentElement = $(event.currentTarget);
+                var syncclass = currentElement.data('syncclass');
+                ($.find('.' + syncclass)[0]).value = currentElement.val();
+                if (event.currentTarget.tagName == 'CORAL-CHECKBOX') {
+                    ($.find('.' + syncclass)[0]).value = event.currentTarget.checked ? "true" : "false";
+                }
+            });
+        }
+        $($.find('.cq-translation-scheduler-repeat-month-select-element')[0]).on('change', function(event) {
+            _OnUpdateYearMonthElement();
+        });
+    }
+
+    $(document).on("foundation-contentloaded", function(e) {
+        checkForCreateProjectMode();
+        if (bTranslationProject) {
+            human_dropdown = $('.human-translation-provider-select');
+            machine_dropdown = $('.machine-translation-provider-select');
+            human_dropdown_span = $('.human-translation-provider-span');
+            machine_dropdown_span = $('.machine-translation-provider-span');
+            content_category_span = $('.content-category-span');
+            translationSchedulerSpan = $('.cq-translation-scheduler-repeat-span');
+            cloudConfigPathInputElement = $($.find('.cq-translation-cloud-config-path'));
+            cloudConfigNameInputElement = $($.find('.cq-translation-cloud-config-name'));
+            var translation_method_dropdown = $(translation_method_span);
+            translation_method_dropdown.on('change', function(event) {
+                updateCloudConfigPathInput('');
+                updateTranslationState();
+            });
+            human_dropdown_span.on('change', function(event) {
+                updateTranslationProvider(event);
+            });
+            machine_dropdown_span.on('change', function(event) {
+                updateTranslationProvider(event);
+            });
+            translationSchedulerSpan.on('change', function(event) {
+                updateSchedulerSelect(event);
+            });
+
+            $(target_language_selector).on('change', function(event) {
+                setDraftJobCount(event);
+            });
+
+            $(autoPromoteLaunchCheckboxSelector).on('change', function(event) {
+                _updateLaunchCheck(event);
+            });
+            var targetTranslaionProviderField = document.querySelector('.machine-translation-provider-select');
+            setTimeout(function() {
+                //process all dropdowns once
+                parseDropdownOnce();
+                updateTranslationState();
+                updateSchedulerSelect();
+                _OnUpdateYearMonthElement();
+                _updateLaunchCheck(null);
+            }, 1000);
+
+            _setUpdateHandlers();
+
+            $(document).on("change", conf_path_selector, updateProvidersUsingCaConfig);
+
+            Coral.commons.ready($(conf_path_selector)[0], updateProvidersUsingCaConfig);
+        }
+    });
+
+    function updateProvidersUsingCaConfig(){
+        var configValue = $(conf_path_selector)[0].value;
+        if(!!configValue) {
+            var url = "/libs/cq/gui/components/projects/admin/translation";
+            var options = {
+                url: Granite.HTTP.externalize(url),
+                data: {
+                    operation: "credentialConfigsFromContext",
+                    confPath: configValue,
+                    currentTime: (new Date()).getTime()
+                },
+                cache: false,
+                type: "get",
+                success: function (output, textStatus, jqXHR) {
+                    ui.clearWait();
+                    updateTranslationProvidersSelection(output);
+                    $(".cloud-config-translation-select").attr("disabled", "");
+                },
+                error: function (xhr, error, errorThrown) {
+                    ui.clearWait();
+                    updateTranslationProvidersSelection(null);
+                    $(".cloud-config-translation-select").removeAttr("disabled");
+                }
+            };
+            $.ajax(options);
+        } else {
+            updateTranslationProvidersSelection(null);
+            $(".cloud-config-translation-select").removeAttr("disabled");
+        }
+    }
+
+
+    function itemExistInConfigurations(translationProvider, configurations) {
+        for (var serviceNdx in serviceToCloudConfigMap) {
+            if(serviceToCloudConfigMap[serviceNdx].serviceName === translationProvider.value) {
+                //provider found
+                var path = serviceToCloudConfigMap[serviceNdx].rootPath;
+                var name = path.substring(path.lastIndexOf("/") + 1);
+                if(!!configurations[name]) {
+                    return true;
+                }
+            }
+
+        }
+    }
+
+    function updateTranslationProviderSelection(configurations, machineOrHumanSelect, translationProvidersForSelection,
+                                                selectedProvider) {
+
+        var providerSelect = $(machineOrHumanSelect)[0];
+
+        //remove all
+        if (providerSelect) {
+            if (providerSelect.items != undefined) {
+                providerSelect.items._deselectAllExcept();
+                providerSelect.items.clear();
+            }
+        }
+
+        var bSelected = false;
+        for (var providerNdx in translationProvidersForSelection) {
+            var translationProvider = translationProvidersForSelection[providerNdx];
+            //if conf is not selected or provider is empty or provider exist in conf
+            if (!configurations || !translationProvider.value
+                || itemExistInConfigurations(translationProvider, configurations)) {
+                if (!!selectedProvider.value && selectedProvider.value === translationProvider.value) {
+                    translationProvider.selected = true;
+                    bSelected = true;
+                }
+                providerSelect.items.add(translationProvider);
+            }
+        }
+
+        if (providerSelect.items && providerSelect.items.length == 0) {
+            providerSelect.items.add({
+                selected: '',
+                content: {
+                    innerHTML: ''
+                },
+                disabled: false,
+                value: ''
+            });
+        }
+
+        if (!bSelected && providerSelect.items.length > 0) {
+            providerSelect.items._getFirstSelectable().selected = true;
+        }
+    }
+
+    function updateTranslationProvidersSelection(configurations) {
+        updateProviderPathInput();
+
+        if (machineTranslationProviders === null && humanTranslationProviders === null) {
+            machineTranslationProviders = $(".machine-translation-provider-select")[0].items.getAll();
+            humanTranslationProviders = $(".human-translation-provider-select")[0].items.getAll();
+        }
+
+        updateTranslationProviderSelection(configurations, ".machine-translation-provider-select", machineTranslationProviders, selectedProviderMT);
+        updateTranslationProviderSelection(configurations, ".human-translation-provider-select", humanTranslationProviders, selectedProviderHT);
+        updateCloudConfigDropdown();
+    };
+
+
+})(document, Granite, Granite.$);

@@ -1,0 +1,393 @@
+<%--
+ADOBE CONFIDENTIAL
+
+Copyright 2013 Adobe Systems Incorporated
+All Rights Reserved.
+
+NOTICE:  All information contained herein is, and remains
+the property of Adobe Systems Incorporated and its suppliers,
+if any.  The intellectual and technical concepts contained
+herein are proprietary to Adobe Systems Incorporated and its
+suppliers and may be covered by U.S. and Foreign Patents,
+patents in process, and are protected by trade secret or copyright law.
+Dissemination of this information or reproduction of this material
+is strictly forbidden unless prior written permission is obtained
+from Adobe Systems Incorporated.
+--%><%
+%><%@page session="false"
+          import="com.adobe.granite.security.user.UserProperties,
+                com.adobe.granite.security.user.UserPropertiesManager,
+                com.adobe.granite.security.user.UserPropertiesService,
+                com.adobe.granite.ui.components.Config,
+                com.adobe.granite.ui.components.ds.DataSource,
+                com.adobe.granite.xss.XSSAPI,
+                org.apache.commons.lang.StringUtils,
+                org.apache.jackrabbit.api.security.user.Authorizable,
+                org.apache.jackrabbit.api.security.user.Query,
+                org.apache.jackrabbit.api.security.user.QueryBuilder,
+                org.apache.jackrabbit.api.security.user.UserManager,
+                org.apache.sling.api.resource.Resource,
+                org.apache.sling.api.resource.ResourceUtil,
+                org.apache.sling.api.resource.ValueMap,
+                javax.jcr.RepositoryException,
+                javax.jcr.Session,
+                java.util.AbstractMap,
+                java.util.ArrayList,
+                java.util.Collections,
+                java.util.Comparator,
+                java.util.Iterator,
+                java.util.List,
+                java.util.Map,
+                com.adobe.granite.ui.components.ExpressionHelper,
+                com.adobe.granite.ui.components.ExpressionResolver,
+                com.adobe.granite.security.user.util.AuthorizableUtil"
+%><%@include file="/libs/granite/ui/global.jsp"%><%
+    ExpressionHelper ex = new ExpressionHelper(sling.getService(ExpressionResolver.class), pageContext);
+
+    ValueMap resourceValueMap           = resource.adaptTo(ValueMap.class);
+    UserPropertiesService upService     = sling.getService(UserPropertiesService.class);
+    Session userSession                 = resourceResolver.adaptTo(Session.class);
+
+    String search = request.getParameter("query");
+    if (search == null) {
+        search = "";
+    }
+
+    String searchProcessed = search.replace("%20"," ").trim();
+    //searchProcessed = searchProcessed.replaceAll("[^a-zA-Z0-9]+"," ");
+
+    int offset = 0;
+    try {
+        offset = Integer.parseInt(request.getParameter("start"));
+    } catch (Exception ignore) {
+    }
+
+    int limit = 25;
+    try {
+        limit = Integer.parseInt(request.getParameter("end")) - offset;
+    } catch (Exception ignore) {
+    }
+
+    // are we at the start of the list, i.e. showing the first few users?
+    boolean startOfList = offset == 0;
+
+    Config cfg = new Config(resource);
+
+    String projectPath = ex.getString(cfg.get("projectPath", String.class));
+    if (StringUtils.isBlank(projectPath)) {
+        projectPath = request.getParameter("projectPath");
+    }
+
+    try {
+
+        boolean includeSelf = false;
+        String includeSelfParameter = request.getParameter("impersonatesOnly");
+        if (includeSelfParameter != null) {
+            includeSelf = StringUtils.equalsIgnoreCase("true", includeSelfParameter) || StringUtils.equalsIgnoreCase("1", includeSelfParameter);
+        }
+
+        UserManager um = resourceResolver.adaptTo(UserManager.class);
+        final UserPropertiesManager upm = upService.createUserPropertiesManager(userSession, resourceResolver);
+
+        List<Authorizable> projectGroups = new ArrayList<Authorizable>();
+
+        boolean showHeaders = false;
+
+        String groupAll = resourceValueMap.get("group", null);
+        if (resourceValueMap.get("showOnlyProjectMembers", true)) {
+            if (projectPath != null) {
+                Resource projectResource = resource.getResourceResolver().resolve(projectPath);
+
+                projectResource = findProjectResource(projectResource);
+                if (projectResource != null) {
+                    showHeaders = true;
+
+                    ValueMap projectVM = ResourceUtil.getValueMap(projectResource);
+                    groupAll = projectVM.get("role_observer", groupAll);
+
+                    if (startOfList) {
+                        DataSource oldDatasource = (DataSource) request.getAttribute(DataSource.class.getName());
+
+%><sling:include path="<%= projectResource.getPath() %>" resourceType="cq/gui/components/projects/admin/datasource/projectroledatasource" /><%
+
+    DataSource rolesDataSource = (DataSource) request.getAttribute(DataSource.class.getName());
+    if (rolesDataSource != null) {
+        Iterator<Resource> rolesIterator = rolesDataSource.iterator();
+
+        List<Map.Entry<String,String>> roles = new ArrayList<Map.Entry<String,String>>();
+
+        while (rolesIterator.hasNext()) {
+            ValueMap roleValueMap = rolesIterator.next().adaptTo(ValueMap.class);
+            String id = roleValueMap.get("groupId", String.class);
+            if (StringUtils.isNotBlank(id)) {
+                String name = roleValueMap.get("text", String.class);
+
+                if (id.contains(searchProcessed) || name.contains(searchProcessed)) {
+                    Map.Entry<String,String> newEntry = new AbstractMap.SimpleEntry<String,String>(id, name);
+                    roles.add(newEntry);
+                }
+            } else {
+                log.debug("Role '{}' does not have an ID", roleValueMap.get("text", ""));
+            }
+        }
+
+        if (roles.size()>0) {
+            Collections.sort(roles, new Comparator<Map.Entry<String,String>>() {
+                public int compare(Map.Entry<String,String> o1, Map.Entry<String,String> o2) {
+                    return o1.getValue().compareTo(o2.getValue());
+                }
+            });
+%><li class="coral-SelectList-item coral-SelectList-item--optgroup" role="presentation"><%
+    if (showHeaders) {
+%><span class="coral-SelectList-groupHeader"><%= i18n.get("Project Roles") %></span><% } %>
+    <ul class="coral-SelectList-sublist" role="group"><%
+
+        Iterator<Map.Entry<String, String>> sortedRolesIterator = roles.iterator();
+        while (sortedRolesIterator.hasNext()) {
+            Map.Entry<String, String> role = sortedRolesIterator.next();
+            String id = role.getKey();
+            String name = role.getValue() != null ? role.getValue() : "";
+
+            String image =  request.getContextPath() + DEFAULT_GROUP_ICON;
+            String nameHtml = xssAPI.encodeForHTML(name);
+            String idHtml = xssAPI.encodeForHTML(id);
+
+            nameHtml = markMatchText(searchProcessed, name, nameHtml, xssAPI);
+            idHtml = markMatchText(searchProcessed, id, idHtml, xssAPI);
+
+    %><li class="coral-SelectList-item coral-SelectList-item--option foundation-layout-flexmedia foundation-layout-flexmedia-middle" data-value="<%= xssAPI.encodeForHTMLAttr(id) %>" data-display="<%= xssAPI.encodeForHTML(name) %>"><%
+        if (image != null && image.length() > 0) {
+    %><img class="foundation-layout-flexmedia-img" width="32" height="32" src="<%=  xssAPI.getValidHref(image) %>"><%
+        }
+    %><div class="foundation-layout-flexmedia-bd"><%
+    %><div class="foundation-layout-flexmedia-bd-singleline"><%= nameHtml %></div><%
+        if (!name.equals(id)) {
+    %><div class="foundation-layout-flexmedia-bd-singleline foundation-layout-util-subtletext"><%= idHtml %></div><%
+        }
+    %></div><%
+    %></li><%
+            }
+        }
+    %></ul>
+</li><%
+                    }
+                    request.setAttribute(DataSource.class.getName(), oldDatasource);
+                }
+            }
+        }
+    }
+
+    // support sorting on content-configured keys, default to
+    // the profile's 'givenName' property
+    String sortOn = cfg.get("sortOn", "@rep:principalName");
+    QueryBuilder.Direction sortOrder = QueryBuilder.Direction.ASCENDING;
+    if (cfg.get("sortOrder", String.class) != null) {
+        sortOrder = QueryBuilder.Direction.valueOf(cfg.get("sortOrder", String.class));
+    }
+
+    // by default exclude any authorizables starting with ID 'projects-' ('%' for the wildcard)
+    String excludedIDPattern = cfg.get("excludedIDPattern", "projects-%");
+
+    String omitUserId = null;
+    if (!includeSelf) {
+        omitUserId = userSession.getUserID();
+    }
+
+    Query query = createQuery(searchProcessed, groupAll, sortOn, sortOrder, offset, limit, excludedIDPattern, omitUserId, userSession);
+    Iterator<Authorizable> members = um.findAuthorizables(query);
+
+    List<Authorizable> authorizables = new ArrayList<Authorizable>();
+
+    if (offset == 0 && projectGroups.size() > 0) {
+        for(Authorizable projectGroup : projectGroups) {
+            authorizables.add(projectGroup);
+        }
+    }
+
+
+    while (members.hasNext()) {
+        Authorizable next = members.next();
+        authorizables.add(next);
+    }
+
+    if (authorizables.size() > 0) {
+        if (showHeaders && startOfList) {%><li class="coral-SelectList-item coral-SelectList-item--optgroup" role="presentation"><%
+
+%>
+    <span class="coral-SelectList-groupHeader"><%= i18n.get("Project Members") %></span>
+    <ul class="coral-SelectList-sublist" role="group"><%
+        }
+        for(Authorizable authorizable: authorizables) {
+
+            UserProperties up = AuthorizableUtil.getProfile(upm, authorizable.getID());
+
+            String name = getFullName(authorizable,  up);
+            String image = (up == null) ? "" : up.getResourcePath(UserProperties.PHOTOS, "/primary/image.prof.thumbnail.36.png", "");
+            String nameHtml = xssAPI.encodeForHTML(name);
+            String idHtml = xssAPI.encodeForHTML(authorizable.getID());
+
+            nameHtml = markMatchText(searchProcessed, name, nameHtml, xssAPI);
+            idHtml = markMatchText(searchProcessed, authorizable.getID(), idHtml, xssAPI);
+
+            if (StringUtils.isBlank(image)) {
+                if (authorizable.isGroup()) {
+                    image = DEFAULT_GROUP_ICON;
+                } else {
+                    image = DEFAULT_USER_ICON;
+                }
+            }
+            image  = request.getContextPath() + image;
+
+    %><li class="coral-SelectList-item coral-SelectList-item--option foundation-layout-flexmedia foundation-layout-flexmedia-middle" data-value="<%= xssAPI.encodeForHTMLAttr(authorizable.getID()) %>" data-display="<%= xssAPI.encodeForHTML(name) %>"><%
+        if (image != null && image.length() > 0) {
+    %><img class="foundation-layout-flexmedia-img" width="32" height="32" src="<%=  xssAPI.getValidHref(image) %>"><%
+        }
+    %><div class="foundation-layout-flexmedia-bd"><%
+    %><div class="foundation-layout-flexmedia-bd-singleline"><%= nameHtml %></div><%
+        if (!name.equals(authorizable.getID())) {
+    %><div class="foundation-layout-flexmedia-bd-singleline foundation-layout-util-subtletext"><%= idHtml %></div><%
+        }
+    %></div><%
+    %></li><%
+        }
+        if (showHeaders) {
+    %></ul>
+</li><%
+            }
+        }
+    } catch (RepositoryException e) {
+        log("Exception running query", e);
+    }
+%><%!
+    private String markMatchText(String searchProcessed, String name, String nameHtml, XSSAPI xssAPI) {
+        int i = name.toLowerCase().indexOf(searchProcessed.toLowerCase());
+        if (i >= 0) {
+            return xssAPI.encodeForHTML(name.substring(0, i)) +
+                    "<b>" + xssAPI.encodeForHTML(name.substring(i, i + searchProcessed.length())) + "</b>" +
+                    xssAPI.encodeForHTML(name.substring(i + searchProcessed.length()));
+        }
+        return nameHtml;
+    }
+
+    public static final String DEFAULT_USER_ICON = "/libs/granite/security/clientlib/themes/default/resources/sample-user-thumbnail.36.png";
+    public static final String DEFAULT_GROUP_ICON = "/libs/granite/security/clientlib/themes/default/resources/sample-group-thumbnail.36.png";
+
+    /** Get a full name string for a user
+     */
+    private String getFullName(Authorizable authorizable, UserProperties up) {
+        try {
+            // if we have no user profile, we return the ID
+            if (up == null) return authorizable.getID();
+
+            String givenName = up.getProperty(UserProperties.GIVEN_NAME);
+            String familyName = up.getProperty(UserProperties.FAMILY_NAME);
+            String name = "";
+            if (givenName != null) name += givenName;
+            if (givenName != null && familyName != null) name += " ";
+            if (familyName != null) name += familyName;
+            if (name.length() == 0) name = authorizable.getID();
+            return name;
+        } catch (RepositoryException e) {
+            return "";
+        }
+    }
+
+    private Query createQuery(final String queryString, final String groupAll,
+                              final String sortOn, final QueryBuilder.Direction sortOrder,
+                              final long offset, final long limit,
+                              final String excludedIDPattern,
+                              final String omitUserId,
+                              final Session userSession) {
+        return new Query() {
+            public <T> void build(QueryBuilder<T> builder) {
+                try {
+                    createQuery(builder, queryString, groupAll, sortOn, sortOrder, offset, limit, excludedIDPattern, omitUserId, userSession);
+                } catch (RepositoryException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        };
+    }
+
+
+    private static <T> void createQuery(QueryBuilder<T> builder, final String queryString, final String groupAll,
+                                        final String sortOn, final QueryBuilder.Direction sortOrder,
+                                        final long offset, final long limit,
+                                        final String excludedIDPattern,
+                                        final String omitUserId,
+                                        final Session userSession) throws RepositoryException {
+
+        T condition = builder.neq("jcr:primaryType", userSession.getValueFactory().createValue("rep:SystemUser"));
+
+        // search for the entire query as well as each term separated by a space surrounded with a wildcard *
+        if (StringUtils.isNotBlank(queryString)) {
+            String[] terms = queryString.split("\\s+");
+
+            String fullQueryPattern = "";
+            String separator = "";
+
+            for (String term : terms) {
+                fullQueryPattern += (separator + "*" + term + "*");
+                separator = " ";
+            }
+
+            T innerCondition =
+                builder.or(
+                        builder.contains(".", queryString),
+                        builder.contains(".", fullQueryPattern)
+                    );
+
+            if (condition == null) {
+                condition = innerCondition;
+            } else {
+                condition = builder.and(
+                        condition,
+                        innerCondition
+                );
+            }
+        }
+
+        if (StringUtils.isNotBlank(omitUserId)) {
+            T omitUserIdCondition = builder.not(builder.or(
+                    builder.like("rep:authorizableId", omitUserId),
+                    builder.like("rep:principalName", omitUserId)
+            ));
+            condition = condition == null ? omitUserIdCondition : builder.and(condition, omitUserIdCondition);
+        }
+
+        if (StringUtils.isNotBlank(excludedIDPattern)) {
+            T excludedIDsCondition =
+                    builder.not(
+                        builder.or(
+                                builder.like("rep:authorizableId", excludedIDPattern),
+                                builder.like("rep:principalName", excludedIDPattern)
+                        )
+                    );
+            condition = condition == null ? excludedIDsCondition : builder.and(condition, excludedIDsCondition);
+        }
+
+        if (condition != null) {
+            builder.setCondition(condition);
+        }
+
+        if (StringUtils.isNotBlank(groupAll)) {
+            builder.setScope(groupAll, false);
+        }
+
+        builder.setSelector(Authorizable.class);
+        builder.setLimit(offset, limit);
+        builder.setSortOrder(sortOn, sortOrder);
+    }
+
+    private Resource findProjectResource(Resource contentResource) {
+        if (contentResource == null || ResourceUtil.isNonExistingResource(contentResource)) {
+            return null;
+        }
+        if (contentResource.isResourceType("cq/gui/components/projects/admin/card/projectcard")) {
+            return contentResource;
+        }
+        return findProjectResource(contentResource.getParent());
+    }
+
+%>
+

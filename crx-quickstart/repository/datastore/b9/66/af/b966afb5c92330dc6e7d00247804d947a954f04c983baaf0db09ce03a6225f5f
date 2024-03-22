@@ -1,0 +1,537 @@
+/*
+ ADOBE CONFIDENTIAL
+
+ Copyright 2016 Adobe Systems Incorporated
+ All Rights Reserved.
+
+ NOTICE:  All information contained herein is, and remains
+ the property of Adobe Systems Incorporated and its suppliers,
+ if any.  The intellectual and technical concepts contained
+ herein are proprietary to Adobe Systems Incorporated and its
+ suppliers and may be covered by U.S. and Foreign Patents,
+ patents in process, and are protected by trade secret or copyright law.
+ Dissemination of this information or reproduction of this material
+ is strictly forbidden unless prior written permission is obtained
+ from Adobe Systems Incorporated.
+ */
+;(function($, ns, channel, window, undefined) {
+    "use strict";
+
+    /**
+     * This module depends on the existence of the Allowed Component list section
+     */
+
+    /**
+     * @typedef {{}} DropTarget
+     *
+     * @property {string} name          - Name of the drop target also used as {@code droptarget} property
+     * @property {string[]} accept      - List of mime types accepted by the drop target
+     * @property {string[]} groups      - List of asset group the drop target is part of
+     */
+
+    /**
+     * @typedef {{}} ComponentDropTarget
+     *
+     * @property {string} title                     - Title of the component
+     * @property {string} resourceType              - Resource type of the component
+     * @property {DropTarget[]} dropTargets         - List drop targets of the component
+     */
+
+    var COMPONENT_MAPPING_MAPPER_SELECTOR = ".js-cq-AssetToComponentMapper";
+    var COMPONENT_MAPPING_MAPPING_CLASS = "js-cq-AssetToComponentMapper-mapping";
+    var COMPONENT_MAPPING_RESOURCE_TYPE_CLASS = "js-cq-AssetToComponentMapper-resourceType";
+    var COMPONENT_MAPPING_NOT_ALLOWED_CLASS = "cq-AssetToComponentMapper-mapping--notAllowed";
+    var COMPONENT_MAPPING_DROP_TARGET_CLASS = "js-cq-AssetToComponentMapper-dropTarget";
+    var COMPONENT_MAPPING_ASSET_GROUP_CLASS ="js-cq-AssetToComponentMapper-assetGroup";
+    var COMPONENT_MAPPING_MIME_TYPES_CLASS = "js-cq-AssetToComponentMapper-mimeTypes";
+    var COMPONENT_MAPPING_ADD_MAPPING_CLASS = "js-cq-AssetToComponentMapper-addMapping";
+    var COMPONENT_MAPPING_ADD_TYPE_CLASS = "js-cq-AssetToComponentMapper-addMimeType";
+    var COMPONENT_MAPPING_DELETE_MAPPING_CLASS = "js-cq-AssetToComponentMapper-deleteMapping";
+    var COMPONENT_MAPPING_HIDDEN_INPUTS_CONTAINER_CLASS = "js-cq-AssetToComponentMapper-mappingHiddenInputs";
+
+    var ALLOWED_COMPONENT_SELECTOR = ".js-cq-AllowedComponents-component";
+    var ALLOWED_COMPONENT_INPUTS_CHECKED_SELECTOR = ALLOWED_COMPONENT_SELECTOR + " input[type='checkbox']:checked";
+
+    var ASSET_TO_COMPONENT_RELATIVE_PATH = "./cq:authoring/assetToComponentMapping/";
+    var MAPPING_NAME_PREFIX = "mapping_";
+
+    var FORM_FIELD_WRAPPER_SELECTOR = ".coral-Form-fieldwrapper";
+
+    /**
+     * Current dialog
+     *
+     * @type {Coral.Dialog}
+     */
+    var dialog;
+
+    /**
+     * Asset to component mapping main container
+     *
+     * @type {Coral.Accordion}
+     */
+    var ACMContainer;
+
+    /**
+     * List of {@code Coral.Select} resource type containing the list of available resource types for the selected asset type
+     *
+     * @type {Coral.Select}
+     */
+    var ACMResourceTypeElements;
+
+    /**
+     * Dictionary of component drop targets
+     *
+     * The key is the component resource type
+     *
+     * @type {Object.<string, ComponentDropTarget>}
+     */
+    var ACMComponentDropTargets = {};
+
+    /**
+     * List of {@code ComponentDropTarget} that correspond to the current allowed components
+     *
+     * @type {Object.<string,ComponentDropTarget>}
+     */
+    var allowedComponentDropTargets = {};
+
+    /**
+     * Returns a template for a new mapping of asset to component form
+     *
+     * @param mappingName   - Name of the mapping resource
+     * @returns {string} The DOM structure as a string
+     */
+    function getTemplate(mappingName) {
+      return '<span class="' + COMPONENT_MAPPING_HIDDEN_INPUTS_CONTAINER_CLASS + '"></span>' +
+          '<div class="coral-Form-fieldwrapper">' +
+              '<label class="coral-Form-fieldlabel">' + Granite.I18n.get("Component") + '</label>' +
+              '<coral-select name="' + ASSET_TO_COMPONENT_RELATIVE_PATH + mappingName + '/resourceType" class="' + COMPONENT_MAPPING_RESOURCE_TYPE_CLASS + ' coral-Form-field" placeholder="' + Granite.I18n.get("Choose a component") + '" required></coral-select>' +
+          '</div>' +
+          '<coral-alert variant="warning" class="cq-AssetToComponentMapper-resourceType--notAllowed">' +
+                '<coral-alert-content>' + Granite.I18n.get("Component not allowed by the container") + '</coral-alert-content>' +
+          '</coral-alert>' +
+          '<div class="coral-Form-fieldwrapper" hidden>' +
+              '<label class="coral-Form-fieldlabel">' + Granite.I18n.get("Drop target") + '</label>' +
+              '<coral-select name="' + ASSET_TO_COMPONENT_RELATIVE_PATH + mappingName + '/droptarget" class="' + COMPONENT_MAPPING_DROP_TARGET_CLASS + ' coral-Form-field" placeholder="' + Granite.I18n.get("Choose a drop target") + '" required></coral-select>' +
+          '</div>' +
+          '<div class="coral-Form-fieldwrapper" hidden>' +
+              '<label class="coral-Form-fieldlabel">' + Granite.I18n.get("Asset Group") + '</label>' +
+              '<coral-select name="' + ASSET_TO_COMPONENT_RELATIVE_PATH + mappingName + '/assetGroup" class="' + COMPONENT_MAPPING_ASSET_GROUP_CLASS + ' coral-Form-field" placeholder="' + Granite.I18n.get("Choose an asset group") + '" required></coral-select>' +
+          '</div>' +
+          '<div class="coral-Form-fieldwrapper">' +
+              '<label class="coral-Form-fieldlabel">' + Granite.I18n.get("Mime types") + '</label>' +
+              '<coral-multifield class="' + COMPONENT_MAPPING_MIME_TYPES_CLASS + ' coral-Form-field" disabled>' +
+                  '<button coral-multifield-add type="button" is="coral-button" class="' + COMPONENT_MAPPING_ADD_TYPE_CLASS + '" disabled>' + Granite.I18n.get("Add type") + '</button>' +
+                  '<template coral-multifield-template>' +
+                    '<input is="coral-textfield" type="text" name="' + ASSET_TO_COMPONENT_RELATIVE_PATH + mappingName + '/assetMimetype">' +
+                  '</template>' +
+              '</coral-multifield>' +
+          '</div>' +
+          '<div class="coral-Form-fieldwrapper">' +
+            '<button is="coral-button" variant="warning" class="' + COMPONENT_MAPPING_DELETE_MAPPING_CLASS + ' coral-Form-field">' + Granite.I18n.get("Delete") + '</button>' +
+          '</div>';
+    }
+
+    /**
+     * Returns the DOM structure of a mapping
+     *
+     * @param {string} mappingName           - Name given to the mapping
+     * @returns {HTMLElement[]}
+     */
+    function createMappingForm (mappingName) {
+        return $.parseHTML(getTemplate(mappingName));
+    }
+
+    /**
+     * Initialize the current resource type element with the proper list of components.
+     *
+     * The list is dependent of the selected asset type
+     *
+     * @param {Coral.Select} resourceTypeElement
+     */
+    function initResourceType (resourceTypeElement) {
+        Coral.commons.ready(resourceTypeElement, function (element) {
+            var resourceType;
+
+            if (element.selectedItem) {
+                resourceType = element.selectedItem.value;
+            }
+
+            element.items.clear();
+
+            var mappingElement = resourceTypeElement.closest("." + COMPONENT_MAPPING_MAPPING_CLASS);
+            mappingElement.className = mappingElement.className.replace(COMPONENT_MAPPING_NOT_ALLOWED_CLASS, "");
+
+            var listItems = getAllowedComponentListItems(resourceType);
+
+            // Add the currently selected value when it is not among the allowed components
+            if (resourceType && !allowedComponentDropTargets[resourceType]) {
+                var selectedComponentDropTarget = getComponentDropTarget(resourceType);
+
+                if (selectedComponentDropTarget) {
+                    listItems.unshift({
+                        content: {
+                            textContent: selectedComponentDropTarget.title + " - " + selectedComponentDropTarget.group
+                        },
+                        value: selectedComponentDropTarget.resourceType,
+                        selected: true
+                    });
+                }
+
+                // Warn the user that resource type is not allowed by the container
+                mappingElement.classList.add(COMPONENT_MAPPING_NOT_ALLOWED_CLASS);
+            }
+
+            for (var i = 0, length = listItems.length; i < length; i++) {
+                element.items.add(listItems[i]);
+            }
+        });
+    }
+
+    /**
+     * Returns the list of allowed components references suitable for being added to a {@Coral.Collection}
+     *
+     * @param {string} [selectedResourceType]
+     *
+     * @returns {object[]} List of configuration objects
+     */
+    function getAllowedComponentListItems (selectedResourceType) {
+        var items = [];
+
+        for (var key in allowedComponentDropTargets) {
+            if (allowedComponentDropTargets.hasOwnProperty(key))
+            var componentDropTarget = allowedComponentDropTargets[key];
+
+            if (componentDropTarget) {
+                var item = {
+                    content: {
+                        textContent: componentDropTarget.title + " - " + componentDropTarget.group
+                    },
+                    value: componentDropTarget.resourceType,
+                    selected: selectedResourceType && selectedResourceType === componentDropTarget.resourceType
+                };
+
+                items.push(item);
+            }
+        }
+
+        return items;
+    }
+
+    /**
+     * Initialize all the available resource types {@code Coral.Autocomplete} elements
+     */
+    function initResourceTypes () {
+        ACMResourceTypeElements = ACMContainer.querySelectorAll("." + COMPONENT_MAPPING_RESOURCE_TYPE_CLASS);
+
+        if (ACMResourceTypeElements) {
+            for (var i = 0, length = ACMResourceTypeElements.length; i < length; i++) {
+                initResourceType(ACMResourceTypeElements[i]);
+            }
+        }
+    }
+
+    /**
+     * Adds to the DOM a new mapping entry in the list of mappings
+     */
+    function addMappingItem () {
+        var mappingElement = ACMContainer.items.add({
+            label: {
+                innerHTML: Granite.I18n.get("New Asset Mapping")
+            },
+            selected: true
+        });
+
+        var mappingName = MAPPING_NAME_PREFIX + (+new Date());
+
+        mappingElement.dataset.name = mappingName;
+        mappingElement.classList.add(COMPONENT_MAPPING_MAPPING_CLASS);
+
+        var formElements = createMappingForm(mappingName);
+
+        for (var i = 0, length = formElements.length; i < length; i++) {
+            mappingElement.content.appendChild(formElements[i]);
+        }
+
+        var resourceTypeElement = mappingElement.content.querySelector("." + COMPONENT_MAPPING_RESOURCE_TYPE_CLASS);
+
+        initResourceType(resourceTypeElement);
+    }
+
+    /**
+     * Removes the {@code Coral.Accordion.Item} from the DOM
+     * Creates a hidden input to request the server for deleting the selected mapping
+     *
+     * @param event
+     */
+    function deleteMappingClicked (event) {
+        var deleteBtn = event.target;
+        var mapping = deleteBtn.closest("." + COMPONENT_MAPPING_MAPPING_CLASS);
+
+        if (mapping) {
+            var mappingName = mapping.dataset.name;
+            var hiddenInput = document.createElement("input");
+            hiddenInput.type = "hidden";
+            hiddenInput.name = ASSET_TO_COMPONENT_RELATIVE_PATH + mappingName + "@Delete";
+            hiddenInput.value = "";
+
+            ACMContainer.appendChild(hiddenInput);
+
+            ACMContainer.items.remove(mapping);
+        }
+    }
+
+    /**
+     * Updates the label of the mapping based on the mapping content
+     *
+     * @param event
+     */
+    function updateMappingLabel (event) {
+        var target = event.target;
+        var mapping = target.closest("." + COMPONENT_MAPPING_MAPPING_CLASS);
+        var resourceTypeElement = mapping.querySelector("." + COMPONENT_MAPPING_RESOURCE_TYPE_CLASS);
+        var componentDropTarget = getComponentDropTarget(resourceTypeElement.value);
+
+        mapping.label.innerHTML = componentDropTarget.title + " - " + componentDropTarget.group;
+    }
+
+    /**
+     * Returns a {@code ComponentDropTarget} for the given resource type
+     *
+     * @param {string} resourceType
+     * @returns {ComponentDropTarget}
+     */
+    function getComponentDropTarget (resourceType) {
+        return ACMComponentDropTargets[resourceType];
+    }
+
+    /**
+     * Initialize the list of allowed {@code ComponentDropTarget}s
+     *
+     * @param {Coral.Dialog} dialog
+     */
+    function initAllowedComponentDropTargets() {
+        // Filter the list of allowed components
+        var checkboxes = dialog.querySelectorAll(ALLOWED_COMPONENT_INPUTS_CHECKED_SELECTOR);
+        allowedComponentDropTargets = {};
+
+        for (var i = 0; i < checkboxes.length; i++) {
+            var allowedComponent = checkboxes[i].closest(ALLOWED_COMPONENT_SELECTOR);
+
+            if (allowedComponent) {
+                allowedComponentDropTargets[allowedComponent.dataset.resourceType] = getComponentDropTarget(allowedComponent.dataset.resourceType);
+            }
+        }
+    }
+
+    /**
+     * Updates the given asset group HTMLElement
+     *
+     * @param {Coral.Select} assetGroupElement
+     * @param {DropTarget} dropTarget
+     */
+    function updateAssetGroup (assetGroupElement, dropTarget) {
+        if (dropTarget.groups) {
+            var firstGroup = true;
+
+            dropTarget.groups.forEach(function (group) {
+                assetGroupElement.items.add({
+                    content: {
+                        textContent: group
+                    },
+                    value: group,
+                    selected: firstGroup
+                });
+
+                firstGroup = false;
+            });
+
+            // Hide the field if there is no alternative
+            assetGroupElement.closest(FORM_FIELD_WRAPPER_SELECTOR).hidden = dropTarget.groups.length < 2;
+        }
+    }
+
+    /**
+     * Updates the given drop targets HTMLElement
+     *
+     * @param {Coral.Select} mappingElement
+     * @param {ComponentDropTarget} componentDropTarget
+     */
+    function updateDropTargets (mappingElement, componentDropTarget) {
+        if (!mappingElement || !componentDropTarget || !componentDropTarget.dropTargets) {
+            return;
+        }
+        var dropTargetElement = mappingElement.querySelector("." + COMPONENT_MAPPING_DROP_TARGET_CLASS);
+        var assetGroupElement = mappingElement.querySelector("." + COMPONENT_MAPPING_ASSET_GROUP_CLASS);
+        var mimeTypesElement = mappingElement.querySelector("." + COMPONENT_MAPPING_MIME_TYPES_CLASS);
+
+        dropTargetElement.items.clear();
+        assetGroupElement.items.clear();
+        mimeTypesElement.items.clear();
+
+        var firstDropTarget = true;
+        // Hide the field if there is no alternative
+        dropTargetElement.closest(FORM_FIELD_WRAPPER_SELECTOR).hidden = componentDropTarget.dropTargets.length < 2;
+
+        componentDropTarget.dropTargets.forEach(function(dropTarget) {
+
+            dropTargetElement.items.add({
+                content: {
+                    textContent: dropTarget.name
+                },
+                value: dropTarget.name,
+                selected: firstDropTarget
+            });
+
+            if (firstDropTarget) {
+                updateAssetGroup(assetGroupElement, dropTarget);
+                updateMimeTypes(mappingElement, componentDropTarget);
+            }
+
+            firstDropTarget = false;
+        });
+    }
+
+    /**
+     * The resource type HTMLElement has changed
+     *
+     * @param event
+     */
+    function resourceTypeChanged (event) {
+        // Update all the depending fields
+        var resourceTypeElement = event.target;
+        var mappingElement = resourceTypeElement.closest("." + COMPONENT_MAPPING_MAPPING_CLASS);
+        var dropTargetElement = mappingElement.querySelector("." + COMPONENT_MAPPING_DROP_TARGET_CLASS);
+        var componentDropTarget = getComponentDropTarget(resourceTypeElement.value);
+
+        if (componentDropTarget && mappingElement) {
+            updateDropTargets(mappingElement, componentDropTarget);
+        }
+
+        if (mappingElement && componentDropTarget && dropTargetElement) {
+            updateMimeTypes(mappingElement, componentDropTarget);
+        }
+
+        updateMappingLabel(event);
+    }
+
+    /**
+     * Updates the mime types based on the provided element
+     *
+     * @param mappingElement
+     * @param componentDropTarget
+     */
+    function updateMimeTypes (mappingElement, componentDropTarget) {
+        if (!mappingElement || !componentDropTarget || !componentDropTarget.dropTargets) {
+            return;
+        }
+
+        var dropTargetElement = mappingElement.querySelector("." + COMPONENT_MAPPING_DROP_TARGET_CLASS);
+        var mimeTypesElement = mappingElement.querySelector("." + COMPONENT_MAPPING_MIME_TYPES_CLASS);
+        var mimeTypesAdd = mappingElement.querySelector("." + COMPONENT_MAPPING_ADD_TYPE_CLASS);
+        var dropTargetName = dropTargetElement.value;
+        var dropTarget;
+
+        mimeTypesElement.disabled = false;
+        mimeTypesAdd.disabled = false;
+
+        // Select the first drop target by default
+        dropTarget = componentDropTarget.dropTargets[0];
+
+        // Get the selected drop target
+        for (var i = 0; i < componentDropTarget.dropTargets.length; i++) {
+            if (dropTargetName === componentDropTarget.dropTargets[i].name) {
+                dropTarget = componentDropTarget.dropTargets[i];
+                break;
+            }
+        }
+
+        if (dropTarget) {
+            mimeTypesElement.items.clear();
+
+            if (dropTarget.accept) {
+                var mappingName = mappingElement.dataset.name;
+
+                dropTarget.accept.forEach(function (accept) {
+                    var item = mimeTypesElement.items.add({
+                        content: {
+                            htmlContent: new Coral.Textfield().set({
+                                name: ASSET_TO_COMPONENT_RELATIVE_PATH + mappingName
+                            })
+                        }
+                    });
+
+                    item.querySelector("input[type='text']").value = accept;
+                });
+            }
+        }
+    }
+
+    /**
+     * A drop target HTMLElement has changed
+     *
+     * @param event
+     */
+    function dropTargetChanged (event) {
+        // Update all the depending fields
+        var dropTargetElement = event.target;
+        var mappingElement = dropTargetElement.closest("." + COMPONENT_MAPPING_MAPPING_CLASS);
+        var assetGroupElement = mappingElement.querySelector("." + COMPONENT_MAPPING_ASSET_GROUP_CLASS);
+        var resourceType = mappingElement.querySelector("." + COMPONENT_MAPPING_RESOURCE_TYPE_CLASS).value;
+        var componentDropTarget = getComponentDropTarget(resourceType);
+
+        var dropTarget;
+        // get the selected drop target
+        for (var i = 0; i < componentDropTarget.dropTargets.length; i++) {
+            if (dropTargetElement.value === componentDropTarget.dropTargets[i].name) {
+                dropTarget = componentDropTarget.dropTargets[i];
+                break;
+            }
+        }
+
+        if (assetGroupElement && dropTarget) {
+            updateAssetGroup(assetGroupElement, dropTarget);
+        }
+
+        if (mappingElement && componentDropTarget && dropTargetElement) {
+            updateMimeTypes(mappingElement, componentDropTarget);
+        }
+    }
+
+    channel.on("dialog-loaded", function (event) {
+        dialog = event.dialog[0];
+        ACMContainer = dialog.querySelector(COMPONENT_MAPPING_MAPPER_SELECTOR);
+
+        if (ACMContainer) {
+            // TODO Update the list of allowed components when the parent tab is selected
+            var tabView = ACMContainer.closest("coral-tabview");
+
+            Coral.commons.ready(tabView, function () {
+                tabView.on("coral-panelstack:change", function (event) {
+                    // Refresh the view when the ACM tab is selected
+                    if (event.detail.selection && event.detail.selection.contains(ACMContainer)) {
+                        initAllowedComponentDropTargets(dialog);
+                        initResourceTypes();
+                    }
+                });
+            });
+
+            ACMResourceTypeElements = ACMContainer.querySelectorAll("." + COMPONENT_MAPPING_RESOURCE_TYPE_CLASS);
+            var addMappingBtn = dialog.querySelector("." + COMPONENT_MAPPING_ADD_MAPPING_CLASS);
+
+            // Configuration data
+            var dropTargets = JSON.parse(ACMContainer.dataset.dropTargets);
+
+            if (dropTargets) {
+                ACMComponentDropTargets = dropTargets.componentDropTargets || {};
+            }
+
+            addMappingBtn.on("click", addMappingItem);
+
+            ACMContainer.on("click", "." + COMPONENT_MAPPING_DELETE_MAPPING_CLASS, deleteMappingClicked);
+            $(ACMContainer).on("change", "." + COMPONENT_MAPPING_RESOURCE_TYPE_CLASS, resourceTypeChanged);
+            $(ACMContainer).on("change", "." + COMPONENT_MAPPING_DROP_TARGET_CLASS, dropTargetChanged);
+        }
+    });
+
+
+})(jQuery, Granite.author, jQuery(document), this);

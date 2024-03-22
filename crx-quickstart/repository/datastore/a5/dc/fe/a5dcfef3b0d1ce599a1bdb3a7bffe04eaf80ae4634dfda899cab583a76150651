@@ -1,0 +1,738 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (document, Granite, $) {
+    "use strict";
+
+    var ns = ".start-bulk-workflows";
+
+    var PACKAGE_SELECTOR = ".package";
+    var TABLE_SELECTOR = ".cq-common-admin-sourcepages";
+
+    var ui = $(window).adaptTo("foundation-ui");
+    var Paginator = $(window).adaptTo("foundation-util-paginator");
+    var messenger = $(window).adaptTo("foundation-util-messenger");
+    var authorizablesCache = {};
+    var paginator;
+    var table, wizard, form, multiResourceSupport;
+
+    var pageTemplate = function (item) {
+        var time = item.cache.isPublished ? `<foundation-time value="${item.cache.published}"></foundation-time>` : item.cache.published;
+        return `<tr is="coral-table-row" itemprop="item" class="foundation-collection-item" data-foundation-collection-item-id="${item.path}"> 
+                <td is="coral-table-cell" class="select" coral-table-rowselect> 
+                   <img class="foundation-collection-item-thumbnail" src="${item.cache.thumbnailurl}" alt=""> 
+                </td> 
+                <td class="foundation-collection-item-title" is="coral-table-cell" alignment="column"> 
+                   <span></span><div class="foundation-layout-util-subtletext">${item.path}</div> 
+                </td> 
+                <td class="foundation-collection-item-modified" is="coral-table-cell" alignment="column" value="${item.cache.modifieddate}"> 
+                   <foundation-time value="${item.cache.modified}"></foundation-time> 
+                   <div class="foundation-layout-util-subtletext foundation-collection-item-user-info"  
+                        user-info-id="${item.cache.modifiedbyuser}"> ${item.cache.modifiedby} </div> 
+                </td> 
+                <td class="foundation-collection-item-published" is="coral-table-cell" alignment="column"  
+                    value="${item.cache.publisheddate}"> 
+                        ${time}
+                   <div class="foundation-layout-util-subtletext foundation-collection-item-user-info"  
+                    user-info-id="  item.cache.publishedbyuser  "> ${item.cache.publishedby}</div> 
+                </td> 
+               </tr>`;
+    };
+    var text = Granite.I18n.get("There is no item.");
+    var emptyRow = `<tr is="coral-table-row" class="empty-row"> 
+                         <td is="coral-table-cell" colspan="4" alignment="center">${text}</td> 
+                    </tr>`;
+
+    function _getItemFromPath(wizard, resourcePath) {
+        var retVal = null;
+        if (wizard.childResourcePageList && wizard.childResourcePageList.length > 0) {
+            for (var index = 0; index < wizard.childResourcePageList.length; index++) {
+                var currentItem = wizard.childResourcePageList[index];
+                if (currentItem.path === resourcePath) {
+                    retVal = currentItem;
+                    break;
+                }
+            }
+        }
+        return retVal;
+    };
+
+    function _removeResourcePath(wizard, resourcePath) {
+        if (wizard.childResourcePageList && wizard.childResourcePageList.length > 0) {
+            for (var index = 0; index < wizard.childResourcePageList.length; index++) {
+                var currentItem = wizard.childResourcePageList[index];
+                if (currentItem.path == resourcePath) {
+                    wizard.childResourcePageList.splice(index, 1);
+                    var hidden = document.querySelector("input[type=hidden][name=srcPathList][data-path='" + currentItem.path + "']");
+                    if (hidden) {
+                        hidden.parentNode.removeChild(hidden);
+                    }
+                    $("input[type=hidden][name=srcPathList][value='" + currentItem.path + "']").remove();
+                    break;
+                }
+            }
+        }
+    };
+
+    function _appendResourcePage(wizard, resourcePath, bRefreshUI) {
+        var bAdded = false;
+        if (!wizard.childResourcePageList) {
+            wizard.childResourcePageList = [];
+        }
+        var newItem = {};
+        newItem.path = resourcePath;
+        _validateResourcePage(newItem);
+        if (newItem.valid) {
+            var paginator = $(_getTable(wizard)).data("foundation-layout-table.internal.paginator");
+            bAdded = true;
+            wizard.childResourcePageList.splice(paginator.offset, 0, newItem);
+            _appendCurrentPage(wizard, _getTable(wizard), newItem);
+            var table = _getTable(wizard);
+            paginator.offset = table.items.getAll().length - $(table).find(".empty-row").length;
+            if (bRefreshUI) {
+                _refreshChildPageListUI(wizard);
+            }
+        }
+        return bAdded;
+    };
+
+    function _getTable(wizard) {
+        var table = wizard.find(TABLE_SELECTOR);
+        return (table.length > 0 ? table[0] : undefined);
+    };
+
+    function _getSelectedItems(wizard) {
+        var contentTable = _getTable(wizard);
+        return contentTable.selectedItems;
+    };
+
+    function _refreshChildPageListUI(wizard) {
+
+        _updateButtonStates(wizard);
+
+        var table = _getTable(wizard);
+        if (wizard.childResourcePageList.length === 0) {
+            table.items.add($(emptyRow)[0]);
+        }
+        var emptRow = $(table).find(".empty-row");
+        if (wizard.childResourcePageList.length > 0 && emptRow.length > 0) {
+            table.items.remove(emptRow[0]);
+        }
+    }
+
+    function _validateResourcePage(currentItem) {
+        //first find if we have all information about this item
+        if (!currentItem.info) {
+            var url = Granite.HTTP.externalize(currentItem.path + "/jcr:content.json", true);
+            var data = Granite.HTTP.eval(url);
+            currentItem.info = data;
+        }
+        currentItem.valid = !!currentItem.info && !!currentItem.info["jcr:title"];
+        if (currentItem.valid) {
+            //process more data now
+            currentItem.cache = {};
+            currentItem.cache.title = currentItem.info["jcr:title"];
+            var publishedInfo = _getPublishedInfo(currentItem);
+            var modifiedInfo = _getModifiedInfo(currentItem);
+            currentItem.cache.isPublished = publishedInfo.isPublished;
+            currentItem.cache.published = publishedInfo.state;
+            currentItem.cache.publisheddate = publishedInfo.date;
+            currentItem.cache.publishedby = publishedInfo.userName;
+            currentItem.cache.publishedbyuser = publishedInfo.userId;
+            currentItem.cache.modifieddate = modifiedInfo.date;
+            currentItem.cache.modifiedby = modifiedInfo.userName;
+            currentItem.cache.modified = modifiedInfo.state;
+            currentItem.cache.modifiedbyuser = modifiedInfo.userId;
+            currentItem.cache.thumbnailurl = Granite.HTTP.externalize(currentItem.path + ".thumb.48.48.png?ck=" + modifiedInfo.date);
+        }
+    }
+
+    function _getPublishedInfo(item) {
+        var replicatedDate = item.info["cq:lastReplicated"];
+        var lastReplicationAction = item.info["cq:lastReplicationAction"];
+        var state = "";
+        var userId = item.info["cq:lastReplicatedBy"];
+        var userName = "";
+        var date = "";
+        var isPublished = true;
+
+        if (replicatedDate) {
+            var date = new Date(replicatedDate);
+            state = date.toISOString();
+            date = date.getTime();
+        }
+        if (lastReplicationAction !== "Activate") {
+            isPublished = false;
+            state = Granite.I18n.get("Not published");
+            userName = "";
+            userId = "";
+        } else {
+            if (userId) {
+                userName = _resolveUserNameById(userId);
+            }
+        }
+        return {
+            isPublished: isPublished,
+            state: state,
+            userName: userName,
+            userId: userId || "",
+            date: date
+        };
+    }
+
+    function _getModifiedInfo(item) {
+        var lastModifiedDate = item.info["cq:lastModified"];
+        var userId = item.info["cq:lastModifiedBy"];
+        var userName = "";
+        var state = "";
+        var date = "";
+
+        if (lastModifiedDate) {
+            var date = new Date(lastModifiedDate);
+            state = date.toISOString();
+            date = date.getTime();
+        }
+        if (userId) {
+            userName = _resolveUserNameById(userId);
+        }
+        return {
+            state: state,
+            userName: userName,
+            userId: userId,
+            date: date
+        };
+    }
+
+    function _resolveUserNameById(userId) {
+        var userString = "";
+        var servletUrl = Granite.HTTP.externalize('/libs/granite/security/search/profile.userproperties.json?authId=' + userId + '&path=');
+        var userName = "";
+        if (!authorizablesCache.hasOwnProperty(userId)) {
+            authorizablesCache[userId] = "";
+            $.ajax({
+                url: servletUrl,
+                type: "GET",
+                dataType: "json",
+                success: function (responseJson) {
+                    authorizablesCache[userId] = userName;
+                    var userData = {};
+                    if (responseJson.hasOwnProperty("authorizables") && responseJson.authorizables.length) {
+                        userData = responseJson.authorizables[0];
+                        if (userData.hasOwnProperty("name")) {
+                            userName = userData.name;
+                            authorizablesCache[userId] = userName;
+                            _updateSourceUserInfos();
+                        }
+                    }
+                }
+            });
+        } else {
+            userName = authorizablesCache[userId];
+        }
+        return userName;
+    }
+
+    function _updateSourceUserInfos() {
+        var form = _getFormElement();
+        var wizard = _getWizardFromForm(form);
+        var table = _getTable(wizard);
+        $(table).find('.foundation-collection-item-user-info[user-info-id]').each(function () {
+            var userId = $(this).attr("user-info-id");
+            var userName = authorizablesCache[userId];
+            if (userName) {
+                $(this).text(userName);
+                $(this).removeAttr("user-info-id");
+            }
+        });
+    }
+
+    function _appendCurrentPage(wizard, table, currentItem) {
+        table.variant = Coral.Table.variant.LIST;
+        table.multiple = true;
+        table.selectable = true;
+        var $table_row = $(pageTemplate(currentItem));
+        $('.foundation-collection-item-title span', $table_row).text(currentItem.cache.title);
+
+        table.items.add($table_row[0]);
+        _appendHiddenField(wizard, 'srcPathList', currentItem.path, currentItem.path);
+    }
+
+    function _updateItemIncludeSubPages(wizard, resources) {
+        //Add child resources in the table
+        if (resources.length === 0) {
+            return;
+        }
+        var bAdded = false;
+        var bRootPath = false;
+        var paginator = $(_getTable(wizard)).data("foundation-layout-table.internal.paginator");
+        var initialOffset = paginator.offset;
+
+        // For each child sub page and reference we have to add we either create a table row or create a hidden field.
+        // In this way all the items are taken into consideration when creating the workflow via form submit
+        resources.forEach(function (currentItem, index) {
+            var tableItemWithPath = _getItemFromPath(wizard, currentItem.path);
+            // if the item to be added doesn't currently show up in the table, we have to either add it or create a
+            // hidden input with it
+            if (tableItemWithPath === null) {
+                if (currentItem.path !== '/content') {
+                    _validateResourcePage(currentItem);
+                    wizard.childResourcePageList.push(currentItem);
+                    // if we didn't reach pagination limit, we add the item to the table
+                    if(index < paginator.limit) {
+                        var table = _getTable(wizard);
+                        var tableOffset = table.items.getAll().length - $(table).find(".empty-row").length;
+                        // check if we can add the newly created item to the current view of the table
+                        if (tableOffset <= (initialOffset + paginator.limit)) {
+                            _appendCurrentPage(wizard, _getTable(wizard), currentItem);
+                            paginator.offset = tableOffset;
+                        } else {
+                            // if we can't add the current item due to pagination, we add it as a hidden field
+                            _appendHiddenField(wizard, 'srcPathList', currentItem.path, currentItem.path);
+                        }
+                    } else {
+                        // if there are more items than the table pagination limit, we add them as hidden fields
+                        _appendHiddenField(wizard, 'srcPathList', currentItem.path, currentItem.path);
+                    }
+                    bAdded = true;
+                } else {
+                    bRootPath = true;
+                }
+            }
+        });
+        ui.clearWait();
+        if (bAdded) {
+            _refreshChildPageListUI(wizard);
+        } else if (!bRootPath) {
+            ui.prompt(Granite.I18n.get("Error"),
+                Granite.I18n.get("Selected page already exist in the list."),
+                "error",
+                [{
+                    text: Granite.I18n.get("Ok"),
+                    id: "no"
+                }]
+            );
+        }
+    }
+
+    function _appendHiddenField(wizard, name, pathInfo, value) {
+        var wizard_form = $(wizard[0]);
+        var i;
+        //check if the hidden field already exists
+        if (wizard_form.find("input[type=hidden][name=" + name + "][value='" + value + "']").length > 0) {
+            return;
+        }
+        var $hiddenField = $("<input type='hidden'/>").attr("name", name);
+        wizard_form.append($hiddenField);
+        $hiddenField.data('path', pathInfo);
+        if (value !== undefined) {
+            $hiddenField.attr("value", value);
+        }
+    };
+
+    function _updateButtonStates(wizard) {
+        $(_getTable(wizard)).trigger("foundation-selections-change");
+        var table = _getTable(wizard);
+        if (table.items.length === 0) {
+            $(".foundation-wizard-control[type=submit]").attr("disabled", true);
+        } else {
+            $(".foundation-wizard-control[type=submit]").removeAttr("disabled");
+        }
+
+        //package not available for single page selection
+        var keepPackageCheck = document.querySelector(".cq-sites-startbulkworkflows-keeppackage");
+        if (keepPackageCheck) {
+            if(keepPackageCheck.checked && wizard.childResourcePageList.length === 1) {
+                keepPackageCheck.checked = false;
+            }
+            var multiResStatus = !multiResourceSupport || wizard.childResourcePageList.length === 1;
+            if (keepPackageCheck.disabled != multiResStatus) {
+                keepPackageCheck.disabled = multiResStatus;
+                Coral.commons.ready( function() {
+                    keepPackageCheck.trigger("change");
+                });
+            }
+        }
+
+    };
+
+    function _handleDeleteBtnClick(wizard) {
+        var selectedItems = _getSelectedItems(wizard);
+        if (selectedItems != null && selectedItems.length > 0) {
+            for (var index = 0; index < selectedItems.length; index++) {
+                var currentItem = $(selectedItems[index]);
+                _removeResourcePath(wizard, currentItem.data('foundationCollectionItemId'));
+                //remove selected
+                _getTable(wizard).items.remove(currentItem[0]);
+            }
+
+            //paginate
+            var paginator = $(_getTable(wizard)).data("foundation-layout-table.internal.paginator");
+            var hasMore = paginator.hasNext;
+            if (hasMore === undefined) {
+                hasMore = selectedCount.length >= (paginator.offset + paginator.limit);
+            }
+
+            if (hasMore && table.items.getAll().length - $(table).find(".empty-row").length <= 0) {
+                paginator.restart(paginator.offset, hasMore);
+            }
+
+            _refreshChildPageListUI(wizard);
+        }
+    };
+
+    function _parseUrlParams() {
+        var search_string = location.search;
+
+        function _parse_values_internal(params, pairs) {
+            if(!pairs || pairs.length === 0) {
+                return {};
+            }
+            var pair = pairs[0];
+            var parts = pair.split('=');
+            var key = decodeURIComponent(parts[0]);
+            var value = decodeURIComponent(parts.slice(1).join('='));
+
+            // Handle multiple parameters of the same name
+            if (typeof params[key] === "undefined") {
+                params[key] = value;
+            } else {
+                params[key] = [].concat(params[key], value);
+            }
+
+            return pairs.length == 1 ? params : _parse_values_internal(params, pairs.slice(1))
+        }
+
+        return search_string.length == 0 ? {} : _parse_values_internal({}, search_string.substr(1).split('&'));
+    };
+
+    function _getFormElement() {
+        return $(".cq-sites-startbulkworkflows-form");
+    };
+
+    function _getWizardFromForm(form) {
+        return form.find(".cq-sites-startbulkworkflows-wizard");
+    };
+
+    function handlePagination(wizard, collection, config, paginator) {
+        var paginate = function (wizard, scrollContainer, paginator) {
+
+            paginator = new Paginator({
+                el: scrollContainer[0],
+                limit: config.limit || 20,
+                wait: function(paginator) {
+                    ui.wait();
+                    return {
+                        clear: function () {
+                            ui.clearWait();
+                        }
+                    }
+                },
+                resolveURL: function (paginator) {
+                    return "";
+                },
+                processResponse: function (paginator, html) {
+                    var deferred = $.Deferred();
+                    var items = wizard.childResourcePageList.slice(this.offset, this.offset + this.limit);
+                    items.forEach(function (currentItem) {
+                        _appendCurrentPage(wizard, _getTable(wizard), currentItem);
+                    });
+
+                    var hasMore = wizard.childResourcePageList.length > (this.offset + this.limit);
+
+                    deferred.resolve({
+                        length: items.length,
+                        hasNext: hasMore
+                    });
+
+                    return deferred.promise();
+                }
+            });
+
+            collection.data("foundation-layout-table.internal.paginator", paginator);
+
+            Coral.commons.ready(collection[0], function() {
+                var offset = collection.find(".foundation-collection-item").length;
+                paginator.start(offset);
+            });
+        };
+
+        var scrollContainer = collection.children("[coral-table-scroll]");
+
+        if (scrollContainer.length) {
+            paginate(wizard, scrollContainer, paginator);
+        } else {
+            requestAnimationFrame(function () {
+                paginate(wizard, collection.children("[coral-table-scroll]"), paginator);
+            });
+        }
+
+        return function () {
+            if (paginator) {
+                paginator.destroy();
+                collection.removeData("foundation-layout-table.internal.paginator");
+                collection.removeData("foundation-layout-table.internal.paginator.sort");
+            }
+        };
+    }
+
+    function createWorkflow(form) {
+        var data = {
+            "_charset_" : "utf-8",
+            "payloadType" : "JCR_PATH",
+            "model" : $("coral-select[name='workflowModel']")[0].selectedItem.value,
+            "workflowTitle" : $("input[name=workflowTitle]")[0].value,
+            "packageTitle": form[0].elements.packageTitle.value,
+            "payload" : []
+        };
+
+        var paths = $("input[type=hidden][name=srcPathList]");
+
+        for (var i = 0; i < paths.length; i++) {
+            if (paths[i].value) {
+                data["payload"].push(paths[i].value);
+            }
+
+        }
+
+        var formResponse = form.find(".foundation-form-response-ui-success").data("foundationFormResponseUiSuccess");
+
+        $.ajax({
+            url: form.attr("action").replace(PACKAGE_SELECTOR, ""),
+            type: form.attr("method") || "post",
+            data: data,
+            success: function() {
+                try {
+                    messenger.put(null, Granite.I18n.get("Workflows have been created for selected resources."), "success");
+
+                    if (!formResponse.redirect.startsWith("/") && !formResponse.redirect.startsWith("http")) {
+                        console.error("Misconfigured redirection target link.");
+                    }
+                    else {
+                        location.href = formResponse.redirect;
+                    }
+                } catch (e) {
+                    if (window.console) {
+                        console.warn("Error occur removing message", e);
+                    }
+                }
+            },
+            error: function() {
+                var msg = form.data("errormessage");
+                ui.notify("", msg ? Granite.I18n.getVar(msg) : Granite.I18n.get("Failed to create workflow"), "error");
+            }
+        });
+    }
+
+    function revalidateStep(step) {
+        if (step.data("foundationWizardStepValidation") === false) {
+            return true;
+        }
+
+        var allValid = true;
+
+        step.adaptTo("foundation-validation-helper").getSubmittables().forEach(function(submittable) {
+            var $submittable = $(submittable);
+            if (!$submittable.is(":visible") || $submittable.is(":disabled")) {
+                return;
+            }
+            var validationApi = $submittable.adaptTo("foundation-validation");
+
+            if (validationApi) {
+                if (!validationApi.checkValidity()) {
+                    allValid = false;
+                }
+                validationApi.updateUI();
+            }
+        });
+
+        step.data("foundation-wizard-step.internal.valid", allValid);
+
+        return allValid;
+    }
+
+    function defaultClearMessage(field) {
+        var error = field.data("foundation-validation.internal.error");
+        if (error) {
+            var tooltip = $(error).data("foundation-validation.internal.error.tooltip");
+            tooltip.hide();
+            tooltip.remove();
+
+            error.remove();
+        }
+        field.removeAttr("invalid");
+        field.removeClass("is-invalid");
+        field.attr("aria-invalid", false);
+    }
+
+    function validateHandler(e) {
+        e.stopPropagation();
+        e.preventDefault();
+
+        var isValidStep = revalidateStep(wizard.find(".foundation-wizard-step-active"));
+        wizard.adaptTo("foundation-wizard").toggleNext(isValidStep);
+    }
+
+    $(function () {
+        form = _getFormElement();
+        wizard = _getWizardFromForm(form);
+        table = $(TABLE_SELECTOR)[0];
+
+        form.on("change" + ns, ".cq-sites-startbulkworkflows-keeppackage", function (e) {
+            var packageTitle = form[0].elements.packageTitle;
+            var fieldAPI = $(packageTitle).adaptTo("foundation-field");
+            if (fieldAPI) {
+                fieldAPI.setDisabled(!this.checked);
+                fieldAPI.setRequired(this.checked);
+            }
+
+            // This is a disabled field
+            if (!this.checked) {
+                fieldAPI.isValidated = false;
+                defaultClearMessage($(packageTitle));
+            }
+
+            validateHandler(e);
+        });
+
+        form.on("change" + ns, "coral-select[name='workflowModel']", function (e) {
+            var selectedOption = e.target.selectedItem;
+            var keepPackageCheck = document.querySelector(".cq-sites-startbulkworkflows-keeppackage");
+            multiResourceSupport = selectedOption.dataset["multiresourcesupport"] === "true";
+
+            if (keepPackageCheck) {
+                if (keepPackageCheck.checked) {
+                    keepPackageCheck.checked = false;
+                }
+                var multiResStatus = !multiResourceSupport || wizard.childResourcePageList.length === 1;
+                if (keepPackageCheck.disabled != multiResStatus) {
+                    keepPackageCheck.disabled = multiResStatus;
+                    Coral.commons.ready( function() {
+                        keepPackageCheck.trigger("change");
+                    });
+                }
+            }
+        });
+
+        form.on("change" + ns, "input[name='workflowTitle'], input[name=PackageTitle]", validateHandler);
+        form.on("input" + ns, "input[name=workflowTitle], input[name=PackageTitle]", Granite.UI.Foundation.Utils.debounce(validateHandler, 500));
+
+        $(document).on("include-children-confirm", function (event) {
+            _updateItemIncludeSubPages(wizard, event.resources);
+
+        });
+
+        form.off("submit" + ns).on("submit" + ns, function(e) {
+            if(!multiResourceSupport || wizard.childResourcePageList.length === 1) {
+                e.preventDefault();
+                e.stopPropagation();
+                createWorkflow(form);
+            }
+        });
+
+        wizard.find(".foundation-collection-action-delete").click(function (e) {
+            ui.prompt(Granite.I18n.get("Remove"),
+                Granite.I18n.get("Do you really want to remove selected pages?"),
+                "error",
+                [{
+                    text: Granite.I18n.get("Cancel"),
+                    id: "no"
+                },
+                    {
+                        text: Granite.I18n.get("Remove"),
+                        id: "yes",
+                        warning: true
+                    }],
+                function (btnId) {
+                    if (btnId === "yes") {
+                        _handleDeleteBtnClick(wizard);
+                    }
+                });
+        });
+
+        $(window).adaptTo("foundation-registry").register("foundation.picker.control.action", {
+            name: "cq.commons.addcontent",
+            handler: function (name, el, config, selections) {
+                if ((selections.length > 0)) {
+                    ui.wait();
+                    var bAdded = false;
+                    var bRootPath = false;
+                    selections.forEach(function (selection) {
+                        var strResourcePath = selection.value;
+                        if (strResourcePath != '/content') {
+                            var currentItem = _getItemFromPath(wizard, strResourcePath);
+                            if (currentItem == null) {
+                                if (_appendResourcePage(wizard, strResourcePath, false)) {
+                                    bAdded = true;
+                                }
+                            }
+                        } else {
+                            bRootPath = true;
+                        }
+                    });
+                    ui.clearWait();
+                    if (bAdded) {
+                        _refreshChildPageListUI(wizard);
+                    } else if (!bRootPath) {
+                        ui.prompt(Granite.I18n.get("Error"),
+                            Granite.I18n.get("Selected page already exist in the list."),
+                            "error",
+                            [{
+                                text: Granite.I18n.get("Ok"),
+                                id: "no"
+                            }]
+                        );
+                    }
+                }
+            }
+        });
+
+        // autoselect source page
+        Coral.commons.ready(wizard[0], function () {
+            handlePagination(wizard, $(_getTable(wizard)), {}, paginator);
+            var path_array = [];
+            var url_params = _parseUrlParams();
+            if (url_params && url_params['item'] && url_params['item'].length > 0) {
+                if (Object.prototype.toString.call(url_params['item']) === '[object Array]') {
+                    path_array = url_params['item'];
+                } else if (url_params['item'].length > 0) {
+                    path_array.push(url_params['item']);
+                }
+
+            } else if (window.location.hash) {
+                var path = window.location.hash.substring(1);
+                path_array = path.split(',');
+            }
+            if (!wizard.childResourcePageList) {
+                wizard.childResourcePageList = [];
+            }
+
+            Coral.commons.ready(table, function (el) {
+                table = el;
+                table.items.remove(table.items.getAll()[0]);
+
+                if (path_array && path_array.length > 0) {
+                    for (var index = 0; index < path_array.length; index++) {
+                        _appendResourcePage(wizard, path_array[index], true);
+                    }
+                } else {
+                    _refreshChildPageListUI(wizard);
+                }
+                _updateButtonStates(wizard);
+            });
+        });
+
+    });
+})(document, Granite, Granite.$);

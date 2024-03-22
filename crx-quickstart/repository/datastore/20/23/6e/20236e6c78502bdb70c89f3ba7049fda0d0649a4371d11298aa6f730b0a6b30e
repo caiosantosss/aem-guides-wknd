@@ -1,0 +1,2471 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+
+/**
+ * A helper class providing a set of WCM-related utilities.
+ * @static
+ * @singleton
+ * @class CQ.WCM
+ */
+CQ.utils.WCM = function() {
+
+    /**
+     * The current WCM mode.
+     * @private
+     * @type String
+     */
+    var currentMode = null;
+
+    /**
+     * The current WCM preview mode.
+     * @private
+     * @type String
+     */
+    var currentPreviewMode = null;
+
+    var editConfigs = [];
+    var editPathStack = null;
+
+    /**
+     * The global registry of edit bars.
+     * @private
+     * @type Object
+     */
+    var editables = {};
+
+    /**
+     * The path of the current page
+     * @private
+     * @type String
+     */
+    var pagePath = null;
+
+    /**
+     * The global registry of dialogs.
+     * @private
+     * @type Object
+     */
+    var dialogs = {};
+
+    /**
+     * Global registry of "external" drop targets (= drop targets that are neither
+     * contained in a dialog nor registered as editables.
+     * @type CQ.Ext.Component[]
+     */
+    var dropTargetComponents = [];
+
+    /**
+     * The default configuration for edit bars.
+     * @private
+     * @type Object
+     */
+    var defaultEditConfig = {
+        //"xtype": "editbar"
+        "xtype": "editrollover"
+    };
+
+
+    /**
+     * Flag indicating if all Editings should be hidden
+     * @private
+     * @type Boolean
+     */
+    var readOnly = false;
+
+    /**
+     * The default configuration for the sidekick.
+     * @private
+     * @type Object
+     */
+    var defaultSidekickConfig = {
+        "xtype": "sidekick"
+    };
+
+    /**
+     * Contains all shown layers.
+     * @private
+     * @type Object
+     */
+    var layers = null;
+
+    /**
+     * Returns the current element in the DOM.
+     * @private
+     * @return {DOMElement} The element
+     */
+    var getCurrentElement = function(path, finder) {
+        var scripts = document.getElementsByTagName("script");
+        try {
+            var toFind = finder.replace("$PATH$",path);
+            var testScript = function(script) {
+                return (script.innerHTML.indexOf(toFind) != -1);
+            };
+
+            //first test if last script matches the regex: page loading case, no need to check all the scripts
+            var selectedScript = scripts[scripts.length-1];
+            if( ! testScript(selectedScript) ) {
+                for( var i  = 0; i < scripts.length; i++) {
+                    if(testScript(scripts[i])) {
+                        selectedScript = scripts[i];
+                        break;
+                    }
+                }
+            }
+
+            if( selectedScript ) {
+                var element = selectedScript.parentNode;
+                return element.tagName != "head" ? element : null;
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    };
+
+    /**
+     * Clears the current selection.
+     * @private
+     */
+    var clearSelection = function(e) {
+        if (window.CQ_selectionLocked) {
+            window.CQ_selectionLocked = false;
+            return;
+        }
+        if (!e.shiftKey && !e.ctrlKey) {
+            CQ.utils.WCM.getSelection().clear();
+        } else {
+            CQ.DOM.clearDocumentSelection(CQ.utils.WCM.getContentWindow());
+        }
+    };
+
+    /**
+     * Checks if the specified HTML element is a form element.
+     * @private
+     */
+    var isFormElement = function(elem) {
+        return elem && elem.tagName &&
+            (elem.tagName.toLowerCase() == "input" ||
+             elem.tagName.toLowerCase() == "textarea" ||
+             elem.tagName.toLowerCase() == "select");
+    };
+
+    /**
+     * Processes the pushed keys.
+     * @param {CQ.Ext.EventObject} e The event
+     * @private
+     */
+    var processKeyDown = function(e) {
+        if (isFormElement(e.getTarget())) {
+            // abort in case the event was triggered in a form element
+            return;
+        }
+        try {
+            // cancel if inplace editing is currently active
+            var contentWin = CQ.utils.WCM.getContentWindow();
+            if (contentWin && contentWin.CQ_inplaceEditComp) {
+                return;
+            }
+            CQ.utils.WCM.altKey = e.altKey;
+            if (e.ctrlKey && e.getCharCode() == 67) { // copy (ctrl + c)
+                CQ.utils.WCM.copy(CQ.utils.WCM.getSelectedItems());
+            } else if (e.ctrlKey && e.getCharCode() == 88) { // cut (ctrl + x)
+                CQ.utils.WCM.cut(CQ.utils.WCM.getSelectedItems());
+            } else if (e.ctrlKey && e.getCharCode() == 86) { // paste (ctrl + v)
+                var targets = CQ.utils.WCM.getSelectedItems();
+                if (targets.length > 0) {
+                    var muu = CQ.undo.util.MultiUndoUtils;
+                    var undoCfg = muu.begin();
+                    // paste only works on first selected item
+                    var target = targets[0];
+                    var toPaste = CQ.utils.WCM.paste();
+                    while (toPaste.length > 0) {
+                        var item = toPaste.shift();
+                        if (e.altKey) {
+                            // [alt]: insert reference independent of it has been copied or cut
+                            target.referenceParagraph(item.path, undoCfg);
+                        } else if (item.action != CQ.utils.WCM.ACTION_CUT) {
+                            target.copyParagraph(item.path, item.resourceType, false, undoCfg);
+                        } else {
+                            muu.determineMoveInformation(undoCfg, item);
+                            var newPath = target.moveParagraph(item.path, item.resourceType);
+                            if (newPath) {
+                                muu.addMoveAction(undoCfg, newPath, target);
+                            }
+                        }
+                    }
+                    muu.reverseActions(undoCfg);
+                    muu.commit(undoCfg);
+                    CQ.utils.WCM.deselect();
+                }
+            } else if (e.getCharCode() == e.DELETE) { // delete
+                // todo: check if input field
+                CQ.utils.WCM.remove(CQ.utils.WCM.getSelectedItems());
+                CQ.utils.WCM.getContentWindow().CQ.wcm.Annotation.removeSelectedSketch();
+            } else if (e.ctrlKey && !e.shiftKey && e.getCharCode() == 90) { // undo (ctrl + z)
+                if (CQ.undo.UndoManager.isEnabled()) {
+                    var history = CQ.undo.UndoManager.getHistory();
+                    if (history.canUndo()) {
+                        try {
+                            history.undo();
+                        } catch (e) {
+                            console.log("Error executing undo: " + e.message);
+                        }
+                    }
+                    e.preventDefault();
+                }
+            } else if ((e.ctrlKey && e.getCharCode() == 89)
+                    || (e.ctrlKey && e.shiftKey && e.getCharCode() == 90)) { // redo (ctrl + y, ctrl + shift + z))
+                if (CQ.undo.UndoManager.isEnabled()) {
+                    history = CQ.undo.UndoManager.getHistory();
+                    if (history.canRedo()) {
+                        try {
+                            history.redo();
+                        } catch (e) {
+                            console.log("Error executing redo: " + e.message);
+                        }
+                    }
+                    e.preventDefault();
+                }
+            }
+        }
+        catch (e) {
+            // external document in content window
+        }
+    };
+
+    /**
+     * Processes the released keys.
+     * @param {CQ.Ext.EventObject} e The event
+     * @private
+     */
+    var processKeyUp = function(e) {
+        CQ.utils.WCM.altKey = e.altKey;
+    };
+    var editablesConfigSorter = function(a, b) {
+
+        if (a.path.lastIndexOf("/") > b.path.lastIndexOf("/")) {
+            return 1;
+        }
+        if (b.path.lastIndexOf("/") > a.path.lastIndexOf("/")) {
+            return -1;
+        }
+        return 0;
+    };
+
+    var editableReadyListeners = {};
+    var editableBeforeRenderListeners = {};
+    var editablesReady = false;
+    var sidekickReady = false;
+
+    return CQ.Ext.apply(new CQ.Ext.util.Observable (), {
+
+        initComponent: function() {
+            CQ.utils.WCM.superclass.initComponent.call(this);
+
+            this.addEvents(
+                /**
+                 * Fires when the sidekick is ready
+                 * @event sidekickready
+                 * @param {CQ.WCM} this
+                 * @param {CQ.wcm.Sidekick} sidekick
+                 * @since 5.4
+                 */
+                "sidekickready",
+
+                /**
+                 * Fires when all the page editables are ready
+                 *
+                 * <p>Not to be confused with {@link #editableready} which is called when
+                 * a single editable is ready.
+                 * @event editablesready
+                 * @param {CQ.WCM} this
+                 * @since 5.4
+                 */
+                "editablesready",
+
+                /**
+                 * Fires when a single editable is ready.
+                 *
+                 * <p>Not to be confused with {@link #editablesready} which is called when
+                 * ALL initial page editables are ready.
+                 * @event editableready
+                 * @param {CQ.wcm.EditBase} editable
+                 * @since 5.6
+                 */
+                "editableready",
+
+                /**
+                 * Fires when page info are loaded
+                 * @event pageinfoloaded
+                 * @param {CQ.WCM} this
+                 * @param {Object} pageinfo
+                 * @since 5.4
+                 */
+                "pageinfoloaded",
+
+                /**
+                 * Fires when the wcm mode changed
+                 * @event wcmmodechange
+                 * @param {CQ.WCM} this
+                 * @param {Object} wcmmode
+                 * @since 5.5
+                 */
+                "wcmmodechange"
+
+            );
+
+        },
+
+        /**
+         * The global cache of page infos
+         * @private
+         * @type Object
+         */
+        pageInfos: {},
+
+        /**
+         * The global cache of component lists
+         * @private
+         * @type Object
+         */
+        componentLists: {},
+        
+        /**
+         * The name of the cookie holding timewarp information.
+         * @static
+         * @final
+         * @type String
+         */
+        TIMEWARP_COOKIE: "timewarp",
+
+        /**
+         * The value for the timewarp mode.
+         * @static
+         * @final
+         * @type String
+         */
+        MODE_TIMEWARP: "timewarp",
+
+        /**
+         * The name of the cookie holding the mode.
+         * @static
+         * @final
+         * @type String
+         */
+        MODE_COOKIE: "wcmmode",
+
+        /**
+         * The path for of the cookie holding the mode.
+         * @static
+         * @final
+         * @type String
+         */
+        MODE_COOKIE_PATH: CQ.HTTP.externalize("/"),
+
+        /**
+         * The value for the edit mode.
+         * @static
+         * @final
+         * @type String
+         */
+        MODE_EDIT: "edit",
+
+        /**
+         * The value for the preview mode.
+         * @static
+         * @final
+         * @type String
+         */
+        MODE_PREVIEW: "preview",
+
+        /**
+         * The value for the design mode.
+         * @static
+         * @final
+         * @type String
+         */
+        MODE_DESIGN: "design",
+        
+        /**
+         * The value for the analytics mode.
+         * @static
+         * @final
+         * @type String
+         */        
+        MODE_ANALYTICS: "analytics",
+
+        /**
+         * The action when an item gets added to the clipboard by copying
+         * (Ctrl + C).
+         * @static
+         * @final
+         * @type String
+         */
+        ACTION_COPY: "COPY",
+
+        /**
+         * The action when an item gets added to the clipboard by cutting
+         * (Ctrl + X).
+         * @static
+         * @final
+         * @type String
+         */
+        ACTION_CUT: "CUT",
+
+        /**
+         * The name of the cookie holding the layers.
+         * @static
+         * @final
+         * @type String
+         */
+        LAYERS_COOKIE: "wcmlayers",
+
+        /**
+         * The path for the cookie holding the layers.
+         * @static
+         * @final
+         * @type String
+         */
+        LAYERS_COOKIE_PATH: CQ.HTTP.externalize("/"),
+
+        /**
+         * The name of the layer for the Live Copy status.
+         * @static
+         * @final
+         * @type String
+         */
+        LAYER_LCSTATUS: "liveCopyStatusLayer",
+
+        /**
+         * String used to find the DOM script tag corresponding to an editable path.
+         * $PATH$ is replaced by the editable path.
+         * @static
+         * @final
+         * @type String
+         */
+        EDITABLE_SCRIPT_FINDER: "CQ.WCM.edit({\"path\":\"$PATH$\"",
+
+        /**
+         * The value for the responsive preview mode.
+         * @static
+         * @final
+         * @type String
+         */
+        PREVIEW_RESPONSIVE: "responsive",
+
+        /**
+         * True if the alt key is held down.
+         * @static
+         * @type Boolean
+         */
+        altKey: false,
+
+        /**
+         * Returns either the current WCM mode: {@link #MODE_EDIT},
+         * {@link #MODE_PREVIEW} and {@link #MODE_DESIGN},
+         * or {@link #MODE_TIMEWARP} if the {@link #TIMEWARP_COOKIE} is set.
+         * @static
+         * @param {Boolean} force (optional) True to force retrieval of value from cookie
+         * @return {String} The WCM mode
+         */
+        getMode: function(force) {
+            var currentMode;
+            if(force || !currentMode){
+                currentMode = CQ.HTTP.getCookie(CQ.utils.WCM.MODE_COOKIE);
+            }
+            if(CQ.HTTP.getCookie(CQ.utils.WCM.TIMEWARP_COOKIE)){
+                return CQ.utils.WCM.MODE_TIMEWARP;
+            }
+            return currentMode;
+        },
+
+        /**
+         * Sets the WCM mode. Supported WCM modes are: {@link #MODE_EDIT},
+         * {@link #MODE_PREVIEW} or {@link #MODE_DESIGN}.
+         * Clears the value of {@link #TIMEWARP_COOKIE}.
+         * @static
+         * @param {String} mode The new WCM mode
+         * @return {String} The WCM mode
+         */
+        setMode: function(mode) {
+            CQ.utils.WCM.setModeCss(mode);
+            CQ.HTTP.setCookie(CQ.utils.WCM.MODE_COOKIE, mode, CQ.utils.WCM.MODE_COOKIE_PATH);
+            CQ.HTTP.clearCookie(CQ.utils.WCM.TIMEWARP_COOKIE,"/");
+            currentMode = mode;
+            this.fireEvent("wcmmodechange",currentMode);
+            return currentMode;
+        },
+
+        /**
+         * Appends a CSS class to the BODY tag accordingly to the current WCM mode
+         * or the specified mode.
+         * @static
+         * @param {String} mode The WCM mode (optional)
+         * @private
+         */
+        setModeCss: function(mode) {
+            var doc = CQ.utils.WCM.getContentWindow().document;
+            var body = doc.body || doc.getElementsByTagName("body")[0];
+            if (!body) {
+                // called from CQ.WCM.launchSidekick: wait until BODY has been drawn
+                CQ.utils.WCM.setModeCss.defer(300, this, [mode]);
+                return;
+            }
+            if (!mode) {
+                if (CQ.utils.WCM.isEditMode()) mode = CQ.utils.WCM.MODE_EDIT;
+                else if (CQ.utils.WCM.isDesignMode()) mode = CQ.utils.WCM.MODE_DESIGN;
+                else if (CQ.utils.WCM.isPreviewMode()) mode = CQ.utils.WCM.MODE_PREVIEW;
+                else if (CQ.utils.WCM.isAnalyticsMode()) mode = CQ.utils.WCM.MODE_ANALYTICS;
+            }
+            var pre = "cq-wcm-";
+            var b = CQ.Ext.get(body);
+            b.removeClass([pre + CQ.utils.WCM.MODE_EDIT, pre + CQ.utils.WCM.MODE_DESIGN, pre + CQ.utils.WCM.MODE_PREVIEW]);
+            b.addClass(pre + mode);
+        },
+
+        /**
+         * Returns the current WCM preview mode: {@link #MODE_PREVIEW}
+         * or NULL.
+         * @static
+         * @return {String} The WCM preview mode
+         */
+        getPreviewMode: function() {
+            return currentPreviewMode;
+        },
+
+        /**
+         * Sets the WCM preview mode. Supported preview modes are:
+         * {@link #PREVIEW_RESPONSIVE} or NULL.
+         * @static
+         * @param {String} mode The new WCM preview mode
+         * @return {String} The WCM preview mode
+         */
+        setPreviewMode: function(mode) {
+            currentPreviewMode = mode;
+            return currentPreviewMode;
+        },
+
+        /**
+         * Returns true if the {@link #TIMEWARP_COOKIE} is set.
+         * @static
+         * @param {Boolean} force (optional) True to force retrieval of value from cookie
+         * @return {Boolean} True if timewarp cookie is set
+         */
+        isTimewarpMode: function(force) {
+            if(force){
+                CQ.utils.WCM.getMode(force);
+            }
+            var cookie = CQ.HTTP.getCookie(CQ.utils.WCM.TIMEWARP_COOKIE);
+            return (cookie && cookie != "");
+        },
+
+        /**
+         * Returns true if the current WCM mode equals
+         * {@link #MODE_PREVIEW}.
+         * @static
+         * @param {Boolean} force (optional) True to force retrieval of value from cookie
+         * @return {Boolean} True if preview mode
+         */
+        isPreviewMode: function(force) {
+            return (CQ.utils.WCM.getMode(force) == CQ.utils.WCM.MODE_PREVIEW);
+        },
+
+        /**
+         * Returns true if the current WCM preview mode equals
+         * {@link #PREVIEW_RESPONSIVE}.
+         * @static
+         * @return {Boolean} True if using responsive preview mode
+         */
+        isResponsiveMode: function() {
+            return (CQ.utils.WCM.getPreviewMode() == CQ.utils.WCM.PREVIEW_RESPONSIVE);
+        },
+
+        /**
+         * Returns true if the current WCM mode equals
+         * {@link #MODE_EDIT}.
+         * @static
+         * @param {Boolean} force (optional) True to force retrieval of value from cookie
+         * @return {Boolean} True if edit mode
+         */
+        isEditMode: function(force) {
+            var mode = CQ.utils.WCM.getMode(force);
+            return (!mode || mode == CQ.utils.WCM.MODE_EDIT);
+        },
+
+        /**
+         * Returns true if the current WCM mode equals
+         * {@link #MODE_DESIGN}.
+         * @static
+         * @param {Boolean} force (optional) True to force retrieval of value from cookie
+         * @return {Boolean} True if design mode
+         */
+        isDesignMode: function(force) {
+            return (CQ.utils.WCM.getMode(force) == CQ.utils.WCM.MODE_DESIGN);
+        },
+        
+        /**
+         * Returns true if the current WCM mode equals
+         * {@link #MODE_ANALYTICS}.
+         * @static
+         * @param {Boolean} force (optional) True to force retrieval of value from cookie
+         * @return {Boolean} True if analytics mode
+         */
+        isAnalyticsMode: function(force) {
+            return (CQ.utils.WCM.getMode(force) == CQ.utils.WCM.MODE_ANALYTICS);
+        },
+        
+        /**
+         * Returns all layers of the content page.
+         * @static
+         * @return {Object} The layers
+         */
+        getLayers: function() {
+            if( !layers ) {
+                layers = CQ.Ext.state.Manager.get(CQ.utils.WCM.LAYERS_COOKIE);
+            }
+            return (layers = ( layers ? layers : {}));
+        },
+
+        /**
+         * Returns true if the specified layer is currently shown.
+         * @static
+         * @param {String} layer The layer to check
+         * @return {Boolean} True if layer is shown
+         */
+        isShownLayer: function(layer) {
+            return CQ.utils.WCM.getContentWindow().CQ.WCM.getLayers()[layer] === true;
+        },
+
+        /**
+         * Shows the specified layer.
+         * @static
+         * @param {String} layer The layer to show
+         */
+        showLayer: function(layer) {
+            CQ.utils.WCM.getContentWindow().CQ.WCM.getLayers()[layer] = true;
+            CQ.Ext.state.Manager.set(CQ.utils.WCM.LAYERS_COOKIE,
+                    CQ.utils.WCM.getContentWindow().CQ.WCM.getLayers());
+        },
+
+        /**
+         * Hides the specified layer.
+         * @static
+         * @param {String} layer The layer to hide
+         */
+        hideLayer: function(layer) {
+            delete CQ.utils.WCM.getContentWindow().CQ.WCM.getLayers()[layer];
+            CQ.Ext.state.Manager.set(CQ.utils.WCM.LAYERS_COOKIE,
+                    CQ.utils.WCM.getContentWindow().CQ.WCM.getLayers());
+        },
+
+        /**
+         * Removes the specified item from both the selection and the clipboard,
+         * then attempts to remove the item from the content page.
+         * @static
+         * @param {Object} item The item to remove
+         */
+        remove: function(item) {
+            if (!item) return;
+            try {
+                if (item instanceof Array && item.length>0) {
+                    for (var i = 0; i < item.length; i++) {
+                        CQ.utils.WCM.getClipboard().remove(item[i]);
+                    }
+                    item[0].removeParagraph();
+                    return;
+                } else {
+                    CQ.utils.WCM.getClipboard().remove(item);
+                    item.removeParagraph();
+                }
+            } catch (e) {
+                // todo: error handling
+            }
+            CQ.utils.WCM.deselect();
+
+        },
+
+        /**
+         * Copies an item to the clipboard.
+         * @static
+         * @param {Object/Object[]} item The item to copy
+         * @param {Boolean} additive (optional) True if the other clipboard
+         *        items should be kept. Default is false.
+         * @param {Boolean} move (optional) True if the item should be moved
+         *        instead of copied (i.e. cut). Default is false.
+         * @return {Object} The item
+         */
+        copy: function(item, additive, move) {
+            var clipboard = CQ.utils.WCM.getClipboard();
+            if (!item) {
+                clipboard.clear();
+                return null;
+            }
+            if (item instanceof Array) {
+                if (item.length > 0) {
+                    for (var i = 0; i < item.length; i++) {
+                        CQ.utils.WCM.copy(item[i], additive, move);
+                        if (!additive) {
+                            additive = true;
+                        }
+                    }
+                } else {
+                    clipboard.clear();
+                }
+                return item;
+            }
+            if (!additive) {
+                clipboard.clear();
+            }
+            if (!item.isActionCopyMove()) {
+                return item;
+            }
+            clipboard.add({
+                "path": item.path,
+                "title": item.path.substring(item.path.lastIndexOf("/") + 1),
+                "icon": item.getIconPath(),
+                "resourceType": item.getResourceType(),
+                "xtype": item.xtype,
+                "action": move ? CQ.utils.WCM.ACTION_CUT : CQ.utils.WCM.ACTION_COPY,
+                "hasAnnotations": item.hasAnnotations()
+            });
+            return item;
+        },
+
+        /**
+         * Copies an item to the clipboard and marks it for deletion
+         * after pasting (if the clipboard is cleared before, the item
+         * will not be deleted). Shorthand for {@link #copy} (with move
+         * parameter true implicitly).
+         * @static
+         * @param {Object/Object[]} item The item to cut
+         * @param {Boolean} additive (optional) True if the other clipboard
+         *        items should be kept. Default is false.
+         * @return {Object} The item
+         */
+        cut: function(item, additive) {
+            return CQ.utils.WCM.copy(item, additive, true);
+        },
+
+        /**
+         * Returns the items in the clipboard as an array for processing.
+         * For copied items, this method can be called multiple times,
+         * whereas cut items can only be processed once: those must
+         * be removed after the first paste (see {@link #remove}).
+         * @static
+         * @return {Object[]} The items
+         */
+        paste: function() {
+            var clipboard = CQ.utils.WCM.getClipboard();
+            var items = [];
+            var cutItems = [];
+            for (var i = 0; i < clipboard.items.length; i++) {
+                var item = clipboard.items[i];
+                items.push(item);
+                if (item.action == CQ.utils.WCM.ACTION_CUT) {
+                    cutItems.push(item);
+                }
+            }
+            for (var i = 0; i < cutItems.length; i++) {
+                clipboard.remove(cutItems[i]);
+            }
+            return items;
+        },
+
+        /**
+         * Returns the items in the clipboard as {@link CQ.Ext.data.Record Record}s.
+         * This method does not remove cut items from the clipboard and should
+         * therefore only be used for viewing purposes. For actual processing
+         * of clipboard items, use {@link #paste}.
+         * @static
+         * @return {Object[]} The items
+         */
+        getClipboardRecords: function() {
+            var clipboard = CQ.utils.WCM.getClipboard();
+            var records = [];
+            for (var i = 0; i < clipboard.items.length; i++) {
+                var item = clipboard.items[i];
+                records.push(new CQ.Ext.data.Record(item));
+            }
+            return records;
+        },
+
+        /**
+         * Returns the clipboard. This method should not be called
+         * directly, use {@link #copy}/{@link #cut} and {@link #paste}
+         * to manage the clipboard.
+         * @private
+         * @static
+         * @param {CQ.wcm.ContentFinder} finder (optional) The Content Finder
+         * @return {CQ.Ext.util.MixedCollection} The clipboard
+         */
+        getClipboard: function(finder) {
+            if (!finder && CQ.utils.WCM.getContentFinder()) {
+                return CQ.utils.WCM.getContentFinder().getClipboard();
+            } else if (!window.CQ_Clipboard) {
+                window.CQ_Clipboard = new CQ.Ext.util.MixedCollection();
+            }
+            return window.CQ_Clipboard;
+        },
+
+        /**
+         * Clears the clipboard.
+         * @static
+         */
+        clearClipboard: function() {
+            var clipboard = CQ.utils.WCM.getClipboard();
+            clipboard.clear();
+        },
+
+        /**
+         * Adds a listener to track clipboard changes.
+         * <div class="mdetail-params">
+         *   <strong style="font-weight: normal;"><b>add</b> Listeners will
+         *   be called with the following arguments:</strong><ul>
+         *   <li><code>index</code> : Number<div class="sub-desc">The index at
+         *   which the item was added.</div></li>
+         *   <li><code>o</code> : Object<div class="sub-desc">The item added.
+         *   </div></li>
+         *   <li><code>key</code> : String<div class="sub-desc">The key
+         *   associated with the added item.</div></li>
+         * </ul></div>
+         * <div class="mdetail-params">
+         *   <strong style="font-weight: normal;"><b>clear</b> Listeners will
+         *   be called with the following arguments:</strong><ul>
+         *   <li>None.</li>
+         * </ul></div>
+         * <div class="mdetail-params">
+         *   <strong style="font-weight: normal;"><b>remove</b> Listeners will
+         *   be called with the following arguments:</strong><ul>
+         *   <li><code>o</code> : Object<div class="sub-desc">The item being
+         *   removed.</div></li>
+         *   <li><code>key</code> : String<div class="sub-desc">(optional) The
+         *   key associated with the added item.</div></li>
+         * </ul></div>
+         * @static
+         * @param {Function} listener The function to register
+         */
+        onClipboardChange: function(listener) {
+            var clipboard = CQ.utils.WCM.getClipboard();
+            clipboard.on("add", listener);
+            clipboard.on("remove", listener);
+            clipboard.on("clear", listener);
+            CQ.Ext.EventManager.on(window.document, "unload", function() {
+                CQ.utils.WCM.unClipboardChange(listener);
+            });
+        },
+
+        /**
+         * Removes the specified listener from clipboard change listeners.
+         * @param {Function} listener The listener to remove
+         */
+        unClipboardChange: function(listener) {
+            var clipboard = CQ.utils.WCM.getClipboard();
+            clipboard.un("add", listener);
+            clipboard.un("remove", listener);
+            clipboard.un("clear", listener);
+        },
+
+        /**
+         * Adds an item to the selection.
+         * @static
+         * @param {Object/Object[]} item The item to select
+         * @param {Boolean} additive (optional) True if the other selected
+         *        items should be kept. Default is false.
+         * @param {Boolean} lock (optional) True if the selection should be
+         *        locked (until the next click in the document).
+         * @return {Object} The item
+         */
+        select: function(item, additive, lock) {
+            var selection = CQ.utils.WCM.getSelection();
+            if (item && selection.contains(item)) {
+                return item;
+            }
+            if (additive) {
+                CQ.DOM.clearDocumentSelection(CQ.utils.WCM.getContentWindow());
+            } else {
+                selection.clear();
+            }
+            if (!item) {
+                selection.clear();
+                return item;
+            }
+            if (item instanceof Array) {
+                for (var i = 0; i < item.length; i++) {
+                    CQ.utils.WCM.select(item[i], true);
+                }
+                return item;
+            }
+            selection.add(item);
+            if (lock) {
+                window.CQ_selectionLocked = true;
+            }
+            if (!window.CQ_selectionObserved) {
+                CQ.Ext.EventManager.on(document.body, "click", clearSelection);
+                window.CQ_selectionObserved = 1;
+            }
+            return item;
+        },
+
+        /**
+         * Removes an item from the selection.
+         * @static
+         * @param {Object} item The item to deselect
+         * @param {Boolean} additive (optional) True if the other selected
+         *        items should be kept. Default is false.
+         * @return {Object} The item
+         */
+        deselect: function(item, additive) {
+            var selection = CQ.utils.WCM.getSelection();
+            if (!item || !additive) {
+                selection.clear();
+            } else if (item) {
+                selection.remove(item);
+            }
+            if (additive) {
+                CQ.DOM.clearDocumentSelection(CQ.utils.WCM.getContentWindow());
+            }
+            if (!selection.getCount() && window.CQ_selectionObserved) {
+                CQ.Ext.EventManager.un(document.body, "click", clearSelection);
+                window.CQ_selectionObserved = 0;
+            }
+            return item;
+        },
+
+        /**
+         * Returns the items in the selection for processing. This will not
+         * clear the selection, so this method can be called multiple times
+         * for processing the selected items.
+         * @static
+         * @return {Object[]} The items
+         */
+        getSelectedItems: function() {
+            var selection = CQ.utils.WCM.getSelection();
+            var items = [];
+            for (var i = 0; i < selection.items.length; i++) {
+                items.push(selection.items[i]);
+            }
+            return items;
+        },
+
+        /**
+         * Returns the selection. This method should not be called
+         * directly, use {@link #select}/{@link #deselect} and
+         * {@link #getSelectedItems} respectively.
+         * @private
+         * @static
+         * @return {CQ.Ext.util.MixedCollection} The selection
+         */
+        getSelection: function() {
+            // todo: global selection for all windows
+            var win = CQ.utils.WCM.getContentWindow();
+            if (!win.CQ_Selection) {
+                win.CQ_Selection = new CQ.Ext.util.MixedCollection();
+            }
+            return win.CQ_Selection;
+        },
+
+        /**
+         * Adds a listener to track selection changes.
+         * <div class="mdetail-params">
+         *   <strong style="font-weight: normal;"><b>add</b> Listeners will
+         *   be called with the following arguments:</strong><ul>
+         *   <li><code>index</code> : Number<div class="sub-desc">The index at
+         *   which the item was added.</div></li>
+         *   <li><code>o</code> : Object<div class="sub-desc">The item added.
+         *   </div></li>
+         *   <li><code>key</code> : String<div class="sub-desc">The key
+         *   associated with the added item.</div></li>
+         * </ul></div>
+         * <div class="mdetail-params">
+         *   <strong style="font-weight: normal;"><b>clear</b> Listeners will
+         *   be called with the following arguments:</strong><ul>
+         *   <li>None.</li>
+         * </ul></div>
+         * <div class="mdetail-params">
+         *   <strong style="font-weight: normal;"><b>remove</b> Listeners will
+         *   be called with the following arguments:</strong><ul>
+         *   <li><code>o</code> : Object<div class="sub-desc">The item being
+         *   removed.</div></li>
+         *   <li><code>key</code> : String<div class="sub-desc">(optional) The
+         *   key associated with the added item.</div></li>
+         * </ul></div>
+         * @static
+         * @param {Function} listener The function to register
+         */
+        onSelectionChange: function(listener) {
+            var selection = CQ.utils.WCM.getSelection();
+            selection.on("add", listener);
+            selection.on("remove", listener);
+            selection.on("clear", listener);
+        },
+
+        /**
+         * Removes the specified listener from selection change listeners.
+         * @param {Function} listener The listener to remove
+         */
+        unSelectionChange: function(listener) {
+            var selection = CQ.utils.WCM.getSelection();
+            selection.un("add", listener);
+            selection.un("remove", listener);
+            selection.un("clear", listener);
+        },
+
+        /**
+         * Returns the edit component for the specified content path.
+         * Example:
+         * <pre><code>
+var editBar = CQ.WCM.getEditable("/content/mysite/en/parsys/0001");
+         * </code></pre>
+         * Edit components must be registered using {@link #makeEditable}.
+         * @static
+         * @param {String} path The content path
+         * @return {CQ.wcm.EditBase} The edit components or <code>null</code> if
+         *         no edit component is defined for the given content path
+         */
+        getEditable: function(path) {
+            return editables[path];
+        },
+
+        /**
+         * Finds the next editable which "contains" the given element.
+         *
+         * Note that this only returns final editables. Use {@link #getEditablePathFromDOM}
+         * if you want to get the path of an editable, which works as soon as the editable
+         * was registered using {@link #makeEditable}.
+         *
+         * @param {Node} element DOM node for which to find the containing editable
+         */
+        getEditableFromDOM: function(element) {
+            var path = CQ.utils.WCM.getEditablePathFromDOM(element);
+            if (path) {
+                return editables[path];
+            } else {
+                return null;
+            }
+        },
+
+        /**
+         * Finds the path of the next editable which "contains" the given element.
+         *
+         * This will return the path even if an editable is already registered
+         * using {@link #makeEditable} but not yet fully built as ext component. In this case
+         * a following call to CQ.WCM.getEditable(foundPath) would return null, since the
+         * final editable has not been created yet.
+         *
+         * @param {Node} element DOM node for which to find the containing editable
+         */
+        getEditablePathFromDOM: function(element) {
+
+            // generic matcher for both final editables and editConfig objects
+            function matches(editObj, element) {
+                if (editObj && editObj.element) {
+                    // final editables have the DOM element under .element.dom, check this first
+                    if (editObj.element.dom && element === editObj.element.dom) {
+                        return true;
+                    // otherwise editConfigs will have the DOM element under .element
+                    } else if (element === editObj.element) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            var i;
+
+            while (element) {
+                // scan if there is an editable for the current DOM element
+                for (var path in editables) {
+                    if (editables.hasOwnProperty(path)) {
+                        if (matches(editables[path], element)) {
+                            return path;
+                        }
+                    }
+                }
+                // then scan editables queue
+                if (this.editablesQueue) {
+                    for (i = 0; i < this.editablesQueue.length; i++) {
+                        if (matches(this.editablesQueue[i], element)) {
+                            return this.editablesQueue[i].path;
+                        }
+
+                    }
+                }
+                // finally scan editConfigs list
+                for (i = 0; i < editConfigs.length; i++) {
+                    if (matches(editConfigs[i], element)) {
+                        return editConfigs[i].path;
+                    }
+                }
+                // walk up the dom
+                element = element.parentNode;
+            }
+            return null;
+        },
+
+        /**
+         * Returns all the path of the {@link CQ.wcm.EditBase} nested into the given content path.
+         * Example:
+         * <pre><code>
+         *   var nestedCmps = CQ.WCM.getNestedEditable("/content/mysite/en/parsys/0001");
+         * </code></pre>
+         * @static
+         * @param {String} path The content path
+         * @return {String[]} An String array of the paths of the nested edit components or <code>[]</code> if
+         *         no edit component is found under the given content path
+         */
+        getNestedEditables: function(path) {
+            var res = [];
+            var parentSelector;
+            if (editables[path] && editables[path].element) {
+                parentSelector = "[id=" + editables[path].element.id + "]";
+            }
+
+            for(var p in editables) {
+            	// prefer check for DOM nesting, as it is more reliable
+            	if ( parentSelector && CQ.Ext.get(editables[p].element).up(parentSelector) ) {
+        			res.push(p);
+        		// fallback to path-based check
+            	} else if (p.indexOf(path + "/") == 0) {
+                    res.push(p);
+                }
+            }
+            return res;
+        },
+
+        /**
+         * Returns all edit components of the content page.
+         * @static
+         * @return {Object} The edit components
+         */
+        getEditables: function() {
+            return editables;
+        },
+
+        /**
+         * Unregisters the edit component for the specified content path.
+         * Edit components must be registered using {@link #makeEditable}.
+         * @private
+         * @static
+         * @param {String} path
+         */
+        unregisterEditable: function(path) {
+            delete editables[path];
+        },
+
+        /**
+         * Adds a listener that is called before the specified edit
+         * component is rendered.
+         * @static
+         * @param {Function} listener The function to register
+         * @param {Object} scope This of the listener (optional). If scope is not
+         * defined listeners will be called with the following arguments:
+         * <ul><li><code>index</code> : CQ.wcm.EditBase<div class="sub-desc">The edit component</div></li></ul>
+         */
+
+        onEditableBeforeRender: function(path, listener, scope) {
+            if( listener ) {
+                if (!editableBeforeRenderListeners[path]) {
+                    editableBeforeRenderListeners[path] = [];
+                }
+                editableBeforeRenderListeners[path].push({"fct": listener, "scope": scope});
+            }
+        },
+
+        /**
+         * Adds a listener that is called as soon as the specified edit
+         * component is ready.
+         * @static
+         * @param {Function} listener The function to register
+         * @param {Object} scope This of the listener (optional). If scope is not
+         * defined listeners will be called with the following arguments:
+         * <ul><li><code>index</code> : <div class="sub-desc">CQ.wcm.EditBase The edit component.</div></li></ul>
+         */
+
+        onEditableReady: function(path, listener, scope) {
+            if( listener ) {
+                if (!editableReadyListeners[path]) {
+                    editableReadyListeners[path] = [];
+                }
+                editableReadyListeners[path].push({"fct": listener, "scope": scope});
+            }
+        },
+
+        /**
+         * Returns if all editables of the page are ready.
+         * @return {Boolean} True if ready
+         * @since 5.4
+         */
+        areEditablesReady: function() {
+            return editablesReady;
+        },
+
+        /**
+         * Returns if the sidekick is ready, i.e. rendered and shown.
+         * @return {Boolean} True if ready
+         * @since 5.4
+         */
+        isSidekickReady: function() {
+            return sidekickReady;
+        },
+
+        /**
+         * Toggles the editables.
+         * @param {Boolean} show True to show the editables. False to hide.
+         * @param {String} filter Path to filter the editables.
+         */
+        toggleEditables: function(show, filter) {
+            var editables = CQ.WCM.getEditables();
+            for(var path in editables) {
+                var editable = editables[path];
+                if( !filter || editable.path.indexOf(filter) != -1) {
+                    if( show ) {
+                        editable.show();
+                    } else {
+                        editable.hide();
+                    }
+                }
+            }
+        },
+
+        /**
+         * Creates an edit component using the specified configuration,
+         * making a certain area of a content page editable for authors.
+         * <p>Config options:
+         * <ul>
+         * <li>path {String} The content path</li>
+         * <li>dialog {String} (optional) The URL to the dialog config</li>
+         * <li>resourceType {String} (optional) The resource type</li>
+         * <li>editConfig {Object} (optional) The edit component config</li>
+         * <li>childConfig {Object} (optional) The defaults for child edit components</li>
+         * </ul></p>
+         * <p>Example:
+         * <pre><code>
+CQ.WCM.makeEditable({
+    path: "/content/mysite/en/parsys/0001",
+    dialog: "/apps/mysite/components/text/dialog.inifity.json",
+    resourceType: "mysite/components/text",
+    editConfig: {...},
+    childConfig: {...}
+});
+           </code></pre></p>
+         * @static
+         * @param {Object} config The configuration
+         * @return {CQ.wcm.EditBase} The edit component (or null if document
+         *         not ready yet)
+         */
+        makeEditable: function(config) {
+            if (!config.path) {
+                CQ.Log.error("CQ.util.WCM#makeEditable: path null or undefined");
+                return null;
+            }
+            var display = config.dialog || config.editConfig;
+            var editConfig = config.editConfig;
+            if (!editConfig) {
+                // todo: clone defaultEditConfig
+                editConfig = CQ.Util.copyObject(defaultEditConfig);
+            } else if (!editConfig.xtype) {
+                editConfig.xtype = defaultEditConfig.xtype;
+            }
+            if (config.dialog) {
+                editConfig.dialog = config.dialog;
+            }
+            if (!display) {
+                editConfig.inactiveMode = true;
+            }
+            editConfig.path = config.path;
+            editConfig.cellSearchPath = config.csp;
+            editConfig.isContainer = config.isContainer;
+			editConfig.emptyText = CQ.I18n.getVarMessage(editConfig.emptyText);
+            if (config.type) {
+                if (!editConfig.params) {
+                    editConfig.params = {};
+                }
+                if (!editConfig.params["./sling:resourceType"]) {
+                    editConfig.params["./sling:resourceType"] = config.type;
+                }
+            }
+            if (config.childConfig) {
+                editConfig.childConfig = config.childConfig;
+            }
+            if (!editConfig.element) {
+                if (config.element) {
+                    editConfig.element = config.element;
+                } else {
+                    editConfig.element = getCurrentElement(editConfig.path, this.EDITABLE_SCRIPT_FINDER);
+                }
+            }
+
+            if(config[CQ.wcm.msm.MSM.PARAM_LIVE_RELATIONSHIP]) {
+                editConfig[CQ.wcm.msm.MSM.PARAM_LIVE_RELATIONSHIP] = CQ.Util.copyObject(config[CQ.wcm.msm.MSM.PARAM_LIVE_RELATIONSHIP]);
+            }
+            if( this.enableEditablesQueue === true) {
+                this.editablesQueue.push(editConfig);
+            } else {
+                if (CQ.Ext.isLoaded) {
+                    return CQ.utils.WCM.createEditable(editConfig);
+                } else {
+                    editConfigs.push(editConfig);
+                    if (editConfigs.length == 1) {
+                        CQ.Ext.onReady(function() {
+                            editConfigs.sort(editablesConfigSorter);
+                            CQ.Timing.stamp("start building editings", "SBE", true);
+                            (function() {
+                                CQ.utils.WCM.buildEditables.defer(16);
+                            }).defer(16);
+
+                        });
+                    }
+                }
+            }
+            return null;
+        },
+
+        /**
+         * Starts the queue mode for {@link #makeEditable}: all subsequent calls to {@link #makeEditable}
+         * will be queued. Only a call to {@link #endMakeEditablesQueue} will create the editables.
+         */
+        startMakeEditablesQueue: function() {
+            this.enableEditablesQueue = true;
+            this.editablesQueue = [];
+        },
+
+        /**
+         * Ends the queue mode for the {@link #makeEditable}: all queued editable configs will be built and
+         * editables created.
+         */
+        endMakeEditablesQueue: function() {
+            this.enableEditablesQueue = false;
+            this.editablesQueue.sort(editablesConfigSorter);
+            for(var i = 0; i < this.editablesQueue.length; i++) {
+                CQ.utils.WCM.createEditable.defer(16,this,[this.editablesQueue[i]]);
+            }
+            this.editablesQueue = [];
+        },
+
+        createEditable: function(config) {
+            if(config && config.path) {
+                var beforeRenderListeners = editableBeforeRenderListeners[config.path];
+                while (beforeRenderListeners && beforeRenderListeners.length > 0) {
+                    var listenerObj = editableBeforeRenderListeners[config.path].shift();
+                    if ( listenerObj.fct.call(listenerObj.scope ? listenerObj.scope : this, config) === false) {
+                        return null;
+                    }
+                }
+
+                if( editables[config.path] &&
+                        !editables[config.path].isReady()){
+                    //recreating same editable
+                    return editables[config.path];
+                }
+
+                // we need our own handler for the "ready" event which must be catching
+                // events at the earliest possible time, hence it has to be defined as
+                // listener in the config; registering it later with on("ready", ...) can
+                // be too late as the ready event is fired from within constructors
+                CQ.Util.addListenerToConfig(config, "ready", function(editable) {
+                    if (readOnly && !editable.hidden) {
+                        editable.hide();
+                    }
+                    var readyListeners = editableReadyListeners[editable.path];
+                    while (readyListeners && readyListeners.length > 0) {
+                        var listenerObj = editableReadyListeners[editable.path].shift();
+                        listenerObj.fct.call(listenerObj.scope ? listenerObj.scope : editable, editable);
+                    }
+
+                    if( editPathStack ) {
+                        //remove *all* instances of editable.path
+                        var epindex = -1;
+                        while ((epindex = editPathStack.indexOf(editable.path)) != -1) {
+                            editPathStack.splice(epindex, 1);
+                        }
+                        if (editPathStack.length == 0) {
+                            editPathStack = null;
+                            editablesReady = true;
+                            CQ.utils.WCM.fireEvent("editablesready");
+                        }
+                    }
+
+                    CQ.utils.WCM.fireEvent("editableready", editable);
+                });
+
+                var editable = CQ.Util.build(config);
+                editables[config.path] = editable;
+
+                return editable;
+            }
+            return null;
+        },
+
+        /**
+         * @private
+         */
+        buildEditables: function() {
+            if (editConfigs.length == 0) {
+                CQ.Timing.stamp("finished building editings", "WCM#makeEditable");
+                return;
+            }
+            var editConfig = editConfigs.shift(editConfigs.length - 1);
+            if( !editPathStack ) {
+                editPathStack = [];
+            }
+            editPathStack.push(editConfig.path);
+            CQ.utils.WCM.createEditable(editConfig);
+            //apparently, timeout method is slower (on IE6 and FF3)
+            //and on IE6 gives a really bad effect on the page
+            //window.setTimeout(CQ.utils.WCM.buildEditables, 1);
+            CQ.utils.WCM.buildEditables();
+        },
+
+        /**
+         * Shows all edit components of the content page (i.e. switching to
+         * edit mode). If the content page has been loaded in preview mode,
+         * this method will trigger a reload.
+         * @static
+         */
+        show: function() {
+            var refresh = true;
+            for (var i in editables) {
+                editables[i].show();
+                refresh = false;
+            }
+            if (refresh) {
+                // assumption: no editables means they are hidden by preview mode
+                CQ.Util.reload();
+            }
+        },
+
+
+        /**
+         * Hides all edit components of the content page (i.e. switching to
+         * preview mode).
+         * @static
+         */
+        hide: function() {
+            CQ.utils.WCM.deselect();
+            for (var i in editables) {
+                editables[i].hide();
+            }
+            for (var i in dialogs) {
+                dialogs[i].hide();
+            }
+        },
+
+        /**
+         * Hides the placeholders for the specified element.
+         * @static
+         * @param {Element} element The element
+         */
+        hidePlaceholders: function(element) {
+            element = CQ.Ext.get(element);
+            var placeholders = element.query("*[class*='-placeholder']");
+            for (var i = 0; i < placeholders.length; i++) {
+                var clazz = placeholders[i].className;
+                if (clazz) {
+                    // hide is typically called multiple times in a row, so the regexp
+                    // must be able to keep a "cq-.....-off" class name
+                    var repl = clazz.replace(/(cq-.+-placeholder)(-off)?\b/, "$1-off");
+                    if (repl != clazz) {
+                        placeholders[i].className = repl;
+                    }
+                }
+            }
+        },
+
+
+        /**
+         * Shows the placeholders for the specified element.
+         * @static
+         * @param {Element} element The element
+         */
+        showPlaceholders: function(element) {
+            element = CQ.Ext.get(element);
+            var placeholders = element.query("*[class*='-placeholder']");
+            for (var i = 0; i < placeholders.length; i++) {
+                var clazz = placeholders[i].className;
+                if (clazz) {
+                    // show is typically called multiple times in a row, so the regexp
+                    // must be able to keep a "cq-...." (without the -off) class name
+                    var repl = clazz.replace(/(cq-.+-placeholder)-off/, "$1");
+                    if (repl != clazz) {
+                        placeholders[i].className = repl;
+                    }
+                }
+            }
+        },
+
+        /**
+         * Creates and/or returns a {@link CQ.Dialog Dialog} using the
+         * specified configuration (which may also be a URL serving one of the
+         * configurations below).
+         * <p>Single Panel:<br>
+         * <pre><code>
+"jcr:primaryType": "cq:Panel",
+items: {
+    "jcr:primaryType": "cq:WidgetCollection",
+    field1: {
+        fieldLabel: "Title",
+        name: "./jcr:title",
+    }
+}
+</pre></code>
+         * </p>
+         * <p>Add a title to create a TabPanel with a single Panel:<br>
+         * <pre><code>
+"jcr:primaryType": "cq:Panel",
+title: "Tab 1"
+items: {
+    ...
+}
+</pre></code>
+         * </p>
+         * <p>An entire TabPanel:<br>
+         * <pre><code>
+"jcr:primaryType": "cq:TabPanel",
+items: {
+    "jcr:primaryType": "cq:WidgetCollection",
+    tab1 : {
+        "jcr:primaryType": "cq:Panel",
+        title: "Tab 1",
+        items: {
+            "jcr:primaryType": "cq:WidgetCollection",
+            field1: {
+                ...
+            }
+        }
+    }
+    tab2: {
+        ...
+    }
+}
+</pre></code>
+         * </p>
+</pre></code>
+         * </p>
+         * <p>An entire Dialog (e.g. with a Tab Panel):<br>
+         * <pre><code>
+"jcr:primaryType": "cq:Dialog",
+items: {
+    "jcr:primaryType": "cq:TabPanel",
+    items: {
+        "jcr:primaryType": "cq:WidgetCollection",
+        tab1 : {
+            "jcr:primaryType": "cq:Panel",
+            title: "Tab 1",
+            items: {
+                ...
+            }
+        }
+    }
+}
+</pre></code>
+         * </p>
+         * <p>The entire dialog config accepts all dialog specific config options:<br>
+         * <pre><code>
+"jcr:primaryType": "cq:Dialog",
+okText: "Custom OK",
+cancelText: "Custom Cancel",
+buttons: CQ.Dialog.CANCEL,
+params: {
+    hiddenField1: "hiddenValue1",
+    hiddenField2: "hiddenValue2"
+}
+</pre></code>
+         * </p>
+         * @static
+         * @param {String/Object} config The URL to retrieve the dialog config from
+         *        or a config object.
+         * @param {String} key (optional) The key to cache the dialog under
+         *        (set to "NEW" to avoid dialog caching)
+         * @param {Boolean} nocreate (optional) True to only look for dialog in cache
+         * @return {CQ.Dialog} The dialog
+         */
+        getDialog: function(config, key, nocreate) {
+            if (nocreate) {
+                return key ? dialogs[key] : null;
+            }
+            var dialogConfig, dialogKey, dialog;
+            if (typeof config == "string" && dialogs[config] && key != "NEW") {
+                // return dialog from cache
+                return dialogs[config];
+            } else if (key && dialogs[key]) {
+                // return dialog from cache
+                return dialogs[key];
+            } else if (typeof config != "object" || config.xtype != "dialog") {
+                dialogConfig = CQ.utils.WCM.getDialogConfig(config);
+            } else {
+                dialogConfig = config;
+            }
+            if (!dialogConfig) {
+                return null;
+            }
+            dialogKey = key;
+            if (!dialogKey) {
+                dialogKey = (typeof config == "string") ? config : dialogConfig.path;
+            }
+            if (!dialogKey) {
+                dialogKey = "dialog-" + new Date().valueOf();
+            }
+            dialog = CQ.Util.build(dialogConfig, true);
+            if (dialogKey != "NEW") {
+                dialogs[dialogKey] = dialog;
+            }
+            return dialog;
+        },
+
+        /**
+         * Unregisters the dialog with the specified key.
+         * @static
+         * @param {String} key The key
+         */
+        unregisterDialog: function(key) {
+            if( dialogs[key] && dialogs[key].destroy) {
+                dialogs[key].destroy();
+            }
+            delete dialogs[key];
+        },
+
+        /**
+         * Registers the specified dialog under the specified key.
+         * @static
+         * @param {CQ.Dialog} dlg The dialog to register
+         * @param {String} key The key
+         */
+        registerDialog: function(key, dlg) {
+            dialogs[key] = dlg;
+        },
+
+        /**
+         * Completes and returns the specified dialog config (see
+         * {@link #getDialog} for options).
+         * @static
+         * @param {String/Object} config The URL to retrieve the dialog config from
+         *        or a config object
+         * @return {Object} The dialog config
+         */
+        getDialogConfig: function(config) {
+            var url;
+            var snippet;
+            if (typeof config == "string") {
+                url = config;
+            }
+            else if (config.url) {
+                url = config.url;
+            }
+            if (url) {
+                var ext = CQ.HTTP.EXTENSION_JSON;
+                // config is URL: get and eval JSON
+                if (url.indexOf(ext) != (url.length - ext.length)) {
+                    url += CQ.Sling.SELECTOR_INFINITY + ext;
+                }
+                url = CQ.HTTP.addSelector(url, "overlay");
+                try {
+                    var json = CQ.HTTP.eval(url);
+                    snippet = CQ.Util.formatData(json);
+                }
+                catch (e) {
+                    CQ.Log.error("CQ.utils.WCM#getDialogConfig failed: " + e.message);
+                    return null;
+                }
+            }
+            else {
+                snippet = CQ.Util.formatData(config);
+            }
+            if (!snippet) {
+                CQ.Log.error("CQ.utils.WCM#getDialogConfig failed");
+                return null;
+            }
+            var dialogConfig;
+            if (snippet.xtype.indexOf("dialog") != -1 || snippet.xtype.indexOf("wizard") != -1) {
+                dialogConfig = snippet;
+            }
+            else {
+                dialogConfig = {
+                    "xtype": "dialog"
+                };
+                if (snippet.xtype == "panel" && snippet.title) {
+                    // panel with title: create a tab panel
+                    dialogConfig.items = {
+                        "xtype": "tabpanel",
+                        items: snippet
+                    };
+                }
+                else {
+                    dialogConfig.items = snippet;
+                }
+            }
+
+            if (dialogConfig.buttons == undefined) {
+                dialogConfig.buttons = CQ.Dialog.OKCANCEL;
+            }
+
+            dialogConfig.helpPath = snippet.helpPath ? snippet.helpPath : config.helpPath;
+            dialogConfig.responseScope = snippet.responseScope ? snippet.responseScope : config.responseScope;
+            dialogConfig.success = snippet.success ? snippet.success : config.success;
+            dialogConfig.failure = snippet.failure ? snippet.failure : config.failure;
+            dialogConfig.params = snippet.params ? snippet.params : config.params;
+            dialogConfig.disableXSSFiltering = snippet.disableXSSFiltering ? snippet.disableXSSFiltering : config.disableXSSFiltering;
+
+            return dialogConfig;
+        },
+
+        /**
+         * Returns all dialogs of the content page.
+         * @static
+         * @return {Object} The dialogs
+         */
+        getDialogs: function() {
+            return dialogs;
+        },
+
+        /**
+         * Creates and/or returns the {@link CQ.wcm.Sidekick Sidekick}.
+         * The {@link CQ.wcm.ContentFinder Content Finder} invokes this method
+         * without a path. Later, when the frame itself will be loaded (or if
+         * the page is loaded without Content Finder), path will be the
+         * content path of the current page.
+         * @static
+         * @param {String} path (optional) The content path
+         * @param {Object} config The config object
+         * @param {Function} setup Callback function to call after sidekick is launched
+         */
+        launchSidekick: function(path, config, setup) {
+            CQ.utils.WCM.setPreviewMode(null);
+            // launch Sidekick in asynchronously
+            CQ.utils.WCM.internalLaunchSidekick.defer(32, this, [path, config, setup]);
+        },
+
+        /**
+         * @private
+         */
+        internalLaunchSidekick: function(path, config, setup) {
+            CQ.utils.WCM.setModeCss();
+
+            if (path) {
+                pagePath = path;
+                //flag denoting that workflow models data is not to be fetched. See CQ-45809 for more info.
+                var skipWorkflow = true;
+                var page = CQ.utils.WCM.getPage(path, skipWorkflow);
+                if (page.isReadOnly()) {
+                    CQ.utils.WCM.setReadOnly(true);
+                    config.readOnly = true;
+                }
+            }
+
+            if (config &&  config.url) {
+                var url = config.url;
+                var ext = CQ.HTTP.EXTENSION_JSON;
+                // config is URL: get and eval JSON
+                if (url.indexOf(ext) != (url.length - ext.length)) {
+                    url += CQ.Sling.SELECTOR_INFINITY + ext;
+                }
+                try {
+                    var json = CQ.HTTP.eval(url);
+                    var snippet = CQ.Util.formatData(json);
+                    config = CQ.utils.Util.applyDefaults(snippet,config);
+                }
+                catch (e) {
+                    CQ.Log.error("CQ.utils.WCM#launchSidekick failed: " + e.message);
+                    return null;
+                }
+            }
+
+            if (!CQ.WCM.getSidekick()) {
+                // Sidekick either created from Content Finder or from content page
+                // (without Content Finder)
+                var createSidekick = function() {
+                    CQ.WCM.getTopWindow().CQ.utils.WCM.createSidekick(path, config, setup);
+                };
+                if (CQ.Ext.isReady) {
+                    createSidekick.defer(16);
+//                    createSidekick();
+                } else {
+//                    CQ.Ext.onReady(createSidekick);
+                    CQ.Ext.onReady(function() {
+                        createSidekick.defer(16);
+                    });
+                    return null;
+                }
+            }
+            else {
+                // content page calls loadContent of the Content Finder's Sidekick
+                var wcm = this;
+                (function() {
+                    CQ.WCM.getSidekick().loadContent(path, config);
+                }).defer(16);
+            }
+        },
+
+        /**
+         * Returns the {@link CQ.wcm.Sidekick Sidekick} (or null if none is
+         * available).
+         * @static
+         * @return {CQ.wcm.Sidekick} The sidekick
+         */
+        getSidekick: function() {
+            return CQ.WCM.getTopWindow().CQ_Sidekick;
+        },
+
+        // private
+        createSidekick: function(path, config, setup) {
+            if (typeof config != "string") {
+                config = CQ.utils.Util.merge(config, defaultSidekickConfig);
+            }
+            var sidekick = CQ.utils.Util.build(config);
+            if (setup) {
+                setup.call(sidekick);
+            }
+            if (path) {
+                sidekick.loadContent(path, config);
+            }
+            sidekick.show();
+            CQ.WCM.getTopWindow().CQ_Sidekick = sidekick;
+            sidekickReady = true;
+            this.fireEvent("sidekickready", CQ.WCM.getSidekick());
+        },
+
+        /**
+         * Returns a page object for the specified path.
+         * @static
+         * @param {String} path The content path of the page
+         * @param {Boolean} skipWorkflow Flag,which if set to true will not fetch workflow models data
+         * @return {CQ.wcm.Page} The page
+         */
+        getPage: function(path, skipWorkflow) {
+            // don't use yet...uncomment for 5.3
+            //return new CQ.Page(info, CQ.User.getCurrentUser(info.userinfo));
+            var info = CQ.utils.WCM.getPageInfo(path, undefined, skipWorkflow);
+            //if info is empty (page does not exist), page must be created with the path and not an empty object.
+            info = info.status ? info : path;
+            return new CQ.wcm.Page(info, CQ.User.getCurrentUser());
+        },
+
+        /**
+         * Returns a design object of the page that is specified by path.
+         * @static
+         * @param {String} path page path
+         * @return {CQ.wcm.Design} the design
+         */
+        getDesign: function(path) {
+            if (!path) {
+                path = CQ.utils.WCM.getPagePath();
+            }
+            var info = CQ.utils.WCM.getPageInfo(path);
+            if (!info.designObject) {
+                if (info.design.path) {
+                    var url = CQ.HTTP.externalize(info.design.path+"/_jcr_content." + info.design.lastModified + ".json/");
+                    var res = CQ.HTTP.get(url);
+                    if (CQ.HTTP.isOk(res)) {
+                        info.designObject = new CQ.wcm.Design(info.design.path, CQ.Util.eval(res));
+                    }
+                }
+            }
+            return info.designObject;
+        },
+
+        /**
+         * Returns the page information for the current user.
+         * @param {String} path The content path of the page
+         * @param {Boolean} forceLoad (optional) True to always reload
+         *        (default is false)
+         * @param {Boolean} skipWorkflow (optional) True to not fetch workflow model data
+         * @return {Object} The page information
+         */
+        getPageInfo: function(path, forceLoad, skipWorkflow) {
+            if (path) {
+                //if path ends with /jcr_content, remove it.
+                var index = path.lastIndexOf("/jcr:content");
+                if (index > 0) {
+                    path = path.substring(0, index);
+                }
+            }
+
+            var contentWin = CQ.utils.WCM.getContentWindow();
+            if( contentWin && contentWin.CQ && contentWin.CQ.utils) {
+                var info = contentWin.CQ.utils.WCM.pageInfos[path];
+                if (!info || forceLoad) {
+                    var url = CQ.HTTP.externalize("/libs/wcm/core/content/pageinfo.json");
+                    url = CQ.HTTP.addParameter(url, "path", path);
+                    if (skipWorkflow === true) {
+                        url = CQ.HTTP.addParameter(url, "skipWorkflow", "true");
+                    }
+                    url = CQ.HTTP.addParameter(url, "_charset_", "utf8");
+                    url = CQ.HTTP.noCaching(url);
+                    var res = CQ.HTTP.get(url);
+                    if (CQ.HTTP.isOk(res)) {
+                        info = CQ.Util.eval(res);
+                    } else {
+                        info = {};
+                    }
+                    contentWin.CQ.utils.WCM.pageInfos[path] = info;
+                    this.fireEvent("pageinfoloaded", contentWin.CQ.utils.WCM.pageInfos[path]);
+                }
+            } else {
+                info = {};
+            }
+            return info;
+        },
+
+        /**
+         * Returns the content language of the page.
+         * @param {String} path The content path of the page
+         * @return {String} a locale code such as "de" or "de_CH"
+         * @since 5.4
+         */
+        getPageLanguage: function(path) {
+            return CQ.utils.WCM.getPageInfo(path).language;
+        },
+
+        /**
+         * Returns the content language of the page as a locale object.
+         * @param {String} path The content path of the page
+         * @return {Object} an object with "code" ("de_CH"), "language" ("de") and "country" ("CH")
+         *                  (or null if the page has no language)
+         * @since 5.4
+         */
+        getPageLocale: function(path) {
+            return CQ.I18n.parseLocale(CQ.utils.WCM.getPageInfo(path).language);
+        },
+
+        /**
+         * Returns the {@link CQ.wcm.ContentFinder Content Finder} (or
+         * null if none is available).
+         * @static
+         * @return {CQ.wcm.ContentFinder} The Content Finder
+         */
+        getContentFinder: function() {
+            return CQ.WCM.getTopWindow().CQ_ContentFinder;
+        },
+
+        /**
+         * Returns the window of the content page, independent of the
+         * presence of the {@link CQ.wcm.ContentFinder Content Finder}.
+         * @static
+         * @return {Window} The content window
+         */
+        getContentWindow: function() {
+            var finder = CQ.utils.WCM.getContentFinder();
+            return finder ? finder.getContentWindow() : window;
+        },
+
+        /**
+         * Returns the last accessible ascendant window.
+         * @static
+         * @return {Window} The top window
+         * @deprecated since 5.5, use {@link CQ.shared.Util#getTopWindow} instead
+         */
+        getTopWindow: CQ.shared.Util.getTopWindow,
+
+        /**
+         * Returns true if the specified window is the window displaying
+         * the content page, independent of the presence of the
+         * {@link CQ.wcm.ContentFinder Content Finder}. If no window is
+         * specified, the current window will be checked.
+         * @static
+         * @param {Window} win The window (optional)
+         * @return {Boolean} True if window is content window
+         */
+        isContentWindow: function(win) {
+            if (!win) win = window;
+            return win == CQ.utils.WCM.getContentWindow();
+        },
+
+        /**
+         * Returns the URL of the content window, independent of the
+         * presence of the {@link CQ.wcm.ContentFinder Content Finder}.
+         * @static
+         * @return {String} The content URL
+         */
+        getContentUrl: function() {
+            return CQ.utils.WCM.getContentWindow().location.href;
+        },
+
+        /**
+         * Loads the global editing toolbar with the specified
+         * {@link CQ.Ext.Toolbar} (or a toolbar config object}.
+         * This will override the default set of toolbar actions.
+         * Note that you must create the toolbar in the right
+         * context (for example: CQ.WCM.getTopWindow().CQ.Ext.Toolbar), if
+         * you specify a toolbar instead of a config object.
+         * @static
+         * @param {CQ.Ext.Toolbar/Object} toolbar The toolbar
+         */
+        loadToolbar: function(toolbar) {
+            var finder = CQ.utils.WCM.getContentFinder();
+            if (finder) {
+                finder.loadToolbar(toolbar);
+            } else {
+                CQ.Log.info("CQ.utils.WCM#loadToolbar: unable to load toolbar without content finder");
+            }
+            if (!CQ.utils.WCM.getContentWindow().CQ_toolbarObserved) {
+                CQ.Ext.EventManager.on(CQ.utils.WCM.getContentWindow(), "unload", function() {
+                    CQ.utils.WCM.unloadToolbar();
+                }, this);
+                CQ.utils.WCM.getContentWindow().CQ_toolbarObserved = 1;
+            }
+        },
+
+        /**
+         * Restores the default set of toolbar actions to the global
+         * editing toolbar.
+         * @static
+         */
+        unloadToolbar: function() {
+            var finder = CQ.utils.WCM.getContentFinder();
+            if (finder) {
+                finder.unloadToolbar();
+            } else {
+                CQ.Log.info("CQ.utils.WCM#loadToolbar: unable to unload toolbar without content finder");
+            }
+            CQ.utils.WCM.getContentWindow().CQ_toolbarObserved = 0;
+        },
+
+        /**
+         * Returns the path of the current page usually set by {@link #launchSidekick}.
+         * If it is not set the path will be retrieved from the current window location.
+         * @static
+         * @return {String} The page path
+         */
+        getPagePath: function() {
+            if( window != CQ.utils.WCM.getContentWindow()) {
+                try {
+                    //always call getPagePath on WCM object in content window
+                    return CQ.utils.WCM.getContentWindow().CQ.WCM.getPagePath();
+                }
+                catch (e) {
+                    // no CQ in content window, e.g. 404
+                    return "";
+                }
+            }
+
+            if (pagePath) {
+                return pagePath;
+            }
+            else {
+                return CQ.shared.HTTP.getPath();
+            }
+        },
+
+
+        /**
+         * Marks/Unmarks the content page as read-only.
+         * @private
+         * @static
+         * @param {Boolean} mode True to hide edit components
+         */
+        setReadOnly: function(mode) {
+            readOnly = mode;
+        },
+
+
+        /**
+         * Sets the design options for the component at the specified
+         * content path.
+         * @private
+         * @static
+         * @param {String} contentPath The content path
+         * @deprecated Use {@link CQ.WCM#provideStyleOptions} instead
+         */
+        getDesignStyleOptions: function(contentPath) {
+            this.setOptions(CQ.utils.WCM.getStyleOptions.call(this, contentPath));
+        },
+
+        /**
+         * Returns the styles defined by the design of the component at
+         * the specified content path as options. This method can be used
+         * directly as {@link CQ.Selection#optionsProvider} to draw a style
+         * selector.
+         * @static
+         * @param {String} contentPath The content path
+         * @return {Object[]} The style options
+         * @since 5.3
+         */
+        getStyleOptions: function(contentPath) {
+            // first check if dialog provides a cell and get styles from the
+            // client side design
+            var dlg = this.findParentByType("dialog");
+            var cell = dlg ? dlg.cell : null;
+            var value = null;
+            if (cell) {
+                var design = CQ.utils.WCM.getDesign();
+                if (design) {
+                    value = design.getStyleProperty(cell, this.initialConfig.newStylePath);
+                }
+            }
+            try {
+                if (!value) {
+                    var suffix = "";
+                    if (contentPath.lastIndexOf("/*") > 0) {
+                        contentPath = contentPath.substring(0, contentPath.length - 2);
+                        if (this.initialConfig.newStylePath) {
+                            suffix = "/" + this.initialConfig.newStylePath;
+                        }
+                    } else {
+                        if (this.initialConfig.stylePath) {
+                            suffix = "/" + this.initialConfig.stylePath;
+                        }
+                    }
+                    var url = contentPath + ".style.json" + suffix;
+                    var json = CQ.Util.eval(url);
+                    for (var a in json) {
+                        value = json[a];
+                        break;
+                    }
+                }
+                if (value) {
+                    if (typeof value == "string") {
+                        value = value.split("\n");
+                    }
+                    var opts = [];
+                    for (var i=0; i<value.length; i++) {
+                        var nm = value[i];
+                        if (typeof nm == "string") {
+                            nm = nm.split("\t");
+                        }
+                        opts.push({
+                            value: nm[0],
+                            text: nm[1] ? nm[1] : nm[0]
+                        });
+                    }
+                    return opts;
+                }
+            } catch (e) {
+                CQ.Log.error("CQ.utils.WCM#getStyleOptions failed: " + e.message);
+            }
+            return [];
+        },
+
+        /**
+         * Sets the content language options.
+         * @private
+         * @static
+         * @deprecated Use {@link CQ.WCM#getLanguageOptions} instead
+         */
+        setContentLanguageOptionsCB: function() {
+            this.setOptions(CQ.utils.WCM.getLanguageOptions());
+        },
+
+        /**
+         * Returns the available languages as options. This method can be used
+         * directly as {@link CQ.Selection#optionsProvider} to draw a language
+         * selector.
+         *
+         * @static
+         * @return {Object[]} An array of objects with "value" (language code)
+         *                    and "text" (language/country name) strings
+         * @since 5.3
+         */
+        getLanguageOptions: function() {
+            try {
+                var languages = CQ.I18n.getLanguages();
+                var opts = [];
+                opts.push({value: "",text: "<>"});
+                for (var name in languages) {
+                    var lang = languages[name];
+                    if (lang.title) {
+                        opts.push({
+                            value: name,
+                            text: lang.title
+                        });
+                    }
+                }
+
+                // CQ-19848: Enforcing use of proper Chinese collation methods (Pinyin for Simplified, stroke count for Traditional)
+                var sortingLocale = CQ.I18n.getLocale();
+                if (/^zh.(cn\b|sg\b|hans\b)/gi.exec(sortingLocale)){
+                    sortingLocale = "zh-Hans-cn-u-co-pinyin";
+                } else if (/^zh.(tw\b|hk\b|mo\b|hant\b)/gi.exec(sortingLocale)){
+                    sortingLocale = "zh-Hant-tw-u-co-stroke";
+                } else {
+                    sortingLocale = sortingLocale.replace("_", "-");
+                }
+
+                opts.sort(function(l1, l2) {
+                    if (l1.text.localeCompare(l2.text, sortingLocale) < 0) {
+                        return -1;
+                    } else if (l1.text.localeCompare(l2.text, sortingLocale) == 0) {
+                        return 0;
+                    } else {
+                        return 1;
+                    }
+                });
+                return opts;
+            } catch (e) {
+                CQ.Log.error("CQ.utils.WCM#getLanguageOptions failed: " + e.message);
+            }
+            return [];
+        },
+
+        /**
+         * Returns the currently defined workflow packages as options. This method can be used
+         * directly as {@link CQ.Selection#optionsProvider} to draw a workflow package
+         * selector.
+         * @static
+         * @param {Object} packages Provided list of workflow packages
+         * @return {Object[]} The workflow package options
+         * @since 5.4
+         */
+        getWorkflowPackageOptions: function(packages) {
+            try {
+                var options = [];
+
+                // Browse packages to build options list
+                for (var i = 0; i < packages.length; i++) {
+                    var wp = packages[i];
+                    options.push({
+                        value: wp.path,
+                        text: wp.title
+                    });
+                }
+
+                // Sort options list
+                options.sort(function(l1, l2) {
+                    if (l1.text < l2.text) {
+                        return -1;
+                    } else if (l1.text == l2.text) {
+                        return 0;
+                    } else {
+                        return 1;
+                    }
+                });
+
+                return options;
+            } catch (e) {
+                CQ.Log.error("CQ.utils.WCM#getWorkflowPackageOptions failed: " + e.message);
+            }
+
+            return [];
+        },
+
+        /**
+         * Returns workflow model options. The list of workflow models is slightly modified in a way, that it excludes the
+         * defining model itself. This reduces (but not completely prevents) the building of workflow loops.
+         * The method parameters follow the signature of the optionsProvider interface.
+         * @static
+         * @param {String} path The path of the container workflow model.
+         * @param {Object} record
+         * @return {Object[]} The container step workflow options
+         * @since 5.4
+         */
+        getContainerStepOptions: function(path, record){
+        	  try {
+                  var options = [];
+                  var json = CQ.HTTP.eval("/libs/cq/workflow/content/console/models.json");
+                  var models = json.models;
+                  if(models){
+                	  var ommit = "";
+                	  if(path){
+                		  var index = path.indexOf("/jcr:content");
+                		  ommit = path.substring(0, index);
+                	  }
+                	  for(var model in models){
+                		  var modelObject = models[model];
+                		  var item = modelObject.item;
+                		  var doOmmit = 0;
+                		  if(item){
+                			  var doOmmit = item.search(ommit);
+                		  }
+                		  if(doOmmit == -1){
+	                		  options.push({
+	                              value: modelObject.item,
+	                              text: modelObject.title,
+	                              qtip: modelObject.description
+	                          });
+                		  }
+                	  }
+                  }
+                  return options;
+              } catch (e) {
+                  CQ.Log.error("CQ.utils.WCM#getContainerWorkflowOptions failed: " + e.message);
+              }
+
+              return [];
+        },
+
+        /**
+         * Adds the required keypress event listeners to trigger WCM actions.
+         * @private
+         * @static
+         * @param {Window} win (optional) The window
+         */
+        observeKeypress: function(win) {
+            if (!CQ.Ext.isReady) {
+                CQ.Ext.onReady(function() {
+                    CQ.utils.WCM.observeKeypress(win);
+                });
+            } else {
+                if (!win) win = window;
+                var target = CQ.Ext.isIE ? win.document : win;
+                if (!win.CQ_keypressObserved) {
+                    CQ.Ext.EventManager.on(target, "keydown", processKeyDown);
+                    CQ.Ext.EventManager.on(target, "keyup", processKeyUp);
+                    win.CQ_keypressObserved = 1;
+                    CQ.Ext.EventManager.on(win.document, "unload", function() {
+                        CQ.Ext.EventManager.un(target, "keydown", processKeyDown);
+                        CQ.Ext.EventManager.un(target, "keyup", processKeyUp);
+                    });
+                }
+            }
+        },
+
+        /**
+         * Returns a ComponentList object for the specified page. If path is
+         * null, the component list of the current page is returned.
+         *
+         * @param {String} path The path
+         * @return {CQ.wcm.ComponentList} The component list
+         * @static
+         */
+        getComponentList: function(path) {
+            var contentWin = this.getContentWindow();
+            var list = contentWin.CQ.utils.WCM.componentLists[""];
+            if (!list) {
+                if (!path) {
+                    path = CQ.utils.WCM.getPagePath();
+                }
+                var info = CQ.utils.WCM.getPageInfo(path);
+                var compsRef = info.componentsRef;
+                if (!compsRef) {
+                    compsRef = "/libs/wcm/core/content/components.json";
+                }
+                var url = CQ.HTTP.externalize(compsRef);
+                var res = CQ.HTTP.get(url);
+                if (CQ.HTTP.isOk(res)) {
+                    // ensure proper page path to be stored in ComponentList object
+                    if (!path) {
+                        path = CQ.utils.WCM.getPagePath();
+                    }
+                    var idx = path.indexOf("/jcr:content");
+                    if (idx > 0) {
+                        path = path.substring(0, idx);
+                    }
+                    list = new CQ.wcm.ComponentList(path, CQ.Util.eval(res));
+                    contentWin.CQ.utils.WCM.componentLists[""] = list;
+                }
+            }
+            return list;
+        },
+        
+        /**
+         * Returns the page-specific config of the component with the
+         * specified resource type.
+         * @param {String} resourceType The resource type of the component
+         * @return {Object} The component config
+         * @static
+         */
+        getComponentConfig: function(resourceType) {
+            try {
+                var cl = CQ.utils.WCM.getComponentList();
+                var config = cl.getComponent(resourceType);
+                return CQ.Util.copyObject(config);
+            } catch (e) {
+                CQ.Log.error("CQ.util.WCM#getComponentConfig: unable to load components.");
+                return null;
+            }
+        },
+
+        /**
+         * Marks/Unmarks the content window as loading.
+         * @private
+         * @static
+         * @param {Boolean} loading True if loading
+         */
+        setContentWindowLoading: function(loading) {
+            CQ.WCM.getTopWindow().CQ_isContentWindowLoading = loading;
+        },
+
+        /**
+         * Returns true if the content window is loading.
+         * @static
+         * @return {Boolean} True if loading
+         */
+        isContentWindowLoading: function() {
+            return CQ.WCM.getTopWindow().CQ_isContentWindowLoading;
+        },
+
+        /**
+         * <p>Registers the specified Ext component that is neither part of a dialog, nor
+         * an editable, but should nevertheless work as a drop target.</p>
+         * <p>If a component is used inside a {@link CQ.Dialog}, you must not use this
+         * method, as the component is automatically detected as a valid drop target.</p>
+         * <p>Note that you should always explicitly unregister any component you previously
+         * registered.</p>
+         * @param {CQ.Ext.Component} dropTargetComp The drop target component to register
+         * @since 5.3
+         */
+        registerDropTargetComponent: function(dropTargetComp) {
+            dropTargetComponents.push(dropTargetComp);
+        },
+
+        /**
+         * <p>Unregisters the specified component as an external drop target (= a drop
+         * target that is neither part of a dialog, nor an editable).</p>
+         * <p>If the specified component has not been registered before, the call to this
+         * method is ignored silently.</p>
+         * @param {CQ.Ext.Component} dropTarget The drop target to unregister
+         * @since 5.3
+         */
+        unregisterDropTargetComponent: function(dropTarget) {
+            var i = dropTargetComponents.indexOf(dropTarget);
+            if (i >= 0) {
+                dropTargetComponents.splice(i, 1);
+            }
+        },
+
+        /**
+         * Gets an array of all currently registered components that work as external drop
+         * targets.
+         * @return {CQ.Ext.Component[]} Array of currently registered external
+         *         drop targets
+         * @since 5.3
+         */
+        getDropTargetComponents: function() {
+            return dropTargetComponents;
+        },
+
+        getEmulatorManager: function(config) {
+            var cw = this.getContentWindow();
+            try {
+                return cw.CQ.wcm.emulator.EmulatorManager.getInstance(config);
+            }
+            catch (e) {
+                return null;
+            }
+        },
+
+        getDeviceSimulator: function(config) {
+            var cw = this.getContentWindow();
+            try {
+                return cw.CQ.wcm.mobile.simulator.DeviceSimulator.getInstance(config);
+            }
+            catch (e) {
+                return null;
+            }
+        }
+
+    });
+}();
+
+// shortcut
+CQ.WCM = CQ.utils.WCM;
+
+/**
+ * Shorthand for {@link #makeEditable}.
+ * @static
+ * @param {Object} config The configuration
+ * @return {CQ.wcm.EditBase} The edit component (or null if
+ *         document not ready yet)
+ * @method edit
+ * @member CQ.WCM
+ */
+CQ.WCM.edit = CQ.utils.WCM.makeEditable;
+

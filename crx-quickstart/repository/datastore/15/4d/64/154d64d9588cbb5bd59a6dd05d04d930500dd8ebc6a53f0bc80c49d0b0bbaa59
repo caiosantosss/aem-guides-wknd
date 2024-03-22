@@ -1,0 +1,568 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+/**
+ * @param {jQuery} $ is the jQuery object to be used
+ * @param {Object} ns is the namespace object to be used
+ * @param {jQuery} channel is the object to be used as an event bus
+ * @param {HTMLElement} window global window object
+ */
+;
+(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+    /**
+     * CSS classes used for DOM Diff
+     */
+    var HTML_ADDED_CLASS = "html-added";
+    var HTML_REMOVED_CLASS = "html-removed";
+    var COMPONENT_ADDED_CLASS = "cq-component-added";
+    var COMPONENT_REMOVED_CLASS = "cq-component-removed";
+    var COMPONENT_MOVED_CLASS = "cq-component-moved";
+    var COMPONENT_GHOST_CLASS = "ghost";
+
+    /**
+     * Instantiates a new DiffService with the given config.
+     *
+     * @class window.DiffService
+     * @classdesc Diff Service provides client side diff functionality for two rendered HTML resources.
+     *
+     * @param {DiffServiceConfig} config - The DiffService Configuration object.
+     */
+    var DiffService = function (config) {
+        this.config = $.extend(true, {}, this.config, config);
+
+        //null check for $target and $source
+    };
+
+    DiffService.prototype = (function () {
+
+        /**
+         * Escape jQuery selectors
+         * @param expression
+         * @returns {String} escaped selector
+         * @private
+         */
+        var _jQuerySelectorEscape = function (expression) {
+            return expression.replace(/[!"#$%&'()*+,.\/:;<=>?@\[\\\]^`{|}~]/g, '\\$&');
+        };
+
+        /**
+         * Calculate the depth path of an element inside a given container
+         * @param el
+         * @param container
+         * @returns {string} the path of the element in the conatiner
+         * @private
+         */
+        var _getDomPath = function (el, container) {
+            var stack = [];
+            while (el.parentNode !== null) {
+                var sibCount = 0;
+                var sibIndex = 0;
+                for (var i = 0; i < el.parentNode.childNodes.length; i++) {
+                    var sib = el.parentNode.childNodes[i];
+                    if (sib.nodeName === el.nodeName) {
+                        if (sib === el) {
+                            sibIndex = sibCount;
+                        }
+                        sibCount++;
+                    }
+                }
+                if (el.nodeType === 1 && el.hasAttribute('id') && el.id !== '') {
+                    stack.unshift(el.nodeName.toLowerCase() + '#' + _jQuerySelectorEscape(el.id));
+                } else if (sibCount > 1) {
+                    stack.unshift(el.nodeName.toLowerCase() + ':eq(' + sibIndex + ')');
+                } else {
+                    stack.unshift(el.nodeName.toLowerCase());
+                }
+                if (el.parentNode === container.get(0))
+                    break;
+                el = el.parentNode;
+            }
+
+            return stack.join(' > '); // removes the html element
+        };
+
+        /**
+         * Filter a given list of HTML nodes based on config settings (skip scripts, comments, cq tags and empty text nodes)
+         * @param childNodes {NodeList} the list of HTML nodes to filter
+         * @returns {Array} filtered HTML nodes
+         * @private
+         */
+        var _filterNodes = function (childNodes) {
+            var ret = [];
+            $.each(childNodes, function (i, item) {
+                /* get rid of black-listed tags */
+                var tagName = (item.tagName || item.nodeName || '').toLowerCase();
+
+                if ( this.blackListedTags.indexOf(tagName) !== -1
+                    || (item.nodeType === this.node_types.TEXT_NODE && item.nodeValue.trim().length === 0)
+                    || item.nodeType === this.node_types.COMMENT_NODE
+                    || item.nodeType === this.node_types.CDATA_SECTION_NODE) {
+                    return;
+                }
+                var parentPath = _getDomPath(item.parentNode, $(item.parentNode).closest(":has(cq)"));
+                item.parentPath = parentPath;
+                ret.push(item);
+            }.bind(this));
+            return ret;
+        };
+
+        /**
+         * Compare two lists of HTML nodes
+         * @param left {NodeList} node list to compare with
+         * @param right {NodeList} node list to compare with
+         * @param editable containing the right list of nodes
+         * @returns {boolean} true if the nodes can be compared, false otherwise
+         * @private
+         */
+        var _compareNodeList = function (left, right, editable) {
+            var lLeft = _filterNodes.call(this, left),
+                lRight = _filterNodes.call(this, right),
+                i, j, rightNode, leftNode, newNode;
+
+            for (i = 0, j = 0; i < lLeft.length || j < lRight.length;) {
+                if (lLeft[i] && lRight[j]) {
+                    if (!this.compareNode(lLeft[i], lRight[j], editable)) {
+                        //left is removed and right is added = > because I don't know what to what I compare
+                        if (lRight[j].nodeType === this.node_types.TEXT_NODE) {
+                            newNode = document.createElement("span");
+                            newNode.className = HTML_ADDED_CLASS;
+                            newNode.innerHTML = lRight[j].nodeValue;
+                            lRight[j].parentNode.replaceChild(newNode, lRight[j]);
+                            lRight[j] = newNode;
+                        } else if (lRight[j].nodeType === this.node_types.ELEMENT_NODE) {
+                            $(lRight[j]).addClass(HTML_ADDED_CLASS);
+                        }
+                        j++;
+                    } else {
+                        i++;
+                        j++;
+                    }
+                } else if (lLeft[i]) {
+                    leftNode = lLeft[i];
+                    rightNode = lRight[j - 1] && lRight.parentPath ? $(lRight[j - 1].parentPath, $("#DiffContentFrame").contents()).get(0) : editable.get(0);
+                    if (leftNode.nodeType === this.node_types.TEXT_NODE && leftNode.nodeValue.trim().length > 0) {
+                        newNode = document.createElement("span");
+                        newNode.className = HTML_REMOVED_CLASS;
+                        newNode.innerHTML = leftNode.nodeValue;
+                        rightNode.appendChild(newNode);
+                    } else if (leftNode.nodeType === this.node_types.ELEMENT_NODE) {
+                        newNode = $(leftNode).clone(true);
+                        newNode.addClass(HTML_REMOVED_CLASS);
+                        rightNode.appendChild(newNode[0]);
+                    }
+                    i++;
+                } else if (lRight[j]) {
+                    rightNode = lRight[j];
+                    if (rightNode.nodeType === this.node_types.TEXT_NODE && rightNode.nodeValue.trim().length > 0) {
+                        newNode = document.createElement("span");
+                        newNode.className = HTML_ADDED_CLASS;
+                        newNode.innerHTML = rightNode.nodeValue;
+                        rightNode.parentNode.replaceChild(newNode, rightNode);
+                        lRight[j] = newNode;
+                    } else if (rightNode.nodeType === this.node_types.ELEMENT_NODE) {
+                        $(rightNode).addClass(HTML_ADDED_CLASS);
+                    }
+                    j++;
+                }
+            }
+            return true;
+        };
+
+        var _commonPagePath = function (sourcePath, targetPath) {
+            if (sourcePath.substring(0, 1) === '/') {
+                sourcePath = sourcePath.substring(1);
+            }
+            if (targetPath.substring(0, 1) === '/') {
+                targetPath = targetPath.substring(1);
+            }
+            var sourceArr = sourcePath.split("/");
+            var targetArr = targetPath.split("/");
+            var path = [];
+            $.each(sourceArr, function (index, sourceWord) {
+                if (sourceWord !== targetArr[index]) {
+                    return false;
+                }
+                path.push(sourceWord);
+            });
+            return path.join("/");
+        };
+
+        var _bestCommonPathMatch = function (path, sourcePath, targetPath) {
+            var commonPathTarget = _commonPagePath(path, targetPath);
+            var commonPathSource = _commonPagePath(path, sourcePath);
+            return commonPathTarget.length > commonPathSource.length ? commonPathTarget : commonPathSource;
+        }
+
+        /**
+         * Compare two lists of HTML attributes
+         * @param expected
+         * @param actual
+         * @returns {boolean} true id the lists of attributes are equal, false otherwise
+         * @private
+         */
+        var _compareAttributes = function (expected, actual) {
+            var aExpected = {}, aActual = {},
+                i, l, bestActualPathMatch, bestExpectedPathMatch;
+
+            if (!expected.attributes && !actual.attributes)
+                return true;
+
+
+            for (i = 0, l = expected.attributes.length; i < l; i++) {
+                aExpected[expected.attributes[i].nodeName] = expected.attributes    [i];
+            }
+
+            for (i = 0, l = actual.attributes.length; i < l; i++) {
+                aActual[actual.attributes[i].nodeName] = actual.attributes[i];
+            }
+
+            for (i in aExpected) {
+                // both nodes has an attribute and it is white-listed
+                if (aExpected.hasOwnProperty(i) && aActual.hasOwnProperty(i)) {
+                    if (this.whiteListedAttributes.indexOf(i) !== -1) {
+                        var vExpected = aExpected[i].nodeValue;
+                        var vActual = aActual[i].nodeValue;
+                        if (i === 'src' || i === 'href') {
+                            vActual = Granite.HTTP.internalize(vActual);
+                            vExpected = Granite.HTTP.internalize(vExpected);
+                            bestActualPathMatch = _bestCommonPathMatch(vActual, this.config.sourcePath, this.config.targetPath);
+                            bestExpectedPathMatch = _bestCommonPathMatch(vExpected, this.config.sourcePath, this.config.targetPath);
+                            vExpected = Granite.HTTP.internalize(vExpected.replace(bestExpectedPathMatch, bestActualPathMatch));
+                            vActual = Granite.HTTP.internalize(vActual);
+                        } else if (i === 'style' && vExpected.indexOf("background-image") !== -1) {
+                            vActual = Granite.HTTP.internalize($(actual).css("background-image").match(/\(\"(.*?)\"\)/)[1]);
+                            bestActualPathMatch = _bestCommonPathMatch(vActual, this.config.sourcePath, this.config.targetPath);
+                            vExpected = Granite.HTTP.internalize($(expected).css("background-image").match(/\(\"(.*?)\"\)/)[1]);
+                            bestExpectedPathMatch = _bestCommonPathMatch(vExpected, this.config.sourcePath, this.config.targetPath);
+                            vExpected = vExpected.replace(bestExpectedPathMatch, bestActualPathMatch);
+                        }
+                        // but values differ
+                        vExpected = vExpected.trim();
+                        vActual = vActual.trim();
+                        if (vExpected !== vActual) {
+                            return false;
+                        }
+                    }
+                    // remove to check for extra/missed attributes;
+                    delete aActual[i];
+                    delete aExpected[i];
+                }
+            }
+
+            // missed attributes
+            for (i in aExpected) {
+                if (aExpected.hasOwnProperty(i))
+                    return false;
+            }
+
+            // extra attributes
+            for (i in aActual) {
+                if (aActual.hasOwnProperty(i))
+                    return false;
+            }
+
+            return true;
+        };
+
+        /**
+         * Verify if a component contains sub-components
+         * @param editable
+         * @returns {boolean} true if it does, false otherwise
+         * @private
+         */
+        var _hasNestedComponents = function (editable) {
+            return editable.find("cq").length > 1;
+        };
+
+        /**
+         * Find the insertion point of a removed component from the source HTML fragment in the target HTML fragment
+         * @param editable that was removed
+         * @param $target HTML fragment
+         * @private
+         */
+        var _findDomInsertionPoint = function (editable, $target) {
+
+            var path = editable.data("path");
+            if (!_hasNestedComponents(editable) && (!path || $("cq[data-path='" + path.replace(this.config.sourcePath, this.config.targetPath) + "']", $target).length > 0)) {
+                return;
+            }
+
+            var inserted = false;
+            editable = editable.parent();
+            var prevSiblings = editable.prevAll().has("> cq");
+
+            prevSiblings.each(function (index, sibling) {
+                if ($(sibling).find("> cq").length === 0) {
+                    return;
+                }
+                var siblingPath = $(sibling).find("> cq").data("path").replace(this.config.sourcePath, this.config.targetPath);
+                var targetSibling = $("cq[data-path='" + siblingPath + "']", $target);
+                if (targetSibling.length > 0) {
+                    var $toInsert = editable.clone(true).addClass(COMPONENT_REMOVED_CLASS);
+                    $toInsert.find('cq').each(function (i, elem) {
+                        $(elem).attr("data-path", $(elem).data("path").replace(this.config.sourcePath, this.config.targetPath));
+                    }.bind(this));
+                    $toInsert.insertAfter(targetSibling.parent());
+                    inserted = true;
+                    return false;
+                }
+            }.bind(this));
+            if (!inserted) {
+                var nextSiblings = editable.nextAll().has("> cq");
+                nextSiblings.each(function (index, sibling) {
+                    if ($(sibling).find("> cq").length === 0) {
+                        return;
+                    }
+                    var siblingPath = $(sibling).find("> cq").data("path").replace(this.config.sourcePath, this.config.targetPath);
+                    var targetSibling = $("cq[data-path='" + siblingPath + "']", this.config.$targetDocument);
+                    if (targetSibling.length > 0) {
+                        var $toInsert = editable.clone(true).addClass(COMPONENT_REMOVED_CLASS);
+                        $toInsert.find('cq').each(function (i, elem) {
+                            $(elem).attr("data-path", $(elem).data("path").replace(this.config.sourcePath, this.config.targetPath));
+                        }.bind(this));
+                        $toInsert.insertBefore(targetSibling.parent());
+                        inserted = true;
+                        return false;
+                    }
+                }.bind(this));
+            }
+            if (!inserted) {
+                var parent = editable.parent();
+                if (parent.find("> cq").length > 0) {
+                    var slingPath = parent.find("> cq").data("path").replace(this.config.sourcePath, this.config.targetPath);
+                    var targetEditable = $("cq[data-path='" + slingPath + "']", this.config.$targetDocument);
+                    if (targetEditable.length > 0) {
+                        var $toInsert = editable.clone(true).addClass(COMPONENT_REMOVED_CLASS);
+                        $toInsert.find('cq').each(function (i, elem) {
+                            $(elem).attr("data-path", $(elem).data("path").replace(this.config.sourcePath, this.config.targetPath));
+                        }.bind(this));
+                        targetEditable.parent().append($toInsert);
+                        inserted = true;
+                        return false;
+                    }
+                } else {
+                    return _findDomInsertionPoint.call(this, parent, this.config.$targetDocument, this.config.sourcePath, this.config.targetPath);
+                }
+            }
+        };
+
+        /**
+         * Verify that component can be edited
+         * @param editable The editable to inspect
+         * @returns {boolean} true is editable has edit configuration, false otherwise
+         * @private
+         */
+        var _isValidEditable = function (editable) {
+            var config = $(editable).data("config");
+            return typeof config !== 'undefined' && typeof config.editConfig !== 'undefined';
+        };
+
+        /**
+         * Calculate hash representation of a string
+         * @param str
+         * @returns hash representation
+         * @private
+         */
+        var _hashCode = function (str) {
+            return str.split("").reduce(function (a, b) {
+                    a = ((a << 5) - a) + b.charCodeAt(0);
+                    return a & a
+                }, 0) + 2147483647 + 1;
+        };
+
+        /**
+         * Compare the computed styles of two HTML nodes
+         * @param original
+         * @param changed
+         * @returns {boolean} true if the styles are equal, false otherwise
+         * @private
+         */
+        var _compareComputedStyles = function (original, changed) {
+            var originalComputedStyle = window.getComputedStyle(original);
+            var changedComputedStyle = window.getComputedStyle(changed);
+
+            for (var i = 0; i < changedComputedStyle.length; i++) {
+                var property = changedComputedStyle.item(i);
+                if (originalComputedStyle.getPropertyValue(property) !== changedComputedStyle.getPropertyValue(property)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        return {
+
+            constructor: ns.DiffService,
+
+            /**
+             * The default DiffService Configuration properties
+             *
+             * @member {DiffServiceConfig} window.DiffService#config
+             */
+            config: {
+                skipComments: true,
+                stripSpaces: true,
+                skipNewSection: true,
+                sourcePath: "",
+                targetPath: ""
+            },
+
+            /**
+             * Basic HTML node types
+             */
+            node_types: {
+                ELEMENT_NODE: 1,
+                ATTRIBUTE_NODE: 2,
+                TEXT_NODE: 3,
+                CDATA_SECTION_NODE: 4,
+                ENTITY_REFERENCE_NODE: 5,
+                ENTITY_NODE: 6,
+                PROCESSING_INSTRUCTION_NODE: 7,
+                COMMENT_NODE: 8,
+                DOCUMENT_NODE: 9,
+                DOCUMENT_TYPE_NODE: 10,
+                DOCUMENT_FRAGMENT_NODE: 11,
+                NOTATION_NODE: 12
+            },
+
+            /* list of white-listed attributes */
+            whiteListedAttributes: [
+                'style', 'src', 'title', 'alt', 'class', 'href'
+            ],
+
+            /* list of black-listed tags */
+            blackListedTags: [
+                'button', 'canvas', 'content', 'element', 'embed', 'form', 'head', 'iframe', 'input', 'link', 'meta', 'noscript', 'object',
+                'script', 'shadow', 'style', 'template', 'title', 'cq'
+            ],
+
+            /**
+             * Compares 2 HTML nodes checking the styles, attributes and content recursively in the DOM tree,
+             * using diff-match-patch for text analysis
+             *
+             * @param left HTML node (source to diff against)
+             * @param right HTML node (the node to be diffed)
+             * @param editable containing the right node
+             * @returns {boolean}
+             */
+            compareNode: function (left, right, editable) {
+                if (_hasNestedComponents(editable) || editable.hasClass("clientcontext")) {
+                    return;
+                }
+                if (left.nodeName === right.nodeName && left.nodeType === right.nodeType) {
+                    switch (left.nodeType) {
+                        case this.node_types.DOCUMENT_NODE:
+                            this.compareNode(left.documentElement, right.documentElement, editable);
+                            break;
+                        case this.node_types.ELEMENT_NODE:
+                            // CQ-4260816 and CQ-4258703 - skipping attributes comparison
+                            _compareNodeList.call(this, left.childNodes, right.childNodes, editable);
+                            break;
+                        case this.node_types.TEXT_NODE:
+                            $(left).prettyTextDiff({
+                                cleanup: false,
+                                debug: false,
+                                originalContent: $(left),
+                                changedContent: $(right),
+                                diffContainer: right
+                            });
+                            break;
+                        default:
+                            break;
+                    }
+                    return true;
+                }
+                return false;
+            },
+
+            /**
+             * Compare two HTML documents/fragments analyzing added, removed, moved and common components/editables
+             */
+            computeHtmlDiff: function () {
+
+                var targetCommonComponents = [];
+                var sourceCommonComponents = [];
+                var componentsHashMap = {};
+                var removedComponents = [];
+
+                //diff for common components
+                $.each($("cq", this.config.$targetDocument), function (index, editable) {
+                    var originalSlingPath = $(editable).data("path");
+                    var slingPath = originalSlingPath.replace(this.config.targetPath, this.config.sourcePath);
+                    //source editables can point to the same path as target ones (we-retail case)
+                    var sourceEditable = $("cq[data-path='" + originalSlingPath + "']", this.config.$sourceDocument);
+                    if (sourceEditable.length === 0) {
+                        sourceEditable = $("cq[data-path='" + slingPath + "']", this.config.$sourceDocument);
+                    }
+                    if (sourceEditable.length > 0) {
+                        sourceEditable = sourceEditable.parent();
+                        targetCommonComponents.push(_hashCode(slingPath));
+                    } else if (sourceEditable.length === 0) {
+                        //don't take into consideration ghost components for live copies
+                        if (!$(editable).parent().hasClass(COMPONENT_GHOST_CLASS)) {
+                            $(editable).parent().addClass(COMPONENT_ADDED_CLASS);
+                        }
+                        return;
+                    }
+                    var hasNestedComponents = _hasNestedComponents($(editable).parent());
+                    if (_isValidEditable(editable)) {
+                        if (!hasNestedComponents) {
+                            editable = $(editable).parent();
+                            this.compareNode(sourceEditable.get(0), editable.get(0), editable);
+                        }
+                        // CQ-4260816 and CQ-4258703 - skipping computed styles analysis
+                    }
+                }.bind(this));
+
+
+                //analyze removed components
+                $.each($("cq", this.config.$sourceDocument), function (index, editable) {
+                    var slingPath = $(editable).data("path").replace(this.config.sourcePath, this.config.targetPath);
+                    var targetEditable = $("cq[data-path='" + slingPath + "']", this.config.$targetDocument);
+                    if (targetEditable.length === 0 && _isValidEditable(editable)) {
+                        removedComponents.push($(editable));
+                    } else {
+                        //analyze moved components
+                        var hash = _hashCode(slingPath.replace(this.config.targetPath, this.config.sourcePath));
+                        sourceCommonComponents.push(hash);
+                        componentsHashMap["" + hash] = slingPath;
+                    }
+                }.bind(this));
+
+                //analyze moved components
+                var modifiedDiffs = new diff_match_patch().diff_main(sourceCommonComponents.join("/"), targetCommonComponents.join("/"));
+                $.each(modifiedDiffs, function (idx, diff) {
+                    if (diff[0] === 1) {
+                        var hashValue = diff[1].split("/").reverse().join("");
+                        var path = componentsHashMap[hashValue];
+                        var targetEditable = $("cq[data-path='" + path + "']", this.config.$targetDocument);
+                        targetEditable.parent().addClass(COMPONENT_MOVED_CLASS);
+                    }
+                }.bind(this));
+
+                $.each(removedComponents, function (i, component) {
+                    _findDomInsertionPoint.call(this, $(component), this.config.$targetDocument);
+                }.bind(this));
+            }
+
+        };
+    })();
+
+    window.DiffService = DiffService || {};
+
+}(jQuery, Granite, jQuery(document), this));

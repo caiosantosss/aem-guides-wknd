@@ -1,0 +1,718 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * This class represents a column of a report.
+ * @class CQ.reports.Column
+ * @constructor
+ * Creates a new Column.
+ */
+CQ.reports.Column = CQ.Ext.extend(CQ.Ext.emptyFn, {
+
+    /**
+     * @cfg {String} dataPath
+     * The path of the column's instance data
+     */
+    dataPath: null,
+
+    /**
+     * @cfg {String} componentPath
+     * The underlying component's path
+     */
+    componentPath: null,
+
+    /**
+     * Paths where individual instance settings may be found
+     * @private
+     * @type String
+     */
+    settingsPath: null,
+
+    /**
+     * @private
+     */
+    definitions: null,
+
+    /**
+     * @private
+     */
+    defaults: null,
+
+    /**
+     * @private
+     */
+    settings: null,
+
+    /**
+     * @private
+     */
+    report: null,
+
+    /**
+     * @private
+     */
+    filters: null,
+
+    /**
+     * @private
+     */
+    requestSyncer: null,
+
+    /**
+     * @private
+     */
+    generic: false,
+
+    /**
+     * @private
+     */
+    genericDefinitions: null,
+
+    /**
+     * @private
+     */
+    genericDefaults: null,
+
+
+    constructor: function(config) {
+        config = config || { };
+        CQ.Ext.apply(this, config);
+        this.updateViewFn = function() {
+                if (this.report.view) {
+                    this.report.view.notifyUpdateEnd();
+                }
+                this.report.reload();
+            }.createDelegate(this);
+        var updateView = this.updateViewFn;
+        this.requestSyncer = new CQ.reports.utils.RequestSync({
+                onLoadFn: updateView,
+                onErrorFn: function() {
+                        updateView();
+                        CQ.Notification.notify(null,
+                                CQ.I18n.getMessage("Could not persist settings."));
+                    }
+            });
+        this.dataId = this.dataPath.replace(/(.*\/)?(.*)/, "$2");
+    },
+
+    /**
+     * Reloads the column definition (for example, after changing it) and
+     */
+    reload: function() {
+        var updateView = this.updateViewFn;
+        var reloadSyncer = new CQ.reports.utils.RequestSync({
+                onLoadFn: updateView,
+                onErrorFn: function() {
+                        updateView();
+                        CQ.Notification.notify(null,
+                                CQ.I18n.getMessage("Could not reload column."));
+                    }
+            });
+        this.invalidateFilters();
+        reloadSyncer.block();
+        this.loadDef(reloadSyncer);
+        reloadSyncer.unblock();
+    },
+
+    /**
+     * Loads the (specific) definition of the column.
+     * @param {CQ.reports.utils.RequestSync} reqSyncer Helper object for request
+     *        synchronization
+     */
+    loadDef: function(reqSyncer) {
+        if (this.componentPath) {
+            reqSyncer.registerRequest();
+            CQ.Ext.Ajax.request({
+                "method": "GET",
+                "url": CQ.HTTP.externalize(this.componentPath + ".infinity"
+                        + CQ.HTTP.EXTENSION_JSON),
+                "success": function(response) {
+                        this.componentDefLoaded(response, reqSyncer);
+                    },
+                "failure": function() {
+                        reqSyncer.finishWithError();
+                    },
+                "scope": this
+            });
+        }
+    },
+
+    /**
+     * Handler that is called after the component definition has been loaded.
+     * @private
+     */
+    componentDefLoaded: function(response, reqSyncer) {
+        this.definitions = null;
+        if (response && (response.status == 200)) {
+            try {
+                var componentDefs = CQ.Util.formatData(CQ.Ext.util.JSON.decode(
+                        response.responseText));
+                this.definitions = componentDefs.definitions || { };
+                this.definitions.name = componentDefs["jcr:title"];
+                this.defaults = componentDefs.defaults || { };
+            } catch (e) {
+                // catch exceptions that originate from parsing a non-JSON Sling
+                // response
+            }
+        }
+        this.generic = (this.definitions.type == "generic");
+        // load settings
+        this.settingsPath = this.dataPath + "/settings";
+        var url = this.dataPath + ".infinity" + CQ.HTTP.EXTENSION_JSON;
+        CQ.Ext.Ajax.request({
+                "method": "GET",
+                "url": CQ.HTTP.externalize(url),
+                "success": function(response) {
+                    this.instanceDefLoaded(response, reqSyncer);
+                },
+                "failure": function(response) {
+                    reqSyncer.finishWithError();
+                },
+                "scope": this
+            });
+    },
+
+    /**
+     * Handler that is called after the column's instance data has been loaded.
+     * @private
+     */
+    instanceDefLoaded: function(response, reqSyncer) {
+        this.settings = { };
+        if (response && (response.status == 200)) {
+            try {
+                var instanceData = CQ.Util.formatData(CQ.Ext.util.JSON.decode(
+                        response.responseText));
+                if (instanceData.settings) {
+                    this.settings = instanceData.settings;
+                }
+            } catch (e) {
+                // catch exceptions that originate from parsing a non-JSON Sling
+                // response
+            }
+        }
+        if (this.generic && this.settings && this.settings.generic) {
+            this.genericDefinitions = this.settings.generic.definitions;
+            this.genericDefaults = this.settings.generic.defaults;
+        }
+        if (this.settings.filters) {
+            var filters = this.getFilters();
+            var filterCnt = filters.length;
+            for (var f = 0; f < filterCnt; f++) {
+                var fltDef = this.settings.filters[filters[f].id];
+                var isActive = fltDef.active;
+                if (isActive) {
+                    filters[f].deserialize(fltDef.value);
+                }
+            }
+        }
+        if (!this.settings.sorting) {
+            this.settings.sorting = {
+                    "sorted": false,
+                    "direction": null
+                };
+        }
+        reqSyncer.finishWithSuccess();
+    },
+
+    /**
+     * Returns a suitable function that is used for pre-filtering data from the result set.
+     * @return {Function} The prefilter function for the column
+     */
+    getPreFilter: function() {
+        if (this.definitions && this.definitions.data
+                && this.definitions.data.clientFilter) {
+            return this.definitions.data.clientFilter;
+        }
+        return CQ.reports.Column.defaultClientFilter;
+    },
+
+    /**
+     * Checks if a data preprocessor is defined for the given preprocessing type.
+     * @param {String} type The preprocessing type (for example: "apply", "view")
+     */
+    isDataPreprocessing: function(type) {
+        if (this.definitions.data && this.definitions.data.preprocessing) {
+            return (this.definitions.data.preprocessing[type] != null);
+        }
+        return false;
+    },
+
+    /**
+     * Determines if the column is currently sorted.
+     * @return {Boolean} True if the column is currently sorted
+     */
+    isSorted: function() {
+        return this.settings.sorting && this.settings.sorting.sorted;
+    },
+
+    /**
+     * Determines if the column is a generic column.
+     * @return {Boolean} True if the column is generic
+     */
+    isGeneric: function() {
+        return this.generic;
+    },
+
+    /**
+     * <p>Returns the dialog that has to be used for configuring the generic properties of a
+     * generic column.</p>
+     * <p>Only to be called if <code>isGeneric == true</code>.</p>
+     * @return {Object} The dialog definition if available; null otherwise
+     */
+    getGenericConfigDialog: function() {
+        return this.definitions.dialog;
+    },
+
+    /**
+     * Determines the current sorting direction ("ASC", "DESC", null).
+     */
+    getSortingDirection: function() {
+        var dir = this.settings.sorting && this.settings.sorting.direction;
+        if (dir == "") {
+            dir = null;
+        }
+        return dir;
+    },
+
+    /**
+     * Sets the specified sorting.
+     * @param {Boolean} isSorted Flag that determines if the column is actually sorted
+     * @param {String} direction Sorting direction ("ASC", "DESC", null)
+     */
+    setSorting: function(isSorted, direction) {
+        if ((direction != null) && (direction.length == 0)) {
+            direction = null;
+        }
+        if (!this.settings.sorting) {
+            this.settings.sorting = { };
+        }
+        this.settings.sorting.sorted = isSorted;
+        this.settings.sorting.direction = direction;
+    },
+
+    /**
+     * Returns a suitable text render function for displaying the content of the column.
+     * @return {Function} The text render function for the column
+     */
+    getTextRenderer: function() {
+        if (this.definitions && this.definitions.view
+                && this.definitions.view.textRenderer) {
+            return this.definitions.view.textRenderer;
+        }
+        return CQ.reports.Column.defaultTextRenderer;
+    },
+
+    /**
+     * This method gets called after the initial load of raw data.
+     * @param {Object[]} data Initial raw data
+     * @param {Number} col The column's index regarding the raw data
+     */
+    notifyInitialData: function(data, col) {
+        // todo implement otherwise (don't initialize filters from (partial) result
+        var filters = this.getFilters();
+        var filterCnt = filters.length;
+        for (var f = 0; f < filterCnt; f++) {
+            filters[f].notifyInitialData(data, col);
+            filters[f].transferToUI();
+        }
+    },
+
+    /**
+     * Gets the column's name.
+     * @return {String} The column's name (untranslated)
+     */
+    getName: function() {
+        if (this.generic) {
+            if (this.settings && this.settings.generic
+                    && this.settings.generic["jcr:title"]) {
+                return this.settings.generic["jcr:title"];
+            }
+        }
+        return this.definitions.name;
+    },
+
+    /**
+     * Gets the column's data ID.
+     * @return {String} The column's data ID
+     */
+    getDataId: function() {
+        return this.dataId;
+    },
+
+    /**
+     * <p>Gets the value type of the column.</p>
+     * <p>Allowed types are:</p>
+     * <ul>
+     *   <li>string</li>
+     *   <li>date</li>
+     *   <li>int</li>
+     *   <li>float</li>
+     * </ul>
+     * @return {String} The value type
+     */
+    getType: function() {
+        return this.definitions.type;
+    },
+
+    /**
+     * <p>Gets the aggregate types that are configured for interactive selection.</p>
+     * @return {Object[]} Array with configurable aggregates; null if no configurable
+     *         aggregate types are available
+     */
+    getAvailableAggregates: function() {
+        if (this.generic) {
+            if (this.genericDefinitions) {
+                return this.genericDefinitions.aggregates;
+            }
+        } else {
+            if (this.definitions) {
+                return this.definitions.aggregates;
+            }
+        }
+        return null;
+    },
+
+    /**
+     * Checks if the column is groupable.
+     * @return {Boolean} True if the column is groupable
+     */
+    isGroupable: function() {
+        if (this.generic) {
+            if (this.genericDefinitions) {
+                return (this.genericDefinitions.groupable == true);
+            }
+        } else {
+            if (this.definitions) {
+                return (this.definitions.groupable === true);
+            }
+        }
+        return false;
+    },
+
+    /**
+     * Checks if the report is currently grouped by this column.
+     * @return {Boolean} True if the report is grouped by this column
+     */
+    isGrouped: function() {
+        return this.settings.grouped;
+    },
+
+    /**
+     * Checks if the column is actually presenting an aggregated value.
+     * @return {Boolean} True if the column shows an aggregated value
+     */
+    isAggregated: function() {
+        if (!this.settings.grouped && (this.getAggregate() != null)) {
+            return (this.report.createGroupedColumns().length > 0);
+        }
+        return false;
+    },
+
+    /**
+     * Sets whether the report is grouped by this column.
+     * @param {Boolean} isGrouped True if the report has to be grouped by this column
+     */
+    setGrouped: function(isGrouped) {
+        this.settings.grouped = isGrouped;
+        this.persistCurrentGroupingState();
+    },
+
+    /**
+     * Gets the currently used aggregate (if any) of the column.
+     * @return {String} The currently used aggregate; null if no aggregate is currently set
+     */
+    getAggregate: function() {
+        var defaults = this.defaults;
+        if (this.generic) {
+            defaults = (this.genericDefaults && this.genericDefaults.aggregate
+                    ? this.genericDefaults : this.defaults);
+        }
+        return (this.settings.aggregate ? this.settings.aggregate : defaults.aggregate);
+    },
+
+    /**
+     * Gets the description text for the currently used aggregate.
+     * @return {String} The text of the aggregate currently used
+     */
+    getAggregateDescription: function() {
+        var aggregate = this.getAggregate();
+        if (aggregate == null) {
+            return "";
+        }
+        var defs = this.getAvailableAggregates();
+        if (defs == null) {
+            return aggregate;
+        }
+        var defCnt = defs.length;
+        for (var d = 0; d < defCnt; d++) {
+            var def = defs[d];
+            if (def.type == aggregate) {
+                return def.text;
+            }
+        }
+        return "";
+    },
+
+    /**
+     * Sets the aggregate.
+     * @param {String} aggregate The aggregate to be used
+     */
+    setAggregate: function(aggregate) {
+        this.settings.aggregate = aggregate;
+        this.persistCurrentAggregate();
+    },
+
+    /**
+     * @private
+     */
+    getSuitableFilters: function() {
+        if (this.generic) {
+            if (this.genericDefinitions) {
+                return this.genericDefinitions.filters;
+            }
+        } else {
+            if (this.definitions) {
+                return this.definitions.filters;
+            }
+        }
+        return null;
+    },
+    /**
+     * Determines if the column has filters available.
+     * @return {Boolean} True if the column has filters available
+     */
+    hasFilters: function() {
+        return (this.getSuitableFilters() != null);
+    },
+
+    /**
+     * Gets the view elements (as an array of Ext component configs) for the filter settings
+     * UI.
+     * @return {CQ.reports.Filter[]} Array containing the filters
+     */
+    getFilters: function() {
+        if (!this.filters) {
+            // load filter view
+            this.filters = [ ];
+            if (this.hasFilters()) {
+                var filters = this.getSuitableFilters();
+                var filterCnt = filters.length;
+                for (var f = 0; f < filterCnt; f++) {
+                    var filterDef = filters[f];
+                    var type = filterDef.filterType;
+                    if (type) {
+                        var filter = CQ.reports.FilterRegistry.createFilter(type, {
+                                "id": filterDef.id
+                            });
+                        filter.createUI(filterDef.uiType);
+                        this.filters.push(filter);
+                    }
+                }
+            }
+        }
+        return this.filters;
+    },
+
+    /**
+     * Invalidates the currently loaded filters. This causes the system to recreate them
+     * on the next call to {@link #getFilters}.
+     */
+    invalidateFilters: function() {
+        this.filters = null;
+    },
+
+    /**
+     * Checks if interactive filtering is currently applied to the column.
+     * @return {Boolean} True if filtering is currently applied to the column
+     */
+    hasActiveFilters: function() {
+        var filters = this.getFilters();
+        var filterCnt = filters.length;
+        for (var f = 0; f < filterCnt; f++) {
+            var filter = filters[f];
+            if (filter.isInteractive() && filter.isActive()) {
+                return true;
+            }
+        }
+        return false;
+    },
+
+    /**
+     * <p>Applies current filter settings.</p>
+     * <p>Filter settings will first be transferred from the UI. Then, the current data
+     * actually gets filtered and the view gets updated accordingly.</p>
+     * @param {Boolean} persistFilters True if filter settings should be persisted
+     */
+    applyFilters: function(persistFilters) {
+        if (this.hasFilters()) {
+            var filterCnt = this.filters.length;
+            for (var f = 0; f < filterCnt; f++) {
+                var filter = this.filters[f];
+                filter.transferFromUI();
+            }
+            if (persistFilters) {
+                this.persistCurrentFilterState();
+            }
+        }
+    },
+
+    /**
+     * Persists the current aggregate used.
+     */
+    persistCurrentAggregate: function() {
+        this.requestSyncer.block();
+        this.requestSyncer.registerRequest();
+        if (this.report.view) {
+            this.report.view.notifyUpdateStart();
+        }
+        var ref = this;
+        CQ.Ext.Ajax.request({
+                "method": "POST",
+                "url": CQ.HTTP.externalize(this.settingsPath),
+                "params": {
+                    "./aggregate": this.settings.aggregate
+                },
+                "success": function() {
+                    ref.requestSyncer.finishWithSuccess();
+                },
+                "failure": function() {
+                    ref.requestSyncer.finishWithError();
+                },
+                "scope": this
+            });
+        this.requestSyncer.unblock();
+    },
+
+    /**
+     * Persists the current grouping state.
+     */
+    persistCurrentGroupingState: function() {
+        this.requestSyncer.block();
+        this.requestSyncer.registerRequest();
+        if (this.report.view) {
+            this.report.view.notifyUpdateStart();
+        }
+        var ref = this;
+        CQ.Ext.Ajax.request({
+                "method": "POST",
+                "url": CQ.HTTP.externalize(this.settingsPath),
+                "params": {
+                    "./grouped": String(this.settings.grouped)
+                },
+                "success": function() {
+                    ref.requestSyncer.finishWithSuccess();
+                },
+                "failure": function() {
+                    ref.requestSyncer.finishWithError();
+                },
+                "scope": this
+            });
+        this.requestSyncer.unblock();
+    },
+
+    /**
+     * Persists the current filter state.
+     */
+    persistCurrentFilterState: function() {
+        this.requestSyncer.block();
+        this.requestSyncer.registerRequest();
+        if (this.report.view) {
+            this.report.view.notifyUpdateStart();
+        }
+        var ref = this;
+        var params = {
+                ":replace": "true",
+                "_charset_": "utf-8"
+            };
+        var filters = this.getFilters();
+        var filterCnt = filters.length;
+        for (var f = 0; f < filterCnt; f++) {
+            var filter = filters[f];
+            var isActive = filter.isActive();
+            params["./filters/" + filter.id + "/active"] = String(isActive);
+            params["./filters/" + filter.id + "/value"] = (isActive ? filter.serialize()
+                    : "");
+        }
+        CQ.Ext.Ajax.request({
+                "method": "POST",
+                "url": CQ.HTTP.externalize(this.settingsPath),
+                "params": params,
+                "success": function() {
+                    ref.requestSyncer.finishWithSuccess();
+                },
+                "failure": function() {
+                    ref.requestSyncer.finishWithError();
+                },
+                "scope": this
+            });
+        this.requestSyncer.unblock();
+    },
+
+    /**
+     * Persists the current sorting state of the column.
+     * @param {CQ.reports.utils.RequestSync} reqSyncer The request syncer to be used
+     */
+    persistSorting: function(reqSyncer) {
+        reqSyncer.registerRequest();
+        var isSorted = false;
+        var direction = "";
+        if (this.settings.sorting) {
+            isSorted = this.settings.sorting.sorted;
+            direction = this.settings.sorting.direction;
+            if (direction == null) {
+                direction = "";
+            }
+        }
+        CQ.Ext.Ajax.request({
+                "method": "POST",
+                "url": CQ.HTTP.externalize(this.settingsPath),
+                "params": {
+                    "./sorting/sorted": isSorted,
+                    "./sorting/direction": direction
+                },
+                "success": function(response) {
+                    reqSyncer.finishWithSuccess();
+                },
+                "failure": function() {
+                    reqSyncer.finishWithError();
+                }
+            });
+    }
+
+});
+
+CQ.reports.Column.defaultTextRenderer = function(v) {
+    if (!v) {
+        return v;
+    }
+    if (typeof(v) == "object") {
+        var o = v;
+        if (o.display != null) {
+            v = o.display;
+        }
+        if (o.path) {
+            v = "<a href=\"" + CQ.shared.HTTP.externalize(o.path)
+                    + ".html\" target=\"_blank\">" + v + "</a>";
+        }
+    }
+    return v;
+};
+
+// runs in the scope of the column
+CQ.reports.Column.defaultClientFilter = function(v) {
+    if (v && typeof(v) == "object") {
+        if (v.path && this.definitions.view && this.definitions.view.suppressLinks) {
+            delete v.path;
+        }
+    }
+    return v;
+};

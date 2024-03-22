@@ -1,0 +1,678 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+// TODO comment
+CQ.wcm.ContentFinderDragZone = CQ.Ext.extend(CQ.Ext.dd.DragZone, {
+    scroll: false,
+    IDDM_startX: 0,
+    IDDM_startY: 0,
+    /*IDDM_deltaX: 0,
+    IDDM_deltaY: 0,*/
+    IDDM_dragThreshMet: false,
+    dropTargets: [],
+    dropTargetRegions: [],
+
+    constructor: function(element, config) {
+        element.on("remove",function() {
+            this.destroy();
+        },this);
+
+        element.on("destroy",function() {
+            this.destroy();
+        },this);
+
+
+        CQ.wcm.ContentFinderDragZone.superclass.constructor.call(this, element, config);
+    },
+
+    destroy: function() {
+        clearTimeout(this.IDDM_clickTimeout);
+
+        CQ.Ext.EventManager.un(document, "mousemove", this.IDDM_handleMouseMove,this);
+        CQ.Ext.EventManager.un(document, "mouseup", this.IDDM_handleMouseUp,this);
+
+        CQ.wcm.ContentFinderDragZone.superclass.destroy.call(this);
+    },
+
+    matchRange: function(p1, p2, offset) {
+        if (!p1 || !p2) return false;
+        if (!offset) offset = 20;
+        return (p2[0] > p1[0] - offset && p2[0] < p1[0] + offset &&
+                p2[1] > p1[1] - offset && p2[1] < p1[1] + offset);
+    },
+
+    updateMouseInfo: function(x, y) {
+        try {
+            this.mouse.time = new Date().valueOf();
+            this.mouse.pos = [x, y];
+        } catch (e) {}
+    },
+
+    // override the default onDragEnter to skip lookup of target by DDM
+    onDragEnter : function(e, id) {
+        var target = (typeof id == "string") ?
+                     CQ.Ext.dd.DragDropMgr.getDDById(id) :
+                     id;
+        this.cachedTarget = target;
+        if (this.beforeDragEnter(target, e, id) !== false) {
+            if (target.isNotifyTarget) {
+                var status = target.notifyEnter(this, e, this.dragData);
+                this.proxy.setStatus(status);
+            } else {
+                this.proxy.setStatus(this.dropAllowed);
+            }
+
+            if (this.afterDragEnter) {
+                /**
+                 * An empty function by default, but provided so that you can perform a custom action
+                 * when the dragged item enters the drop target by providing an implementation.
+                 * @param {CQ.Ext.dd.DragDrop} target The drop target
+                 * @param {Event} e The event object
+                 * @param {String} id The id of the dragged element
+                 * @method afterDragEnter
+                 */
+                this.afterDragEnter(target, e, id);
+            }
+        }
+    },
+
+    onDragCancel: function() {},
+
+    GEN_handleKeyPress: function(e) {
+        if(!CQ.WCM.isContentWindowLoading()) {
+            if(e.getKey()==e.ESC){
+                CQ.Ext.EventManager.un(document, "mouseup", this.IDDM_handleMouseUp,this);
+                CQ.Ext.EventManager.un(document, "keypress", this.GEN_handleKeyPress,this);
+                CQ.WCM.getContentWindow().CQ.Ext.EventManager.un(CQ.WCM.getContentWindow().document, "keypress", this.GEN_handleKeyPress,this);
+
+                if (this.proxy)
+                    this.proxy.repair(this.getRepairXY(e, this.dragData), this.afterRepair, this);
+
+                clearTimeout(this.IDDM_clickTimeout);
+
+                this.onDragCancel(e,this.cachedTarget);
+
+                this.IDDM_dragCurrent = false;
+                this.dragging = false;
+
+
+                // set timeout so document's mouseup event is fired before the mask is removed
+                // (without the mask the mouseup event is fired on the iframe's document)
+                // event to fire: DDCore#_onLoad => Event.on(document, "mouseup",   this.handleMouseUp, this, true);
+                window.setTimeout(this.CF_cleanUpDD, 1);
+            }
+        }
+    },
+
+    /**
+     * Fired when this object is clicked
+     * @method handleMouseDown
+     * @param {Event} e
+     * @param {CQ.Ext.dd.DragDrop} oDD the clicked dd object (this dd obj)
+     * @private
+     */
+    handleMouseDown: function(e) {
+        if(!CQ.WCM.isContentWindowLoading()) {
+            if (this.primaryButtonOnly && e.button != 0 && e.type != "mousedown") {
+                return;
+            }
+
+            if (this.isLocked()) {
+                return;
+            }
+
+            this.CF_cleanUpDD();
+
+            var pt = new CQ.Ext.lib.Point(CQ.Ext.lib.Event.getPageX(e), CQ.Ext.lib.Event.getPageY(e));
+            if (this.IDDM_isOverTarget(pt, this) && this.clickValidator(e)) {
+                CQ.Ext.EventManager.on(document, "mousemove", this.IDDM_handleMouseMove, this);
+                CQ.Ext.EventManager.on(document, "mouseup", this.IDDM_handleMouseUp, this);
+                CQ.Ext.EventManager.on(document, "keypress", this.GEN_handleKeyPress, this);
+                CQ.WCM.getContentWindow().CQ.Ext.EventManager.on(CQ.WCM.getContentWindow().document, "keypress", this.GEN_handleKeyPress, this);
+
+                // set the initial element position
+                this.setStartPosition();
+
+                if (this.dragging) {
+                    return;
+                }
+
+                this.IDDM_dragCurrent = true;
+
+                var data = this.getDragData(e);
+                if (data && this.onBeforeDrag(data, e) !== false) {
+                    this.dragData = data;
+                    this.proxy.stop();
+                }
+
+                this.b4MouseDown(e);
+                this.onMouseDown(e);
+
+
+                // track start position
+                this.IDDM_startX = e.getPageX();
+                this.IDDM_startY = e.getPageY();
+
+                this.IDDM_deltaX = this.IDDM_startX - this.getEl().offsetLeft;
+                this.IDDM_deltaY = this.IDDM_startY - this.getEl().offsetTop;
+
+                this.IDDM_dragThreshMet = false;
+
+
+                // track start position
+                var x = e.getPageX();
+                var y = e.getPageY();
+                var cmp = this;
+
+                this.IDDM_clickTimeout = setTimeout(function() {
+                    cmp.IDDM_startDrag(x, y);
+                }, this.DDM.clickTimeThresh);
+
+                this.IDDM_stopEvent(e);
+            }
+        }
+    },
+
+    /**
+     * Stores the drop targets of the specified component, given that
+     * they are visible, not locked or denied by the specified drag zone.
+     * @static
+     * @param {CQ.Ext.Component} comp The component
+     * @param {CQ.Ext.dd.DragSource} dragZone The drag zone
+     */
+    CF_storeDropTargets: function(comp) {
+        if(!CQ.WCM.isContentWindowLoading()) {
+            if (!comp.isVisible() || !comp.getDropTargets || !this.isDropAllowed) return;
+            if (comp.isDropAllowedForObject
+                    && (typeof(comp.isDropAllowedForObject) == "function")) {
+                if (!comp.isDropAllowedForObject(this.dragData)) {
+                    return;
+                }
+            }
+            var targets = comp.getDropTargets();
+            if (!targets) return;
+            var contentWindow = CQ.WCM.getContentWindow();
+            try {
+                if (!contentWindow.CQ) return;
+            }
+            catch (e) {
+                return;
+            }
+            for (var i = 0; i < targets.length; i++) {
+                var target = targets[i];
+                if (target.isLocked() || !this.isDropAllowed(target)) {
+                    continue;
+                }
+                var region = contentWindow.CQ.Ext.lib.Region.getRegion(target.getEl());
+                this.dropTargets.push(target);
+                this.dropTargetRegions.push(region);
+            }
+        }
+    },
+
+    CF_cleanUpDD: function() {
+        CQ.wcm.ContentFinder.unmaskFrame();
+
+        this.dropTargets = [];
+        this.dropTargetRegions = [];
+
+        this.dragging = false;
+        this.IDDM_dragCurrent = false;
+    },
+
+    CF_b4StartDrag: function(x,y) {
+        if(!CQ.WCM.isContentWindowLoading()) {
+            var finder = CQ.WCM.getContentFinder();
+            if (!finder) {
+                throw new Error("No finder defined");
+            }
+            finder.contentWindowLeft = CQ.Ext.get("cq-cf-framewrapper").getX();
+
+            //this.CF_cleanUpDD();
+            var mask = CQ.wcm.ContentFinder.maskFrame();
+
+            this.dropTargets = [];
+            this.dropTargetRegions = [];
+            var contentWindow = CQ.WCM.getContentWindow();
+            try {
+                if (!contentWindow.CQ) return;
+            }
+            catch (e) {
+                return;
+            }
+
+            //run this part asynchronously to avoid behavior: proxy does not follow the mouse pointer
+            var currentObj = this;
+            window.setTimeout(function() {
+                var dialogs = contentWindow.CQ.WCM.getDialogs();
+                for (var path in dialogs) {
+                    var dialog = dialogs[path];
+                    if (!dialog.isVisible()) {
+                        continue;
+                    }
+                    // todo: handle floating and possibly overlapping dialogs
+                    var panel = dialog.getActiveTab();
+                    var fields = CQ.Util.findFormFields(panel);
+                    // loop the fields of the active panel
+                    for (var name in fields) {
+                        var snf = fields[name];
+                        for (var i = 0; i < snf.length; i++) {
+                            currentObj.CF_storeDropTargets(snf[i], currentObj);
+                        }
+                    }
+
+                    // targets that are the active panel itself (some composite fields e.g. SmartFile)
+                    currentObj.CF_storeDropTargets(panel, currentObj);
+                }
+                var editables = finder.getContentWindow().CQ.WCM.getEditables();
+                for (var path in editables) {
+                    currentObj.CF_storeDropTargets(editables[path], currentObj);
+                }
+                var externalDropTargets =
+                        finder.getContentWindow().CQ.WCM.getDropTargetComponents();
+                var tc = externalDropTargets.length;
+                for (var t = 0; t < tc; t++) {
+                    currentObj.CF_storeDropTargets(externalDropTargets[t], currentObj);
+                }
+
+                CQ.Log.debug("CQ.wcm.ContentFinderDragZone#CF_b4StartDrag: drag started, drop targets found",
+                        currentObj.dropTargets);
+                CQ.wcm.ContentFinderDragZone.debug_toggleDropTargetsMark(currentObj.dropTargets, true);
+            },1);
+
+            this.mouse = {
+                "pos":[-1,-1],
+                "lastPos":[-1,-1],
+                "time":0
+            };
+        }
+    },
+
+
+    CF_handleMouseMove: function(e) {
+        if(!CQ.WCM.isContentWindowLoading()) {
+            var finder = CQ.WCM.getContentFinder();
+            if (!finder) {
+                throw new Error("No finder defined");
+            }
+            var contentWindow = CQ.WCM.getContentWindow();
+            try {
+                if (!contentWindow.CQ) return;
+            }
+            catch (e) {
+                return;
+            }
+
+            var resolvedDropTarget = [];
+
+            var frame = CQ.Ext.get(CQ.wcm.ContentFinder.FRAME_ID);
+            if( !frame ) {
+                throw new Error("No frame defined");
+            }
+
+            var x = e.getPageX() - frame.getRegion()[0] + contentWindow.CQ.Ext.dd.DDM.getScrollLeft();
+            var y = e.getPageY() - frame.getRegion()[1] + contentWindow.CQ.Ext.dd.DDM.getScrollTop();
+
+            var regions = this.dropTargetRegions;
+            for (var i = 0; i < regions.length; i++) {
+                if (regions[i].contains(new CQ.Ext.lib.Point(x, y))) {
+                    var oDD = this.dropTargets[i];
+                    if(oDD.isLocked()) {
+                        continue;
+                    }
+
+                    //if enableMultipleEventsFiring is set on drag object (default is not this case),
+                    // fire events on all found drop target (ExtJS default behavior)
+                    //else (default), fire events only for the topfront drop target
+                    if(this.IDDM_dragCurrent["enableMultipleEventsFiring"]) {
+                        resolvedDropTarget.push(oDD);
+                    } else {
+                        //only one must match
+                        if( resolvedDropTarget.length == 0) {
+                            resolvedDropTarget.push(oDD);
+                        } else {
+                            resolvedDropTarget[0] = contentWindow.CQ.Ext.dd.DragDropMgr.getTopfrontElement(resolvedDropTarget[0],oDD);
+                        }
+                    }
+
+                }
+            }
+
+            CQ.Log.trace("CQ.wcm.ContentFinderDragZone#CF_handleMouseMove: mouve is moving, resolved drop targets " +
+                    "(mouse over)",
+                    resolvedDropTarget);
+
+            for(var i = 0;i < resolvedDropTarget.length; i++) {
+                var target = resolvedDropTarget[i];
+                if (target == this.cachedTarget) {
+                    this.onDragOver(e);
+                    this.updateMouseInfo(x,y);
+                    return;
+                } else {
+                    if (this.cachedTarget) {
+                        CQ.wcm.ContentFinderDragZone.debug_toggleDropTargetMark(this.cachedTarget, true, false);
+                        this.onDragOut(e);
+                    }
+                    CQ.wcm.ContentFinderDragZone.debug_toggleDropTargetMark(target, true, true);
+                    this.onDragEnter(e, target);
+                    this.updateMouseInfo(x,y);
+                    return;
+                }
+            }
+
+            if (this.cachedTarget) {
+                CQ.wcm.ContentFinderDragZone.debug_toggleDropTargetMark(this.cachedTarget, true, false);
+                this.onDragOut(e);
+            }
+            this.updateMouseInfo(x,y);
+        }
+    },
+
+    IDDM_startDrag: function(x, y) {
+        clearTimeout(this.IDDM_clickTimeout);
+        if (this.IDDM_dragCurrent) {
+            this.b4StartDrag(x, y);
+            this.CF_b4StartDrag(x,y);
+
+            this.startDrag(x, y);
+        }
+
+        this.IDDM_dragThreshMet = true;
+    },
+
+
+
+
+    IDDM_handleMouseMove: function(e) {
+        if (!this.IDDM_dragCurrent || e.type != "mousemove") {
+            return true;
+        }
+
+        if (CQ.Ext.isIE) {
+            document.selection.empty();
+        }
+
+         //check for IE mouseup outside of page boundary
+        if (CQ.Ext.isIE && (e.button !== 0 && e.button !== 1 && e.button !== 2)) {
+            this.IDDM_stopEvent(e);
+            return this.IDDM_handleMouseUp(e);
+        }
+
+        if (!this.IDDM_dragThreshMet) {
+            var diffX = Math.abs(this.IDDM_startX - e.getPageX());
+            var diffY = Math.abs(this.IDDM_startY - e.getPageY());
+            if (diffX > this.DDM.clickPixelThresh ||
+                diffY > this.DDM.clickPixelThresh) {
+                this.IDDM_startDrag(this.IDDM_startX, this.IDDM_startY);
+            }
+        }
+
+        if(this.IDDM_dragThreshMet) {
+            this.b4Drag(e);
+            this.onDrag(e);
+
+            this.CF_handleMouseMove(e);
+        }
+
+
+        this.IDDM_stopEvent(e);
+
+        return true;
+    },
+
+
+    IDDM_handleMouseUp: function(e) {
+        if(!CQ.WCM.isContentWindowLoading()) {
+            if (CQ.Ext.QuickTips) {
+                CQ.Ext.QuickTips.enable();
+            }
+
+            if(!this.IDDM_dragCurrent) {
+                return;
+            }
+
+            CQ.wcm.ContentFinderDragZone.debug_toggleDropTargetsMark(this.dropTargets, false);
+
+            clearTimeout(this.IDDM_clickTimeout);
+            CQ.Ext.EventManager.un(document, "mouseup", this.IDDM_handleMouseUp,this);
+            CQ.Ext.EventManager.un(document, "keypress", this.GEN_handleKeyPress,this);
+            CQ.WCM.getContentWindow().CQ.Ext.EventManager.un(CQ.WCM.getContentWindow().document, "keypress", this.GEN_handleKeyPress,this);
+
+            if (this.IDDM_dragThreshMet) {
+                if (this.cachedTarget) {
+                    this.onDragDrop(e);
+                } else {
+                    this.onInvalidDrop(this.cachedTarget,e);
+                }
+            }
+
+            if (this.IDDM_dragCurrent) {
+                if (this.IDDM_dragThreshMet) {
+                    this.b4EndDrag(e);
+                    this.endDrag(e);
+                }
+            }
+
+            this.IDDM_dragCurrent = false;
+            this.dragging = false;
+
+            this.IDDM_stopEvent(e);
+
+            // set timeout so document's mouseup event is fired before the mask is removed
+            // (without the mask the mouseup event is fired on the iframe's document)
+            // event to fire: DDCore#_onLoad => Event.on(document, "mouseup",   this.handleMouseUp, this, true);
+            window.setTimeout(this.CF_cleanUpDD, 1);
+        }
+    },
+
+    stopPropagation: true,
+    preventDefault: true,
+
+    IDDM_stopEvent: function(e) {
+        if (this.stopPropagation) {
+            e.stopPropagation();
+        }
+
+        if (this.preventDefault) {
+            e.preventDefault();
+        }
+    },
+
+    //methods with a DDM call
+
+
+    /**
+     * Add this instance to a group of related drag/drop objects.  All
+     * instances belong to at least one group, and can belong to as many
+     * groups as needed.
+     * @method addToGroup
+     * @param {String} sGroup the name of the group
+     */
+    addToGroup: function(sGroup) {
+        this.groups[sGroup] = true;
+        //this.DDM.regDragDrop(this, sGroup);
+    },
+
+    /**
+     * Remove's this instance from the supplied interaction group
+     * @method removeFromGroup
+     * @param {String}  sGroup  The group to drop
+     */
+    removeFromGroup: function(sGroup) {
+        if (this.groups[sGroup]) {
+            delete this.groups[sGroup];
+        }
+
+        //this.DDM.removeDDFromGroup(this, sGroup);
+    },
+
+    /**
+     * Allows you to specify a child of the linked element that should be
+     * used to initiate the drag operation.  An example of this would be if
+     * you have a content div with text and links.  Clicking anywhere in the
+     * content area would normally start the drag operation.  Use this method
+     * to specify that an element inside of the content div is the element
+     * that starts the drag operation.
+     * @method setHandleElId
+     * @param {String} id the id of the element that will be used to
+     * initiate the drag.
+     */
+    setHandleElId: function(id) {
+        if (typeof id !== "string") {
+            id = CQ.Ext.id(id);
+        }
+        this.handleElId = id;
+        //this.DDM.regHandle(this.id, id);
+    },
+
+    /**
+     * Remove all drag and drop hooks for this element
+     * @method unreg
+     */
+    unreg: function() {
+        CQ.Ext.EventManager.un(this.id, "mousedown",
+                this.handleMouseDown,this);
+        this._domRef = null;
+        //this.DDM._remove(this);
+    },
+
+    /**
+     * Returns true if this instance is locked, or the drag drop mgr is locked
+     * (meaning that all drag/drop is disabled on the page.)
+     * @method isLocked
+     * @return {Boolean} True if this obj or all drag/drop is locked, else
+     * false
+     */
+    isLocked: function() {
+        return this.locked;
+    },
+
+    clickValidator: function(e) {
+        var target = e.getTarget();
+        return ( this.isValidHandleChild(target) &&
+                 (this.id == this.handleElId/* ||
+                        this.DDM.handleWasClicked(target, this.id)*/) );
+    },
+
+    /**
+     * Checks the cursor location to see if it over the target
+     * @method isOverTarget
+     * @param {CQ.Ext.lib.Point} pt The point to evaluate
+     * @param {DragDrop} oTarget the DragDrop object we are inspecting
+     * @return {Boolean} True if the mouse is over the target, else false
+     * @private
+     * @static
+     */
+    IDDM_isOverTarget: function(pt, intersect) {
+        // use cache if available
+        var loc = this.IDDM_getLocation();
+
+        if (!loc) {
+            return false;
+        }
+
+        this.cursorIsOver = loc.contains( pt );
+
+        // DragDrop is using this as a sanity check for the initial mousedown
+        // in this case we are done.  In POINT mode, if the drag obj has no
+        // contraints, we are also done. Otherwise we need to evaluate the
+        // location of the target as related to the actual location of the
+        // dragged element.
+        if (!this.IDDM_dragCurrent || (!intersect && !this.constrainX && !this.constrainY)) {
+            return this.cursorIsOver;
+        }
+
+        this.overlap = null;
+
+        // Get the current location of the drag element, this is the
+        // location of the mouse event less the delta that represents
+        // where the original mousedown happened on the element.  We
+        // need to consider constraints and ticks as well.
+        var pos = this.getTargetCoord(pt.x, pt.y);
+
+        var el = this.getDragEl();
+        var curRegion = new CQ.Ext.lib.Region( pos.y,
+                                               pos.x + el.offsetWidth,
+                                               pos.y + el.offsetHeight,
+                                               pos.x );
+
+        var overlap = curRegion.intersect(loc);
+
+        if (overlap) {
+            this.overlap = overlap;
+            return (intersect) ? true : this.cursorIsOver;
+        } else {
+            return false;
+        }
+    },
+
+    /**
+     * Returns a Region object containing the drag and drop element's position
+     * and size, including the padding configured for it
+     * @method getLocation
+     * @param {DragDrop} oDD the drag and drop object to get the
+     *                       location for
+     * @return {CQ.Ext.lib.Region} a Region object representing the total area
+     *                             the element occupies, including any padding
+     *                             the instance is configured for.
+     * @static
+     */
+    IDDM_getLocation: function() {
+        var el = this.getEl(), pos, x1, x2, y1, y2, t, r, b, l;
+
+        try {
+            pos= CQ.Ext.lib.Dom.getXY(el);
+        } catch (e) { }
+
+        if (!pos) {
+            return null;
+        }
+
+        x1 = pos[0];
+        x2 = x1 + el.offsetWidth;
+        y1 = pos[1];
+        y2 = y1 + el.offsetHeight;
+
+        t = y1 - this.padding[0];
+        r = x2 + this.padding[1];
+        b = y2 + this.padding[2];
+        l = x1 - this.padding[3];
+
+        return new CQ.Ext.lib.Region( t, r, b, l );
+    }
+});
+
+CQ.wcm.ContentFinderDragZone.DEBUG = false;
+
+CQ.wcm.ContentFinderDragZone.debug_toggleDropTargetsMark = function(targets, enable, resolved) {
+    for(var i=0;i<targets.length;i++) {
+        CQ.wcm.ContentFinderDragZone.debug_toggleDropTargetMark(targets[i], enable, resolved);
+    }
+};
+
+CQ.wcm.ContentFinderDragZone.debug_toggleDropTargetMark = function(target, enable, resolved) {
+    if( CQ.wcm.ContentFinderDragZone.DEBUG && target && target.getEl) {
+        var contentWindow = CQ.WCM.getContentWindow();
+        var el = contentWindow.CQ.Ext.get(target.getEl());
+        if( enable ) {
+            if( resolved ) {
+                el.removeClass("cq-cf-dd-debug-unresolved");
+                el.addClass("cq-cf-dd-debug-resolved");
+            } else {
+                el.removeClass("cq-cf-dd-debug-resolved");
+                el.addClass("cq-cf-dd-debug-unresolved");
+            }
+        } else {
+            el.removeClass("cq-cf-dd-debug-resolved");
+            el.removeClass("cq-cf-dd-debug-unresolved");
+        }
+    }
+};

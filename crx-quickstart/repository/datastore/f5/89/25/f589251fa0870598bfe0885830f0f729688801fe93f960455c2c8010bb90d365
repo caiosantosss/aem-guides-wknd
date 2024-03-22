@@ -1,0 +1,625 @@
+/*
+ * Copyright 1997-2011 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+CQ.Ext.ns("CQ.Translator");
+
+CQ.Ext.onReady(function(){
+    
+    var i18nPath = null;
+    
+    CQ.Translator.languages = CQ.Translator.languages || ['de', 'es', 'fr', 'it', 'pt-br', 'zh-cn', 'zh-tw', 'ja', 'ko-kr'];
+    CQ.Translator.TreeDepth = CQ.Translator.TreeDepth || 0;
+    
+    // create the Data Store
+    var fields = ['key', 'string', 'comment'];
+    CQ.Ext.each(CQ.Translator.languages, function(lang) {
+        fields.push(lang);
+    });
+    
+    var store = new CQ.Ext.data.JsonStore({
+        root: 'translations',
+        idProperty: 'key',
+        
+        url: '/libs/cq/i18n/translator.translations.json',
+        baseParams: {
+            path: i18nPath,
+            treeDepth: CQ.Translator.TreeDepth
+        },
+        
+        autoSave: false,
+        writer: new CQ.Ext.data.JsonWriter({
+            encode: false,
+            listful: true,
+            writeAllFields: true
+        }),
+        proxy: new CQ.Ext.data.HttpProxy({
+            api: {
+                read: { url: '/libs/cq/i18n/translator.translations.json', method: 'GET' },
+                update: '/libs/cq/i18n/translator.translations.json',
+                create: '/libs/cq/i18n/translator.translations.json',
+                destroy: '/libs/cq/i18n/translator.translations.delete.json'
+            },
+            headers: {"Content-Type": "application/json; charset=utf-8"}
+        }),
+
+        fields: fields,
+    
+        markForRemove: function(record) {
+            if (record) {
+                record.deleted = true;
+            }
+        },
+    
+        isDirty: function() {
+            if (this.getModifiedRecords().length > 0) {
+                return true;
+            }
+            var dirty = false;
+            this.each(function (record) {
+                if (record.deleted) {
+                    dirty = true;
+                    return false;
+                }
+            });
+            return dirty;
+        },
+    
+        saveAll: function() {
+            // delete records marked for deletion
+            this.each(function (record) {
+                if (record.deleted) {
+                    this.remove(record);
+                }
+            }, this);
+            this.save();
+        },
+        
+        // overwrite to handle simple response with only "success: true" instead of
+        // returning all ids of the written records (replacing DataReader.realize)
+        onCreateRecords : function(success, rs, data) {
+            this.commitChanges();
+            this.each(function (record) {
+                record.phantom = false;
+            }, this);
+        }
+    });
+    //store.setDefaultSort('string', 'desc');
+    
+    function updateSaveButton(store) {
+        CQ.Ext.getCmp("strings-save-button").setDisabled(!store.isDirty());
+    }
+
+    store.on("add", updateSaveButton);
+    store.on("update", updateSaveButton);
+    store.on("remove", updateSaveButton);
+    store.on("save", updateSaveButton);
+    store.on("load", updateSaveButton);
+    
+    var grid;
+    
+    store.on("beforesave", function() {
+        grid.body.mask("Saving...");
+    });
+    store.on("save", function() {
+        grid.body.unmask();
+    });
+    
+    function loadPath(path) {
+        if (i18nPath == path) {
+            return;
+        }
+        store.baseParams.path = i18nPath = path;
+        store.reload();
+        
+        var exportMenu = CQ.Ext.getCmp("export-menu");
+        exportMenu.removeAll();
+        CQ.Ext.each(CQ.Translator.languages, function(lang) {
+            exportMenu.add({
+                text: "Export full " + lang.toUpperCase() + " xliff",
+                handler: function() {
+                    window.open(CQ.HTTP.externalize(i18nPath + "/" + lang + ".dict.xliff"), "_blank");
+                }
+            });
+        });
+        exportMenu.add({
+            text: "Export selection as xliff (strings only)",
+            handler: function() {
+                var s = grid.getSelectionModel().getSelections();
+                var xml = '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xliff PUBLIC "-//XLIFF//DTD XLIFF//EN" "http://www.oasis-open.org/committees/xliff/documents/xliff.dtd">\n<xliff version="1.0">\n    <file source-language="en" tool="ruby-xgettext 1.0 by Day Software AG" date="' + new Date().format("Y-m-d\\TH:i:s.uP") + '" original="sourcefile">\n        <header/>\n        <body>\n';
+                
+                if (s.length == 0) {
+                    s = store.getRange(); // get all
+                }
+                for (var i = 0, rec; rec = s[i]; i++) {
+                    var string = rec.get("string");
+                    xml += '            <trans-unit id="' + i + '">\n                <source><![CDATA[' + string + ']]></source>\n';
+                    var comment = rec.get("comment");
+                    if (comment) {
+                        xml += '                <context-group name="comment">\n                    <context context-type="comment">' + CQ.Ext.util.Format.htmlEncode(comment) + '</context>\n                </context-group>\n';
+                    }
+                    xml += '            </trans-unit>\n';
+                }
+                
+                xml += '        </body>\n    </file>\n</xliff>';
+                
+                var win = new CQ.Ext.Window({
+                    //maximizable: true, // doesn't work, window becomes small bar at top
+                    y: 100,
+                    width: 600,
+                    height: 500,
+                    title: "Xliff export :: select all &gt; copy text &gt; save",
+                    layout: "fit",
+                    items: [{
+                        html: "<textarea class='xml'>" + CQ.Ext.util.Format.htmlEncode(xml) + "</textarea>"
+                    }]
+                });
+                win.show();
+            }
+        });
+    }
+    
+    // quotes a string for use as regexp pattern
+    function regexQuote(str) {
+        return (str+'').replace(/([\\\.\+\*\?\[\^\]\$\(\)\{\}\=\!\<\>\|\:])/g, "\\$1");
+    }
+    
+    var filterTerm = null;
+    var filterRegex = null;
+    
+    function filter(opts) {
+        if (!opts) {
+            filterTerm = null;
+            filterRegex = null;
+            store.clearFilter();
+            return;
+        }
+        filterTerm = opts.term;
+        // create a regex for matching the html-escaped literal "filterTerm" string case-insensitive, global
+        filterRegex = new RegExp(regexQuote(CQ.Ext.util.Format.htmlEncode(filterTerm)), "ig");
+        
+        store.filterBy(function(rec, id) {
+            var found = false;
+            // check for modified / new / deleted records
+            if (opts.onlyChanged) {
+                if (!rec.dirty && !rec.phantom && !rec.deleted) {
+                    return false;
+                }
+            } else {
+                if (opts.onlyModified && !rec.dirty) {
+                    return false;
+                }
+                if (opts.onlyNew && !rec.phantom) {
+                    return false;
+                }
+                if (opts.onlyDeleted && !rec.deleted) {
+                    return false;
+                }
+                if (opts.hasComment && (!rec.get("comment") || rec.get("comment").length == 0)) {
+                    return false;
+                }
+                if (opts.missingTranslations) {
+                    var missing = false;
+                    CQ.Ext.each(CQ.Translator.languages, function(lang) {
+                        var tr = rec.get(lang);
+                        if (!tr || tr == "") {
+                            missing = true;
+                            return false;
+                        }
+                    });
+                    return missing;
+                }
+            }
+            // check all fields for occurrence of the filter term
+            if (filterTerm) {
+                rec.fields.each(function(field) {
+                    var value = rec.get(field.name);
+                    if (value && value.toLowerCase().indexOf(filterTerm.toLowerCase()) >= 0) {
+                        found = true;
+                        return false; // stop fields.each iteration
+                    }
+                    return true;
+                });
+            } else {
+                found = true;
+            }
+            return found;
+        });
+    }
+    
+    function highlightFilterTerms(value) {
+        if (filterTerm && value.toLowerCase().indexOf(filterTerm.toLowerCase()) >= 0) {
+            value = CQ.Ext.util.Format.htmlEncode(value);
+            return value.replace(filterRegex, "<span class='highlight'>$&</span>");
+        }
+        return CQ.Ext.util.Format.htmlEncode(value);
+    }
+    
+    function toolTipRenderer(value, metadata) {
+        if (value) {
+            metadata.attr = 'title="' + CQ.Ext.util.Format.htmlEncode(value) + '"';
+            return highlightFilterTerms(value);
+        }
+        return value;
+    }
+    
+    var editDialog = new CQ.Translator.TranslationsDialog({
+        languages: CQ.Translator.languages,
+        store: store
+    });
+    
+    var cmCfg = {
+        // specify any defaults for each column
+        defaults: {
+            width: 120,
+            sortable: true,
+            renderer: toolTipRenderer
+        },
+        columns:[{
+                id: 'string',
+                header: "String",
+                dataIndex: 'string',
+                width: 300
+            },{
+                header: "Comment",
+                dataIndex: 'comment',
+                width: 200
+        }]
+    };
+    
+    CQ.Ext.each(CQ.Translator.languages, function(lang) {
+        cmCfg.columns.push({
+            header: lang.toUpperCase(),
+            dataIndex: lang,
+            editor: new CQ.Ext.form.TextField()
+        });
+    });
+    
+    grid = new CQ.Ext.grid.EditorGridPanel({
+        region: "center",
+        //title: "Strings",
+        margins: '5 5 5 5',
+        selModel: new CQ.Ext.grid.RowSelectionModel(),
+        //trackMouseOver:false,
+        //disableSelection:true,
+        loadMask: true,
+        store: store,
+        cm: new CQ.Ext.grid.ColumnModel(cmCfg),
+        view: new CQ.Ext.ux.grid.BufferView({
+            // render rows as they come into viewable area.
+            scrollDelay: false,
+            getRowClass: function(record, index, rowParams, store) {
+                if (record.deleted) {
+                    return "deleted-row";
+                }
+                return "";
+            }
+        }),
+        listeners: {
+            celldblclick: function(grid, row, col) {
+                // string and comment cols
+                if (col == 0 || col == 1) {
+                    editDialog.editTranslations(store.getAt(row));
+                }
+            }
+        }
+    });
+    grid.getSelectionModel().on("selectionchange", function(sm) {
+        CQ.Ext.getCmp("strings-remove-button").setDisabled(sm.getCount() < 1);
+    });
+
+    var filterBar = {
+        region: "south",
+        height: 55,
+        cls: "label",
+        border: false,
+        layout: "hbox",
+        layoutConfig: {
+            padding: "5",
+            align: "middle"
+        },
+        defaults: {margins:'0 5 0 0'},
+        items: [{
+                html: "Filter by text:",
+                border: false
+            },{
+                id: "filter-term-field",
+                xtype: "textfield",
+                listeners: {
+                    // run trigger on ENTER as well
+                    specialkey: function(field, e) {
+                        if (e.getKey() == CQ.Ext.EventObject.ENTER) {
+                            filterBar.runFilter();
+                        }
+                    }
+                }
+            },{
+                xtype: "fieldset",
+                width: 230,
+                title: "Changes",
+                layout: "hbox",
+                layoutConfig: {
+                    padding: "0",
+                    align: "middle"
+                },
+                defaults: {margins:'0 5 0 0'},
+                style: "padding: 3px",
+                
+                items: [{
+                    id: "any-change-checkbox",
+                    xtype: "checkbox",
+                    boxLabel: "Any"
+                },{
+                    id: "only-mod-checkbox",
+                    xtype: "checkbox",
+                    boxLabel: "Modified"
+                },{
+                    id: "only-new-checkbox",
+                    xtype: "checkbox",
+                    boxLabel: "New"
+                },{
+                    id: "only-deleted-checkbox",
+                    xtype: "checkbox",
+                    boxLabel: "Deleted"
+                }]
+            },{
+                id: "has-comment-checkbox",
+                xtype: "checkbox",
+                boxLabel: "Has Comment"
+            }, {
+                id: "missing-translations-checkbox",
+                xtype: "checkbox",
+                boxLabel: "Missing Translations"
+            },{
+                xtype: "button",
+                text: "Filter",
+                margins: '0 5 0 5',
+                listeners: {
+                    click: function(button, e) {
+                        filterBar.runFilter();
+                    }
+                }
+            },{
+                id: "clear-filter-button",
+                xtype: "button",
+                text: "Clear",
+                disabled: true,
+                listeners: {
+                    click: function(button, e) {
+                        filterBar.clearFilter();
+                    }
+                }
+        }],
+        runFilter: function() {
+            var filterOpts = {
+                term:         CQ.Ext.getCmp("filter-term-field").getValue(),
+                onlyChanged:  CQ.Ext.getCmp("any-change-checkbox").getValue(),
+                onlyModified: CQ.Ext.getCmp("only-mod-checkbox").getValue(),
+                onlyNew:      CQ.Ext.getCmp("only-new-checkbox").getValue(),
+                onlyDeleted:  CQ.Ext.getCmp("only-deleted-checkbox").getValue(),
+                hasComment:   CQ.Ext.getCmp("has-comment-checkbox").getValue(),
+                missingTranslations: CQ.Ext.getCmp("missing-translations-checkbox").getValue()
+            };
+            filter(filterOpts);
+            CQ.Ext.getCmp("clear-filter-button").enable();
+        },
+        clearFilter: function() {
+            CQ.Ext.getCmp("clear-filter-button").disable();
+            
+            CQ.Ext.getCmp("filter-term-field").setValue("");
+            CQ.Ext.getCmp("any-change-checkbox").setValue(false);
+            CQ.Ext.getCmp("only-mod-checkbox").setValue(false);
+            CQ.Ext.getCmp("only-new-checkbox").setValue(false);
+            CQ.Ext.getCmp("only-new-checkbox").setValue(false);
+            CQ.Ext.getCmp("has-comment-checkbox").setValue(false);
+            
+            filter();
+        }
+    };
+    
+    var viewport = new CQ.Ext.Viewport({
+        layout: "border",
+        border: true,
+        defaults: {
+            border: true,
+            margins: '5 5 5 5'
+        },
+        items: [
+            {
+                region: "north",
+                //title: "CQ5 Translator",
+                autoHeight: true,
+                layout: "fit",
+                bodyStyle: "border-top: 0;",
+                tbar: {
+                    items: [
+                        // for more complex project configuration, enable west project panel again (see below)
+                        "Dictionaries:",
+                        {
+                            id: "i18n-path-combobox",
+                            xtype: "combo",
+                            fieldLabel: "I18n Path",
+                            width: 300,
+                            triggerAction: "all",
+                            store: new CQ.Ext.data.JsonStore({
+                                url: "translator.i18npaths.json",
+                                root: "paths",
+                                restful: true,
+                                idProperty: "path",
+                                fields: [ "path" ]
+                            }),
+                            valueField: "path",
+                            displayField: "path",
+                            listeners: {
+                                beforeselect: function(combo, record, index) {
+                                    if (store.isDirty()) {
+                                        CQ.Ext.Msg.alert("Changes present", "Please save or reset changes in current list.");
+                                        return false;
+                                    }
+                                },
+                                select: function(combo, record, index) {
+                                    loadPath(record.get("path"));
+                                }
+                            }
+                        },
+                        "-",
+                        {
+                            text: "Import",
+                            menu: {
+                                xtype: "menu",
+                                plain: true,
+                                items: [
+                                    {
+                                        text: "XLIFF translations...",
+                                        handler: function() {
+                                            var dlg = CQ.Ext.ComponentMgr.create({
+                                                xtype:"importxliffdialog",
+                                                path: i18nPath,
+                                                listeners: {
+                                                    success: function() {
+                                                        store.reload();
+                                                    }
+                                                }
+                                            });
+                                            dlg.show();
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            text: "Export",
+                            menu: {
+                                xtype: "menu",
+                                id: "export-menu",
+                                plain: true
+                            }
+                        }, {
+                            text: "Translate Dictionary",
+                            menu: {
+                                xtype: "menu",
+                                plain: true,
+                                items: [
+                                    {
+                                        text: "Create a new translation project",
+                                        handler: function() {
+                                            var dlg = CQ.Ext.ComponentMgr.create({
+                                                xtype:"newtranslationprojectdialog",
+                                                path: i18nPath,
+                                                listeners: {
+                                                    success: function() {
+                                                        store.reload();
+                                                    }
+                                                }
+                                            });
+                                            dlg.show();
+                                        }
+                                    },
+                                    {
+                                        text: "Add to existing translation project",
+                                        handler: function() {
+                                            var dlg = CQ.Ext.ComponentMgr.create({
+                                                xtype:"existingtranslationprojectdialog",
+                                                path: i18nPath,
+                                                listeners: {
+                                                    success: function() {
+                                                        store.reload();
+                                                    }
+                                                }
+                                            });
+                                            dlg.show();
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+
+                        {
+                            text: "Settings",
+                            menu: {
+                                xtype: "menu",
+                                plain: true,
+                                items: [
+                                    {
+                                        text: "Change /etc/languages ...",
+                                        handler: function() {
+                                            window.open(CQ.HTTP.externalize("/crx/de/index.jsp#/crx.default/jcr:root/etc/languages"));
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                region: "center",
+                layout: "fit",
+                items: {
+                    layout: "border",
+                    title: "Strings &amp; Translations",
+                    border: false,
+                    tbar: [{
+                            text: "Save",
+                            id: "strings-save-button",
+                            iconCls: "save-icon",
+                            disabled: true,
+                            handler: function() {
+                                store.saveAll();
+                            }
+                        },{
+                            text: "Reset & Refresh",
+                            iconCls: "refresh-icon",
+                            handler: function() {
+                                store.reload();
+                            }
+                        },{
+                            text: "Add",
+                            iconCls: "add-icon",
+                            handler: function() {
+                                grid.stopEditing();
+                                editDialog.addTranslations();
+                            }
+                        },{
+                            id: "strings-remove-button",
+                            text: "Remove",
+                            iconCls: "remove-icon",
+                            disabled: true,
+                            handler: function() {
+                                var s = grid.getSelectionModel().getSelections();
+                                for (var i = 0, rec; rec = s[i]; i++) {
+                                    if (rec.phantom) {
+                                        store.remove(rec);
+                                    } else {
+                                        store.markForRemove(rec);
+                                    }
+                                    store.fireEvent("update", store, rec, CQ.Ext.data.Record.EDIT);
+                                }
+                            }
+                    }],
+                    items: [
+                        grid,
+                        filterBar
+                    ]
+                }
+            }
+        ]
+    });
+
+    CQ.Translator.load = function(path) {
+        if (path) {
+            loadPath(path);
+            var cb = CQ.Ext.getCmp("i18n-path-combobox");
+            if (cb) {
+                cb.setValue(path);
+            }
+        }
+    };
+});

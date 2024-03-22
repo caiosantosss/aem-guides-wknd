@@ -1,0 +1,1312 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+    /**
+     * @typedef {{}} Granite.author.ui.assetFinder~AssetController
+     * @memberOf Granite.author.ui.assetFinder
+     *
+     * @property {function} setUp                   - Called before loading the current asset controller
+     * @property {function} tearDown                - Called before unloading the current asset controller
+     * @property {function} loadAssets              - Loads the assets of a certain type
+     * @property {function} setServlet              - Override the servlet path
+     * @property {function} setSearchPath           - Override the search path
+     * @property {function} setItemResourceType     - Override the item resource type
+     * @property {function} resetSearchPath         - Resets the search path to the default value
+     * @property {string}   viewInAdminRoot         - URI Template used to view assets of this type in admin (e.g.,
+     *     "/assetdetails.html{+item}"). It will be expanded with the selected asset path
+     */
+
+    /**
+     * The asset finder allow the user to search for assets and then add those to the content of the page.
+     * It is located in the [SidePanel]{@link Granite.author.ui.SidePanel}
+     *
+     * Initialized on {@link Document#event:cq-editor-loaded} (all asset controllers should be registered prior to this)
+     *
+     * @type {*}
+     * @namespace
+     * @alias Granite.author.ui.assetFinder
+     */
+    ns.ui.assetFinder = (function () {
+        var self = {};
+
+        var dataSize = 20; // amount of data to be loaded on scroll
+        var defaultLimit = 20; // amount of data to be loaded on initial load
+        var dataSizeS7 = 100;
+        var defaultLimitS7 = 100;
+        var startLimit = 0; // show results beginning from start limit
+        var endLimit = defaultLimit; // show results til end limit
+        var currentController = "";
+        var eventTypeLoad = "loadAssets";
+        var isDataLoaded = false; // check if data is loaded on tab switch
+        var isAllDataLoaded = false;// check if all data got loaded, needed for scrolling
+        var spinnerVisible = false;
+        var offscrollTimer = null; // timer for scrolling
+        var $elSelectedFilters; // selected filters container
+        var $elContentPanel; // content container
+        var $elAssetType; // container for the type selector
+        var $elS7Conf;
+        var $elContent; // content container
+        var $search; //search element wrapper
+        var $elSearch; // search input
+        var $clear; // clear button of the search field
+        var $pathFields;
+        var $taglist; // tag filter
+        var $taglistClearAll; // tag filter
+        var $spinner; // spinner
+        var $elSearchNoResults; // empty results message
+        var $sidepanelTabTitle;
+        var LOAD_MORE_ASSETS_MARGIN = 10;
+
+        /**
+         * Contains all registered controllers
+         *
+         * @memberOf Granite.author.ui.assetFinder
+         * @alias registry
+         * @type {Object}
+         */
+        self.registry = {};
+
+        /**
+         * The side panel HTMLElement
+         *
+         * @memberOf Granite.author.ui.assetFinder
+         * @ignore
+         * @alias $sidePanel
+         * @type {jQuery}
+         */
+        self.$sidePanel = $("#SidePanel");
+
+        var editPanel = null;
+
+        /**
+         * The specific side panel inner element used in page editor
+         *
+         * @memberOf Granite.author.ui.assetFinder
+         * @alias $editPanel
+         * @type {jQuery}
+         * @deprecated
+         * @ignore
+         */
+        Object.defineProperty(self,'$editPanel',{
+
+            get: function () {
+                Granite.author.util.deprecated();
+                return editPanel;
+            },
+            set: function(value) {
+                Granite.author.util.deprecated();
+                editPanel = value;
+            }
+        });
+
+        var tabName = "editor-AssetFinder";
+
+        /**
+         * Stylesheet class name of the assets tab
+         *
+         * @memberOf Granite.author.ui.assetFinder
+         * @alias tabName
+         * @deprecated
+         * @ignore
+         */
+        Object.defineProperty(self,'tabName',{
+
+            get: function () {
+                Granite.author.util.deprecated();
+                return tabName;
+            },
+            set: function(value) {
+                Granite.author.util.deprecated();
+                tabName = value;
+            }
+
+        });
+        /**
+         * Corresponding jQuery element
+         *
+         * @memberOf Granite.author.ui.assetFinder
+         * @alias $el
+         * @type {jQuery}
+         */
+        self.$el = null;
+
+        self.initVars = function() {
+            self.$editPanel = self.$sidePanel.find(".js-SidePanel-content--edit");
+            self.$el = self.$sidePanel.find(".editor-AssetFinder,.sidepanel-tab-assets");
+            $elSelectedFilters = self.$el.find('.rail-view.active .selected-filter-panel'); // selected filters container
+            $elContentPanel = self.$el.find('.content-panel'); // content container
+            $elAssetType = self.$el.find('.rail-view.active .assetfilter.type'); // container for the type selector
+            $elS7Conf = self.$el.find('.rail-view.active .assetfilter.s7');
+            $elContent = $elContentPanel.find('.assetfinder-content-container'); // content container
+            $search = self.$el.find('#assetsearch'); //search element wrapper
+            $elSearch = $search; // search input
+            $clear = self.$el.find("[data-editor-searchfilter-search]").parent(".coral-DecoratedTextfield")
+                .find('.coral-DecoratedTextfield-button'); // clear button of the search field
+            $pathFields = self.$el.find('foundation-autocomplete.path');
+            $taglist = self.$el.find('.rail-view.active coral-taglist.taglist'); // tag filter
+            $taglistClearAll = self.$el.find('.rail-view.active .taglist-clearall'); // tag filter
+            $spinner = self.$el.find(".resultspinner"); // spinner
+            $elSearchNoResults = self.$el.find(".emptyresult"); // empty results message
+            self.TagList = new ns.ui.TagList($taglist);
+            $sidepanelTabTitle = self.$el.find(".sidepanel-tab-title");
+        };
+
+        // @TODO grid which is a CUI.CardView is deprecated
+        var GRID_LAYOUT_SETTINGS = {
+            colWidth: 145,
+            gutterX: 14,
+            selector: "article.card-asset" // We are specific here, as assets card may contain nested <article> tags, see paragraph asset type.
+        };
+        // end of deprecated
+
+        var MASONRY_LAYOUT_SETTINGS = {
+            layout: "variable",
+            columnWidth: 140,
+            spacing: 15
+        };
+
+        /**
+         * Lists of tags
+         *
+         * @memberOf Granite.author.ui.assetFinder
+         * @alias TagList
+         * @type {Granite.author.ui.TagList}
+         */
+        self.TagList = null;
+
+
+        /**
+         * Register an asset controller.
+         * Asset controllers are responsible for the loading of assets of a given type in the Asset Finder.
+         * To add drag and drop capabilities for new asset types, make sure to also register the appropriate
+         * [AssetDragAndDrop]{@link Granite.author.ui.assetFinder.AssetDragAndDrop} Controller under the
+         * [dropController]{@link Granite.author.ui.dropController}
+         *
+         * Note that this doesn't add the corresponding asset type in the select list. This is done on
+         * "cq-editor-loaded", and thus assumes that all asset controllers have been registered before the event is
+         * triggered.
+         *
+         * @memberOf Granite.author.ui.assetFinder
+         * @alias register
+         *
+         * @param {string} name                                                     - Internal name of the controller,
+         *     also used to derive the corresponding asset type
+         * @param {Granite.author.ui.assetFinder~AssetController} controller        - Controller instance
+         */
+        self.register = function (name, controller) {
+            self.registry[name] = controller;
+        };
+
+        /**
+         * Common utilities
+         */
+        var utilsCommons = {
+
+            /**
+             * Search predicate range delimiter
+             *
+             * @memberOf Granite.author.ui.assetFinder.utilsCommons
+             */
+            RANGE_DELIMITER: "..",
+
+            /**
+             * Goal of this function is to reduce the calls on the contentfinder servlet
+             *
+             * By triggering an additional event on the grid we can use debounce
+             *
+             * @memberOf Granite.author.ui.assetFinder.utilsCommons
+             * @appendData append data to grid
+             */
+            loadAssets: function (appendData) {
+                // trigger paging request
+                $elContent.trigger({
+                    type: eventTypeLoad,
+                    append: appendData
+                });
+            },
+
+            /**
+             * Resets the context of the asset finder
+             *
+             * By clearing all the fields, filters and reloading the list of assets
+             *
+             * @memberOf Granite.author.ui.assetFinder.utilsCommons
+             */
+            resetAssets: function () {
+                // reset fulltext search
+                utilsCommons.filters.resetFulltextSearch();
+                // reset path fields
+                utilsCommons.filters.resetPathFields();
+                // reset filters
+                utilsCommons.filters.resetFilters();
+                // reset data
+                if (isDataLoaded) { // just reset if data was already loaded
+                    utilsCommons.loadAssets(false);
+                }
+            },
+
+            /**
+             * Is the side panel opened
+             *
+             * @memberOf Granite.author.ui.assetFinder.utilsCommons
+             * @returns {boolean}
+             */
+            sidePanelIsOpened: function () {
+                return self.$sidePanel.hasClass("sidepanel-opened");
+            },
+
+            /**
+             * Is the assets tab visible and active
+             *
+             * @memberOf Granite.author.ui.assetFinder.utilsCommons
+             * @returns {boolean}
+             */
+            tabIsActive: function () {
+                return (utilsCommons.sidePanelIsOpened() &&
+                    ($("coral-tab:selected").attr("aria-controls") === self.$el.parents("coral-panel").attr("id")) &&
+                    self.$el.parents(".js-SidePanel-content").is(":visible"));
+            },
+
+            /**
+             * Sets the correct height for the content-panel container of the side panel
+             *
+             * As the filter containers and content containers' height are flexible,
+             * There is no way to solve this with pure css
+             *
+             * @memberOf Granite.author.ui.assetFinder.utilsCommons
+             * @deprecated 6.4
+             */
+            setContentPanelHeight: function () {
+                Granite.author.util.deprecated();
+                var h = $(window).height(),
+                        offset = $elContentPanel.offset();
+
+                $elContentPanel.height(Math.round(h - offset.top));
+            },
+
+            /**
+             * // @TODO grid which is a CUI.CardView is deprecated
+             */
+            /**
+             * Section dedicated to the management of the grid which is a CUI.CardView
+             *
+             * <i>These components represent the content listed by the asset side panel</i>
+             *
+             * @memberOf Granite.author.ui.assetFinder.utilsCommons
+             */
+            grid: {
+
+                /**
+                 * Returns the CUI.CardView container of the content
+                 *
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.grid
+                 */
+                getCardView: function () {
+                    return CUI.CardView.get($elContent);
+                },
+
+                /**
+                 * Sets the CUI.CardView and its children style and behavior
+                 *
+                 * Handles the correct positioning of cards
+                 *
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.grid
+                 */
+                setCardView: function () {
+                    var cardView = utilsCommons.grid.getCardView();
+                    cardView.setDisplayMode(CUI.CardView.DISPLAY_GRID);
+
+                    // adapt the grid layout
+                    if (ns.device.isDesktop()) {
+                        utilsCommons.grid.adaptCardLayout(cardView, GRID_LAYOUT_SETTINGS);
+                    } else {
+                        utilsCommons.grid.adaptCardLayout(cardView, $.extend({}, GRID_LAYOUT_SETTINGS, {"colWidth": 200}));
+                    }
+
+                    // disable the link on cards label
+                    $elContent.find('a.label').on('click', function(event) {
+                        event.preventDefault();
+                    });
+                },
+
+                /**
+                 * Adapts the grid to the given layout settings
+                 *
+                 * @param {CUI.CardView} cardView   - The CUI.CardView to act upon
+                 * @param {{}} settings             - Grid layout settings
+                 * @private
+                 * @ignore
+                 */
+                adaptCardLayout: function (cardView, settings) {
+                    cardView.layout(settings);
+                }
+            },
+            /**
+             * end of deprecated
+             */
+
+            /**
+             * Section dedicated to the management of the asset filters and associated list of tags
+             *
+             * @memberOf Granite.author.ui.assetFinder.utilsCommons
+             */
+            filters: {
+
+                /**
+                 * Adds the entry into the selectList
+                 * @param {jquery} selectList into which the
+                 * @param {string} name - Name of the asset type to be added
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.filters
+                 * @private
+                 */
+                _addAssetTypeEntry: function (name, $selectList) {
+                    if ($selectList) {
+                        // Coral custom components aren't ready at loading time in the AssetFinder,
+                        // let's wait that they are ready
+                        Coral.commons.ready($selectList.get(0), function() {
+                            // Add option
+                            var item = {
+                                value: name,
+                                content: {
+                                    innerHTML: Granite.I18n.getVar(name)
+                                }
+                            };
+
+                            var items = $selectList.get(0).items;
+                            items.add(item);
+                        });
+                    } else {
+                        // select list has not yet been initialized by CoralUI, thus
+                        // add <option> element to the native select
+                        var $li = $('<option/>', { value: name, text: text });
+                        var $nativeSelectList = $elAssetType.find('select');
+
+                        $li.appendTo($nativeSelectList);
+                    }
+                },
+
+                /**
+                 * Adds a new asset type entry in the select list
+                 *
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.filters
+                 *
+                 * @param {string} name - Name of the asset type to be added
+                 */
+                addTypeSelectorEntry: function (name) {
+                    if (!$elAssetType.length) {
+                        return;
+                    }
+
+                    var $scene7AssetFilterEl = $('coral-select[name=assetfilter_s7_selector]');
+                    if (name === "Scene7" && $scene7AssetFilterEl.length) {
+                        Coral.commons.ready($scene7AssetFilterEl[0], function () {
+                            if ($scene7AssetFilterEl[0].items.length > 0) {
+                                self.utilsCommons.filters._addAssetTypeEntry(name, $elAssetType);
+                            }
+                        })
+                    } else {
+                        self.utilsCommons.filters._addAssetTypeEntry(name, $elAssetType);
+                    }
+                },
+
+                /**
+                 * Handle the visibility of the tagList clear-all action depending upon the length of tags.
+                 * Hides the action if length of tagList is greater than 0
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.filters
+                 *
+                 */
+                handleVisibilityClearAllAction: function () {
+                    self.TagList.getValues().then(function (values) {
+                        self.utilsCommons.filters.setVisibilityClearAll(values.length > 0);
+                    });
+                },
+
+                /**
+                 * Toggle the visibility of the tagList clear-all action
+                 *
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.filters
+                 *
+                 * @param {boolean} show - Should the action be displayed
+                 */
+                setVisibilityClearAll: function (show) {
+                    if (show) {
+                        // the taglist table should be labelled as "Filters"
+                        $taglist.prop("labelled", Granite.I18n.get("Filters"));
+
+                        // move clear all to before the taglist
+                        $taglist.before($taglistClearAll);
+
+                        // show clear all
+                        $taglistClearAll.show();
+                    } else {
+                        $taglistClearAll.hide();
+                    }
+                },
+
+                /**
+                 * Clears the fulltext search field
+                 *
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.filters
+                 */
+                resetFulltextSearch: function () {
+                    if ($elSearch.length) $elSearch.val('');
+                },
+
+                /**
+                 * Resets the pathFields
+                 *
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.filters
+                 */
+                resetPathFields: function () {
+                    if (self.registry[currentController] && typeof self.registry[currentController].resetSearchPath === 'function') {
+                        self.registry[currentController].resetSearchPath();
+                    }
+
+                    $pathFields.each(function() {
+                        this.value = '';
+                    });
+                },
+
+                /**
+                 * Resets filters and related list of tags
+                 *
+                 * @memberOf Granite.author.ui.assetFinder.utilsCommons.filters
+                 */
+                resetFilters: function () {
+                    self.TagList.clearAll();
+                    utilsCommons.filters.setVisibilityClearAll(false);
+                }
+            }
+        };
+
+        /**
+         * resetPathBrowsers backward compatibility
+         *
+         * @memberOf Granite.author.ui.assetFinder.utilsCommons.filters
+         * @deprecated 6.3
+         */
+        Object.defineProperty(utilsCommons.filters,'resetPathBrowsers',{
+
+            get: function () {
+                Granite.author.util.deprecated();
+                return utilsCommons.filters.resetPathFields;
+            },
+            set: function (value) {
+                Granite.author.util.deprecated();
+                utilsCommons.filters.resetPathFields = value;
+            }
+        });
+
+        /**
+         * Common utils dedicated to the asset management
+         *
+         * @memberOf Granite.author.ui.assetFinder
+         * @alias utilsCommons
+         * @private
+         * @ignore
+         */
+        self.utilsCommons = utilsCommons;
+
+        /**
+         * Sidepanel switched handler: the sidepanel becomes active
+         *
+         * @listens Document#event:cq-sidepanel-tab-switched
+         */
+        function handleSidepanelSwitch(event) {
+            if (utilsCommons.tabIsActive(event)) {
+                // manage clear all of selected filters
+                self.TagList.getValues().then(function (values) {
+                    utilsCommons.filters.setVisibilityClearAll(values.length);
+
+                    // load assets
+                    if (!isDataLoaded) {
+                        utilsCommons.loadAssets(false);
+                        isDataLoaded = true;
+                    } else {
+                        // @TODO grid which is a CUI.CardView is deprecated
+                        // Reset the grid as the panel maybe got resized
+                        // and handle correct distribution of cards
+                        utilsCommons.grid.setCardView();
+                        // end of deprecated
+                    }
+                });
+            }
+        }
+
+        /**
+         * Sidepanel resized handler: the sidepanel gets resized
+         */
+        function handleSidepanelResize(event) {
+            if (utilsCommons.tabIsActive(event)) {
+                // @TODO grid which is a CUI.CardView is deprecated
+                // Reset the grid when panel gets resized
+                // and handle correct distribution of cards
+                utilsCommons.grid.setCardView();
+                // end of deprecated
+            }
+        }
+
+        /**
+         * to reduce the calls on the contentfinder servlet, use debounce
+         */
+        function handleLoadAssets(event) {
+            var appendData = event.append;
+            if (!appendData) {
+                // reset internal variables, search and filters
+                _resetInternal();
+                // @TODO grid which is a CUI.CardView is deprecated
+                _resetGrid();
+                // end of deprecated
+            }
+            _displayData(appendData);
+
+            /**
+             * reset the internal status parameters
+             */
+            function _resetInternal () {
+                startLimit = 0;
+                var assetType = getAssetType();
+                if (assetType ==="Scene7") {
+                    endLimit = defaultLimitS7;
+                } else {
+                    endLimit = defaultLimit;
+                }
+                isAllDataLoaded = false;
+            }
+
+            // @TODO grid which is a CUI.CardView is deprecated
+            /**
+             * Reset grid
+             */
+            function _resetGrid () {
+                utilsCommons.grid.getCardView().removeAllItems();
+            }
+            // end of deprecated
+
+            /**
+             * Load and display the data
+             */
+            function _displayData (appendData) {
+                var $pathField;
+                var path;
+
+                if (self.registry[currentController]) {
+                    $pathField = $pathFields.filter('[data-filtertype="'+ currentController +'"]:visible');
+
+                    $elSearchNoResults.hide();
+                    _showSpinner();
+
+                    if ($pathField.length && typeof self.registry[currentController].setSearchPath === 'function') {
+                        //value api in path finder is not returning correct value. GRANITE-29039
+                        path = $pathField.get(0).values[0];
+                        if (path === undefined || !path || path.indexOf("://") === -1) { // CQ-77968
+                            self.registry[currentController].setSearchPath(path);
+                        }
+                    }
+
+                    if (self.registry[currentController]["searchCallback"] != null) {
+                        // abort existing in-progress search
+                        self.registry[currentController]["searchCallback"].abort();
+                    }
+
+                    self.registry[currentController]["searchCallback"] = self.registry[currentController]
+                         .loadAssets(_createQuery(), startLimit, endLimit);
+
+                    self.registry[currentController]["searchCallback"]
+                        .then(function (htmlResponse) {
+                            // hide helper divs
+                            $elSearchNoResults.hide();
+                            // results found
+                            _insertDataToMasonry(htmlResponse, appendData);
+
+                            // @TODO grid which is a CUI.CardView is deprecated
+                            _insertDataToGrid(htmlResponse, appendData);
+                            utilsCommons.grid.setCardView();
+                            // end of deprecated
+
+                            // Update global pagination
+                            startLimit = endLimit;
+                            endLimit = endLimit + getAssetPageSize();
+                        })
+                        .fail(function (req, status, error) {
+                            if (status !== "abort") {
+                                console.log("Error while getting assets", req, status, error);
+                                // Add role for empty message for screen reader
+                                $elSearchNoResults.attr('role', 'alert');
+                                $elSearchNoResults.show();
+                                // Wait 2 seconds for screen reader to announce role than remove it
+                                setTimeout(function() {
+                                    $elSearchNoResults.removeAttr('role');
+                                }, 2000)
+                            }
+                        })
+                        .always(function (req, status, error) {
+                            if (status !== "abort") {
+                                // hide spinner
+                                _hideSpinner();
+
+                                // reset search callback object
+                                self.registry[currentController]["searchCallback"] = null;
+                            }
+                        });
+                }
+            }
+
+            /**
+             * Create query including fulltext search and filters
+             * Additionally sort the results jcr:lastModified
+             */
+            function _createQuery () {
+                var query = "";
+
+                // search query
+                var fulltextSearch = '';
+                if ($elSearch.length && $elSearch.val().length) {
+                    fulltextSearch = $elSearch.val().trim();
+                    fulltextSearch = fulltextSearch.replace(/"/g, '\\"');
+                }
+                if (fulltextSearch.length) {
+                    query = query.concat(fulltextSearch + " ");
+                }
+
+                var assetType = getAssetType();
+                var s7conf = $elS7Conf[0].value;
+                if (assetType ==="Scene7" && s7conf !== null) {
+                    query = query.concat("\"s7conf\":\"" + s7conf + "\" ");
+                }
+
+                var selectedFilters = self.TagList.getSelectedTags();
+                for (var property in selectedFilters) {
+                    $.map(selectedFilters[property], function (value, key) {
+                        try {
+                            // if key is a JSON array, add each key to query
+                            var keys = JSON.parse(key);
+                            keys.forEach(function (key) {
+                                if(query && query.indexOf(property) >= 0) {
+                                    query = query + "OR ";
+                                }
+                                query = query.concat("\"" + property + "\":\"" + key + "\" ");
+                            })
+                        } catch (exception) {
+                            // add key as a string to query
+                            if(query && query.indexOf(property) >= 0) {
+                                query = query + "OR ";
+                            }
+                            query = query.concat("\"" + property + "\":\"" + key + "\" ");
+                        }
+                    });
+                }
+
+                return query;
+            }
+
+            /**
+             * @TODO grid which is a CUI.CardView is deprecated
+             */
+            /**
+             * Insert data into grid
+             *
+             * @type {string}
+             * @type {boolean}
+             */
+            function _insertDataToGrid(htmlResponse, appendData) {
+                var parsedResponse = $.parseHTML(htmlResponse),
+                    $elData = $(parsedResponse).filter("article").toArray(),
+                    // check if this asset type is migrated to Coral3
+                    $elDataCoralCard = $(parsedResponse).filter("coral-card").toArray();
+                if ($elDataCoralCard.length) return;
+
+                // remove existing masonry - as we show the grid here
+                var $masonry = self.$el.find('coral-masonry');
+                if (!appendData && $masonry.length) {
+                    $masonry.remove();
+                }
+
+                // set flag if all data has been loaded
+                isAllDataLoaded = ($elData.length < (endLimit - startLimit));
+
+                if (!appendData) {
+                    _resetGrid();
+                }
+
+                if ($elData.length) {
+                    // results found
+                    utilsCommons.grid.getCardView().append($elData);
+                } else {
+                    // no results
+                    if (!startLimit && !$elData.length) {
+                        // Add role for empty message for screen reader
+                        $elSearchNoResults.attr('role', 'alert');
+                        $elSearchNoResults.show();
+                        // Wait 2 seconds for screen reader to announce role than remove it
+                        setTimeout(function() {
+                            $elSearchNoResults.removeAttr('role');
+                        }, 2000)
+                    }
+                }
+            }
+
+            /**
+             * end of deprecated
+             */
+            function _getMasonry(appendData) {
+                var $masonry = self.$el.find('coral-masonry'), // get the current masonry element
+                    // get the Coral.Masonry
+                    masonry = $masonry[0],
+                    $grid = self.$el.find('div.editor-SidePanel-masonryContainer'),
+                    grid = $grid[0];
+
+                if (!appendData) {
+                    if (masonry) {
+                        // we have to create a new masonry, so remove the existing one
+                        masonry.remove();
+                        masonry = undefined;
+                    }
+
+                    if (grid) {
+                        grid.remove();
+                        grid = undefined;
+                    }
+                }
+
+                // first call of assetfinder: masonry got never defined
+                if (!masonry) {
+                    // create a masonry as it doesn't exist
+                    masonry = new Coral.Masonry().set(MASONRY_LAYOUT_SETTINGS);
+
+                    // update reference, as old masonry was earlier removed from DOM
+                    Granite.author.ui.assetFinder.masonry = masonry;
+
+                    if (!grid) {
+                        // create a container div to contain the coral-masonry element
+                        grid = document.createElement('div');
+                        grid.className = 'editor-SidePanel-masonryContainer';
+                    }
+
+                    $elContentPanel.append(grid);
+                    grid.appendChild(masonry);
+
+                    // add aria-labelledby for masonry component
+                    $sidepanelTabTitle[0].id = $sidepanelTabTitle[0].id || Coral.commons.getUID();
+                    masonry.setAttribute('aria-labelledby', $sidepanelTabTitle[0].id);
+
+                    // turn on ariaGrid
+                    masonry.setAttribute('ariaGrid', 'on');
+                    $(masonry).on('focus', 'coral-masonry-item, coral-masonry-item button', function(e) {
+                        var $masonryItem = $(e.target).closest('coral-masonry-item');
+                        if (!$masonryItem.is(e.target)) {
+                            var focusEvent = new FocusEvent('focus', {
+                                view: window,
+                                bubbles: true,
+                                cancelable: true
+                            });
+                            $masonryItem[0].dispatchEvent(focusEvent); 
+                        }
+                        $masonryItem.find('button').prop('tabIndex', 0);
+                    });
+                    $(masonry).on('blur', 'coral-masonry-item, coral-masonry-item button', function(e) {
+                        var $masonryItems = $(e.target).closest('coral-masonry').find('coral-masonry-item');
+                        window.requestAnimationFrame(function() {
+                            $masonryItems.each(function() {
+                                var $masonryItem = $(this);
+                                $masonryItem.find('button').prop('tabIndex', $masonryItem.prop('tabIndex'));
+                            });
+                        });
+                    });
+                }
+                return masonry;
+            }
+
+            function _insertDataToMasonry(htmlResponse, appendData) {
+                var parsedResponse = $.parseHTML(htmlResponse),
+                    $elData = $(parsedResponse).filter("coral-card").toArray(),
+                    // check if this asset type is still Coral2
+                    $elDataArticle = $(parsedResponse).filter("article").toArray();
+                if ($elDataArticle.length) return;
+
+                // reset the grid - as we show now the masonry
+                if (!appendData) _resetGrid();
+
+                // set flag if all data has been loaded
+                isAllDataLoaded = ($elData.length < (endLimit - startLimit));
+
+                // hide masonry default empty message
+                self.$el.find(".foundation-layout-masonry-empty").toggle(true);
+
+                // get the current masonry
+                self.masonry = _getMasonry(appendData);
+
+                if ($elData.length) {
+                    $elData.forEach(function(card) {
+                        self.masonry.items.add({
+                            content: {
+                                innerHTML: card.outerHTML
+                            }
+                        });
+                    });
+
+                    // show custom empty message in case masonry is empty
+                    self.$el.find(".editor-SidePanel-resultMessage").toggle(false);
+
+                    // Cards not shown in IE11 because of the coral-masonry's <object>
+                    if (ns.device.isIE11) {
+                        $(self.masonry).find("object").css("display", "none");
+                    }
+                } else {
+                    // no results
+                    if (!startLimit && !$elData.length) {
+                        // Add role for empty message for screen reader
+                        $elSearchNoResults.attr('role', 'alert');
+                        $elSearchNoResults.show();
+                        // Wait 2 seconds for screen reader to announce role than remove it
+                        setTimeout(function() {
+                            $elSearchNoResults.removeAttr('role');
+                        }, 2000)
+                    }
+                }
+            }
+
+            /**
+             * shows the spinner
+             */
+            function _showSpinner () {
+                spinnerVisible = true;
+
+                // show spinner at the bottom of result set
+                var $parent = $spinner.parent();
+
+                $spinner = $spinner.detach();
+                $parent.append($spinner);
+                $spinner.attr("role", "alert");
+                $spinner.show();
+
+                // if the Mansory container is visible - scroll to the recently appended spinner
+                var parentTop = $parent.position().top,
+                    parentBottom = parentTop + $parent.height(),
+                    h = $(window).height();
+
+                if ((parentTop <= h) && (parentBottom >= 0)) {
+                    $spinner[0].scrollIntoView(false);
+                }
+            }
+
+            /**
+             * hides the spinner
+             */
+            function _hideSpinner () {
+                var noResultsFound = $('.editor-AssetFinder .emptyresult:visible').length;
+                var masonryItems = Granite.author.ui.assetFinder.masonry.querySelectorAll('coral-masonry-item');
+                var allItemsReady = Array.from(masonryItems).filter(function(el) { return window.getComputedStyle(el).opacity !== '1'}).length === 0;
+
+                // hide spinner once container got updated
+                if (noResultsFound || allItemsReady) {
+                    spinnerVisible = false;
+                    $spinner.hide();
+                    $spinner.removeAttr("role");
+
+                    return;
+                }
+
+                // paging request is done, but elements are not yet added to the DOM
+                requestAnimationFrame(_hideSpinner);
+            }
+
+        }
+
+        // reset all data
+        function handleResetAssets(event) {
+            utilsCommons.resetAssets();
+        }
+
+        /**
+         * Returns the type of assets currently listed
+         *
+         * @returns {string}
+         */
+        var getAssetType = function () {
+            return $elAssetType.find("coral-select-item[selected]").val();
+        };
+
+        /**
+         * Returns the pagination size for the current asset type
+         *
+         * @returns {number}
+         */
+        var getAssetPageSize = function() {
+            if ("Scene7" === getAssetType()) {
+                return dataSizeS7;
+            }
+
+            return dataSize;
+        };
+
+        /**
+         * Handler for infinite scrolling
+         */
+        function handleScroll(event) {
+
+            var elem = $(event.currentTarget),
+                    scrollTop = elem.scrollTop(),
+                    scrollHeight = elem.get(0).scrollHeight,
+                    clientHeight = elem.get(0).clientHeight;
+
+            //while scrolling, disable all other events
+            //ipad scroll issue: gives the wrong target object in the event (swipe origin instead of touch that stopped
+            //the scroll. see #CQ5-32293
+            $.toe.off();
+
+            if (offscrollTimer) {
+                clearTimeout(offscrollTimer);
+            }
+
+            offscrollTimer = setTimeout(function () {
+                //restore events
+                $.toe.on();
+
+                offscrollTimer = null;
+            }, 500);
+
+            // load more assets 10 pixels before reaching the end just for safety on cross browser behavior
+            if (!spinnerVisible && (scrollTop > 0) && (scrollTop + clientHeight) >= (scrollHeight - LOAD_MORE_ASSETS_MARGIN)) {
+                if (!isAllDataLoaded) {
+                    // load data
+                    utilsCommons.loadAssets(true);
+                }
+            }
+        }
+
+        /**
+         * Handle inner rails
+         */
+        function handleInnerRail(event) {
+            event.preventDefault();
+
+            // deactivate current active rails
+            self.$el.find('.rail-switch > nav.toolbar a').removeClass("active");
+            self.$el.find('.rail-switch > nav.toolbar i').removeClass("active");
+            self.$el.find('.rail-view.active').removeClass("active");
+
+            // set active rail
+            $(event.target).addClass("active");
+            self.$el.find('.rail-view[data-view="' + $(this).data("view") + '"]').addClass("active").show();
+            self.$el.find('.rail-view[data-view="' + $(this).data("view") + '"] i').addClass("active");
+        }
+
+        /**
+         * Handler for the asset type
+         * @returns {Function}
+         */
+        function handleAssetTypes(event) {
+            var type = event.selected;
+            if (!type) {
+                type = $(event.target).find("coral-select-item:selected").val();
+            }
+
+            if (self.registry[currentController]) {
+                if (self.registry[currentController] && typeof self.registry[currentController].tearDown === 'function') {
+                    self.registry[currentController].tearDown();
+                }
+
+                currentController = type;
+                // set available filters
+                _setFilterVisibility(currentController);
+
+                if (currentController === "Scene7") {
+                    handleS7Confs();
+                } else {
+                    // load assets
+                    utilsCommons.resetAssets();
+                }
+
+                if (typeof self.registry[currentController].setUp === 'function') {
+                    self.registry[currentController].setUp();
+                }
+
+                // disable the "view in admin" actions if no "view in admin" root URL is defined
+                if (!self.registry[currentController].viewInAdminRoot) {
+                    self.$el.addClass('editor-AssetFinder--noViewInAdmin');
+                } else {
+                    self.$el.removeClass('editor-AssetFinder--noViewInAdmin');
+                }
+            }
+
+            /**
+             * Every type has its own filter
+             * Shown only the ones which are valid for the type
+             * @param type
+             */
+            function _setFilterVisibility (type) {
+                // some fieldwrapper are being rendered despide being empty, scene7path for example.
+                // so hiding all coral-Form-fieldwrapper except for the "Filter" one
+                $('.rail-view.active #assetfinder-filter .coral-Form-fieldwrapper').each(function() {
+                   $(this).not('.coral-Search--cqSearchPanel').hide();
+                });
+
+                // manage the filtering
+                var filtersClass = 'assetfilter';
+
+                // hide all filters and taglist
+                $('.' + filtersClass + ':not([data-filtertype=General])').hide();
+
+                // show only type specific filters
+                var $validFilters = $('.' + filtersClass + '[data-filtertype="' + type + '"]');
+                $validFilters.show();
+                $validFilters.parent().show();
+
+                self.TagList.getValues().then(function (values) {
+                    if (ns.device.isDesktop()) {
+                        if (values.length === 0) {
+                            $elSelectedFilters.hide();
+                        } else {
+                            $elSelectedFilters.show();
+                        }
+                    }
+                });
+            }
+        }
+
+        function handleS7Confs() {
+            var confValue = $elS7Conf[0].value;
+
+            // set available filters
+            _setFilterVisibility(confValue);
+            // load assets
+            utilsCommons.resetAssets();
+
+            /**
+             * s7 conf has its own filter
+             * Shown only the ones which are valid
+             * @param type
+             */
+            function _setFilterVisibility (confValue) {
+                // manage the filtering
+                var filtersClass = 'assetfilter';
+
+                var $invalidFilters = $('.' + filtersClass + '[data-s7confname]');
+                $invalidFilters.hide();
+                $invalidFilters.parent(".coral-Form-fieldwrapper").hide();
+
+                var $validFilters = $('.' + filtersClass + '[data-s7confname="' + confValue + '"]');
+                $validFilters.show();
+                $invalidFilters.parent().show();
+            }
+        }
+
+
+        /**
+         * Handler for the fulltext search
+         * allow start search by enter key on input field
+         */
+        function handleFulltextSearch(event) {
+
+            var keycode = Granite.Util.getKeyCode(event);
+            if (keycode === 13) {
+                utilsCommons.loadAssets(false);
+            } else if ($(event.target).val().length === 0) {
+                utilsCommons.filters.resetFulltextSearch();
+                utilsCommons.loadAssets(false);
+            }
+        }
+
+        /**
+         * Handler to clear fulltext search
+         */
+        function handleFulltextSearchClear(event) {
+            event.preventDefault();
+            utilsCommons.filters.resetFulltextSearch();
+            utilsCommons.loadAssets(false);
+        }
+
+
+        function handleTags(event) {
+            if (ns.device.isDesktop()) {
+                if (event.type == "coral-collection:add") {
+                    // Show taglist
+                    $elSelectedFilters.show();
+
+                } else if (event.type == "coral-collection:remove") {
+                    // Hide taglist (otherwise, spacing issues)
+                    self.TagList.getValues().then(function (values) {
+                       if (values === []) {
+                           $elSelectedFilters.hide();
+                       }
+                    });
+                }
+            } else if (!$elSelectedFilters.is(":visible")) {
+                // Always shown on mobile
+                $elSelectedFilters.show();
+            }
+        }
+
+        function initPathFields() {
+            var namespace = "author-assetfinder-pathfield";
+            var timeout;
+            var delay = 500;
+            var onFieldChange = function() {
+                utilsCommons.loadAssets(false);
+            };
+
+            $pathFields.each(function() {
+                var $pathField = $(this);
+                $pathField.off('foundation-field-change.' + namespace).on('foundation-field-change.' + namespace, onFieldChange)
+                    .off('keydown.' + namespace).on('keydown.' + namespace, function (event) {
+                        $pathField.off('foundation-field-change');
+                    })
+                    .off('keyup.' + namespace).on('keyup.' + namespace, function (event) {
+                        var keycode = Granite.Util.getKeyCode(event);
+
+                        clearTimeout(timeout);
+                        timeout = setTimeout(function () {
+                            $pathField.on('foundation-field-change', onFieldChange);
+                        }, delay);
+
+                        if (keycode === 13) { // Enter press
+                            utilsCommons.loadAssets(false);
+                        }
+                    });
+            });
+        }
+
+        function initAssetTypeSelectList() {
+            // Creates the entry list out of the asset types registered
+            var entries = [];
+            for (var assetType in self.registry) {
+                if (self.registry.hasOwnProperty(assetType)) {
+                    entries.push(assetType);
+                }
+            }
+
+            // Sorts the list according to the EditorConfig
+            entries.sort(function (a, b) {
+                var indexOfA = ns.config.assetTypeOrder.indexOf(a);
+                var indexOfB = ns.config.assetTypeOrder.indexOf(b);
+
+                // In case one of "a" or "b" is not present in the ordered list
+                if (indexOfA === -1) {
+                    return indexOfB;
+                } else if (indexOfB === -1) {
+                    return indexOfA;
+                } else {
+                    // "a" appears before "b" in the ordered list
+                    return indexOfA - indexOfB;
+                }
+            });
+
+            // Adds the corresponding items in the select list
+            entries.forEach(utilsCommons.filters.addTypeSelectorEntry);
+        }
+
+        /**
+         * Initializes the asset finder
+         *
+         * @private
+         */
+        function init () {
+
+            // Initialize itself only if the required content is present
+            if (!self.$el) {
+                self.initVars();
+            }
+            if (self.$el.length === 0) {
+                return;
+            }
+            initAssetTypeSelectList();
+
+            // Set the current controller (which is the first registered controller in the list)
+            currentController = (currentController) ? currentController : Object.keys(self.registry)[0];
+
+            // Handle custom filters at first load
+            handleAssetTypes({
+                selected: currentController,
+                preventReset: true
+            });
+
+            // PathField event handling
+            initPathFields();
+
+            /**
+             * Content panel - events handlers
+             */
+
+            // Load assets
+            $elContent.on(eventTypeLoad, $.debounce(125, false, handleLoadAssets));
+
+            // Handle infinite scrolling
+            $elContentPanel.on('scroll', handleScroll);
+
+            /**
+             * Filter panel - event handlers
+             */
+
+            // Manage asset types
+            $elAssetType.on('change', handleAssetTypes);
+
+            // Manage tags
+            $taglist.on('coral-collection:remove coral-collection:add', handleTags);
+
+            // Fulltext search
+            $elSearch.on('keyup', handleFulltextSearch);
+            $clear.on('click', handleFulltextSearchClear);
+
+            // Manage tags clearing
+            $taglistClearAll.find('button').on('click', handleResetAssets);
+
+            // S7 conf
+            $elS7Conf.on('change', handleS7Confs);
+
+
+            /**
+             * Misc - events handlers
+             */
+
+            // Handle tab switch
+            channel.on('cq-sidepanel-tab-switched', handleSidepanelSwitch);
+
+            // Handle resize
+            channel.on('cq-sidepanel-resized', handleSidepanelResize);
+            $(window).on('resize', $.debounce(125, false, handleSidepanelResize));
+
+            // Handle "view in admin" action configured per asset types
+            channel.on('click', '.editor-Card-viewInAdmin', function (event) {
+                var $card = $(event.currentTarget).parents('.editor-Card-asset').first();
+                var viewInAdminURL;
+
+                if ($card.length &&
+                    self.registry[currentController] &&
+                    self.registry[currentController].viewInAdminRoot) {
+
+                    // Expand the "view in admin" root with the asset path
+                    viewInAdminURL = Granite.URITemplate.expand(self.registry[currentController].viewInAdminRoot, {
+                        item: $card.data('path')
+                    });
+
+                    ns.util.open(Granite.HTTP.externalize(viewInAdminURL));
+                }
+            });
+
+            // Manage inner rail
+            self.$el.find('.rail-switch > nav.toolbar a').on('click', handleInnerRail);
+        }
+
+        channel.one("cq-sidepanel-loaded", init);
+
+        return self;
+    }());
+
+}(jQuery, Granite.author, jQuery(document), this));

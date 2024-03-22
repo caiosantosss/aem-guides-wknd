@@ -1,0 +1,579 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+/**
+ * @param {jQuery} $ is the jQuery object to be used
+ * @param {Object} ns is the namespace object to be used
+ * @param {jQuery} channel is the object to be used as an event bus
+ * @param {HTMLElement} window global window object
+ */
+;(function ($, ns, channel, window, undefined) {
+
+    /**
+     * The overlays have been repositioned
+     *
+     * @event Document#cq-overlays-repositioned
+     */
+
+    /**
+     * Create overlays based on the given list of {@link Granite.author.Editable}s
+     *
+     * @event Document#cq-overlays-create
+     * @type {object}
+     * @property {Granite.author.Editable[]} editables  - Editables from which to create overlays
+     */
+
+    /**
+     * A fast double clicked has been performed over an {@link Granite.author.ui.Overlay}
+     *
+     * @event Document#cq-overlay-fast-dblclick
+     */
+
+    /**
+     * A slow double clicked has been performed over an {@link Granite.author.ui.Overlay}
+     *
+     * @event Document#cq-overlay-slow-dblclick
+     */
+
+    /**
+     * A click action has been performed over an {@link Granite.author.ui.Overlay}
+     *
+     * @event Document#cq-overlay-click
+     */
+
+    /**
+     * A taphold action has been performed over an {@link Granite.author.ui.Overlay}
+     *
+     * @event Document#cq-overlay-hold
+     */
+
+    /**
+     * An outside click action has been performed over an {@link Granite.author.ui.Overlay}
+     *
+     * @event Document#cq-overlay-outside-click
+     */
+
+    /**
+     * An hover action has been performed over an {@link Granite.author.ui.Overlay}
+     *
+     * @event Document#cq-overlay-hover
+     */
+
+    /**
+     * Hides all the {@link Granite.author.ui.Overlay}s
+     *
+     * @event Document#cq-hide-overlays
+     */
+
+    /**
+     * Shows all the {@link Granite.author.ui.Overlay}s
+     *
+     * @event Document#cq-show-overlays
+     */
+
+    /**
+     * The overlay manager includes the following and non-exhaustive list of responsibilities:
+     *
+     * <ul>
+     *  <li>Instantiate and initialize the {@link Granite.author.Overlay}s</li>
+     *  <li>Influence all the {@link Granite.author.Overlay}s at once</li>
+     *  <li>Position all the the {@link Granite.author.Overlay}s at once</li>
+     * </ul>
+     *
+     * <p>Overlays are created out of the {@link Granite.author.Editable}s (which are stored in {@link Granite.author.editables})</p>
+     * <p>This {@link Granite.author.ui.Overlay}s are visual interfaces between the user and the underlying content</p>
+     * <p>The overlay manager broadcasts cq-overlay-* events informing a given user interaction (hover, click, etc.) occurred on an overlay</p>
+     * <p>Other modules could then listen to those events; like for instance {@link Granite.author.selection}</p>
+     *
+     * @namespace
+     * @alias Granite.author.overlayManager
+     */
+    ns.overlayManager = (function () {
+        var self = {},
+            $doc = $(document),
+            $win = $(window),
+            contentContainer = $doc.find('#ContentWrapper'),
+            container = $doc.find('#OverlayWrapper'),
+            overlayConstructor = null, // container for all overlays
+            suspended = false,
+            fastDoubleClickDelay = 300,
+            lastClickTapTime,
+            lastClickedTappedEditable;
+
+        function repositionOverlay(editable) {
+            var parent;
+            // if there is no overlay in place, don't bother we ignore it (most likely timing issue)
+            if (editable.overlay) {
+                parent = ns.editables.getParent(editable);
+
+                // don't rely on order of editables in the store...
+                if (parent && parent.overlay && !parent.overlay.currentPos) {
+                    repositionOverlay(parent);
+                }
+
+                editable.overlay.position(editable, parent);
+            }
+        }
+
+
+        function isDescendantOf(editableA, editableB) {
+            // assumption: editables have a common root (/content)
+            // so, we don't suport the case where editableA.path = a/b/c and editableB.path = b/c
+            return (
+                editableA.path &&
+                editableB.path &&
+                (editableA.path.indexOf(editableB.path, 0) === 0) &&
+                (editableA.path[editableB.path.length] === '/')
+            );
+        }
+
+        /**
+         * Limit the given array of {Granite.author.Editable}s to elements that do not have any of its ancestor in the array.
+         *
+         * @private
+         * @ignore
+         *
+         * @param editables     array of editables to be parsed
+         * @returns {Array}     a copy of the provided array with only the entries that aren't contained in any other entries
+         */
+        function excludeDescendants(editables) {
+            if (!editables || editables.length === 0) {
+                return [];
+            }
+
+            var all = editables.slice(0);
+            var top = [];
+
+            while (all.length > 0) {
+                var currentParent = all.shift();
+
+                for (var i = all.length - 1; i >= 0; i--) {
+                    if (isDescendantOf(currentParent, all[i])) {
+                        // we have a parent of current element so we need to swap
+                        currentParent = all.splice(i, 1)[0];
+                    } else if (isDescendantOf(all[i], currentParent)) {
+                        // we have a child of current element so just remove it
+                        all.splice(i, 1);
+                    }
+                }
+                top.push(currentParent);
+            }
+
+            return top;
+        }
+
+        /**
+         * Returns the editable from an event on an overlay
+         *
+         * @param {{}} event - Event from which to extract the current target {@link Granite.author.Editable}
+         * @returns {Granite.author.Editable}
+         */
+        function getEditable(event) {
+            return ns.editables.find($(event.currentTarget).data("path"))[0];
+        }
+
+
+        /**
+         * Creates overlays out of the {@link Granite.author.editables} store.
+         *
+         * <p>This method requires the editables to be already loaded.</p>
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias setup
+         */
+        self.setup = function () {
+            ns.editables.map(self.create);
+        };
+
+        /**
+         * Removes all overlays from the current {@link Granite.author.editables} store
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias teardown
+         */
+        self.teardown = function () {
+            ns.editables.map(self.destroy);
+        };
+
+        /**
+         * Creates an {@link Granite.author.ui.Overlay} for the given {@link Granite.author.Editable} (if not already existing)
+         *
+         * <p>This process is executed for the current {@link Granite.author.Editable} instance but also recursively through its parents and children</p>
+         *
+         * <p><i>Recursive</i></p>
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias create
+         *
+         * @param {Granite.author.Editable} editable - {@link Granite.author.Editable} for which to create a series of {@link Granite.author.ui.Overlay}'s among
+         * its parents and children. The overlay instance is also associated to its {@link Granite.author.Editable} instance
+         */
+        self.create = function (editable) {
+            if (!overlayConstructor) {
+                return;
+            }
+
+            if (!editable.overlay) {
+                var parent = ns.editables.getParent(editable);
+
+                // going up recursively until we reach the root container
+                if (parent && !parent.overlay) {
+                    self.create(parent);
+                }
+
+                // we check again because a child overlay might also be created by the parent constructor
+                if (!editable.overlay) {
+                    editable.overlay = new overlayConstructor(editable, parent ? parent.overlay.dom : container);
+                }
+
+                ns.editables.getChildren(editable, true).forEach(function (child) {
+                    self.create(child);
+                });
+            }
+        };
+
+        /**
+         * Destroys the {@link Granite.author.ui.Overlay} of the given {@link Granite.author.Editable} and its children {@link Granite.author.ui.Overlay}s
+         *
+         * <p><i>Recursive</i></p>
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias destroy
+         *
+         * @param {Granite.author.Editable} editable - {@link Granite.author.Editable} to be destroy. This also includes its children
+         */
+        self.destroy = function (editable) {
+            if (editable.overlay) {
+                editable.overlay.remove();
+                editable.overlay = null;
+
+                ns.editables.getChildren(editable).forEach(function (child) {
+                    self.destroy(child);
+                });
+            }
+        };
+
+        /**
+         * Recreates or creates an {@link Granite.author.ui.Overlay} for the given {@link Granite.author.Editable}
+         *
+         * <p><i>Recursive</i></p>
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias recreate
+         *
+         * @param {Granite.author.Editable} editable - {@link Granite.author.Editable} for which to recreate an {@link Granite.author.ui.Overlay}
+         */
+        self.recreate = function (editable) {
+            this.destroy(editable);
+            this.create(editable);
+        };
+
+        /**
+         * Recreates or creates the {@link Granite.author.ui.Overlay}s for the given {@link Granite.author.Editable}s
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias createAll
+         *
+         * @param {Granite.author.Editable[]} cfg.editables - The editables for which to create an {@link Granite.author.ui.Overlay}
+         */
+        self.recreateAll = function (cfg) {
+            var editables = excludeDescendants((cfg && cfg.editables) || []);
+
+            var i = editables.length - 1;
+            for (; i >= 0 ; i--) {
+                self.recreate(editables[i]); // Creates overlay recursively (up to the parent)
+            }
+        };
+
+        /**
+         * Repositions all the {@link Granite.author.ui.Overlay}s
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias reposition
+         * @fires Document#cq-overlays-repositioned
+         * @returns {$.Promise}
+         */
+        self.reposition = function () {
+            var deferred = $.Deferred();
+            // invalidate current position of overlays to force recomputation
+            for (var i = 0; i < ns.editables.length; i++) {
+                if (ns.editables[i].overlay) {
+                    ns.editables[i].overlay.currentPos = null;
+                }
+            }
+
+            window.requestAnimationFrame(function () {
+                for (var i = ns.editables.length-1; i >= 0; i--) {
+                    repositionOverlay(ns.editables[i]);
+                }
+
+                var height = null;
+
+                if (contentContainer.length > 0) {
+                    height = contentContainer.get(0).scrollHeight;
+                } else if (container.length > 0) {
+                    height = container.get(0).scrollHeight;
+                }
+
+                if (height !== null) {
+                    container.css({
+                        height: height
+                    });
+                }
+
+                deferred.resolve();
+
+                channel.trigger('cq-overlays-repositioned');
+            });
+
+            return deferred.promise();
+        };
+
+        /**
+         * Now a noop; the overlayManager always listens to changes via a MutationObserver in the iframe
+         *
+         * @ignore
+         * @memberOf Granite.author.overlayManager
+         * @alias startObservation
+         * @see event:cq-contentframe-layout-change
+         * @deprecated
+         */
+        self.startObservation = function () {
+            Granite.author.util.deprecated('Use event cq-contentframe-layout-change instead');
+
+        };
+
+        /**
+         * Now a noop; the overlayManager always listens to changes via a MutationObserver in the iframe
+         *
+         * @ignore
+         * @memberOf Granite.author.overlayManager
+         * @alias stopObservation
+         * @see event:cq-contentframe-layout-change
+         * @deprecated
+         */
+        self.stopObservation = function () {
+            Granite.author.util.deprecated('Use event cq-contentframe-layout-change instead');
+        };
+
+        /**
+         * Shows or hides the overlays but not the container
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias setOverlaysVisible
+         *
+         * @param {boolean} [condition] - Should the {@link Granite.author.ui.Overlay}s be visible
+         */
+        self.setOverlaysVisible = function (condition) {
+            container.toggleClass('is-hidden-children', condition === false);
+        };
+
+        /**
+         * Shows or hides the main container (all overlays)
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias setVisible
+         *
+         * @param {boolean} [condition] - Should the Overlay (#ContentWrapper) container be visible
+         */
+        self.setVisible = function (condition) {
+            container.toggleClass('is-hidden', suspended || condition === false);
+        };
+
+        /**
+         * Returns the currently used Overlay constructor
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias getOverlayRendering
+         */
+        self.getOverlayRendering = function () {
+            return overlayConstructor;
+        };
+
+        /**
+         * Sets a custom Overlay constructor
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias setOverlayRendering
+         *
+         * @param {function} fn - the Overlay constructor
+         */
+        self.setOverlayRendering = function (fn) {
+            overlayConstructor = fn;
+        };
+
+        /**
+         * Resets the Overlay constructor to default ({@link Granite.author.ui.Overlay})
+         *
+         * @memberOf Granite.author.overlayManager
+         * @alias resetOverlayRendering
+         */
+        self.resetOverlayRendering = function () {
+            overlayConstructor = ns.ui.Overlay;
+        };
+
+        /**
+         * Handle different clicks interactions
+         *
+         * @fires Document#cq-overlay-fast-dblclick
+         * @fires Document#cq-overlay-slow-dblclick
+         * @fires Document#cq-overlay-click
+         */
+        container.on('click keypress', '.cq-Overlay--component', function (event) {
+            let enterKey = 13;
+            let spaceKey = 32;
+
+            if (event.type === 'keypress' && event.which !== enterKey && event.which !== spaceKey) {
+                return;
+            }
+
+            event.stopImmediatePropagation(); // we stop propagation to avoid having the containers activated
+            event.preventDefault();
+
+            var editable = getEditable(event);
+            var now = new Date().getTime();
+
+            if (editable.overlay.isActive() && editable === lastClickedTappedEditable) {
+                // same inspectable clicked or tapped --> double click or tap
+
+                channel.trigger($.Event(
+                    (now - lastClickTapTime) <= fastDoubleClickDelay ?
+                        "cq-overlay-fast-dblclick" :
+                        "cq-overlay-slow-dblclick",
+                    {
+                        inspectable: editable, // @deprecated; use editable instead
+                        editable: editable,
+                        originalEvent: event
+                    }
+                ));
+
+                // unsave the last clicked or tapped inspectable to remove the reference
+                lastClickedTappedEditable = null;
+
+            } else {
+                // not same inspectable clicked or tapped --> single click or tap
+                channel.trigger($.Event("cq-overlay-click", {
+                        inspectable: editable, // @deprecated; use editable instead
+                        editable: editable,
+                        originalEvent: event
+                    }
+                ));
+
+                // save date and inspectable for potential future double click or tap
+                lastClickTapTime = now;
+                lastClickedTappedEditable = editable;
+            }
+        });
+
+        /**
+         * Handles taphold interaction
+         *
+         * @fires Document#cq-overlay-hold
+         */
+        container.finger('taphold', '.cq-Overlay--component', function (event) {
+            var editable = getEditable(event);
+
+            // inspectable must be active
+            if (editable.overlay.isActive()) {
+                channel.trigger($.Event("cq-overlay-hold", {
+                        inspectable: editable, // @deprecated; use editable instead
+                        editable: editable,
+                        originalEvent: event
+                    }
+                ));
+            }
+        });
+
+        /**
+         * Handles outside click interaction
+         *
+         * @fires Document#cq-overlay-outside-click
+         */
+        container.pointer("click", function (event) {
+            if (!$(event.target).hasClass("cq-Overlay")) {
+                lastClickedTappedEditable = null;
+                channel.trigger($.Event("cq-overlay-outside-click", {
+                        originalEvent: event
+                    }
+                ));
+            }
+        });
+
+        /**
+         * Handles hover interaction
+         *
+         * @fires Document#cq-overlay-hover
+         */
+        // ignore undesired mouseoutmouseover/mouseout on iPad
+        if (!ns.device.isIpad) {
+            container.on('mouseover mouseout', '.cq-Overlay--component:not(.is-disabled)', function (event) {
+                var editable = getEditable(event);
+
+                channel.trigger($.Event("cq-overlay-hover", {
+                        inspectable: editable, // @deprecated; use editable instead
+                        editable: editable,
+                        originalEvent: event
+                    }
+                ));
+            });
+        }
+
+        /**
+         * Repositions on resize
+         */
+        $win.on('resize', $.debounce(100, function (event) {
+            self.reposition();
+        }));
+
+        /**
+         * Repositions on content frame layout change
+         *
+         * <p>(this event is trigger in the #ContentFrame when we get a new "layout-change" message from the iframe)</p>
+         */
+        channel.on("cq-contentframe-layout-change", self.reposition);
+
+        /**
+         * Recreate overlays when explicitly requested
+         */
+        channel.on("cq-overlays-create", self.recreateAll);
+
+        channel.on("cq-show-overlays", function () {
+            suspended = false;
+            self.setVisible(true);
+        });
+
+        channel.on("cq-hide-overlays", function () {
+            suspended = true;
+            self.setVisible(false);
+        });
+
+        channel.on("cq-sidepanel-beforetoggle", function () {
+            self.setOverlaysVisible(false);
+        });
+
+        channel.on("cq-sidepanel-aftertoggle", $.debounce(100, function () {
+            self.reposition();
+            self.setOverlaysVisible(true);
+        }));
+
+        channel.on("cq-close-toolbar", function () {
+            lastClickedTappedEditable = null;
+        })
+
+        return self;
+    }());
+
+}(jQuery, Granite.author, jQuery(document), this));

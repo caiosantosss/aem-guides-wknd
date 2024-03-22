@@ -1,0 +1,740 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (window, document, Granite, $) {
+    "use strict";
+    var ui = $(window).adaptTo("foundation-ui");
+    var assetsLoadingISCallTimeout = null;
+
+    //Default Model Values
+    var DEF_VAL = {
+        'title': '',
+        'description': '',
+        'manualThumbnail': '',
+        'preset': {},
+        'asset': null,
+        'swatch': null
+    }
+
+    //DOM
+    var EDITOR_INFO = '.dm-setup-info';
+
+	//DATA KEY
+    var ASSET_PATH = 'asset-path',
+        ASSET_JCR_PATH = 'assetJcrpath',
+        ASSET_TYPE = 'asset-type',
+        ASSET_S7ID = 's7id',
+        ASSET_S7_COID = 's7coid';
+
+    //SERVLET
+    var SERVLET = {
+        'rootAsset': '.json',
+        'childAsset': '.children.0.json',
+        'setISCall': '?req=set,json&cache=off',
+        'remoteSet': '.set.remote.members.json'
+    };
+
+    //JCR Data key
+    var KEY = {
+    	'primaryType': 'jcr:primaryType',
+        'relatedNode': 'related',
+        's7damType': 'dam:s7damType',
+        's7SetNode': 's7Set',
+        'slingMembers': 'sling:members',
+        'slingResources': 'sling:resources',
+        's7swatch': 'dam:s7Swatch',
+        'spinRow': 'spinset-row',
+        'metadata': 'metadata',
+        'title': 'dc:title',
+        'desc': 'dc:description',
+        'manualThumbnail': 'manualThumbnail'
+    }
+    //Event
+    var EVENT_ERROR_MSG = 'dm-set-error-msg';
+
+	//CONST
+    var JCR_ASSET_TYPE = 'dam:Asset',
+        CHARSET = 'utf-8',
+        CREATE_OP = 'dam.mediaset.create',
+        MODIFY_OP = 'dam.mediaset.modify',
+        DELAY_MOD = 500;
+
+    //Submission Fields
+    var FIELDS = {
+        'title': 'title',
+        'manualThumbnail': 'manualThumbnail',
+        'operation': ':operation',
+        'charset': '_charset_',
+        'description': 'description',
+        'path': 'path',
+        'swatch': 'swatch',
+        'settype': 'settype',
+        'numrows': 'numrows',
+        'scene7file': 'scene7file',
+        'scene7handle': 'assethandle',
+        'scene7coid': 'companyhandle'
+    }
+
+    //Set Parsers
+    var SET_PARSER = {
+        'imageset': {
+            parse: parseImageSet
+        },
+        'spinset': {
+            parse: parseSpinSet
+        },
+        'mixedmediaset': {
+            parse: parseImageSet
+        }
+    }
+
+    //current operation mode
+    var operation = CREATE_OP;
+
+
+	/*
+    	Model for set
+        item: {path: URL1, swatch: URL2}
+        settings: {title: title, manualThumbnail: URL3, description: desc, preset: obj}
+     */
+
+   	$.s7dm = $.s7dm || {};
+
+    $(document).one('foundation-contentloaded', function(){
+        // Place wait spinner until initialization is complete
+        ui.wait();
+	//load model to datactl
+        $.s7dm.datactl = $.s7dm.datactl || {};
+    	$.s7dm.datactl._model = {
+        	buildItem: buildItem,
+        	buildSettings: buildSettings,
+            loadData: loadData,
+            submit: submit,
+            validateSettings: validateSettings
+    	}
+    });
+
+    /**
+     * @param {Object} json JSON of arbitrary data to be parsed for item
+     * @return {Object} JSON object representing item in this model
+     * 	{ path: URL1, swatch: URL2 }
+     */
+    function buildItem(json){
+        var _json = json || {};
+        var asset = _json['asset'] || DEF_VAL['asset'],
+            assetId = _json['assetId'] || asset,
+            swatch = _json['swatch'] || DEF_VAL['swatch'],
+            swatchId = _json['swatchId'] || swatch;
+        return {
+            'path': asset,
+            'assetId': assetId,
+            'swatch': swatch,
+            'swatchId': swatchId
+        };
+    }
+
+    /**
+     * @param {Object} json JSON of arbitrary data to be parsed for settings
+     * @return {Object} JSON object representing settings in this model
+     * 	{ title: title, manualThumbnail: URL3, description: desc, preset: obj }
+     */
+    function buildSettings(json) {
+        var _json = json || {};
+        var title = _json['title'] || DEF_VAL['title'],
+            manualThumbnail = _json['manualThumbnail'] || DEF_VAL['manualThumbnail'],
+            desc = _json['description'] || DEF_VAL['description'],
+            preset = _json['preset'] || DEF_VAL['preset'];
+        return {
+            'title': title,
+            'manualThumbnail': manualThumbnail,
+            'description': desc,
+            'preset': preset
+        };
+    }
+
+    /**
+     * load initial data
+     * @param {Function} completeFn method to be called when the loading is done
+     *
+     */
+    function loadData(completeFn){
+		var assetJcrPath = $(EDITOR_INFO).data(ASSET_JCR_PATH),
+            assetPath = $(EDITOR_INFO).data(ASSET_PATH),
+            assetType = $(EDITOR_INFO).data(ASSET_TYPE);
+        if (assetType == 'remote') {
+			loadRemoteData(assetJcrPath, assetPath, completeFn);
+			ui.clearWait();
+        }
+        else {
+            //Async IS loader to fill missing remote asset ID data
+            if (assetJcrPath != assetPath) {
+                loadJCRData(assetJcrPath, assetPath, function(resp){
+					loadAsyncIS(resp, completeFn);
+                })
+            }
+            else {
+            	loadJCRData(assetJcrPath, assetPath, completeFn);
+		ui.clearWait();
+            }
+        }
+    }
+
+    /**
+     * Load remote asset data
+     * @param {String} assetJcrPath asset jcr path
+     * @param {String} assetPath remote asset path
+     * @param {Function} completeFn function to call after finish loading
+     */
+    function loadRemoteData(assetJcrPath, assetPath, completeFn) {
+        var remoteURL = assetJcrPath.replace('.remoteset', SERVLET.remoteSet);
+        $.ajax({
+            cache: false,
+            url: remoteURL
+        }).done(function(json){
+            //override remote asset with appropriate set type
+            var assetType = json.asset.assetType;
+            if (assetType.toLowerCase() == 'renderset') {
+                assetType = 'ImageSet';
+            }
+            else if  (assetType.toLowerCase() == 'spinset2d') {
+                //IPS returns type of 1-D set at 2D - this is a workaround.
+                //We already prevent the user from access edit in preview page
+                assetType = 'SpinSet';
+            }
+            $(EDITOR_INFO).data(ASSET_TYPE, assetType);
+            if (json.asset.inJcr) {
+                $(EDITOR_INFO).data(ASSET_JCR_PATH, json.asset.assetPath);
+                $(EDITOR_INFO).data(ASSET_PATH, json.asset.assetId);
+                loadJCRData(json.asset.assetPath, assetPath, completeFn);
+            } else {
+                //true remote asset - no JCR node
+
+                $(EDITOR_INFO).data(ASSET_S7ID, json.asset.assetHandle);
+                $(EDITOR_INFO).data(ASSET_S7_COID, json.asset.companyHandle);
+
+                if (json.asset.assetType.toLowerCase() !== 'renderset') {
+                    completeRemoteDataLoad(json, null, completeFn);
+                }
+                else {
+                    //swatch set case required extra IS call to create structure due to Scene7API limitation
+                    $.ajax({
+                        cache: false,
+                        url: Granite.HTTP.externalize('/is/image/' + json.asset.assetId + '?req=set,json'),
+                        dataType: 'text'
+                    }).done(function(jsonP) {
+                        var isJSON = parseSetISJSON(jsonP);
+                        completeRemoteDataLoad(json, isJSON, completeFn)
+                    });
+                }
+            }
+        }).error(function(json){
+	    ui.clearWait();
+            //issue warning since we can't edit and redirect back
+            $(document).trigger({  'type': EVENT_ERROR_MSG,
+                'errorMsg': Granite.I18n.get('This set contains invalid asset.'),
+                'errorList': '',
+                'errorTitle': Granite.I18n.get('Cannot modify this set'),
+                'closeEditor': true});
+        })
+    }
+
+    function completeRemoteDataLoad(remoteJSON, isJSON, completeFn) {
+        var canEdit = true,
+            invalidAssets = '';
+        for (var i = 0; i < remoteJSON.members.length; i++) {
+            canEdit &= remoteJSON.members[i].inJcr;//check to make sure that all set members are in JCR. We can't edit if one is not.
+            if (!remoteJSON.members[i].inJcr) {
+                invalidAssets += '<ul><li>' + remoteJSON.members[i].assetId + '</li></ul>';
+            }
+        }
+        if (canEdit) {
+            //check if we can edit first
+            var resp = {
+                'items': [],
+                'order': [],
+                'settings' : {}
+            };
+            if (isJSON != null) {
+                var setItems = isJSON.set.item;
+                //swatch set
+                for (var i = 0; i < setItems.length; i++) {
+                    var setItem = {
+                        'path': findAssetPathFromID(remoteJSON, setItems[i].i.n),
+                        'assetId': setItems[i].i.n,
+                        'swatch': findAssetPathFromID(remoteJSON, setItems[i].s.n),
+                        'swatchAssetId': setItems[i].s.n
+                    };
+                    resp.items.push(setItem);
+                    resp.order.push(i);
+                }
+            }
+            else {
+                //non-swatch set
+                for (var i = 0; i < remoteJSON.members.length; i++) {
+                    var setItem = {
+                        'path': remoteJSON.members[i].assetPath,
+                        'assetId': remoteJSON.members[i].assetId,
+                        'swatch': null,
+                        'swatchAssetId': null
+                    };
+                    resp.items.push(setItem);
+                    resp.order.push(i);
+                }
+            }
+
+            resp.settings = {
+                'title': remoteJSON.asset.assetId.split('/')[1],
+                'description': '',
+                'manualThumbnail': ''
+            };
+            operation = CREATE_OP;
+            $.s7dm.operation = operation;
+            completeFn(resp)
+        }
+        else {
+	    ui.clearWait();
+            //issue warning since we can't edit and redirect back
+            $(document).trigger({  'type': EVENT_ERROR_MSG,
+                'errorMsg': Granite.I18n.get('The following assets in this set are not valid:'),
+                'errorList': invalidAssets,
+                'errorTitle': Granite.I18n.get('Cannot modify this set'),
+                'closeEditor': true});
+        }
+
+    }
+
+    /**
+     * Find asset JCR path based on scene7 asset ID
+     * @param remoteJSON json from .set.remote.json
+     * @param assetId scene7 asset ID
+     * @returns asset jcr path
+     */
+
+    function findAssetPathFromID(remoteJSON, assetId){
+        var assetPath = null;
+        for (var i = 0; i < remoteJSON.members.length; i++) {
+            if (remoteJSON.members[i].assetId == assetId) {
+                assetPath =  remoteJSON.members[i].assetPath;
+                break;
+            }
+        }
+        return assetPath;
+    }
+
+    /**
+     * @private
+     * Load set data from JCR
+     * @param {String} assetJcrPath JCR Path of asset
+     * @param {String} assetPath true IS asset path
+     * @param {Function} completeFn method to be called after loading is done
+     */
+    function loadJCRData(assetJcrPath, assetPath, completeFn) {
+        $.ajax({
+            cache: false,
+            url: assetJcrPath + SERVLET.rootAsset
+        }).done(function(json){
+            if (json[KEY.primaryType] != JCR_ASSET_TYPE) {
+                operation = CREATE_OP;
+            	$.s7dm.operation = operation;
+                completeFn()
+            }
+            else {
+                $.ajax({
+                    cache: false,
+                    url: Granite.HTTP.externalize(assetJcrPath + SERVLET.childAsset)
+                }).done(function(json2){
+                   	var resp = parseData(json2[0]);
+                    operation = MODIFY_OP;
+            		$.s7dm.operation = operation;
+                    completeFn(resp);
+                })
+            }
+        });
+    }
+
+    /**
+     * @private
+     * Async IS loading to get remote asset ID
+     * @param {Function} resp response from JCR loading step
+     * @param {Function} completeFn - function to be issued after loading is done
+     */
+    function loadAsyncIS(resp, completeFn) {
+		var assetPath = $(EDITOR_INFO).data(ASSET_PATH);
+        var state0 = $.s7dm.datactl.data.getState();
+        $.ajax({
+            cache: false,
+            url: Granite.HTTP.externalize('/is/image/' + assetPath + SERVLET.setISCall),
+            dataType: 'text'
+        }).done(function(jsonP){
+            var json = parseSetISJSON(jsonP);
+	    
+	    // calling loadAsyncIS function again when received blank json
+	    if(json.set == undefined){
+		if(assetsLoadingISCallTimeout == null){
+
+		    // setting 1 minute timeout for prompt error message
+                    assetsLoadingISCallTimeout = setTimeout(function(){ 
+                        ui.clearWait();
+            		//issue warning since we can't edit and redirect back
+            		$(document).trigger({  'type': EVENT_ERROR_MSG,
+                        'errorMsg': Granite.I18n.get('Assets are not loaded for this set '),
+                        'errorTitle': Granite.I18n.get('Cannot modify this set'),
+                        'closeEditor': true});
+                        return false;
+                    }, 60000);
+                }
+
+                loadAsyncIS(resp, completeFn);
+		return false;
+
+            }else{
+		clearTimeout(assetsLoadingISCallTimeout);
+            }
+
+            if(json.set.item) {
+                for (var i = 0; i < json.set.item.length; i++) {
+                    if (json.set.item[i].i) { //image member
+                        resp.items[i].assetId = decodeURIComponent(json.set.item[i].i.n);
+                    }
+                    else if (json.set.item[i].set) { // spin and img set as member
+                        resp.items[i].assetId = decodeURIComponent(json.set.item[i].set.n);
+                    }
+                    if (json.set.item[i].s && json.set.item[i].s.n && resp.items[i].swatch != null) {
+                        //fill swatch info only when there is swatch
+                    	resp.items[i].swatchId = json.set.item[i].s.n;
+                    }
+                }
+            }
+            completeFn(resp);
+	    ui.clearWait();
+        })
+    }
+
+
+    /**
+     * @param {Array} ordered item from data controller
+     * @param {Object} settings from data controller
+     * @see datactl.js
+     */
+    function submit(items, settings) {
+        var assetJcrPath = $(EDITOR_INFO).data(ASSET_JCR_PATH);
+        if (operation == CREATE_OP) {
+            //Create
+            assetJcrPath = getSubmissionPath(assetJcrPath);
+        	submitNewSet(items, assetJcrPath, settings);
+        }
+        else {
+            //Update
+            submitModSet(items, assetJcrPath, settings);
+        }
+    }
+
+    /**
+     * @param {Object} settings from data controller, which is built by buildSettings() in the model
+     * @return {Boolean} true when all setting criteria are met.
+     */
+    function validateSettings(settings) {
+        var valid = true;
+        if (!settings.title || $.trim(settings.title) == '') { //get rid of leading/trailing space
+            valid = false;
+        }
+        return valid;
+    }
+
+	//Private Methods
+
+    /**
+     * @private
+     * Data parser for initial data
+     * @param {Object} json initial JSON response
+     * @param {Boolean} isDMS7 is DMS7 case using remote IS
+     * @param {Function} completeFn method to be called after parsing is done.
+     * @return {Object} initial data for data controller
+     */
+    function parseData(json, isDMS7, completeFn) {
+        var resp = {
+            	'items': [],
+            	'order': [],
+            	'settings' : {}
+        	}
+
+        var setType = json[KEY.s7damType],
+            relatedNode = json[KEY.relatedNode];
+        if (SET_PARSER[setType.toLowerCase()]) {
+            var set = SET_PARSER[setType.toLowerCase()].parse(relatedNode);
+            resp['settings'] = parseSettings(json);
+            resp['items'] = set['items'];
+			resp['order'] = set['order'];
+        }
+        return resp;
+    }
+
+
+    /**
+     * @private
+     * Image set parser with data from JCR
+     * @param {Object} relatedNode - related node from JCR response
+     * @return {Object} json of items and order matching model for datactl
+     */
+    function parseImageSet(relatedNode) {
+        var s7SetNode = relatedNode[KEY.s7SetNode];
+		var setMembers = s7SetNode[KEY.slingMembers];
+        var setResources = setMembers[KEY.slingResources];
+        var set = [];
+        var order = [];
+        var setResourceKey = []; //real resource to prevent issue CQ-4242855 where node name doesn't match resource name after move
+        for (var key in setMembers) {
+            setResourceKey.push(key);
+        }
+        for (var i = 0; i < setResources.length; i++) {
+            var path = setResources[i]
+            var pathId = parseIdFromPath(path);
+            var swatch = setMembers[setResourceKey[i]][KEY.s7swatch];
+            var json = {
+                'asset': path,
+                'assetId': path,
+                'swatch': swatch,
+                'swatchAssetId': swatch
+            };
+            set.push(buildItem(json));
+            order.push(i);
+
+        };
+        return { 'items': set,
+                 'order': order};
+
+    }
+
+    function isCompletedMetadata(members){
+        for (var i = 0; i < members; i++){
+            if(members[i].path == members[i].assetId) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+	/**
+     * @private
+     * Parse spin set to the model
+     * @param {Object} relatedNode related JCR node
+     * @return {Object} a set matching model
+     */
+    function parseSpinSet(relatedNode, resp, completeFn) {
+        var rowKeys = [];
+        var set = [];
+        var order = [];
+        for (var key in relatedNode) {
+            if (key.indexOf(KEY.spinRow) == 0) {
+                rowKeys.push(key);
+            }
+        }
+        for (var i = 0; i < rowKeys.length; i++) {
+            var rowNode = relatedNode[rowKeys[i]];
+			var setMembers = rowNode[KEY.slingMembers];
+        	var setResources = setMembers[KEY.slingResources];
+            for (var j = 0; j < setResources.length; j++) {
+                var path = setResources[j]
+                var json = {
+                    'asset': path,
+                    'assetId': path,
+                    'swatch': null,
+                    'swatchAssetId': null
+                };
+                set.push(buildItem(json));
+                order.push(j);
+            };
+        }
+        return { 'items': set,
+                 'order': order};
+    }
+
+
+
+	/**
+     * @private
+     * Parse setting to the model
+     * @param {Object} json JSON of property
+     * @return {Object} setting object matching this model
+     */
+    function parseSettings(json) {
+        var metadata = json[KEY.metadata];
+        var settings = {
+            'title': metadata[KEY.title],
+            'description': metadata[KEY.desc],
+            'manualThumbnail': metadata[KEY.manualThumbnail]
+        }
+        return buildSettings(settings);
+    }
+
+    /**
+     * @private
+     * @param {String} path asset path to extract node ID from
+     * @return {String} node ID from asset path
+     */
+    function parseIdFromPath(path) {
+        return path.substring(path.lastIndexOf('/')+1);
+    }
+
+    /**
+     * @private
+     * @param {String} jsonStr JSON String from IS req=set
+     * @return {Object} JSON array for valid response member
+     */
+    function parseSetISJSON(jsonStr){
+        var json = [];
+        if (jsonStr.indexOf('s7jsonResponse(') > 0) {
+			var modJSONStr = jsonStr.replace('/*jsonp*/s7jsonResponse(','');
+        	modJSONStr = modJSONStr.replace(',"");', '');
+            json = JSON.parse(modJSONStr);
+            if (json.item) {
+                json = json.item;
+            }
+        }
+        return json;
+    }
+
+    /**
+     * @private
+     * submit new set
+     * @param {Array} items asset items to be saved
+     * @param {String} assetPath asset path
+     * @param {Object} settings JSON setting of the set specified by this model
+     */
+    function submitNewSet(items, assetPath, settings){
+        var params = {};
+        params[FIELDS.title] = $.trim(settings.title);//get rid of space
+        params[FIELDS.description] = settings.description;
+        params[FIELDS.settype] = $.s7dm.getSetConfig($(EDITOR_INFO).data(ASSET_TYPE)).s7Type;
+        params[FIELDS.charset] = CHARSET;
+        params[FIELDS.operation] = CREATE_OP;
+        params[FIELDS.manualThumbnail] = settings.manualThumbnail;
+        //For remote set, it must contain scene7ID and maintains original title - then, we pass more info to perform override
+        if ($(EDITOR_INFO).data(ASSET_S7ID) && !isRemoteTitleChanged($(EDITOR_INFO).data(ASSET_PATH), $.trim(settings.title))) {
+			params[FIELDS.scene7handle] = $(EDITOR_INFO).data(ASSET_S7ID);
+            params[FIELDS.scene7coid] = $(EDITOR_INFO).data(ASSET_S7_COID);
+            params[FIELDS.scene7file] = $(EDITOR_INFO).data(ASSET_PATH);
+        }
+
+        //TODO: temporary for spin
+        params[FIELDS.numrows] = 1;
+        $.post(assetPath, params)
+        	.done( function(res) {
+                var newAssetPath =  $(res).find("#Location").text();
+                //Workaround for xssApi issue with getValidHref on non-Latin characters returning empty
+                if (!newAssetPath) {
+                    newAssetPath =  assetPath + "/" + $(res).find("#Path").text();
+                }
+                setTimeout( function(){
+                		submitModSet(items, newAssetPath, settings);
+                 	},DELAY_MOD);
+
+        	})
+        	.fail( function(res) {
+                $(document).trigger($.s7dm.datactl.event.SAVE_FAIL);
+        	});
+
+    }
+
+    /**
+     * @private
+     * submit modified set
+     * @param {Array} items asset items to be saved
+     * @param {String} assetPath asset path
+     * @param {Object} settings JSON setting of the set specified by this model
+     */
+    function submitModSet(items, assetPath, settings){
+        var params = {};
+        if (settings) {
+        	params[FIELDS.title] = settings.title;
+        	params[FIELDS.description] = settings.description;
+        	params[FIELDS.manualThumbnail] = settings.manualThumbnail;
+        }
+        params[FIELDS.settype] = $.s7dm.getSetConfig($(EDITOR_INFO).data(ASSET_TYPE)).s7Type;
+        params[FIELDS.charset] = CHARSET;
+        params[FIELDS.operation] = MODIFY_OP;
+        //TODO: temporary for spin
+        params[FIELDS.numrows] = 1;
+        var paths= [];
+        var swatches = [];
+        var containSwatch = false;
+        //Check whether this set having one swatch item - for IPS, we need to assign swatch to all when one has it.
+        for (var i=0; i < items.length; i++) {
+            if (items[i]['swatch']) {
+                containSwatch = true;
+            }
+        }
+
+        for (var i=0; i < items.length; i++) {
+			paths.push(items[i]['path']);
+            if (items[i]['swatch']) {
+            	swatches.push(items[i]['path'] + ':' + items[i]['swatch']);
+            }
+            else if (containSwatch) { //if at least one item has swatch, other items w/o will refer to itself as swatch
+                swatches.push(items[i]['path'] + ':' + items[i]['path']);
+            }
+        }
+        params[FIELDS.path] = paths;
+        if (swatches.length > 0) {
+        	params[FIELDS.swatch] = swatches;
+        }
+        if (paths.length > 0) {
+            $.post(assetPath, params)
+                .done( function(res){
+                    //success - trigger save success with asset path
+                    $(document).trigger({'type': $.s7dm.datactl.event.SAVE_SUCCESS, 'href': assetPath});
+                })
+                .fail( function(err){
+                	$(document).trigger($.s7dm.datactl.event.SAVE_FAIL);
+                });
+        }
+        else {
+            $(document).trigger($.s7dm.datactl.event.SAVE_FAIL);
+        }
+
+    }
+
+    /**
+     * @private
+     * @param {String} assetPath raw asset path to filter out the remote portion for remote set edit
+     * @return {String} path for submission call
+     */
+    function getSubmissionPath(assetPath) {
+        var pathParts = assetPath.split('/'),
+            submissionPath = '';
+        for (var i = 0; i < pathParts.length; i++) {
+            if (pathParts[i].indexOf('.remoteset') > 0) {
+                break;
+            }
+            if (pathParts[i] != '') {
+            	submissionPath += '/' + pathParts[i];
+            }
+        }
+        return submissionPath;
+    }
+
+    /**
+     * Check title change from original one getting from IPS
+     * @param assetPath original asset ID from IPS
+     * @param title current title
+     * @returns {boolean} true if current title doesn't matached with the last part of asset ID
+     */
+    function isRemoteTitleChanged(assetPath, title){
+        var origTitle = assetPath.substring(assetPath.indexOf("/")+1);
+        return (origTitle != title)
+    }
+
+})(window, document, Granite, $);

@@ -1,0 +1,1260 @@
+/*************************************************************************
+*
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+*  Copyright 2011 Adobe Systems Incorporated
+*  All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and are protected by trade secret or copyright law.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+**************************************************************************/
+
+/*
+AdobePatentID="2789US01"
+*/
+
+/**
+ * @class CQ.undo.UndoHistory
+ * @extends CQ.Ext.util.Observable
+ * @private
+ * The UndoHistory represents a history of undo steps and provides means to manage those
+ * steps.
+ * @constructor
+ * Creates a new undo history.
+ */
+CQ.undo.UndoHistory = CQ.Ext.extend(CQ.Ext.util.Observable, {
+
+    /**
+     * The undo steps
+     * @private
+     * @type CQ.undo.UndoStep[]
+     */
+    undoSteps: null,
+
+    /**
+     * @cfg {Number} maxUndoSteps
+     * Maximum number of undo steps to be kept in memory; -1 for unlimited steps (not
+     * recommended!)
+     */
+    maxUndoSteps: 0,
+
+    /**
+     * The currently active undo step; -1 if no undo steps are available
+     * @private
+     * @type Number
+     */
+    activeStep: 0,
+
+    /**
+     * @cfg {String} persistence
+     * @property
+     * The module used to persist the undo history over several requests
+     */
+    persistence: null,
+
+    /**
+     * @cfg {String} persistenceMode
+     * @property
+     * The persistence mode
+     */
+    persistenceMode: null,
+
+    /**
+     * @cfg {String} markerMode
+     * @property
+     * The mode used for marking undone/redone items
+     */
+    markerMode: null,
+
+    /**
+     * @cfg {String[]} whitelist
+     * @property
+     * List of components that are safe for undo
+     */
+    whitelist: null,
+
+    /**
+     * @cfg {String[]} blacklist
+     * @property
+     * List of components and component operations that have known problems with undo
+     */
+    blacklist: null,
+
+    /**
+     * @cfg {Object} persistenceCfg
+     * The configuration object for the persistence module; will be passed 1:1 to the
+     * persistence module
+     */
+
+    /**
+     * @cfg {Object} binaryServletUrl
+     * The URL for accessing the servlet that manages binary values
+     */
+    binaryServletUrl: null,
+
+    /**
+     * Object that is used to handle ID changes due to elements being recreated in an
+     * undo/redo process
+     * @private
+     * @type CQ.undo.util.IdRewriteManager
+     */
+    idManager: null,
+
+    /**
+     * The currently processed undo step
+     * @private
+     * @type CQ.undo.UndoStep
+     */
+    stepProcessed: null,
+
+    /**
+     * The event to send if an undo or redo operation has succeeded
+     * @private
+     * @type String
+     */
+    operationEvent: null,
+
+    /**
+     * The load mask to use for "shielding" an ongoing undo operation
+     */
+    undoMask: null,
+
+    /**
+     * Flag that determines if currently an undo or redo operation is active
+     * @type Boolean
+     * @private
+     */
+    isOperationActive: false,
+
+    /**
+     * Flag that determines if undo/redo is (temporaryliy) blocked
+     * @type Boolean
+     * @private
+     */
+    blocked: false,
+
+    /**
+     * Page version (usually the time code last requested from the server) the undo
+     * history is valid for; used for detecting page content invalidated by using
+     * browser back/forward buttons
+     * @type Number
+     * @private
+     */
+    pageVersion: null,
+
+    /**
+     * Flag that determines if either a undo step has been recorded or an undo or redo
+     * operation has been executed since last page load; roughly, this means that the
+     * page content may have changed using AJAX and therefore should not be taken from
+     * browser cache
+     * @type Boolean
+     * @private
+     */
+    edited: false,
+
+    /**
+     * Array that defines currently blocked paths
+     * @type Array
+     * @private
+     */
+    blockedPaths: null,
+
+
+    constructor: function(config) {
+        config = config || { };
+        var win = (CQ.WCM.getContentFinder() ? CQ.WCM.getTopWindow()
+                : CQ.WCM.getContentWindow());
+        var ud = CQ.undo.UndoDefs;
+        CQ.Util.applyDefaults(config, {
+            "maxUndoSteps": 30,
+            // using window.name persistence until 4K HEAD limit gets fixed (if ever ...)
+            "persistence": "window.name",
+            "persistenceMode": CQ.undo.persistence.PersistenceMode.ON_STEP,
+            "markerMode": CQ.undo.UndoDefs.MARKER_MODE_FLASH,
+            "binaryServletUrl": ud.DEFAULT_SERVLET_URL,
+            "whitelist": [],
+            "blacklist": []
+        });
+        // must handle persistence config seperately, as it may contain references to
+        // window, which will cause an infinite loop for applyDefaults
+        if (!config.persistenceCfg) {
+            config.persistenceCfg = {
+                "win": win
+            };
+        }
+        this.undoSteps = [ ];
+        this.activeStep = -1;
+        this.edited = false;
+        this.blockedPaths = [ ];
+        this.idManager = new CQ.undo.util.IdRewriteManager();
+        this.maxUndoSteps = config.maxUndoSteps;
+        this.persistence = CQ.undo.persistence.PersistenceRegistry.create(
+                config.persistence, config.persistenceCfg);
+        this.persistenceMode = config.persistenceMode;
+        this.markerMode = config.markerMode;
+        this.binaryServletUrl = config.binaryServletUrl;
+        this.blacklist = config.blacklist;
+        this.whitelist = config.whitelist;
+        CQ.undo.UndoHistory.superclass.constructor.call(this, config);
+        this.addEvents(
+                /**
+                 * @event undostep
+                 */
+                "undostep",
+
+                /**
+                 * @event redostep
+                 */
+                "redostep");
+    },
+
+    /**
+     * <p>Creates a new undo step.</p>
+     * <p>The redo history is cleared if necessary.</p>
+     * @param {Object} config The undo step's configuration
+     * @return {CQ.undo.UndoStep} The undo step
+     */
+    createUndoStep: function(config) {
+        if (this.canRedo()) {
+            // clear redo history if a new undo step gets created
+            var delItem = this.activeStep + 1;
+            this.undoSteps.splice(delItem, this.undoSteps.length - delItem);
+        }
+        var step = new CQ.undo.UndoStep(config);
+
+        var listener = function() {
+            step.un("committed", listener, this);
+            var removeCnt = (this.maxUndoSteps >= 0
+                ? this.undoSteps.length - this.maxUndoSteps : 0);
+            // console.log(removeCnt, this.maxUndoSteps)
+            if (removeCnt > 0) {
+                if ((this.activeStep - removeCnt) >= -1) {
+                    // console.log("Undo history too long; truncating");
+                    this.undoSteps.splice(0, removeCnt);
+                    this.activeStep -= removeCnt;
+                }
+            }
+            this.edited = true;
+            if (this.persistenceMode == CQ.undo.persistence.PersistenceMode.ON_STEP) {
+                this.saveHistory(CQ.undo.UndoManager.getPagePath());
+            }
+        };
+        step.on("committed", listener, this);
+        this.undoSteps.push(step);
+        this.activeStep++;
+        return step;
+    },
+
+    /**
+     * Removes the specified step from the undo history.
+     * @param {CQ.undo.UndoStep} stepToRemove The step to be removed
+     */
+    removeStep: function(stepToRemove) {
+        for (var s = this.undoSteps.length - 1; s >= 0; s--) {
+            if (this.undoSteps[s] == stepToRemove) {
+                this.undoSteps.splice(s, 1);
+                break;
+            }
+        }
+    },
+
+    /**
+     * Determines if an undo operation can be executed by the user.
+     * @return {Boolean} True if undo is available
+     */
+    canUndo: function() {
+        return !this.isOperationActive && !this.blocked && (this.activeStep >= 0);
+    },
+
+    /**
+     * Determines if a redo operation can be executed by the user.
+     * @return {Boolean} True if redo is available
+     */
+    canRedo: function() {
+        return !this.isOperationActive && !this.blocked
+                && (this.activeStep < (this.undoSteps.length - 1));
+    },
+
+    /**
+     * Executes an undo operation.
+     */
+    undo: function() {
+        if (!this.canUndo()) {
+            throw new Error("Cannot undo.");
+        }
+        if (this.activeStep >= this.undoSteps.length) {
+            throw new Error("Invalid undo position: " + this.activeStep + "; max: "
+                    + this.undoSteps.length);
+        }
+        this.stepProcessed = this.undoSteps[this.activeStep];
+        var validity = this.stepProcessed.getValidity(this);
+        if (validity != CQ.undo.UndoStep.VALID) {
+            this.handleInvalidContext(validity, false);
+            if (validity != CQ.undo.UndoStep.NOT_WHITELISTED) {
+                return;
+            }
+        }
+        var execute;
+        var _undo = function(execute) {
+            this.activeStep--;
+            this.edited = true;
+            // in step mode, we'll have to save the history here to get the active step
+            // right even if the redo triggers a page reload
+            if (this.persistenceMode == CQ.undo.persistence.PersistenceMode.ON_STEP) {
+                this.saveHistory(CQ.undo.UndoManager.getPagePath());
+            }
+            if (execute == "true") {
+                this.operationEvent = "undostep";
+                this.prepareScreen(true);
+                this.isOperationActive = true;
+                this.stepProcessed.on("completed", this.onStepCompleted, this);
+                this.stepProcessed.on("error", this.onStepFailed, this);
+                this.stepProcessed.undo();
+            } else {
+                this.onStepIgnored("undostep");
+            }
+        }.createDelegate(this);
+        execute = this.handlePreconditions(this.stepProcessed, true, _undo);
+        if (execute == "false") {
+            return;
+        }
+        if (execute != "confirm") {
+            _undo(execute);
+        }
+    },
+
+    /**
+     * Executes a redo operation.
+     */
+    redo: function() {
+        if (!this.canRedo()) {
+            throw new Error("Cannot redo.");
+        }
+        this.activeStep++;
+        if (this.activeStep >= this.undoSteps.length) {
+            throw new Error("Invalid redo position: " + (this.activeStep - 1) + "; max: "
+                    + this.undoSteps.length);
+        }
+        this.stepProcessed = this.undoSteps[this.activeStep];
+        var validity = this.stepProcessed.getValidity(this);
+        if (validity != CQ.undo.UndoStep.VALID) {
+            this.handleInvalidContext(validity, true);
+            if (validity != CQ.undo.UndoStep.NOT_WHITELISTED) {
+                this.activeStep--;
+                return;
+            }
+        }
+        var execute;
+        var _redo = function(execute) {
+            this.edited = true;
+            // in step mode, we'll have to save the history here to get the active step
+            // right even if the redo triggers a page reload
+            if (this.persistenceMode == CQ.undo.persistence.PersistenceMode.ON_STEP) {
+                this.saveHistory(CQ.undo.UndoManager.getPagePath());
+            }
+            if (execute == "true") {
+                this.isOperationActive = true;
+                this.operationEvent = "redostep";
+                this.prepareScreen(false);
+                this.stepProcessed.on("completed", this.onStepCompleted, this);
+                this.stepProcessed.on("error", this.onStepFailed, this);
+                this.stepProcessed.redo();
+            } else {
+                this.onStepIgnored("redostep");
+            }
+        }.createDelegate(this);
+        execute = this.handlePreconditions(this.stepProcessed, false, _redo);
+        if (execute == "false") {
+            this.activeStep--;
+            return;
+        }
+        if (execute != "confirm") {
+            _redo(execute);
+        }
+    },
+
+    /**
+     * Clears the undo history
+     */
+    clear: function() {
+        this.undoSteps.length = 0;
+        this.activeStep = -1;
+        this.blockedPaths.length = 0;
+        this.idManager = new CQ.undo.util.IdRewriteManager();
+    },
+
+
+    // --- Handler -------------------------------------------------------------------------
+
+    /**
+     * @private
+     */
+    removeHandlers: function() {
+        this.stepProcessed.un("completed", this.onStepCompleted, this);
+        this.stepProcessed.un("error", this.onStepFailed, this);
+    },
+
+    /**
+     * @private
+     */
+    onStepCompleted: function(step) {
+        this.removeHandlers();
+        // in step mode, we'll have to save the history again as the undo/redo operation
+        // may have changed the history
+        if (this.persistenceMode == CQ.undo.persistence.PersistenceMode.ON_STEP) {
+            this.saveHistory(CQ.undo.UndoManager.getPagePath());
+        }
+        this.fireEvent(this.operationEvent, this.stepProcessed);
+        this.restoreScreen(this.stepProcessed, (this.operationEvent == "undostep"));
+        if (step.config.refreshPage === true) {
+            CQ.Util.reload()
+        }
+        this.isOperationActive = false;
+    },
+
+    /**
+     * @private
+     */
+    onStepIgnored: function(operationEvent) {
+        this.fireEvent(operationEvent, this.stepProcessed);
+    },
+
+    /**
+     * @private
+     */
+    onStepFailed: function() {
+        this.undoMask.hide();
+        this.removeHandlers();
+        this.isOperationActive = false;
+        var isUndo = (this.operationEvent == "undostep");
+        var title = (isUndo
+                ? CQ.I18n.getMessage("Undo failed")
+                : CQ.I18n.getMessage("Redo failed"));
+        var message;
+        // use message from undo actions if available
+        var messages = this.stepProcessed.config.messages;
+        var msgCnt = messages.length;
+        if (msgCnt > 0) {
+            message = "";
+            for (var m = 0; m < msgCnt; m++) {
+                message += messages[m];
+                message += "<br>";
+            }
+            CQ.undo.util.UndoUtils.messageBox(title, message, undefined,
+                    CQ.Ext.MessageBox.OK, undefined, CQ.Ext.MessageBox.ERROR);
+            return;
+        }
+        message = (isUndo
+                ? CQ.I18n.getMessage("The undo operation has failed.")
+                : CQ.I18n.getMessage("The redo operation has failed."));
+        message += CQ.I18n.getMessage("The reason could be a concurrent page edit, a redone cross-page move operation, a network issue or other circumstances.");
+        message += "<br><br>";
+        message += CQ.I18n.getMessage("You have the following options:");
+        message += "<br><br>";
+        message += CQ.I18n.getMessage("Continue: The problem will be ignored, and you can try to continue undoing earlier actions. Note that follow-up problems may occur.");
+        message += "<br><br>";
+        message += CQ.I18n.getMessage("Clear History: The undo history will be cleared, and you won't be able to undo or redo previously recorded actions.");
+        message += "<br><br>";
+        message += CQ.I18n.getMessage("Cancel: The undo history will be left unchanged, and you will still be able to redo previously undone operations.");
+        message += "<br><br>";
+        message += CQ.I18n.getMessage("How would you like to proceed?");
+        CQ.undo.util.UndoUtils.messageBox(title, message, function(btnId) {
+            var saveHistory = false;
+            switch (btnId) {
+                case "ignore":
+                    break;
+                case "cancel":
+                    if (isUndo) {
+                        this.activeStep++;
+                    } else {
+                        this.activeStep--;
+                    }
+                    saveHistory = true;
+                    break;
+                case "clear":
+                    this.clear();
+                    saveHistory = true;
+                    break;
+            }
+            if (saveHistory) {
+                // in step mode, we'll have to save the history in case it has changed
+                // due to the user's interaction
+                if (this.persistenceMode == CQ.undo.persistence.PersistenceMode.ON_STEP) {
+                    this.saveHistory(CQ.undo.UndoManager.getPagePath());
+                }
+            }
+        }.createDelegate(this), {
+            "_customized": [
+                {
+                    "id": "ignore",
+                    "text": CQ.I18n.getMessage("Continue")
+                }, {
+                    "id": "clear",
+                    "text": CQ.I18n.getMessage("Clear History")
+                }, {
+                    "id": "cancel",
+                    "text": CQ.I18n.getMessage("Cancel"),
+                    "defaultCancel": true
+                }
+            ]
+        }, CQ.Ext.MessageBox.ERROR);
+    },
+
+
+    // --- State ---------------------------------------------------------------------------
+
+    /**
+     * <p>Temporarily blocks undo and redo.</p>
+     * <p>Use case is for example scaffolding, which adds changes to the undo history
+     * of a page when the "Update" button gets clicked (hence requires an active undo
+     * history), but must not allow undo/redo of previously recorded undo steps (usually,
+     * not the entire page is available for editing using a scaffold).</p>
+     */
+    block: function() {
+        this.blocked = true;
+    },
+
+    /**
+     * <p>Allow undo/redo again, after previously blocking it.</p>
+     */
+    unblock: function() {
+        this.blocked = false;
+    },
+
+
+    // --- Persistence ---------------------------------------------------------------------
+
+    /**
+     * <p>Saves the current undo history to the persistence layer.</p>
+     * @param {String} pagePath (optional) The path of the page to save the history for
+     */
+    saveHistory: function(pagePath) {
+        pagePath = (pagePath ? pagePath : CQ.WCM.getPagePath());
+        var serializer = this.persistence.getSerializer();
+        var data = serializer.serialize(this);
+        if (data != null) {
+            this.persistence.save(pagePath, data);
+        }
+    },
+
+    /**
+     * <p>Loads the undo history from the persistence layer if available.</p>
+     */
+    loadHistory: function(pagePath) {
+        pagePath = (pagePath ? pagePath : CQ.WCM.getPagePath());
+        var strRep = this.persistence.load(pagePath);
+        if (strRep != null) {
+            this.undoSteps.length = 0;
+            this.activeStep = -1;
+            var serializer = this.persistence.getSerializer();
+            serializer.deserialize(this, strRep);
+        }
+    },
+
+    /**
+     * <p>Serializes the undo history to a JSON-compatible object.</p>
+     * @return {Object} The JSON-compatible object representing the undo history
+     */
+    serialize: function() {
+        var stepCnt = this.undoSteps.length;
+        var data = {
+            "a": this.activeStep,
+            "s": stepCnt,
+            "pv": this.pageVersion,
+            "pe": this.edited,
+            "bp": this.blockedPaths
+        };
+        for (var s = 0; s < stepCnt; s++) {
+            var stepToProcess = this.undoSteps[s];
+            data["s" + s] = stepToProcess.serialize();
+        }
+        return data;
+    },
+
+    /**
+     * <p>Deserializes the undo history from a JSON-compatible object that was created
+     * by {@link #serialize}.</p>
+     * @param {Object} data The JSON compatible object to deserialize from
+     */
+    deserialize: function(data) {
+        try {
+            this.pageVersion = data["pv"];
+            this.edited = data["pe"];
+            this.activeStep = parseInt(data["a"]);
+            this.blockedPaths = data["bp"];
+            this.undoSteps.length = 0;
+            var stepCnt = data["s"];
+            for (var s = 0; s < stepCnt; s++) {
+                var stepToProcess = data["s" + s];
+                // TODO handle in a better way (for example, persist scroll offsets as well)
+                var step = new CQ.undo.UndoStep(this.createStepConfig());
+                this.undoSteps.push(step);
+                step.deserialize(stepToProcess);
+            }
+        } catch (e) {
+            this.activeStep = -1;
+            this.undoSteps.length = 0;
+            console.log("Error deserializing:", e);
+        }
+    },
+
+
+    // --- Caching stuff -------------------------------------------------------------------
+
+    /**
+     * <p>Sets the page version the undo history is valid for.</p>
+     * <p>Must be set on each page load. If the page verison is still the same after next
+     * page load, the page content may be invalid, as it has been taken from cache.</p>
+     * @param {Number} version The page version
+     */
+    setPageVersion: function(version) {
+        this.pageVersion = version;
+        this.edited = false;
+    },
+
+    /**
+     * <p>Gets the page version the undo history is valid for.</p>
+     * <p>Should be checked on each page load. If the page version is still the same as
+     * returned by this method, the page content may be invalid, as it has been taken from
+     * cache.</p>
+     * @return {Number} The page version
+     */
+    getPageVersion: function() {
+        return this.pageVersion;
+    },
+
+    /**
+     * <p>Determines if the page has been edited since the last page load.</p>
+     * <p>This is determined by checking if any undo steps have been recorded or any
+     * undo/redo operation has been executed since then.</p>
+     * @return {Boolean} True if edits were done since last page load
+     */
+    hasEdits: function() {
+        return this.edited;
+    },
+
+
+    // --- Helpers -------------------------------------------------------------------------
+
+    /**
+     * @private
+     */
+    handlePreconditions: function(step, isUndo, confirmFn) {
+        var levels = [ "false", "ignore", "confirm", "true" ];
+        var actions = step.undoActions;
+        var actionCnt = actions.length;
+        var stepExecute = levels.indexOf("true");
+        var stepMessage = "";
+        var confirmHandlers = [ ];
+        for (var a = 0; a < actionCnt; a++) {
+            var actionPreconditions = actions[a].checkPreconditions(isUndo);
+            var actionExecute = levels.indexOf(actionPreconditions.execute);
+            var actionMessage = actionPreconditions.message;
+            if (actionExecute < stepExecute) {
+                stepMessage = "";
+                stepExecute = actionExecute;
+            }
+            if (actionMessage && (stepMessage.indexOf(actionMessage) < 0)) {
+                if (stepMessage.length > 0) {
+                    stepMessage += "<br>";
+                }
+                stepMessage += actionMessage;
+            }
+            if (actionPreconditions.confirm) {
+                confirmHandlers.push(actionPreconditions.confirm)
+            }
+        }
+
+        if (stepMessage) {
+            // prevent further undo/redo steps
+            this.isOperationActive = true;
+            var uu = CQ.undo.util.UndoUtils;
+            var opName = (isUndo ? CQ.I18n.getMessage("Undo") : CQ.I18n.getMessage("Redo"));
+            var boxHandler = function() {
+                this.isOperationActive = false;
+            }.createDelegate(this);
+            var confirmHandler = function(isExecuted) {
+                var handlerCnt = confirmHandlers.length;
+                for (var c = 0; c < handlerCnt; c++) {
+                    confirmHandlers[c](isExecuted === true);
+                }
+                boxHandler();
+            };
+            switch (stepExecute) {
+                case 0: // "false"
+                    uu.messageBox(CQ.I18n.getMessage("{0} cannot be executed", [ opName ]),
+                            stepMessage, boxHandler, CQ.Ext.MessageBox.CANCEL, undefined,
+                            CQ.Ext.MessageBox.ERROR);
+                    break;
+                case 1: // "ignore"
+                    uu.messageBox(CQ.I18n.getMessage("{0} ignored", [ opName ]),
+                            stepMessage, confirmHandler, CQ.Ext.MessageBox.OK, undefined,
+                            CQ.Ext.MessageBox.ERROR);
+                    break;
+                case 2: // "confirm"
+                    uu.messageBox(CQ.I18n.getMessage("Please confirm"), stepMessage
+                            + "<br><br>"
+                            + CQ.I18n.getMessage("Do you really want to continue?"),
+                            function(btnId) {
+                                var isExecute = (btnId == "yes");
+                                confirmHandler(isExecute);
+                                confirmFn(isExecute ? "true" : "ignore");
+                            }, CQ.Ext.MessageBox.YESNO, undefined,
+                            CQ.Ext.MessageBox.QUESTION);
+                    break;
+                case 3: // "true"
+                    uu.messageBox(CQ.I18n.getMessage("Info"), stepMessage, boxHandler);
+                    break;
+            }
+
+        }
+        return levels[stepExecute];
+    },
+
+    /**
+     * <p>Handles a temporarily invalid undo context.</p>
+     * @param {Number} validity The reason why the undo context is invalid
+     * @param {Boolean} isRedo True if the originating operation was a redo (rather than
+     *        an undo)
+     */
+    handleInvalidContext: function(validity, isRedo) {
+        var us = CQ.undo.UndoStep;
+        var tempBlocked = (isRedo
+                ? CQ.I18n.getMessage("This operation can currently not be redone.")
+                : CQ.I18n.getMessage("This operation can currently not be undone."));
+        var blocked = (isRedo
+                ? CQ.I18n.getMessage("This operation can not be redone.")
+                : CQ.I18n.getMessage("This operation can not be undone."));
+        var title = (isRedo
+                ? CQ.I18n.getMessage("Redo unavailable")
+                : CQ.I18n.getMessage("Undo unavailable"));
+        var msg;
+        var isAlert = true;
+        switch (validity) {
+            case us.BLACKLISTED:
+                msg = blocked + "<br>";
+                msg += CQ.I18n.getMessage("The operation references an item that is known to cause problems with undo.");
+                break;
+            case us.NOT_WHITELISTED:
+                isAlert = false;
+                title = (isRedo ? CQ.I18n.getMessage("Redo") : CQ.I18n.getMessage("Undo"));
+                msg = CQ.I18n.getMessage("The operation references an item that may cause problems with undo. Proceed at your own risk.");
+                break;
+            case us.INVALID_WCM_MODE:
+                msg = tempBlocked + "<br>";
+                msg += CQ.I18n.getMessage("Please change the edit mode back to the original one, then try again.");
+                break;
+            case us.BLOCKED_PATH:
+                msg = tempBlocked + "<br>";
+                msg += CQ.I18n.getMessage("The operation references an item that has been moved to a different page by cutting and pasting. Please navigate to that page and undo the paste operation first.");
+                break;
+        }
+        if (isAlert) {
+            CQ.undo.util.UndoUtils.messageBox(title, msg);
+        } else {
+            CQ.Notification.notify(title, msg, 10);
+        }
+    },
+
+    /**
+     * <p>Prepares the screen for an undo/redo operation.</p>
+     * @param {Boolean} isUndo True for an undo operation; false for a redo operation
+     */
+    prepareScreen: function(isUndo) {
+        this.undoMask = new CQ.undo.util.UndoMask();
+        this.undoMask.message = (isUndo ? CQ.I18n.getMessage("Undoing ...")
+                : CQ.I18n.getMessage("Redoing ..."));
+        this.undoMask.show();
+    },
+
+    /**
+     * <p>Restores the screen after an undo/redo operation.</p>
+     * <p>Scroll offsets are restored; a suitable selection is created.</p>
+     * @param {CQ.undo.UndoStep} step The undo step
+     * @param {Boolean} isUndo True for undo, false for redo
+     */
+    restoreScreen: function(step, isUndo) {
+        var scrollOffsets = step.getScrollOffsets();
+        if (scrollOffsets) {
+            var win = CQ.WCM.getContentWindow();
+            win.scrollTo(scrollOffsets.left, scrollOffsets.top);
+        }
+        this.undoMask.hide();
+        // TODO find a better way to visualize the target(s) of the operation
+        CQ.WCM.deselect();
+        var items = step.getSelection(isUndo);
+        if (this.markerMode == CQ.undo.UndoDefs.MARKER_MODE_SELECT) {
+            CQ.WCM.select(items);
+        } else if (this.markerMode == CQ.undo.UndoDefs.MARKER_MODE_FLASH) {
+            var itemCnt = items.length;
+            for (var i = 0; i < itemCnt; i++) {
+                var highlight = new CQ.Highlight({
+                    "element": items[i].el,
+                    "cls": "cq-editbase-droptarget-highlight"
+                });
+                // need to take "addListener" here, as "on" is overridden inconsistently and
+                // won't work
+                highlight.addListener("afterflash", function(obj) {
+                    obj.destroy();
+                });
+                highlight.flash();
+            }
+        }
+    },
+
+    /**
+     * <p>Creates a configuration object that is suitable for an undo operation.</p>
+     * @param {CQ.undo.util.FormStub} redoFormStub (optional) The form stub for redoing the
+     *        operation; null for non-form-based undo steps
+     */
+    createStepConfig: function(redoFormStub) {
+        var contentWin = CQ.WCM.getContentWindow();
+        var scrollOffsets = (this.scrollOffsets ? this.scrollOffsets : {
+            "left": contentWin.scrollX,
+            "top": contentWin.scrollY
+        });
+        return {
+            "scrollOffsets": scrollOffsets,
+            "idManager": this.idManager,
+            "binaryServletUrl": this.binaryServletUrl
+        };
+    },
+
+    /**
+     * <p>Retrieves the undo step that contains the specified undo action.</p>
+     * @param {CQ.undo.UndoAction} action The undo action
+     * @return {CQ.undo.UndoStep} The undo step; null if no suitable undo step could be
+     *         found
+     */
+    getStepForAction: function(action) {
+        var stepCnt = this.undoSteps.length;
+        for (var s = 0; s < stepCnt; s++) {
+            var stepToCheck = this.undoSteps[s];
+            var actions = stepToCheck.undoActions;
+            var actionCnt = actions.length;
+            for (var a = 0; a < actionCnt; a++) {
+                if (actions[a] == action) {
+                    return stepToCheck;
+                }
+            }
+        }
+        return null;
+    },
+
+    /**
+     * <p>Returns the index of the specified undo step inside the undo history.</p>
+     * @param {CQ.undo.UndoStep} step The undo step
+     * @return {Number} The step's index; -1 if the step is not contained in the history
+     */
+    getStepIndex: function(step) {
+        var stepCnt = this.undoSteps.length;
+        for (var s = 0; s < stepCnt; s++) {
+            if (step == this.undoSteps[s]) {
+                return s;
+            }
+        }
+        return -1;
+    },
+
+    /**
+     * Returns the object that handles ID changes due to element recreation.
+     * @return {CQ.undo.util.IdRewriteManager} The id rewriter
+     */
+    getIdManager: function() {
+        return this.idManager;
+    },
+
+    /**
+     * Prepares the recording of an undo step.
+     * @param {CQ.undo.util.OriginalData} originalData The original data
+     */
+    prepareUndo: function(originalData) {
+        this.originalData = originalData;
+        var contentWin = CQ.WCM.getContentWindow();
+        this.scrollOffsets = {
+            "left": contentWin.scrollX,
+            "top": contentWin.scrollY
+        };
+        var blobs = originalData.blobs;
+        if (blobs && (blobs.length > 0)) {
+            var blobCnt = blobs.length;
+            for (var b = 0; b < blobCnt; b++) {
+                var blob = blobs[b];
+                blob.save(this.binaryServletUrl, this.originalData.path);
+            }
+        }
+    },
+
+    /**
+     * Prevents form-based undo explicitly.
+     */
+    preventUndo: function() {
+        this.originalData = null;
+    },
+
+    /**
+     * @private
+     */
+    isNamedItem: function(item) {
+        return (item.getEl() != undefined) && (item.getName() == item.getEl().dom.name)
+                && !item.disabled;
+    },
+
+    /**
+     * @private
+     */
+    convertOriginalValue: function(originalValue, newValue) {
+        var uu = CQ.undo.util.UndoUtils;
+        if (CQ.Ext.isBoolean(newValue)) {
+            if (CQ.Ext.isString(originalValue)) {
+                if (originalValue == "true") {
+                    originalValue = true;
+                } else if (originalValue == "false") {
+                    originalValue = false;
+                }
+            }
+        } else if (CQ.Ext.isDate(newValue)) {
+            if (CQ.Ext.isString(originalValue)) {
+                var dateValue = uu.parseDate(originalValue);
+                originalValue = (dateValue ? dateValue : originalValue);
+            }
+        }
+        return originalValue;
+    },
+
+    /**
+     * <p>Handles the successul submission of a form.</p>
+     * <p>{@link #prepareUndo} must have been called before using this helper method.</p>
+     * @param {CQ.Ext.form.BasicForm} form The submitted form
+     */
+    onSuccessfulFormSubmit: function(form) {
+        var items = form.items;
+        if (!this.originalData) {
+            return;
+        }
+        var uu = CQ.undo.util.UndoUtils;
+        // using sling:resourceType to determine if the form is being used for updating
+        // a component
+        var values = form.getValues();
+        if (values.hasOwnProperty("./sling:resourceType")
+                || values.hasOwnProperty(uu.UNDO_MARKER_FIELD)) {
+            var resourceType = values["./sling:resourceType"];
+            // collect changes by examining the form fields
+            var itemCnt = items.length;
+            var changedValues = { };
+            var originalValues = { };
+            var deletedPaths = [ ];
+            var addedPaths = [ ];
+            var hasChanged = false;
+            var originalValue, i, item, name, recName, isField;
+            for (i = 0; i < itemCnt; i++) {
+                item = items.get(i);
+                name = item.getName();
+                if (name && (name.length > 2) && (name.substring(0, 2) == "./")) {
+                    recName = name.substring(2);
+                    isField = this.isNamedItem(item);
+                    if (isField && !uu.isFiltered(recName)) {
+                        originalValue = this.originalData.records.get(recName);
+                        var newValue = item.getValue();
+                        // do some type conversion first - changes get persisted
+                        if ((originalValue == undefined) && CQ.Ext.isString(newValue)
+                                && (newValue.length == 0)) {
+                            newValue = undefined;
+                        }
+                        originalValue = this.convertOriginalValue(originalValue, newValue);
+                        // handle multi-values correctly (they are transferred as
+                        // multiple single values with the same name)
+                        if (changedValues.hasOwnProperty(name)) {
+                            var multiValue = changedValues[name];
+                            if (!CQ.Ext.isArray(multiValue)) {
+                                multiValue = [ multiValue ];
+                                changedValues[name] = multiValue;
+                            }
+                            multiValue.push(newValue);
+                        } else {
+                            changedValues[name] = newValue;
+                        }
+                        originalValues[name] = originalValue;
+                    } else if (isField && uu.strEndsWith(name, CQ.Sling.DELETE_SUFFIX)) {
+                        deletedPaths.push(name.substring(
+                                0, name.length - CQ.Sling.DELETE_SUFFIX.length));
+                    }
+                }
+            }
+            // detect values that did not really change (must be handled separately, as
+            // arrays will only be "stable" at this point)
+            var handleCreatedValues = function(name, originalValue) {
+                if (!originalValue) {
+                    delete originalValues[name];
+                    addedPaths.push(name);
+                }
+            };
+            for (var checkName in changedValues) {
+                if (changedValues.hasOwnProperty(checkName)
+                        && originalValues.hasOwnProperty(checkName)) {
+                    originalValue = originalValues[checkName];
+                    var changedValue = changedValues[checkName];
+                    if (CQ.Ext.isArray(changedValue)) {
+                        var hasArrayChanges = true;
+                        if (CQ.Ext.isArray(originalValue)) {
+                            var arrayCnt = originalValue.length;
+                            if (arrayCnt == changedValue.length) {
+                                hasArrayChanges = false;
+                                for (i = 0; i < arrayCnt; i++) {
+                                    if (originalValue[i] != changedValue[i]) {
+                                        hasArrayChanges = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (hasArrayChanges) {
+                            hasChanged = true;
+                            handleCreatedValues(checkName, originalValue);
+                        } else {
+                            delete changedValues[checkName];
+                            delete originalValues[checkName];
+                        }
+                    } else {
+                        // non-persistent type adjustments
+                        if (CQ.Ext.isDate(originalValue)) {
+                            originalValue = originalValue.getTime();
+                        }
+                        if (CQ.Ext.isDate(changedValue)) {
+                            changedValue = changedValue.getTime();
+                        } else if (CQ.Ext.isBoolean(changedValue)) {
+                            if (originalValue == undefined) {
+                                originalValue = false;
+                            }
+                        }
+                        // remove values that did not change
+                        if (originalValue != changedValue) {
+                            hasChanged = true;
+                            handleCreatedValues(checkName, originalValue);
+                        } else {
+                            delete changedValues[checkName];
+                            delete originalValues[checkName];
+                        }
+                    }
+                }
+            }
+            // handle added paths - delete the super node(s) if no other sub items (nodes
+            // and properties) are present
+            var addedSuperPaths = [ ];
+            var originalData = uu.jsonToSlingParameters(this.originalData.records.data);
+            for (var a = addedPaths.length - 1; a >= 0; a--) {
+                var addedPath = addedPaths[a];
+                var paths = addedPath.split("/");
+                // remove leading "."
+                paths.splice(0, 1);
+                var superPathToDelete = null;
+                for (var p = paths.length - 2; p >= 0; p--) {
+                    var pathToCheck = ".";
+                    for (var j = 0; j <= p; j++) {
+                        pathToCheck += "/" + paths[j];
+                    }
+                    var isSuperPathEmpty = true;
+                    for (var dataKey in originalData) {
+                        if (originalData.hasOwnProperty(dataKey)) {
+                            if (uu.strStartsWith(dataKey, pathToCheck + "/")
+                                    || uu.strStartsWith(dataKey, pathToCheck + "@")) {
+                                isSuperPathEmpty = false;
+                                break;
+                            }
+                        }
+                    }
+                    // no data in super path - we can delete it safely on undo
+                    if (isSuperPathEmpty) {
+                        superPathToDelete = pathToCheck;
+                    }
+                }
+                var actuallyAdded = (superPathToDelete ? superPathToDelete : addedPath);
+                if (addedSuperPaths.indexOf(actuallyAdded) < 0) {
+                    addedSuperPaths.push(actuallyAdded);
+                    originalValues[actuallyAdded + CQ.Sling.DELETE_SUFFIX] = "true";
+                }
+            }
+            // finally, handle deleted paths
+            var deletedCnt = deletedPaths.length;
+            for (var d = 0; d < deletedCnt; d++) {
+                var toDelete = deletedPaths[d];
+                changedValues[toDelete + CQ.Sling.DELETE_SUFFIX] = "true";
+                originalValue = this.originalData.records.get(toDelete.substring(2));
+                if (CQ.Ext.isObject(originalValue)) {
+                    originalValue = CQ.Util.copyObject(originalValue);
+                    uu.filterJSON(originalValue, true);
+                }
+                uu.jsonToSlingParameters(originalValue, toDelete, originalValues);
+                hasChanged = true;
+            }
+            // handle BLOBs
+            var originalBlobs = this.originalData.blobs;
+            var changedBlobs = uu.createChangedBlobs(
+                    originalBlobs, this.binaryServletUrl, this.originalData.path);
+            // remove all references to BLOBs, as they are handled completely on the
+            // serverside
+            var filterBlobs = function(values, blobs) {
+                var blobCnt = blobs.length;
+                var toRemove = [ ];
+                for (var b = 0; b < blobCnt; b++) {
+                    var blob = blobs[b];
+                    var blobField = "./" + blob.path;
+                    for (var fieldName in values) {
+                        if (values.hasOwnProperty(fieldName)) {
+                            if ((fieldName == blobField)
+                                    || uu.strStartsWith(fieldName, blobField + "/")
+                                    || uu.strStartsWith(fieldName, blobField + "@")) {
+                                toRemove.push(fieldName);
+                            }
+                        }
+                    }
+                }
+                var removeCnt = toRemove.length;
+                for (var r = 0; r < removeCnt; r++) {
+                    delete values[toRemove[r]];
+                }
+            };
+            filterBlobs(originalValues, originalBlobs);
+            filterBlobs(changedValues, changedBlobs);
+            hasChanged |= (changedBlobs.length > 0);
+            // finally, create the step
+            if (hasChanged) {
+                var formStub = new CQ.undo.util.FormStub(form);
+                var undoStep = this.createUndoStep(this.createStepConfig());
+                undoStep.addUndoAction(new CQ.undo.actions.UpdateParagraphAction(
+                        this.idManager, this.originalData.path, resourceType,
+                        originalValues, changedValues, formStub,
+                        originalBlobs, changedBlobs,
+                        (this.originalData.isGlobalUpdate === true)));
+                undoStep.commit();
+            }
+        } else {
+            // console.log("Dialog not undoable");
+        }
+        this.cancelUndo(true);
+    },
+
+    /**
+     * <p>Creates and saves BLOBs from the POST parameters used for
+     * {@link CQ.wcm.EditBase.createParagraph}.</p>
+     *
+     * @param parPath The paragraph path
+     * @param params The parameters as passed to {@link CQ.wcm.EditBase.createParagraph}
+     * @return List of BLOBs
+     */
+    createBlobsFromCreateParams: function(parPath, params) {
+        var blobs = [ ];
+        var uu = CQ.undo.util.UndoUtils;
+        for (var nameToCheck in params) {
+            if (params.hasOwnProperty(nameToCheck)) {
+                if (uu.strEndsWith(nameToCheck, "@MoveFrom")) {
+                    var fieldSepPos = nameToCheck.lastIndexOf("@");
+                    var fieldName = nameToCheck.substring(0, fieldSepPos);
+                    fieldName = (uu.strStartsWith(fieldName, "./")
+                            ? fieldName.substring(2) : fieldName);
+                    // operation is "update" from the blob's perspective
+                    var blob = new CQ.undo.util.Blob({
+                        "op": "update",
+                        "path": fieldName,
+                        "field": fieldName
+                    });
+                    blob.save(this.binaryServletUrl, parPath);
+                    blobs.push(blob);
+                    delete params[nameToCheck];
+                }
+            }
+        }
+        return blobs;
+    },
+
+    /**
+     * Cancels undo.
+     */
+    cancelUndo: function(preventBlobCleanup) {
+        if (!preventBlobCleanup && (this.originalData != null)) {
+            var blobs = this.originalData.blobs;
+            if (blobs) {
+                var toDelete = [ ];
+                var blobCnt = blobs.length;
+                for (var b = 0; b < blobCnt; b++) {
+                    var blob = blobs[b];
+                    if (blob.id) {
+                        toDelete.push(blob.id);
+                    }
+                }
+                CQ.undo.util.UndoUtils.deleteBinaries(this.binaryServletUrl, toDelete);
+            }
+        }
+        this.originalData = null;
+        this.scrollOffset = null;
+        this.undoFormStub = null;
+    },
+
+    /**
+     * Blocks the specified path for the specified step.
+     * @param {String} path The path
+     * @param {Number} step The step; if undefined, the current step is used
+     * @return {Object} The blocking definition (containing path and step properties)
+     */
+    blockPath: function(path, step) {
+        if (isNaN(step)) {
+            step = this.activeStep;
+        }
+        // console.log("Blocking path: " + path + " (step: " + step + ")");
+        var blockingDef = {
+            "path": path,
+            "step": step
+        };
+        this.blockedPaths.push(blockingDef);
+        return blockingDef;
+    },
+
+    /**
+     * Unblocks the specified path for the specified step.
+     * @param {String} path The path
+     * @param {Number} step The step; if undefined, the currently active step is used
+     */
+    unblockPath: function(path, step) {
+        if (isNaN(step)) {
+            step = this.activeStep;
+        }
+        // console.log("Unblocking path: " + path + " (step: " + step + ")");
+        var defCnt = this.blockedPaths.length;
+        for (var d = (defCnt - 1); d >= 0; d--) {
+            var def = this.blockedPaths[d];
+            if ((def.path == path) && (def.step == step)) {
+                this.blockedPaths.splice(d, 1);
+                break;
+            }
+        }
+    },
+
+    /**
+     * Checks if the specified path is blocked for the specified step.
+     * @param {String} path The path to check
+     * @param {Number} step The step to check for; if undefined, the currently active step
+     *        is used
+     */
+    isPathBlocked: function(path, step) {
+        if (isNaN(step)) {
+            step = this.activeStep;
+        }
+        var blockingsCnt = this.blockedPaths.length;
+        for (var b = 0; b < blockingsCnt; b++) {
+            var blocked = this.blockedPaths[b];
+            if ((blocked.path == path) && (blocked.step >= step)) {
+                // console.log("Path '" + path + "' is blocked.");
+                return true;
+            }
+        }
+        return false;
+    }
+
+});

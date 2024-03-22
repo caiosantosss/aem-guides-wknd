@@ -1,0 +1,839 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+  "use strict";
+
+  var template = ns.annotate.Theme.templates.annotation;
+
+  /**
+   * Represents an annotation made on the content of the page
+   *
+   * @class
+   */
+  ns.annotate.Annotation = function (options, el, $wrapper, $posEl) {
+    var self = {};
+
+    /**
+     * self.el DOM of the annotation mark, if present
+     *
+     * @type {jQuery}
+     */
+    self.el = el && el.length > 0 ? el : undefined;
+
+    /**
+     * self.$el jQuery object of the annotation markup, if DOM present
+     *
+     * @type {jQuery}
+     */
+    self.$el = el && el.length > 0 ? $(el) : undefined;
+
+    /**
+     * Use the wrapper we are given, otherwise the annotation will be appended to body element
+     * self.$wrapper jQuery object of the annotation parent
+     *
+     * @type {jQuery}
+     */
+    self.$wrapper = $wrapper && $wrapper.length > 0 ? $wrapper : $(channel[0].body);
+
+    /**
+     * Element to offset the annotation UI relative to - typically the editable. If no element, use self.$wrapper
+     * self.$wrapper jQuery object of the annotation parent
+     *
+     * @type {jQuery}
+     */
+    self.$posEl = $posEl.length > 0 ? $posEl : self.$wrapper;
+
+
+
+    /**
+     * Annotation initialization.
+     */
+    self._init = function () {
+      var editables;
+
+      // Set up the options object, mixing passed options with defaults
+      self.options = $.extend(true, {}, ns.annotate.Annotation.defaults, options);
+
+      // Find the editable from the annotation path
+      if (self.options.path) {
+        editables = ns.editables.find(self.options.path.substr(0, self.options.path.indexOf("/cq:annotation")));
+        self.editable = (editables.length > 0) ? editables[0] : undefined;
+      }
+
+      // The annotation hasn't been persisted as it doesn't have a name, create a new one
+      if (!self.options.name) {
+        var props = self._buildOffsetProperties();
+        self._createAnnotation(props);
+      } else {
+        self.id = self.options.path.replace(/\//g, ''); // use stripped path as unique id for the annotation
+        self._buildAnnotation();
+      }
+    };
+
+    /* SETUP */
+
+    /**
+     * Renders the annotation, sets up listening, builds its sketches and enables.
+     * Called once when the annotation is available server-side and has a unique id.
+     * @private
+     */
+    self._buildAnnotation = function () {
+      self._render();
+      self._initSketches();
+      self._addListeners();
+      self.setEnabled(true);
+      self.setZIndex(1); // set an initial z-index
+      self.$el.data('annotation', self); // Set up reverse reference on the mark
+    };
+
+    /**
+     * Set up all of the sketches related to this annotation.
+     * @private
+     */
+    self._initSketches = function() {
+      if (self.options.sketches) {
+        $.each(self.options.sketches, function(id, sketch) {
+          if (id == "jcr:primaryType") return true;
+          if (sketch && sketch.data) {
+            sketch.id = id;
+            self._addSketch(sketch);
+          }
+        });
+      }
+    };
+
+    /**
+     * Render the annotation, build the mark and popover as necessary
+     * @private
+     */
+    self._render = function () {
+      if (!self.$el) {
+        self._buildMark();
+      }
+
+      self._buildPopover();
+
+      self.reposition();
+    };
+
+    /**
+     * Build the annotation mark and append it to annotations wrapper
+     * @private
+     */
+    self._buildMark = function() {
+      var $mark = $(template.MARK),
+        attributes = {
+          "data-path" : self.options.path,
+        };
+
+      $mark.attr(attributes);
+      self.$wrapper.append($mark);
+      self.$el = $mark;
+      self.el = $mark[0];
+      self._updateMarkText();
+    };
+
+    /**
+     * Sets the modified info (author and date).
+     * @param {String} userId The user who last modified the annotation
+     * @param {String} date The date of the last modification
+     * @private
+     */
+    self._setModifiedInfo = function(userId, date) {
+      var d, datestring = "", titlestring = "", now, diff;
+
+      if (date) {
+        d = new Date(date);
+        if (!isNaN(d.getTime())) {
+          now = (ns.annotate.clientMillisecondOffset) ? moment().add(ns.annotate.clientMillisecondOffset, 'milliseconds') : moment();
+          diff = moment(d).diff(now);
+          if (diff > 0) { // Date is still in the future despite accounting for client offset
+            now.add(diff, 'milliseconds');
+          }
+          moment.locale(Granite.I18n.getLocale());
+          datestring = moment(d).from(now);
+          titlestring = moment(d).format('MMMM Do YYYY, h:mm a');
+        }
+      }
+
+      var _writeModifiedInfo = function(authorstr, datestr, titlestr) {
+        if (self.$lastmodified) {
+          if (datestr !== "") {
+            self.$lastmodified.text(Granite.I18n.get("{0} by {1}", [datestr, authorstr], "example: {5 days ago} by {Alison Parker}"));
+            self.$lastmodified.attr('title', titlestr);
+          }
+        }
+      };
+
+      self._getFriendlyUserString(userId)
+          .then(function (friendlystring) {
+            _writeModifiedInfo(friendlystring, datestring, titlestring); // Use the friendly string if we retrieve it
+          }).fail(function () {
+        _writeModifiedInfo(userId, datestring, titlestring); // Fallback to the id
+      });
+    };
+
+    /**
+     * Sets the mark text from configuration.
+     * @private
+     */
+    self._updateMarkText = function() {
+      if (self.$comment) {
+        self.options.text = self.$comment.val(); // Update the text from the comment textarea
+      }
+
+      var isDot = (self.options.text && self.options.text !== "") ? false : true,
+        text = Granite.I18n.get("Edit annotation"),
+        words;
+
+      if (!isDot) {
+        words = $.trim(self.options.text).split(" ");
+        text = (words.length > 1) ? words[0] + " . . ." : words[0];
+      }
+
+      self.$el.text(text);
+
+      // The mark is just a circle if it has no text comment
+      self.$el.toggleClass(ns.annotate.Theme.attributes.CLASS_MARK_DOT, isDot);
+    };
+
+    /**
+     * Build the popover and setup its interactivity
+     * @private
+     */
+    self._buildPopover = function () {
+      self.$popover = $(template.POPOVER);
+      self.$el.after(self.$popover);
+
+      self.$lastmodified = self.$popover.find('.' + ns.annotate.Theme.attributes.CLASS_LASTMODIFIED);
+      self.$comment = self.$popover.find('.' + ns.annotate.Theme.attributes.CLASS_COMMENT);
+      self.$comment.val(''); // CQ-20244, IE10+ adds the placeholder as default content
+      self._amendPopoverContent();
+
+      self.popover = self.$popover[0];
+
+      self.$colorpicker = self.$popover.find('coral-colorinput');
+      self.colorpicker = self.$colorpicker[0];
+
+      Coral.commons.ready(self.colorpicker, function() {
+        for (var color in self.options.colors) {
+          if (self.options.colors.hasOwnProperty(color)) {
+            self.colorpicker.items.add({
+              "value": self.options.colors[color]
+            });
+          }
+        }
+
+        self._setUIColor(self._getColorHex(self.options.color));
+        self.$colorpicker.attr('aria-label',`${Granite.I18n.get('Color Swatch')} ${self._getColorHex(self.options.color)}`);
+
+        self.colorpicker.on('change', function(event) {
+          self._setColor(self._getColorId(self.colorpicker.value));
+          self.$colorpicker.attr('aria-label',`${Granite.I18n.get('Color Swatch')} ${self._getColorHex(self.options.color)}`);
+        });
+      });
+
+      self.$popover.on("keyup", function(e) {
+        if(e.keyCode === 46 && !(e.target && e.target.nodeName in {'INPUT':1, 'TEXTAREA':1})) {
+          ns.annotate.actions.doDelete(self);
+        }
+      });
+
+      Coral.commons.ready(self.popover, function() {
+        // Add hide popover listener
+        self.popover.on('coral-overlay:close', function() {
+          clearInterval(self.lastModifiedInterval);
+          channel.off('cq-overlay-click.'+self.id);
+          self._updateMarkText(); // Update the mark text on hide
+
+          // Ensure we don't de-active if the user has selected another item before popover close
+          if (!ns.annotate.ItemsController.active || ns.annotate.ItemsController.active === self) {
+            self.setActive(false);
+          }
+
+          self.$comment.blur();
+          self.$popover.find('coral-overlay').each(function() {
+            $(this)[0].open = false;
+          });
+        });
+
+        // Ensure the popover gets closed when clicking editable
+        self.popover.on('coral-overlay:open', function() {
+          self.setActive(true);
+          self._setModifiedInfo(self.options.lastModifiedBy, self.options.lastModified);
+          self.lastModifiedInterval = setInterval(function() {
+            self._setModifiedInfo(self.options.lastModifiedBy, self.options.lastModified);
+          }, ns.annotate.Annotation.MODIFIEDINFO_REFRESH_INTERVAL);
+
+          channel.on('cq-overlay-click.'+self.id, function() {
+            if (self.popover) {
+              self.popover.open = false;
+            }
+          });
+        });
+      });
+    };
+
+    /**
+     * Adapts the popover content for specific use with this annotation.
+     */
+    self._amendPopoverContent = function() {
+      self.$popover.attr('id', self.id); // Set the id of the popover to the unique annotation name
+      self.$comment.val(self.options.text); // Set the text for this annotation
+      self.$popover.find('.'+ns.annotate.Theme.attributes.CLASS_ANNOTATION_ACTION).attr('data-path', self.options.path); // Update the path for action buttons
+      self._setModifiedInfo(self.options.lastModifiedBy, self.options.lastModified);
+    };
+
+    /**
+     *  Add Sketch handler
+     *  Sets up already-persisted sketches related to the annotation
+     *  as well as newly-drawn sketches triggered by a UI action.
+     *  @param {Object} [sketch] The sketch data, if setting up a persisted sketch.
+     */
+    self._addSketch = function(sketch) {
+      var sOptions = {
+        "path": self.options.path + "/shapes/",        // Sketch path, for persistence operations
+        "color": self._getColorHex(self.options.color) // The sketch color
+        }, s;
+
+      if (sketch) { // Sketch already existing
+        sOptions.path = self.options.path + "/shapes/" + sketch.id; // Unique reference
+        sOptions.data = sketch.data; // Initial, existing sketch data
+        sOptions.offsetX = sketch.x; // Horizontal offset of sketch UI
+        sOptions.offsetY = sketch.y; // Vertical offset of sketch UI
+      }
+
+      s = new ns.annotate.Sketch(sOptions, self);
+      self.sketches = (self.sketches) ? self.sketches : [];
+      self.sketches.push(s);
+      return s;
+    };
+
+    /* COLORING */
+
+    /**
+     * Sets the annotation color and updates the UI
+     * @param {String} [colorId] The id of the color to switch to
+     * */
+    self._setColor = function(colorId) {
+      var color = self._getColorHex(colorId);
+
+      if (color) {
+        self.options.color = colorId;
+        self._setUIColor(color); // Reflect change in UI
+        self._updateProperty('color', colorId, true); // Persist
+      }
+    };
+
+    /**
+     * Sets the color of the UI
+     * @param {String} [color] The new color (hex)
+     */
+    self._setUIColor = function(color) {
+      self.$el.css('background-color', color);
+      self.$el.toggleClass(ns.annotate.Theme.attributes.CLASS_MARK_BRIGHT, ns.annotate.utils.getColorLuminance(color) > ns.annotate.Theme.MARK_LUMINANCE_THRESHOLD);
+      self.colorpicker.value = color;
+
+      if(self.sketches && self.sketches.length > 0) {
+        $.each(self.sketches, function(i, sketch) {
+          sketch._recolor(color);
+        });
+      }
+    };
+
+    /**
+     * Gets the hex representation of a color from its ID
+     * @param {String} colorId The color
+     * @returns {String} The hex color
+     */
+    self._getColorHex = function(colorId) {
+      return self.options.colors[colorId];
+    };
+
+    /**
+     * Gets the ID of a color from a hex representation
+     * @param {String} color The color (hex)
+     * @returns {String} The color ID
+     */
+    self._getColorId = function(color) {
+      for (var colorId in self.options.colors) {
+        if (self.options.colors.hasOwnProperty(colorId)) {
+          if (self.options.colors[colorId] === color) {
+            return colorId;
+          }
+        }
+      }
+    };
+
+    /* DESTRUCTION */
+
+    /**
+     * Remove all of the associated DOM elements,
+     * destroying children and associated data and events.
+     * @private
+     */
+    self._unrender = function() {
+      self.$el.remove();
+      self.$popover.remove();
+
+      if (self.sketches) {
+        $.each(self.sketches, function(i, sketch) {
+          sketch.unrender();
+        });
+      }
+    };
+
+    /**
+     * Un-renders and destroys this annotation's references.
+     */
+    self._destroy = function () {
+      self.setActive(false);
+
+      self.popover.off('coral-overlay:open');
+      self.popover.off('coral-overlay:close');
+
+      self._unrender();
+      self.$el = null;
+      self.$popover = null;
+      if (self.sketches) {
+        $.each(self.sketches, function(i, sketch) {
+          sketch.destroy();
+          delete self.sketches[i];
+        });
+        self.sketches = null;
+      }
+
+      ns.annotate.ItemsController.remove(self);
+    };
+
+    /* PERSISTENCE
+     -------------*/
+
+    /**
+     * Fetches (read) the annotation's persisted configuration from the server.
+     * @return {$.Deferred}
+     * @private
+     * */
+    self._fetch = function () {
+      return (
+          ns.annotate.persistence.readAnnotation(self)
+        );
+    };
+
+    /**
+     * Persists (update) a single annotation property.
+     * @param [property]
+     * @param [content]
+     * @param {Boolean} [preventSetJcrModified] Flag to prevent setting of jcr modified properties.
+     * @return {*}
+     * @private
+     */
+    self._updateProperty = function (property, content, preventSetJcrModified) {
+      if ((property.length < 2) || (property.substring(0, 2) != "./")) {
+        property = "./" + property;
+      }
+      return ns.annotate.persistence.updateAnnotationProperty(self, property, content, preventSetJcrModified);
+    };
+
+    /**
+     * Persists (update) a set of annotation properties
+     * @param {Object} [properties] The annotation properties
+     * @param {Boolean} [preventSetJcrModified] Flag to prevent setting of jcr modified properties.
+     * @return {*}
+     * @private
+     */
+    self._updateProperties = function(properties, preventSetJcrModified) {
+      properties = self._prefixProperties(properties);
+      return ns.annotate.persistence.updateAnnotation(self, properties, preventSetJcrModified);
+    };
+
+    /**
+     * Reads the jcr:modified info of the annotation and updates the UI
+     */
+    self._readModifiedInfo = function() {
+      var start = new Date();
+
+      // Read the modified info
+      ns.annotate.persistence.readAnnotation(self)
+          .then(function (data, textStatus, jqXHR) {
+
+            // Store the server-client timestamp offset
+            // Used for displaying an accurate FromNow() time using moment js,
+            // as the client timestamp alone may be out of sync with the modified date.
+            if (!ns.annotate.clientMillisecondOffset) {
+              var serverDate = jqXHR.getResponseHeader("date");
+              var end = new Date();
+              var clientDateOffset = moment(new Date(serverDate)).diff(end);
+              var ajaxProcessingDuration = moment(start).diff(end);
+              ns.annotate.clientMillisecondOffset = clientDateOffset - ajaxProcessingDuration;
+            }
+
+            var annotationData = $.parseJSON(data);
+            self.options.lastModifiedBy = annotationData['jcr:lastModifiedBy'];
+            self.options.lastModified = annotationData['jcr:lastModified'];
+            self._setModifiedInfo(self.options.lastModifiedBy, self.options.lastModified);
+          });
+    };
+
+    /**
+     * Persists (create) a new annotation with an initial offset and text
+     * @param {Object} [properties] The initial annotation properties
+     * @return {*}
+     * @private
+     */
+    self._createAnnotation = function(properties) {
+      properties = self._prefixProperties(properties);
+      return ns.annotate.persistence.createAnnotation(self, properties);
+    };
+
+    /**
+     * Builds the offset properties for this annotation.
+     * @return {Object} The offset parameters
+     * @private
+     */
+    self._buildOffsetProperties = function() {
+      return {
+        "x": Math.round(self.options.offsetX),
+        "y": Math.round(self.options.offsetY),
+        "x@TypeHint": "Long",
+        "y@TypeHint": "Long"
+      };
+    };
+
+    /**
+     * Prefixes a set of properties with "./" in preparation for persistence
+     * @param {Object} [properties] The properties to prefix
+     * @return {Object} The prefixed properties
+     * @private
+     */
+    self._prefixProperties = function(properties) {
+      for (var name in properties) {
+        if (properties.hasOwnProperty(name)) {
+          if ((name.length < 2) || (name.substring(0, 2) != "./")) {
+            var value = properties[name];
+            delete properties[name];
+            properties["./" + name] = value;
+          }
+        }
+      }
+      return properties;
+    };
+
+    /* STATES
+     -------------*/
+
+    /**
+     * Sets the annotation sketches to be enabled or disabled.
+     * @param {Boolean} [condition] enable or disable this annotation's sketches
+     */
+    self._setSketchesEnabled = function (condition) {
+      if (self.sketches && self.sketches.length > 0) {
+        $.each(self.sketches, function(i, sketch) {
+          if (condition === true || condition === undefined) {
+            sketch.setEnabled(true);
+          } else if (condition === false) {
+            sketch.setEnabled(false);
+          }
+        });
+      }
+    };
+
+    /**
+     * Sets the annotation to be enabled or disabled.
+     * @param {Boolean} [condition] enable or disable this annotation
+     * @return {Object} this annotation
+     */
+    self.setEnabled = function (condition) {
+      if (condition === true || condition === undefined) {
+        self.isEnabled = true;
+        self.$el.toggleClass(ns.annotate.Theme.attributes.CLASS_DISABLED, !self.isEnabled);
+        self._setSketchesEnabled(true);
+      } else if (condition === false) {
+        self.isEnabled = false;
+        self.popover.hide();
+        self.$el.toggleClass(ns.annotate.Theme.attributes.CLASS_DISABLED, !self.isEnabled);
+        self._setSketchesEnabled(false);
+      }
+
+      return self;
+    };
+
+    /**
+     * Sets the annotation to be active or inactive.
+     * @param {Boolean} [condition] activate or deactivate this annotation
+     * @return {Object} this annotation
+     */
+    self.setActive = function (condition) {
+      if (condition === true || condition === undefined) {
+        self.isActive = true;
+        self.$el.toggleClass(ns.annotate.Theme.attributes.CLASS_ACTIVE, !self.isActive);
+        ns.editables.map(function(inspectable) { inspectable.overlay.setSelected(false); }); /* TODO - refactor deselection of all overlays */
+        self.setOverlaySelected(true);
+        ns.annotate.ItemsController.setActive(self); /* TODO - refactor */
+
+      } else if (condition === false) {
+        self.isActive = false;
+        self.$el.toggleClass(ns.annotate.Theme.attributes.CLASS_ACTIVE, !self.isActive);
+        self.setOverlaySelected(false);
+      }
+
+      return self;
+    };
+
+    /**
+     * Sets the annotation's editable overlay to be selected or deselected.
+     * @param {Boolean} [condition] set annotation's editable overlay to be selected or deselected
+     */
+    self.setOverlaySelected = function (condition) {
+      if (self.editable && self.editable.overlay != undefined) {
+        if (condition === true || condition === undefined) {
+          self.editable.overlay.setSelected(true);
+        } else if (condition === false) {
+          self.editable.overlay.setSelected(false);
+        }
+      }
+    };
+
+    /**
+     * Set the z-index of the annotation mark
+     * @param {String|Number} [ZIndex] valid css ZIndex property
+     * @return {Object} this annotation
+     * */
+    self.setZIndex = function (ZIndex) {
+      self.$el.css("z-index", ZIndex + self.options.baseZIndex);
+
+      return self;
+    };
+
+    /**
+     * Gets the position of this annotation element relative to its offset parent
+     * @return {Object} The position of the annotation element
+     */
+    self.getPosition = function() {
+      return self.$el.position();
+    };
+
+    /* HOOKS
+     -------------*/
+
+    /**
+     * Executes the afterdelete listener.
+     * TODO - add other hooks and make them configurable
+     * */
+    self.afterDelete = function () {
+      self._destroy();
+    };
+
+    /**
+     * Executes the aftercreate listener.
+     * TODO - add other hooks and make them configurable
+     * */
+    self.afterCreate = function (data) {
+      self.options.path = $(data).find("#Path").text(); // Grab the new path
+      self.id = self.options.path.replace(/\//g, ''); // use stripped path as unique id for the annotation
+      self._buildAnnotation();
+      self._readModifiedInfo();
+      self.setActive(true);
+      ns.annotate.ItemsController.add(self);
+
+      Coral.commons.nextFrame(function() {
+        if (self.popover) {
+          self.popover.open = true;
+        }
+      })
+    };
+
+    /**
+     * Executes the afterupdate listener.
+     * */
+    self.afterUpdate = function (data) {
+      self._readModifiedInfo();
+    };
+
+    /* POSITIONING
+     -------------*/
+
+    /**
+     * Get the offset of the position element.
+     * */
+    self.getPosElOffset = function() {
+      if (self.$posEl) {
+        return {"top":self.$posEl.offset().top,"left":self.$posEl.offset().left}
+      }
+      return false;
+    };
+
+    /**
+     * Repositions the annotation based on its stored offset
+     * */
+    self.reposition = function() {
+      var posElOffset = self.getPosElOffset();
+      var pos = {
+        "x": Math.round(posElOffset.left + self.options.offsetX),
+        "y": Math.round(posElOffset.top + self.options.offsetY)
+      };
+      self._reposition(pos, false);
+    };
+
+    /**
+     * Repositions the annotation
+     * TODO - this could maybe be generalized - also used in ns.Annotation.Sketch logic
+     * @param {Object} pos {x:?,y:?} The new annotation position
+     * */
+    self._reposition = function(pos) {
+      $(self.$el).css({
+        top: pos.y,
+        left: pos.x
+      });
+    };
+
+    /**
+     * Calculates the offset of the annotation relative to the position element
+     * TODO - this function is used by both ns.Annotation and ns.Annotation.Sketch, generalize
+     * @param {Object} pos {x:?,y:?} The new annotation sketch position
+     * */
+    self._calcOffset = function(pos) {
+      var posElOffset = self.getPosElOffset(),
+          offset = {
+            "x": Math.round((pos.x - posElOffset.left) * 10) / 10,
+            "y": Math.round((pos.y - posElOffset.top) * 10) / 10
+          };
+      return offset;
+    };
+
+    /**
+     * Set the offset internal properties and persist
+     * @param {Object} offset {x:?,y:?} The offset from the position element
+     * @param {Boolean} [persist] Persist the new offset?
+     * */
+    self._setOffset = function(offset, persist) {
+      self.options.offsetX = offset.x;
+      self.options.offsetY = offset.y;
+
+      // Persist the new position for the annotation
+      if (persist !== false) {
+        ns.annotate.persistence.moveAnnotation(self, {"x":self.options.offsetX,"y":self.options.offsetY}, true);
+      }
+    };
+
+    /* EVENTING
+     -------------*/
+
+    self._addListeners = function() {
+      // Handle comment change
+      self.$comment.on('change', function() {
+        var val = $(this).val();
+        self.options.text = val;
+        self._updateProperty('text', $(this).val()); // Persist the new text value
+      });
+
+      // Handle drag and drop
+      if (self.options.draggable && !self._dragAction) {
+        self._dragAction = new Coral.DragAction(self.el);
+        self._dragAction.scroll = true;
+
+        self.el.addEventListener('coral-dragaction:dragstart', function (event) {
+          if (self.popover.open) {
+            self.popover.open = false;
+          }
+
+          self._dragStartPosition = { x : self.el.offsetLeft , y : self.el.offsetTop };
+          self.setActive(true);
+        });
+
+        self.el.addEventListener('coral-dragaction:dragend', function (event) {
+          var dropPosition = { x : self.el.offsetLeft, y : self.el.offsetTop };
+
+          if (self._dragStartPosition.x !== dropPosition.x && self._dragStartPosition.y !== dropPosition.y) {
+            // There has been a change of position
+            self.popover.interaction = "off";
+            self._setOffset(self._calcOffset(dropPosition), true);
+            self.setActive(false);
+            ns.annotate.Layer.handleItemsBeyondVisibleArea();
+          } else {
+            // No new position
+            self.popover.interaction = "on";
+            ns.annotate.Layer.handleItemsBeyondVisibleArea();
+          }
+        });
+      }
+    };
+
+    /* HELPERS
+     -------------*/
+
+    /**
+     * Attempt to read a friendly version (user name) from a user id
+     * via AuthorizableSearchServlet
+     * @param {String} userId The user id to search
+     * @returns {$.Deferred}
+     * */
+    self._getFriendlyUserString = function(userId) {
+      return $.ajax({
+        type: "GET",
+        dataType: "html",
+        url: ns.annotate.Annotation.AUTHORIZABLE_SERVLET_QUERY_TEMPLATE.replace('#NAME#',userId)
+      }).then(function(data) {
+        var dataJson = $.parseJSON(data),
+            userData, userString = "", success = false;
+
+        if (dataJson.hasOwnProperty('authorizables') && dataJson.authorizables.length) {
+          userData = dataJson.authorizables[0];
+          if (userData.hasOwnProperty('name')) {
+            userString = userData.name;
+            success = true;
+          }
+        }
+
+        if (success) {
+          return userString;
+        } else {
+          return $.Deferred().reject();
+        }
+      });
+    };
+
+    self._init(); // Initialize the annotation
+
+    return self;
+  };
+
+  /**
+   * Annotation default options.
+   * @type {Object}
+   */
+  ns.annotate.Annotation.defaults = {
+    "color"     : "blue",                   // The default color identifier
+    "offsetX"   : 0,                        // The X offset of the annotation mark relative to the left of the position element
+    "offsetY"   : 0,                        // The Y offset of the annotation mark relative to the top of the position element
+    "colors"    : ns.annotate.Theme.colors, // {Object} The colors available to an annotation (e.g. { "blue" : "#3287d2" } )
+    "draggable" : true,                     // Can the annotation mark be dragged?
+    "baseZIndex": ns.annotate.Theme.MAXIMUM_ANNOTATION_ITEMS // baseZIndex for annotation marks, which should be always on top of the sketches
+  };
+
+  /**
+   * Path for fetching user friendly name from id
+   * TODO - use a Granite library
+   */
+  ns.annotate.Annotation.AUTHORIZABLE_SERVLET_QUERY_TEMPLATE = '/libs/granite/security/search/authorizables.json?query={"condition":[{"named":"#NAME#"}]}';
+
+  /**
+   * Wait period for refreshing annotation modified info
+   */
+  ns.annotate.Annotation.MODIFIEDINFO_REFRESH_INTERVAL = 46000;
+
+}(jQuery, Granite.author, jQuery(document), this));

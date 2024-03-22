@@ -1,0 +1,1854 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+//editorLoaded = true;
+
+(function (window, document, Granite, $) {
+    "use strict";
+    var rel = "#videopreseteditor-wizard";
+    var WIZARD_HEADER = '.foundation-layout-wizard2-title';
+    var VIDEO_FRAME_RATE_PROP = "videoFramerate";
+	var MAXBITRATE_PROP = "maxBitrate";
+    var SOURCE_FRAME_RATE_KEY = "framerate1";
+    var SOURCE_FRAME_RATE_VAL = "source frame rate";
+    var SOURCE_FRAME_RATE_VAL_LOCALIZED = Granite.I18n.get("source frame rate");
+    var SOURCE_MAXBITRATE_KEY = "1.5x";	
+    var CONST_AVS_VIDEO_CODEC = 'MP4 H264 (.mp4)';
+    var CONST_NON_AVS_VIDEO_CODEC = 'MP4 H264 (.mp4)';
+    var CONST_AVS_AUDIO_BITRATE = '128';
+    var CONST_AUDIO_SAMPLE = '44100';
+    var CONST_AVS_VIDEO_FRAMERATE = 'source frame rate';	//'30';
+    var CONST_VIDEO_FRAMERATE = 'source frame rate';			//'25';
+	var CONST_H264PROFILE = 'high';
+    var validateFieldG;
+    var disableSavePerFieldG;
+    
+	    $(window).adaptTo("foundation-registry").register("foundation.validation.validator", {
+	    	selector: "[data-foundation-validation='videodata']",
+	        validate: function(el) {
+
+	        	if($('#' + el.id + '.isnotVisited').length != 0) {
+	        		if(!$('#' + el.id + '.isnotVisited').val()) {
+	        			disableSavePerFieldG(el.id);
+	        		}
+	        		return "";
+	        	}
+	        	if(!validateFieldG){
+	        		return;
+	        	}
+	        	
+	        	if($('#' + el.id).attr('data-chkvaliddata') == 'true'){
+	        		return "";
+	        	}
+	        	validateFieldG(el.id);
+	        	return $(el).data('tooltiptext');
+	        }
+	    });
+    
+        $(document).on("foundation-contentloaded", function (e) {
+            var $wizard = $(rel);
+            validateFieldG = validateField;
+            disableSavePerFieldG = disableSavePerField;
+            $wizard.off("submit", submit);
+            $wizard.on("submit", submit);
+            var avsEnabled;
+            var description;
+            var editMode;
+            var encodingPreset;
+            var errorList = [];
+            var saveAction;
+            var saveInProgress = false;
+
+            var audioBitrates;
+            var audioCodecs;
+            var videoCodecs;
+			var maxBitrate;
+            var currentVideoCodec='';
+            var lastSelectControl = '';
+
+            var samplingRates;
+            var frameRates;
+
+            var configurationPath = '/libs/settings/dam/dm/video/configuration.children.0.json';
+            var videoGroupPath;
+            var videoProfileGroupPath;
+            var presetId;
+            var group;
+            var title;
+            var smartcropPresets = "";
+            var smartcropPresetsStaticList = ["9x16", "16x9", "4x3", "4x5", "1x1"];
+            var presets = [];
+            var showDefaultsChangedWarning = false;
+            var showAvsIntegrityWarning = true;
+            var editorLoaded = false;
+
+            var constraint = CONST_CUSTOM;
+
+            $('#video-width').attr('autoEnabled', 'true');
+            $('#video-height').attr('autoEnabled', 'true');
+            $('#size-calc-width-txt').attr('autoEnabled', 'true');
+            $('#size-calc-height-txt').attr('autoEnabled', 'true');
+
+            $('#video-width').attr('evenInteger', 'true');
+            $('#video-height').attr('evenInteger', 'true');
+            $('#size-calc-width-txt').attr('evenInteger', 'true');
+            $('#size-calc-height-txt').attr('evenInteger', 'true');
+
+            var widthValidation = $('#video-width').adaptTo("foundation-validation");
+            if (widthValidation) {
+                widthValidation.checkValidity();
+            }
+
+            hideAllFields();
+
+            //hide tooltips
+            $('.infoTip').hide();
+
+            //get query parameters
+            presetId    = getQueryParam('preset');
+            group       = getQueryParam('group');
+            avsEnabled  = getQueryParam('avsEnabled');
+
+            group = decodeURIComponent(group);
+            var encodedGroup = encodeURIComponent(group);
+
+            if (widthValidation) {
+                var href = $wizard.find("[is='coral-anchorbutton']").attr("href");
+                if (href.indexOf('group=') == -1) {
+                    href += (href.indexOf('?') == -1 ? '?' : '&') + 'group=' + encodedGroup;
+                } else {
+                    var ar = href.split('?');
+                    var params = ar[1].split('&');
+                    for (var i = 0; i < params.length; i++) {
+                        var cur = params[i].split('=');
+                        if (cur[0] == 'group') {
+                            params[i] = 'group=' + encodedGroup;
+                            break;
+                        }
+                    }
+                    ar[1] = params.join('&');
+                    href = ar.join('?');
+                }
+                $wizard.find("[is='coral-anchorbutton']").attr("href", href);
+            }
+
+            if (showDefaultsChangedWarning)
+                showDefaultsChangedWarning  = ($.cookie("showDefaultsChangedWarning")==null);
+            showAvsIntegrityWarning     = ($.cookie("showAvsIntegrityWarning")==null);
+            
+            //set edit mode
+            editMode = (presetId !== undefined);
+            $(WIZARD_HEADER).html(editMode ? CONST_EDIT_VIDEO_ENCODING_TITLE : CONST_CREATE_VIDEO_ENCODING_TITLE);
+            //set save action
+            saveAction = (editMode)? 'edit' : 'create';
+
+            //get configuration data from JCR to populate fields
+            $.ajax({
+                  url: configurationPath,
+                  cache: false
+            }).done(function(data) {
+                //populate fields
+            	Coral.commons.nextFrame(function() {
+	                populateDefaults(data);
+
+	                if(group.length > 0) {
+	                    //load group
+	                    loadGroupData();
+	                }
+	                else {
+	                    //load group encodings
+	                    loadGroupEncodings();
+	                }
+            	});
+            });
+
+            addInfoTooltips();
+
+            function loadGroupData() {
+
+                //get configuration data from JCR to populate fields
+                $.ajax({
+                      url: CONST_VIDEO_PROFILE_QUERY_PATH,
+                      cache: false
+                }).done(function(data) {
+
+                    avsEnabled  = data['avsEnabled'];
+                    description = data['description'];
+                    group       = data['name'];
+                    title       = data['jcr:title'];
+
+                    for (var item in smartcropPresetsStaticList) {
+                        if (data['smartcrop'] && data['smartcrop'][smartcropPresetsStaticList[item]]) {
+                            smartcropPresets += (smartcropPresets != "")
+                                ? "|" + data['smartcrop'][smartcropPresetsStaticList[item]]['name'] + ";" + smartcropPresetsStaticList[item]
+                                : data['smartcrop'][smartcropPresetsStaticList[item]]['name'] + ";" + smartcropPresetsStaticList[item];
+                        }
+                    }
+
+                    //this is only for 6.2-created profiles; they do not have the title property set
+                    if (title == undefined) {
+                        title = group;
+                    }
+
+                    //load group encodings
+                    loadGroupEncodings();
+                });
+            }
+
+            function dms7Tooltip(el) {
+            	var descr = el.data('descriptionbase');
+                if(CONST_DMS7_SERVICE_CONFIGURED === 'false'){
+                    if(avsEnabled !== 'true') {
+                        descr += el.data('descriptionext');
+                    }
+            	}
+            	return descr;
+            }
+
+            function addInfoTooltips() {
+
+            	var rmv = $('#video-height').parent().find('coral-icon');
+            	rmv.on('click', function() {
+                    var modalElement = $('#sizeCalculatorHelp');
+                    if (modalElement != undefined && modalElement.length > 0) {
+                    	modalElement.adaptTo("foundation-toggleable").show();
+                        //set calculator values to reflect what is currently in the ui
+                        $('#size-calc-width-txt').val($('#video-width').val());
+                        $('#size-calc-height-txt').val($('#video-height').val());
+
+                        //default to custom
+                        constraint = CONST_CUSTOM;
+                        $('.sizeCalcRadio').prop('checked', false);
+                        $('#sizeCalculatorHelp .coral-RadioGroup input[value=3]').prop('checked', true);
+
+                        //resize video and center
+                        resizeVideoSizeCalculator();
+                    }
+                });
+            	
+            	$('#video-codec-ctnr coral-tooltip-content').html(dms7Tooltip($('#video-codec')));
+            	$('#audio-codec-ctnr coral-tooltip-content').html(dms7Tooltip($('#audio-codec')));
+            }
+
+            $('#btn-save').on('click', function() {
+                submitChanges();
+            });
+            
+            /*
+             *
+             * advance tab listeners
+             */
+
+            //enable disable controls based on selected
+            $(document).on('change', '#advanced-use-default-values', function() {
+
+                //deactivate fields anything that is not a select/combo control
+                if(this.checked) {
+                    $('.advancedTabFormControl[data-init!=select]').attr('disabled', 'disabled');
+                }
+                else {
+                    $('.advancedTabFormControl[data-init!=select]').removeAttr('disabled');
+
+                    //update select controls
+                    $('.advancedTabFormControl[data-init=select] > select').trigger('selected');
+                }
+
+
+                //deactivate select controls
+                var i;
+                var selectControlArr = $('.advancedTabFormControl[data-init=select]');
+                var len = selectControlArr.length;
+
+                //enable/disable comboboxes
+                for(i=0; i<len; i++) {
+
+                    var $combo = $(selectControlArr[i]);
+
+                    if(this.checked) {
+                        $combo.find('button').attr('disabled', 'disabled');
+                        disableControlCustomOptionHandler($combo);
+                    }
+                    else {
+                        $combo.find('button').removeAttr('disabled');
+						if($combo[0].id == "maxBitrate") continue;
+                        //disable associated text boxes according to existing logic around custom values
+                        selectControlCustomOptionHandler($combo);
+                        forceValidateControlCustomOptionHandler($combo);
+                    }
+                }
+				if($('#cb-constantBitrate').prop('checked')){
+					$('#cb-constantBitrate').trigger('change');
+				}
+            });
+            $(document).on('change', '#cb-constantBitrate', function() {
+
+                //deactivate fields anything that is not a select/combo control
+                if(this.checked) {
+                    //$('#maxBitrate[data-init!=select]').attr('disabled', 'disabled');
+					$('#maxBitrate').attr('disabled', 'disabled');
+					$('#maxBitrate-txt').removeAttr('data-chkvaliddata');
+					$('#maxBitrate-txt').attr('data-chkvaliddata', 'true');
+					$('#maxBitrate-txt').attr('disabled', 'disabled');
+					removeErrorField('#maxBitrate-txt');
+                }
+                else {
+                    $('#maxBitrate').removeAttr('disabled');
+
+                    //update select controls
+                    $('#maxBitrate[data-init=select] > select').trigger('selected');
+                }
+				selectMaxBitrate($('#maxBitrate'));
+
+                //deactivate select controls
+                /*var i;
+                var selectControlArr = $('#maxBitrate[data-init=select]');
+                var len = selectControlArr.length;
+
+                //enable/disable comboboxes
+                for(i=0; i<len; i++) {
+
+                    var $combo = $(selectControlArr[i]);
+
+                    if(this.checked) {
+                        $combo.find('button').attr('disabled', 'disabled');
+                        disableControlCustomOptionHandler($combo);
+                    }
+                    else {
+                        $combo.find('button').removeAttr('disabled');
+
+                        //disable associated text boxes according to existing logic around custom values
+                        //selectControlCustomOptionHandler($combo);
+						selectMaxBitrate($el);
+                        forceValidateControlCustomOptionHandler($combo);
+                    }
+                }*/
+            });
+
+            //global listener
+            $(document).on('change coral-select', function(e) {
+            	$('#'+e.target.id).trigger('selected');
+            });
+            $(document).on('selected', 'coral-select', function(e) {
+
+                var $el = $(this);
+                var id = $(this).attr('id');
+
+                //if the select codec is the last selected codec, bail
+                if(lastSelectControl === id + $el.val()) {
+                    return;
+                }
+                lastSelectControl = id + $el.val();
+
+                switch(id) {
+                    case 'video-codec':
+
+                        loadSupportedAudioCodecs($el.val());
+
+                        //if this is an AVS set audio codec and bitrate to dynamic media compliment values
+                        if(avsEnabled === 'true' && $el.val() === CONST_AVS_VIDEO_CODEC ) {
+                            $('#keep-aspect-ratio').prop('checked', true);
+
+                            setDefaultValuesForAvs();
+                            return;
+                        }
+                        break;
+                    case 'audio-bitrate':
+                        selectControlCustomOptionHandler($el);
+                        break;
+                    case 'videoFramerate':
+                        selectControlCustomOptionHandler($el);
+                        break;
+                    case 'audioSample':
+                        selectControlCustomOptionHandler($el);
+                        break;
+                    case 'maxBitrate':
+						selectMaxBitrate($el);
+                        //selectControlCustomOptionHandler($el);
+                        break;
+                }
+            });
+
+            $('.defaultField').on('change', function() {
+
+                //load preset data if applicable
+                if(!editorLoaded) {
+                    return;
+                }
+
+                if(!showDefaultsChangedWarning) {
+                    return;
+                }
+
+                //skip if this is not an avs
+                if($('#video-codec').get(0).value !== CONST_AVS_VIDEO_CODEC) {
+                    return;
+                }
+
+                var defaultValueChanged =  defaultsChanged(this.id);
+
+                if(defaultValueChanged && showDefaultsChangedWarning) {
+                    $('#encoding-constraing-warning').modal('show');
+                }
+            });
+
+
+            $('#video-bitrate.isnotVisited').on('focus', function(e) {
+            	$('#video-bitrate.isnotVisited').off('focus');
+            	$('#video-bitrate').removeClass('isnotVisited');
+                $('#video-bitrate').one('focusout', function(e) {
+                	$('#video-bitrate').trigger('change');
+                });
+            });
+
+            $('#video-height.isnotVisited').on('focus', function(e) {
+            	$('#video-height.isnotVisited').off('focus');
+            	$('#video-height').removeClass('isnotVisited');
+                $('#video-height').one('focusout', function(e) {
+                	$('#video-height').trigger('change');
+                });
+            });
+
+            
+            $('.defaultField').on('selected', function() {
+
+                //load preset data if applicable
+                if(!editorLoaded) {
+                    return;
+                }
+
+                if(!showDefaultsChangedWarning) {
+                    return;
+                }
+
+                //skip if this is not an avs
+                if($('#video-codec').get(0).value !== CONST_AVS_VIDEO_CODEC) {
+                    return;
+                }
+
+                 //get id
+                var componentId = this.id.split('')[0];
+                var defaultValueChanged =  defaultsChanged(componentId);
+
+                if(defaultValueChanged && showDefaultsChangedWarning) {
+                    $('#encoding-constraing-warning').modal('show');
+                }
+            });
+
+            function setCookie(name, value) {
+                $.cookie(name, value, { expires : 10 });
+            }
+
+            $('#cb-supress-preset-warning').on('change', function() {
+
+                showDefaultsChangedWarning = !this.checked;
+
+                setCookie('showDefaultsChangedWarning', false);
+            });
+
+            $('#cb-supress-avs-warning').on('change', function() {
+
+                showAvsIntegrityWarning = !this.checked;
+
+                setCookie('showAvsIntegrityWarning', false);
+            });
+
+            $('#btn-save-set').on('click', function() {
+
+                submitChanges('true');
+            });
+            $('#video-bitrate').on('change', function() {
+				selectMaxBitrate($('#maxBitrate'));
+            });
+            function presetsIntegrityIsValid() {
+
+                var i;
+                var len = presets.length;
+                var masterPreset;
+                var valid = true;
+
+                if((len == 0) || (len == 1 && editMode)) {
+                    return true;
+                }
+
+                for(i=0;i<len;i++) {
+
+                    if(masterPreset === undefined) {
+                        masterPreset = presets[i];
+                        masterPreset['audioCodec']      = presets[i]['audioCodec'];
+                        masterPreset['audioBitrate']    = presets[i]['audioBitrate'];
+                        masterPreset['keepAspectRatio'] = presets[i]['keepAspectRatio'];
+                        masterPreset['twoPass']         = presets[i]['twoPass'];
+                        masterPreset['constantBitrate'] = presets[i]['constantBitrate'];
+                        masterPreset['h264Profile']     = presets[i]['h264Profile'];
+						masterPreset['maxBitrate']      = presets[i]['maxBitrate'];
+                        masterPreset['audioSample']     = presets[i]['audioSample'];
+                    }
+
+                    if(masterPreset['videoCodec'] !== CONST_AVS_VIDEO_CODEC) {
+                        return true;
+                    }
+
+                    if($('#audio-codec').get(0).value !== masterPreset['audioCodec']) {
+                        valid = false;
+                    }
+                    if($('#audio-bitrate').get(0).value == 'CUSTOM') {
+                    	if($('#audio-bitrate-txt').get(0).value !== masterPreset['audioBitrate']) {
+                    		valid = false;
+        				}
+                    } else if($('#audio-bitrate').get(0).value !== masterPreset['audioBitrate']) {
+        				valid = false;
+                    } 
+
+                    if($('#keep-aspect-ratio').prop('checked') != toBool(masterPreset['keepAspectRatio'])) {
+                        valid = false;
+                    }
+
+                	if($('#cb-twoPass').prop('checked') != (toBool(masterPreset['twoPass']) || masterPreset['twoPass'] == undefined )) {
+                		valid = false;
+                	}
+                	
+                    if($('#cb-constantBitrate').prop('checked') != toBool(masterPreset['constantBitrate'])) {
+                    	valid = false;
+                    }
+                    
+					if($('#h264Profile').val() !== (masterPreset['h264Profile'] !== undefined ? masterPreset['h264Profile'] : CONST_H264PROFILE)){
+						valid = false;
+					}
+
+					var audioSampleVal = masterPreset['audioSample'] !== undefined ? masterPreset['audioSample'] : CONST_AUDIO_SAMPLE;
+					if($('#audioSample').get(0).value == 'CUSTOM') {
+                    	if($('#audioSample-txt').get(0).value !== audioSampleVal) {
+                    		valid = false;
+        				}
+					} else  if($('#audioSample').get(0).value !== audioSampleVal) {
+                        valid = false;
+					}
+                }
+
+                return valid;
+            }
+
+            function toBool(val) {
+            	return val == "true";
+            }
+
+            function defaultsChanged(id) {
+
+                if(avsEnabled === 'false') {
+                    return false;
+                }
+
+                if(id === 'audio-codec' && $('#audio-codec').get(0).value !== 'Dolby HE-AAC') {
+                    return true;
+                }
+
+                if(id === 'audio-bitrate' && $('#audio-bitrate').get(0).value !== CONST_AVS_AUDIO_BITRATE) {
+                    return true;
+                }
+
+                if(id === 'keep-aspect-ratio' && !$('#keep-aspect-ratio').prop('checked')) {
+                    return true;
+                }
+
+                if(id === 'cb-twoPass' && $('#cb-twoPass').prop('checked')) {
+                    return true;
+                }
+
+                if(id === 'cb-constantBitrate' && $('#cb-constantBitrate').prop('checked')) {
+                    return true;
+                }
+
+                if(id === 'h264Profile' && $('#h264Profile').val() !== CONST_H264PROFILE) {
+                    return true;
+                }
+                if(id === 'audioSample' && $('#audioSample').val() !== CONST_AUDIO_SAMPLE) {
+                    return true;
+                }
+                return false;
+            }
+
+            function checkAdvanced() {
+                if(!$('#cb-twoPass').prop('checked')) {
+                    return false;
+                }
+
+                if($('#cb-constantBitrate').prop('checked')) {
+                    return false;
+                } else if($('#maxBitrate').val() !== SOURCE_MAXBITRATE_KEY) {
+                	return false;
+                }
+
+                if($('#h264Profile').val() !== CONST_H264PROFILE) {
+                    return false;
+                }
+                if($('#videoFramerate').val() !== (avsEnabled === 'true' ? CONST_AVS_VIDEO_FRAMERATE : CONST_VIDEO_FRAMERATE)) { // avs=30; no_avs=25
+                    return false;
+                }
+                if($('#audioSample').val() !== CONST_AUDIO_SAMPLE) {
+                    return false;
+                }
+                return true;
+            }
+            function setDefaultValuesForNonAvs() {
+                Coral.commons.nextFrame(function() {
+	                $('#videoFramerate').get(0).value = CONST_VIDEO_FRAMERATE;
+	                $('#videoFramerate').trigger('selected');
+                });
+            }
+
+            function setDefaultValuesForAvs(notify) {
+                $('#video-codec').get(0).value = CONST_AVS_VIDEO_CODEC;
+
+                if(notify !== undefined) {
+                    $('#video-codec').trigger('selected');
+                }
+                Coral.commons.nextFrame(function() {
+                    $('#audio-codec').get(0).value = 'Dolby HE-AAC';
+                    $('#audio-codec').trigger('selected');
+
+	                $('#videoFramerate').get(0).value = CONST_AVS_VIDEO_FRAMERATE;
+	                $('#videoFramerate').trigger('selected');
+
+	                //set audio bitrate to predetermined value
+	                $('#audio-bitrate').get(0).value = CONST_AVS_AUDIO_BITRATE;
+	                $('#audio-bitrate').trigger('selected');
+
+	                //set cb-twoPass to true
+	                $('#cb-twoPass').prop('checked', true);
+
+	                //set cb-twoPass to true
+	                $('#cb-constantBitrate').prop('checked', false);
+
+	                //audio sample rate
+	                $('#audioSample').get(0).value = '44100';
+	                $('#audioSample').trigger('selected');
+                });
+          }
+
+            function setValuesToMatchMasterPreset() {
+
+                var masterPreset = presets[0];
+
+                $('#video-codec').get(0).value = masterPreset['videoCodec'];
+                $('#video-codec').trigger('selected');
+
+                Coral.commons.nextFrame(function() {
+                    $('#audio-codec').get(0).value = masterPreset['audioCodec'];
+                    $('#audio-codec').trigger('selected');
+
+	                //set audio bitrate to predetermined value
+	                $('#audio-bitrate').get(0).value = masterPreset['audioBitrate'];
+                    if($('#audio-bitrate').get(0).value != masterPreset['audioBitrate']) {
+                    	$('#audio-bitrate').get(0).value = 'CUSTOM';
+                        $('#audio-bitrate-txt').val(masterPreset['audioBitrate']);
+                    }
+	                $('#audio-bitrate').trigger('selected');
+
+	                //set keep aspect ratio to true
+	                $('#keep-aspect-ratio').prop('checked', (masterPreset['keepAspectRatio'] === 'true'));
+
+	                //set cb-twoPass to true if undefined <==> (default value)
+					$('#cb-twoPass').prop('checked', (masterPreset['twoPass']==='true' || masterPreset['twoPass'] == undefined));
+
+	                //set cb-twoPass to true
+	                if(masterPreset['constantBitrate'] !== undefined) {
+	                    $('#cb-constantBitrate').prop('checked', (masterPreset['constantBitrate'] === 'true'));
+						$('#cb-constantBitrate').trigger('change');
+	                }
+
+	                if(masterPreset['h264Profile'] !== undefined) {
+	                    $('#h264Profile').get(0).value = masterPreset['h264Profile'];
+	                    $('#h264Profile').trigger('selected');
+	                }
+	                if(masterPreset['maxBitrate'] !== undefined) {
+	                    $('#maxBitrate').get(0).value = masterPreset['maxBitrateCustom'];
+	                    $('#maxBitrate').trigger('selected');
+	                }
+	                //audio sample rate
+	                if(masterPreset['audioSample'] !== undefined) {
+	                    $('#audioSample').get(0).value = masterPreset['audioSample'];
+	                    if($('#audioSample').get(0).value != masterPreset['audioSample']) {
+	                    	$('#audioSample').get(0).value = 'CUSTOM';
+	                        $('#audioSample-txt').val(masterPreset['audioSample']);
+	                    }
+	                    $('#audioSample').trigger('selected');
+
+	                }
+
+	                $('#advanced-use-default-values').prop('checked', checkAdvanced());
+	                $('#advanced-use-default-values').trigger('change');
+                });
+
+            }
+
+            $('#sizeCalculatorHelp .coral-RadioGroup').on('change', function() {
+
+                var target;
+
+                //set constraint
+                constraint = this.value;
+
+                //set target if the value is not equal to custom
+                if(this.value !== CONST_CUSTOM) {
+                    target = this.id;
+                }
+
+                //resize video and pass the updated field's id
+                resizeVideoSizeCalculator();
+            });
+
+            function disableControlCustomOptionHandler($control) {
+
+                var id = $($control).get(0).id;
+                var $el = $('#' + id + '-txt');
+                $el.removeAttr('data-chkvaliddata');
+            	$el.attr('data-chkvaliddata', 'true');
+            	$el.trigger('change');
+            	$el.attr('disabled', 'disabled');
+                removeErrorField(id + '-txt');
+            }
+
+            function forceValidateControlCustomOptionHandler($control) {
+                var id = $($control).get(0).id;
+                var $el = $('#' + id + '-txt');
+                $el.trigger('change');
+            }
+
+			function selectMaxBitrate($control) {
+                //grab id off of parent node
+                var id = $($control).get(0).id;
+                var $el = $('#' + id + '-txt');
+
+                if($control.val() && $control.val().toLowerCase() === 'custom') {
+                    //enable textfield and set bitrate vale to positive int
+                	$el.removeAttr('disabled');
+
+                    //add to validation schema
+
+                	$el.removeAttr('data-chkvaliddata');
+
+                    //if the text field's value is "custom" clear for user input
+                    if($el.val().toLowerCase() === CUSTOM.toLowerCase()) {
+                        $el.val('');
+                        $el.select();
+                        $el.focus();
+                        $el.trigger('change');
+                    }
+                } else {
+                    //disable text and set prompt to maxbitrate value
+                	$el.attr('data-chkvaliddata', 'true');
+                	$el.val($('#video-bitrate').get(0).value == "" ? 0 :  Math.round($('#video-bitrate').get(0).value * $('#maxBitrate').get(0).value.split('x')[0]) );
+                	$el.trigger('change');
+                	$el.attr('disabled', 'disabled');
+                    removeErrorField(id + '-txt');
+                }
+			}
+
+            function selectControlCustomOptionHandler($control) {
+                //grab id off of parent node
+                var id = $($control).get(0).id;
+                var $el = $('#' + id + '-txt');
+
+                if($control.val() && $control.val().toLowerCase() === 'custom') {
+                    //enable textfield and set bitrate vale to positive int
+                	$el.removeAttr('disabled');
+
+                    //add to validation schema
+
+                	$el.removeAttr('data-chkvaliddata');
+
+                    //if the text field's value is "custom" clear for user input
+                    if($el.val().toLowerCase() === CUSTOM.toLowerCase()) {
+                        $el.val('');
+                        $el.select();
+                        $el.focus();
+                        $el.trigger('change');
+                    }
+                } else {
+                    //disable text and set prompt to "Custom"
+                	$el.attr('data-chkvaliddata', 'true');
+                	$el.val(CUSTOM);
+                	$el.trigger('change');
+                	$el.attr('disabled', 'disabled');
+
+                    removeErrorField(id + '-txt');
+
+                    //remove from validation schema
+
+                }
+            }
+
+            $('#sizeCalculatorHelp .sizeCalculator-inputField').on('change', function(event) {
+                var valid = validateField(this.id);
+
+                if(!valid) {
+                    return;
+                }
+
+                if(this.id === 'size-calc-width-txt' || this.id === 'size-calc-height-txt') {
+                    resizeVideoSizeCalculator(this.id);
+                }
+            });
+
+            function loadGroupEncodings() {
+
+                var path = CONST_VIDEO_PRESETS_QUERY_PATH;
+                $.ajax({
+                      url: path,
+                      cache: false
+                }).done(function(data) {
+                    
+                    presets = [];
+                    var len = data.length;
+                    
+                    for(var i=0;i < len; i++) {
+                        
+                        var preset      = {};
+                        preset['videoCodec'] = data[i]['videoCodec'];
+                        preset['audioCodec'] = data[i]['audioCodec'];
+                        preset['audioBitrate'] = data[i]['audioBitrate'];
+                        preset['audioBitrateCustom'] = data[i]['audioBitrateCustom'];
+                        preset['keepAspectRatio'] = data[i]['keepAspectRatio'];
+                        preset['twoPass'] = data[i]['twoPass'];
+                        preset['constantBitrate'] = data[i]['constantBitrate'];
+                        preset['h264Profile'] = data[i]['h264Profile'];
+                        preset['audioSample'] = data[i]['audioSample'];
+						preset['maxBitrate'] = data[i]['maxBitrate'];
+						preset['maxBitrateCustom'] = data[i]['maxBitrateCustom'];
+                        preset['id'] = data[i]['id'];
+                        
+                        if(preset['videoCodec'] === CONST_AVS_VIDEO_CODEC) {
+                            
+                        }
+                        
+                        //save preset
+                        presets.push(preset);
+                    }
+                    
+                    //load preset data if applicable
+                    if(editMode) {
+                        loadPresetData();
+                    } else {
+                        //notify user to populate necessary/missing fields and disable editor if applicable
+                        $('#video-bitrate').trigger('change');
+                        $('#keep-aspect-ratio').prop('checked', true);
+						$('#cb-twoPass').prop('checked', true);
+                        
+                        if(avsEnabled === 'true') {
+                            //if there are already presets in the group, assign values to this preset
+                            if(presets.length  > 0 && presets[0].videoCodec === 'MP4 H264 (.mp4)') {
+                                setValuesToMatchMasterPreset();
+                            } else {
+                                setDefaultValuesForAvs(true);
+                            }
+                        } else {
+                        	setDefaultValuesForNonAvs();
+                        }
+                        
+                        editorLoaded = true;
+                    }
+                    
+                });
+            }
+            
+            function rebuildSelectControl(optionList, selectId, addCustomOption) {
+            	
+                var selectComp = $(selectId).get(0);
+                var oldSelectedExists = false;
+                var oldSelectedValue = null;
+                if(selectComp.selectedItem){
+                	oldSelectedExists = true;
+                	oldSelectedValue = selectComp.selectedItem.value;
+                }
+                
+                selectComp.items.clear();
+
+                var defaultsel;
+                if (optionList != undefined && optionList.length > 0) {
+                	var items = [];
+                	for (var i = 0; i < optionList.length; i++) {
+                		items.push({content: { innerHTML: optionList[i].val}, value: optionList[i].val, selected: oldSelectedExists && optionList[i].val == oldSelectedValue });
+                	}
+
+                	if(addCustomOption !== undefined) {
+                    	items.push({content: { innerHTML: CUSTOM, value: 'CUSTOM', selected: oldSelectedExists && 'CUSTOM' == oldSelectedValue}});
+                    }
+                	
+                	var itms_ = selectComp.items;
+                	for (var i = 0; i < items.length; i++) {
+                		var itm_ = itms_.add(items[i]);
+                		if(items[i].selected){
+            				var selectId_ = selectId;
+                            /*
+                             use Coral.commons.ready to wait until all items in the coral select list are available
+                             before triggering "click" on the item, otherwise, index i might be out of bounds when
+                             $(selectId_).find('coral-selectlist-item') contains only 1 item in DOM upon page initialization.
+                              */
+                            Coral.commons.ready($(selectId_).get(0), createTriggerHandlerForItem(i));
+                    	}
+                	}
+                }
+
+                function createTriggerHandlerForItem(index) {
+                    return function () {
+                        $(selectId_).find('coral-selectlist-item')[index].trigger('click');
+                    };
+                }
+            }
+
+            function populateDefaults(dataObj) {
+                var ac;
+
+                var encodingService = "dynamicmedia";
+
+                //populate arrays
+                videoCodecs = objectToArray(dataObj[1][encodingService]['codecs']);
+                audioCodecs = dataObj[0][encodingService]['codecs'];
+                ac = objectToArray(dataObj[0][encodingService]['codecs'][videoCodecs[0]['key']]);
+                audioBitrates = objectToArray(dataObj[0]['bitrates']);
+                audioBitrates = audioBitrates.sort();
+				maxBitrate = objectToArray(dataObj[1]['maxbitrate']);
+				maxBitrate = maxBitrate.sort();
+                
+                //get advanced options
+                samplingRates = objectToArray(dataObj[0]['samplingrates']);
+                samplingRates = samplingRates.sort();
+                frameRates = objectToArray(dataObj[1]['framerates']);
+                frameRates = frameRates.sort();
+                /*
+                 CQ-74326: This string 'source frame rate' isn't translated in 'Create New Video Encoding Profile' page
+                 Replace "source frame rate" by localized text after sorting to preserve order.
+                 */
+                if (frameRates) {
+                    for (var i = 0; i < frameRates.length; i++) {
+                        if (frameRates[i].key == SOURCE_FRAME_RATE_KEY) {
+                            frameRates[i].val = SOURCE_FRAME_RATE_VAL_LOCALIZED;
+                        }
+                    }
+                }
+
+                //populate comboboxes
+                rebuildSelectControl(videoCodecs,   '#video-codec');
+                rebuildSelectControl(audioBitrates, '#audio-bitrate', true);
+                rebuildSelectControl(frameRates, '#videoFramerate', true);
+                rebuildSelectControl(samplingRates, '#audioSample', true);
+				rebuildSelectControl(maxBitrate, '#maxBitrate', true);
+                
+                //$('#h264Profile').select({});
+                function waitVideoCodec(){
+                	if(!$('#video-codec').get(0).value) {
+                		setTimeout(waitVideoCodec, 20);
+                		return;
+                	}
+                	//trigger change to load supported audio codecs
+                    $('#audio-bitrate').trigger('selected');
+                    $('#videoFramerate').trigger('selected');
+                    $('#audioSample').trigger('selected');
+             //set min max values for video width/height
+	                var size = dataObj[1][encodingService]['size'];
+	                $('#video-width').attr('data-min', size['minWidth']);
+	                $('#video-width').attr('data-max', size['maxWidth']);
+	                $('#video-height').attr('data-min', size['minHeight']);
+	                $('#video-height').attr('data-max', size['maxHeight']);
+
+	                $('#size-calc-width-txt').attr('data-min', size['minWidth']);
+	                $('#size-calc-width-txt').attr('data-max', size['maxWidth']);
+	                $('#size-calc-height-txt').attr('data-min', size['minHeight']);
+	                $('#size-calc-height-txt').attr('data-max', size['maxHeight']);
+	
+	                //set minimum value for video bitrate field
+	                $('#video-bitrate').attr('data-min', 1);
+	                
+	                //set audio bitrate to predetermined value
+	            //    $('#audio-bitrate').get(0).value='64';
+	            //    $('#audio-bitrate').trigger('selected');
+	                
+	                //audio sample rate
+	                $('#audioSample').get(0).value='44100';
+	                $('#audioSample').trigger('selected');
+	                
+	                //audio sample rate
+	                $('#maxBitrate').get(0).value='1.5x';
+	                $('#maxBitrate').trigger('selected');					
+	                
+	                if(avsEnabled === 'true') {
+	                    $('#video-codec').get(0).value = CONST_AVS_VIDEO_CODEC;
+	                    $('#video-codec').trigger('selected');
+	                    
+	                    //disable video codec to inhibit users from changing this value when avs is enabled
+	                    $('#video-codec').find('button').addClass('is-disabled');
+	                    $('#video-codec').find('button').attr('disabled', 'disabled');
+	                    
+	                } else {
+	                	$('#video-codec').get(0).value = CONST_NON_AVS_VIDEO_CODEC;
+	                	$('#video-codec').trigger('selected');
+	                }
+	                /*
+	                 * advanced tab settings
+	                 */
+	                $('#advanced-use-default-values').prop('checked', true);
+	                $('#advanced-use-default-values').trigger('change');
+                };
+                
+                waitVideoCodec();
+            }
+
+            function loadPresetData() {
+
+                var path = CONST_VIDEO_PROFILE_PATH + '/' + encodeURIComponent(presetId) + '.json';
+
+                $.ajax({
+                      url: path,
+                      cache: false
+                }).done(function(data) {
+                    
+                    //set video codec
+                	$('#video-codec').get(0).value=data['videoCodec'];
+                    $('#video-codec').trigger('selected');
+                    
+                    //set audio codec
+                    Coral.commons.nextFrame(function() {
+                    	$('.isnotVisited').removeClass('isnotVisited');
+                    	errorList = [];
+                    	
+                        $('#audio-codec').get(0).value=data['audioCodec'];
+                        $('#audio-codec').trigger('selected');
+                    
+	                    //set video bitrate
+	                    $('#video-bitrate').val(data['videoBitrate']);
+	                    $('#video-bitrate').trigger('change');
+	                    
+	                    //set audio bitrate
+	                    if(data['audioBitrateCustom'] === 'true') {
+	                    	$('#audio-bitrate').get(0).value='CUSTOM';
+	                        $('#audio-bitrate-txt').val(data['audioBitrate']);
+	                        $('#audio-bitrate-txt').removeAttr('disabled');
+	                    }
+	                    else {
+	                    	$('#audio-bitrate').get(0).value=data['audioBitrate'];
+	                    }
+	                    $('#audio-bitrate').trigger('selected');
+	                    
+	                    
+	
+	                    //set size
+	                    var w = data['width'];
+	                    var h = data['height'];
+	                    
+	                    if(w === '0') {
+	                        w = CONST_AUTO;
+	                    }
+	                    
+	                    if(h === '0') {
+	                        h = CONST_AUTO;
+	                    }
+	                    
+	                    $('#video-width').val(w);
+	                    $('#video-width').trigger('change');
+	                    $('#video-height').val(h);
+	                    $('#video-height').trigger('change');
+	                    
+	                    //set keep aspect ratio flag
+	                    $('#keep-aspect-ratio').prop('checked', (data['keepAspectRatio'] === 'true')? true : false);
+	                    
+						//set twoPass flag
+	                    $('#cb-twoPass').prop('checked', (data['twoPass'] === 'true' || data['twoPass'] == undefined)? true : false);	                    
+	                    
+	                    /**
+	                     * load advanced tab options
+	                     */
+	                    var i;
+	                    var advancedControlsArr = $('.advancedTabFormControl');
+	                    var len = advancedControlsArr.length;
+	                    var $el;
+	                    var controlType;
+	                    var propName;
+	                    var propVal;
+	                    var hasAdvancedProps = false;
+	                    
+	                    for(i=0;i<len;i++) {
+	                        $el = $(advancedControlsArr[i]);
+	                        controlType = $el.find('input').attr('type');
+	                        
+	                        if( controlType !== undefined && controlType === 'checkbox') {
+	                            //prop name
+	                            propName    = $el.attr('id').split('cb-')[1];
+	                            propVal     = data[propName];
+	                            //if the value is undefined just skip it...
+	                            if(propVal === undefined) {
+	                                continue;
+	                            }
+	                            var checked = (propVal === 'true')? true : false;
+	                            $el.prop('checked', checked);
+	                            continue;
+	                        }
+	                        
+	                        if($el.is('coral-select')) {
+	                            //prop name
+	                            propName    = $el.attr('id');
+	                            propVal     = data[propName];
+	
+	                            /*
+	                             CQ-74326: This string 'source frame rate' isn't translated in 'Create New Video Encoding Profile' page
+	                             If property is videoFramerate and value is the "source frame rate", then set to localized
+	                             version, otherwise it would be treated as custom value.
+	                             Note: original (non-localized) version "source frame rate" is saved in CRX in order not to
+	                             break backend encoding.
+	                              */
+	                            if (propName == VIDEO_FRAME_RATE_PROP && (propVal == SOURCE_FRAME_RATE_VAL || propVal == undefined)) {
+		                            propVal = SOURCE_FRAME_RATE_VAL_LOCALIZED;
+	                            }
+								//
+								if (propName == "maxBitrateCustom") continue;
+								if (propName == MAXBITRATE_PROP && data['maxBitrateCustom']) {
+									if(data['maxBitrateCustom'].toLowerCase() === 'custom') {
+										$('#maxBitrate').get(0).value='CUSTOM';
+										$('#maxBitrate-txt').val(data['maxBitrate']);
+										$('#maxBitrate-txt').removeAttr('disabled');
+									}
+									else {
+										$('#maxBitrate').get(0).value=data['maxBitrateCustom'];
+										$('#maxBitrate-txt').val(data['maxBitrate']);
+									}
+									//$('#maxBitrate').trigger('selected');									
+									/*if(maxBitrateVal && maxBitrateVal.toLowerCase() === 'custom') {
+										urlParams += '&maxBitrate=' + maxBitrateCustomVal;
+										urlParams += '&maxBitrateCustom=true';
+									}
+									else {
+										urlParams += '&maxBitrate=' + maxBitrateCustomVal;
+										urlParams += '&maxBitrateCustom=false'
+									}	*/			
+
+									continue;
+								}	
+	                            //get select control id
+	                            var selobj = $el.get(0); 
+	                            //set value
+	                            if(propVal !== undefined) {
+	                            	selobj.value=propVal;
+	
+	                            }
+	                            //if value is not the value we attempted to set make custom
+	                            if(propVal !== undefined && (!selobj.selectedItem || selobj.selectedItem.value !== propVal)) {                                
+	                            	selobj.value="CUSTOM";
+	                            	$('#' + propName + '-txt').val(propVal);
+	                            }
+	                        	$el.trigger('selected');
+	                            continue;
+	                        }
+	                    }
+	                    
+	                    /*
+	                     * advanced tab settings
+	                     */
+	                    $('#advanced-use-default-values').prop('checked', checkAdvanced());
+	                    $('#advanced-use-default-values').trigger('change');
+
+	                    //For custom maxBitrate, we *do* need a validity check. Hence remove data-chkvaliddata
+	                    //which makes the vaidity-check skip this field
+	                    if($('#maxBitrate').val() === 'CUSTOM') {
+	                        $('#maxBitrate-txt').removeAttr('data-chkvaliddata');
+	                    }
+
+	                    editorLoaded = true;
+                    });
+
+                });
+            }
+
+            function resizeVideoSizeCalculator(target) {
+                
+                //get dimensions
+                var h2;
+                var w2;
+                var w = $('#size-calc-width-txt').val();
+                var h = $('#size-calc-height-txt').val();
+                var fieldToValidate;
+
+                constraint = $('#sizeCalculatorHelp .coral-RadioGroup input:checked').val();
+
+                //if aspect ratio is passed in use it...
+                if(constraint !== CONST_CUSTOM) {
+                    
+                    if(constraint === CONST_4_3) {
+                        
+                        if(target === 'size-calc-width-txt') {
+                            w2 = 3 * w;
+                            h = w2 / 4;
+                            
+                            //set field to update
+                            h = parseInt(h);
+                            fieldToValidate = $('#size-calc-height-txt').val(h).attr('id');
+                        }
+                        else if(target === 'size-calc-height-txt'){
+                            h2 = 4 * h;
+                            w = h2 / 3;
+                            
+                            //set field to update
+                            w = parseInt(w);
+                            fieldToValidate = $('#size-calc-width-txt').val(w).attr('id');
+                        }
+                        else {
+                            w = 400;
+                            h = 300;
+                            
+                            $('#size-calc-width-txt').val(w);
+                            $('#size-calc-height-txt').val(h);
+                        }
+                    }
+                    
+                    if(constraint === CONST_16_9) {
+                        
+                        if(target === 'size-calc-width-txt') {
+                            
+                            w2 = 9 * w;
+                            h = w2 / 16;
+                            
+                            //set field to update
+                            h = parseInt(h);
+                            fieldToValidate = $('#size-calc-height-txt').val(h).attr('id');
+                        }
+                        else if(target === 'size-calc-height-txt') {
+                            
+                            h2 =16 * h;
+                            w = h2 / 9;
+                            
+                            //set field to update
+                            w = parseInt(w);
+                            fieldToValidate = $('#size-calc-width-txt').val(w).attr('id');
+                        }
+                        else {
+                            w = 400;
+                            h = 225;
+                            
+                            $('#size-calc-width-txt').val(w);
+                            $('#size-calc-height-txt').val(h);
+                        }
+                    }
+                    
+                    if(fieldToValidate !== undefined) {
+                        validateField(fieldToValidate);
+                    }
+                }
+                
+                //set width
+                $('#preview-content').width(w);
+                $('#preview-content').height(h);
+
+                //vertically center content
+                var heightOffset = $('#preview-content').parent().height() - $('#preview-content').height();
+                $('#preview-content').css('margin-top'  , heightOffset / 2);
+
+                //set calculator values to reflect what is currently in the ui
+                $('#video-width').val(w);
+                $('#video-height').val(h);
+                
+                $('#video-width').trigger('change');
+                $('#video-height').trigger('change');
+                Coral.commons.nextFrame(function() {
+                	$("#sizeCalculatorHelp").trigger('center');
+                });
+
+            }
+
+            function loadSupportedAudioCodecs(videoCodec) {
+                var ac = [];
+                var i;
+                var len = videoCodecs.length;
+                
+                for(i=0;i<len;i++) {
+                    
+                    if(videoCodecs[i].val === videoCodec) {
+                        ac = objectToArray(audioCodecs[videoCodecs[i].key]);
+                        rebuildSelectControl(ac,'#audio-codec');
+                    }
+                }
+            }
+
+            function submitChanges(forceSave) {
+            	var videoCodecVal = $('#video-codec').get(0).value;
+                var videoBitrateVal = $('#video-bitrate').get(0).value;
+                var audioCodecVal = $('#audio-codec').get(0).value;
+                var audioBitrateVal = $('#audio-bitrate').get(0).value;
+                var audioBitrateCustomVal = $('#audio-bitrate-txt').val();
+				var maxBitrateVal = $('#maxBitrate').val();				
+				var maxBitrateCustomVal = $('#maxBitrate-txt').val();
+                
+        		var chk = checkAdvanced();
+            	$('#advanced-use-default-values').prop('checked', chk);
+            	$('#advanced-use-default-values').trigger('change');
+
+                if(forceSave === undefined && avsEnabled === 'true' && showAvsIntegrityWarning && !presetsIntegrityIsValid()) {
+                    var modalElement = $('#avs-constraing-warning');
+                    if (modalElement != undefined && modalElement.length > 0) {
+                    	modalElement.adaptTo("foundation-toggleable").show();
+                    }
+                    return;
+                }
+                
+                if(saveInProgress) {
+                    return;
+                }
+                saveInProgress = true;
+                
+                var postUrl = CONST_STORAGE_LOCATION;
+                
+                var urlParams   = '';
+                var params  = '';
+                params += ':operation=' + saveAction;
+                
+                if(group !== undefined) {
+                    //use title value here as it will have the proper localized name. the jcr safe name value will be inferred by the servlet
+                    params += '&name=' + encodeURIComponent(group);
+                    params += '&newname=' + encodeURIComponent($('#group-name-txt').val());
+                    params += '&avsEnabled=' + avsEnabled;
+                    params += '&description=' + description;
+                    params += "&smartCropParam=" + smartcropPresets;
+                }
+                
+                //jcr path.
+                params += '&path=' + CONST_STORAGE_LOCATION;
+                params += '&_charset_=UTF-8';
+                
+                
+                //pass presetId if it is present
+                if(presetId !== undefined) {
+                    params += '&presetId=' + presetId;
+                }
+                
+                //add video preset parameters BASIC SETTINGS
+                params += '&params=';
+                
+                //set props
+                urlParams += 'videoCodec=' + videoCodecVal;
+                urlParams += '&videoBitrate=' + videoBitrateVal;
+                urlParams += '&audioCodec=' + audioCodecVal;
+                
+                // additional validation because coral ui is reenabling the Save button which
+                // allows saving invalid data
+                if(audioBitrateVal && audioBitrateVal.toLowerCase() === 'custom') {
+                    urlParams += '&audioBitrate=' + audioBitrateCustomVal;
+                    urlParams += '&audioBitrateCustom=true';
+                }
+                else {
+                    urlParams += '&audioBitrate=' + audioBitrateVal;
+                    urlParams += '&audioBitrateCustom=false'
+                }
+                
+                
+                urlParams += '&keepAspectRatio='    + ($('#keep-aspect-ratio').prop('checked'));
+                
+                //set size
+                var w = $('#video-width').val();
+                if (w && w.length > 0) {
+                    w = w.toLowerCase();
+                }
+                var h = $('#video-height').val();
+                if (h && h.length > 0) {
+                    h = h.toLowerCase();
+                }
+                
+                if(w === CONST_AUTO) {
+                    w = '0';
+                }
+                
+                if(h === CONST_AUTO) {
+                    h = '0';
+                }
+                
+                urlParams += '&width='              + w;
+                urlParams += '&height='             + h;
+                
+                /*
+                 * GET AVANCED TAB SETTINGS IF APPLICABLE
+                 */
+                    
+                    var i;
+                    var advancedControlsArr = $('.advancedTabFormControl');
+                    var len = advancedControlsArr.length;
+                    var $el;
+                    var controlType;
+                    var propName;
+                    var propVal;
+                    
+                    for(i=0;i<len;i++) {
+                        
+                        $el = $(advancedControlsArr[i]);
+                        controlType = $el.find('input').attr('type');
+                        
+                        
+                        if( controlType !== undefined && controlType === 'checkbox') {
+                            
+                            //prop name
+                            propName    = $el.attr('id').split('cb-')[1];
+                            propVal     = $el.prop('checked');
+                            
+                            //append settingloqf
+                            urlParams += '&' + propName + '=' + propVal;
+                            
+                            continue;
+                        }
+                        
+                        if( $el.is('coral-select') ) {
+                            
+                            //prop name
+                            propName = $el.attr('id');
+                            
+                            if(!$('#' + propName).get(0).selectedItem){
+                            	continue;
+                            }
+                            propVal = $('#' + propName).get(0).selectedItem.value;
+
+                            /*
+                             CQ-74326: This string 'source frame rate' isn't translated in 'Create New Video Encoding Profile' page
+                             If the localized "source frame rate" is selected, save the original version in CRX to prevent
+                             breaking backend encoding.
+                             */
+                            if (propName == VIDEO_FRAME_RATE_PROP && propVal == SOURCE_FRAME_RATE_VAL_LOCALIZED) {
+                                propVal = SOURCE_FRAME_RATE_VAL;
+                            }
+                            /////
+							if (propName == MAXBITRATE_PROP) {
+								/*if(maxBitrateVal && maxBitrateVal.toLowerCase() === 'custom') {
+									urlParams += '&maxBitrate=' + maxBitrateCustomVal;
+									urlParams += '&maxBitrateCustom=true';
+								}
+								else {
+									urlParams += '&maxBitrate=' + maxBitrateCustomVal;
+									urlParams += '&maxBitrateCustom=false'
+								}	*/	
+								if(!$('#cb-constantBitrate').prop('checked')) {
+									urlParams += '&maxBitrate=' + maxBitrateCustomVal;
+									urlParams += '&maxBitrateCustom=' + maxBitrateVal;
+								}
+								continue;
+								//break;
+							}
+							///
+                            //if the dropdowns next element is a text field check to see if the select is set to custom else get value
+                            if( $('#' + propName + '-txt').length != 0 && propVal.toLowerCase() === 'custom') {
+                                
+                                //if value is custom use text field value
+                            	propVal = $('#' + propName + '-txt').val();
+                            }
+                            
+                            //append setting
+                            urlParams += '&' + propName + '=' + propVal;
+                        }
+                    }
+
+                
+                //params
+                params = params + encodeURIComponent(urlParams);
+                
+                //sevlet url
+                postUrl = postUrl + '.videopresets';
+                
+                //disable save button for form submission
+                $('#btn-save').attr('disabled', 'disabled');
+
+                $.post(postUrl, params, function(args) {
+                    
+                    //re-enable save button post save
+                    $('#btn-save').removeAttr('disabled');
+
+                    goToGroupEditor();
+                })
+                .fail(function(args) {
+                    
+                    saveInProgress = false;
+                    
+                    //re-enable save button post save
+                    $('#btn-save').removeAttr('disabled');
+                    
+                    alert(CONST_SAVE_FAILED);
+                });
+            }
+
+            /**
+             * Executed after saving a video preset.
+             */
+            function goToGroupEditor() {
+                //this needs to be double encoded in the event of a profile made in 6.2 which did not have the name encoded
+                var url = Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/s7dam/videopresets/videopresetgroupeditor.html?group=' + encodeURIComponent(group));
+                document.location.href = url;
+            }
+
+            function objectToArray(obj) {
+                
+                var arr = [];
+                var retObj;
+                
+                for(var key in obj) {
+                    if(valildConfigurationField(key)) {
+                        retObj = {};
+                        retObj.key = key;
+                        retObj.val = obj[key];
+                        arr.push(retObj);
+                    }
+                }
+                return arr;
+            }
+
+            /**
+             * keypress handlers.
+             */
+            function alphaNumericFilterKeypress(evt) {
+                if ((evt.charCode && isRestricted(evt.charCode)) || $('#viewerPresetName').val().length > CONST_MAX_LENGTH_FOR_NAME) {
+                    evt.preventDefault();
+                }
+            }
+            function isRestricted(code) {
+                var restrictedCharCodes = [34, 39, 42, 47, 58, 91, 92, 93, 124]; //invalid char list for JCR: ", ', *, /, :, [, \, ], | 
+                if ($.inArray(code, restrictedCharCodes) > -1) {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+
+            function noZeroForFirstCharFilterKeypress(evt) {
+                evt = evt || window.event;
+
+                //allow backspace and arrows
+                if(/^(8|37|39|127|46)$/i.test(evt.keyCode)) { return; }
+                
+                var charCode = evt.keyCode || evt.which;
+                var charStr = String.fromCharCode(charCode);
+                var selectionStart = evt.currentTarget.selectionStart
+
+                /*
+                 * "" is allowed - it removes the value from the jcr. values of zero are 
+                 * generally not allowed and should be handled separately
+                 */
+                if (!evt.shiftKey) {
+                    if (evt.currentTarget.value.length == 0 || selectionStart == 0) {
+                        //0 for first char is not allowed. also if the user has part of the field selected and the zeroth char is
+                        //selected we dont allow zero to be entered
+                        return /[1-9]/i.test(charStr);
+                    } else {
+                        //0 after first char is allowed
+                        return /[0-9]/i.test(charStr);
+                    }
+                }
+            }
+
+            //CQ-4234155:Video bitrate must always be less than max bitrate
+            function isVideoAndMaxBitrateComboValid(maxBitRate, videoBitRate) {
+                return (maxBitRate === undefined) || (videoBitRate === undefined) || (parseInt(maxBitRate) >= parseInt(videoBitRate));
+            }
+
+            function validateField(field) {
+                
+                var textFieldsArr = $('input[type=text]');
+                var min;
+                var max;
+                var val;
+                var valid = true;
+                
+                if($('#'+field).hasClass('advancedTabFormControl')) {
+                    //return;
+                }
+                
+                min = parseInt($('#'+field).attr('data-min'));
+                max = parseInt($('#'+field).attr('data-max'));
+                val = $('#'+field).val();
+
+                if((min && val  < min) ||  (max && val > max)) {
+
+                    var isRange = ($('#'+field).attr('data-min')!==undefined && $('#'+field).attr('data-max') !== undefined);
+                    if(isRange) {
+                        addRangeErrorField(field);
+                    } else {
+                        addErrorField(field);
+                    }
+                    
+                    valid = false;
+                }
+                else if(isNaN(val) || val.indexOf('.') !== -1) {
+                    
+                    if($('#'+field).attr('autoEnabled') === undefined) {
+                        addErrorField(field);
+                        valid = false;
+                    }
+                    else if($('#'+field).attr('autoEnabled') !== undefined) {
+                        
+                        if($('#'+field).val().toLowerCase() !== CONST_AUTO) {
+                            
+                            addErrorField(field);
+                            valid = false;
+                        }
+                        else if($('#video-width').val().toLowerCase() === CONST_AUTO && $('#video-height').val().toLowerCase() === CONST_AUTO) {
+                            addErrorField(field);
+                            valid = false;
+                        }
+                        else {
+                            removeErrorField(field);
+                        }
+                    }
+                    else {
+                        removeErrorField(field);
+                    }
+                }
+                else if($('#'+field).attr('evenInteger') !== undefined) {
+                    
+                    var isOdd = ( parseInt(val) % 2);
+                    
+                    if(isOdd) {
+                        addOddNumberErrorField(field);
+                        valid = false;
+                    }
+                    else if(valid){
+                        removeErrorField(field);
+                    }
+                }
+                else if($('#maxBitrate').val() === 'CUSTOM' && (field === 'maxBitrate-txt' || field === 'video-bitrate')){
+                     valid = isVideoAndMaxBitrateComboValid($('#maxBitrate-txt').val(), $('#video-bitrate').val());
+
+                     if(valid) {
+                         removeErrorField(field);
+                     } else {
+                         var toolTipText;
+                         if(field === 'maxBitrate-txt') {
+                            toolTipText = Granite.I18n.get("Max bitrate must always be more than or equal to video bitrate.");
+                         } else if(field === 'video-bitrate') {
+                            toolTipText = Granite.I18n.get("Video bitrate must always be less than max bitrate.");
+                         }
+                         addErrorWithToolTip(field, toolTipText);
+                     }
+
+                     //Validity of maxBitrate-txt and video-bitrate is interdependent.
+                     //If one is made invalid, the dependent one is disabled
+                     //If one is made valid, the dependent one is enabled
+                     var dependentField = (field === 'maxBitrate-txt') ? 'video-bitrate' : 'maxBitrate-txt';
+                     $("#" + dependentField).prop('disabled', !valid);
+                     $("#maxBitrate").prop('disabled', !valid);
+                }
+                else {
+                    removeErrorField(field);
+                    if(field === 'video-width') {
+                        if($('#video-height').val().toLowerCase() === CONST_AUTO) {
+                            removeErrorField('video-height');
+                        }
+                    }
+                    else if(field === 'video-height') {
+                        if($('#video-width').val().toLowerCase() === CONST_AUTO) {
+                            removeErrorField('video-width');
+                        }
+                    }
+                }
+                
+                return valid;
+            }
+
+            function addErrorWithToolTip(field, toolTipText) {
+                if( getErrorField(field) !== '' ) {
+                    removeErrorField(field);
+                }
+
+                $('#'+field).css('border-color', 'red');
+                $('#'+field).data('tooltiptext', toolTipText);
+
+                disableSavePerField(field);
+            }
+
+            function addErrorField(field) {
+                
+                if( getErrorField(field) !== '' ) {
+                    removeErrorField(field);
+                }
+                
+                var toolTipText;
+                    
+                var val = parseInt($('#'+field).val());
+                var minValue = $('#'+field).attr('data-min');
+                
+                //show alternate error message if the text "auto" is allowed
+                if( $('#'+field).attr('autoEnabled') !== undefined) {
+                    if($('#video-width').val().toLowerCase() === CONST_AUTO && $('#video-height').val().toLowerCase() === CONST_AUTO) {
+                        toolTipText = CONST_NUMERIC_REQUIRED_OR_AUTO_SINGLE;
+                    } else if($('#size-calc-width-txt').val().toLowerCase() === CONST_AUTO && $('#size-calc-height-txt').val().toLowerCase() === CONST_AUTO) {
+                        toolTipText = CONST_NUMERIC_REQUIRED_OR_AUTO_SINGLE;
+                    } else {
+                        toolTipText = CONST_NUMERIC_REQUIRED_OR_AUTO_TXT + minValue;
+                    }
+                } else {
+                    toolTipText = CONST_NUMERIC_REQUIRED + minValue;
+                }
+                
+                $('#'+field).css('border-color', 'red');
+                $('#'+field).data('tooltiptext', toolTipText);
+                
+                disableSavePerField(field);
+            }
+
+
+            function addRangeErrorField(field) {
+                
+                if( getErrorField(field) !== '' ) {
+                    removeErrorField(field);
+                }
+                    
+                var val = parseInt($('#'+field).val());
+                var minValue = $('#'+field).attr('data-min');
+                var maxValue = $('#'+field).attr('data-max');
+                
+                var toolTipText;
+                
+                //show alternate error message if the text "auto" is allowed
+                if( $('#'+field).attr('autoEnabled') !== undefined) {
+                    if($('#video-width').val().toLowerCase() === CONST_AUTO && $('#video-height').val().toLowerCase() === CONST_AUTO) {
+                        toolTipText = CONST_NUMERIC_REQUIRED_OR_AUTO_SINGLE;
+                    } else {
+                        toolTipText = CONST_NUMERIC_REQUIRED_OR_AUTO_TXT + minValue + ' ' + CONST_NUMERIC_MAX_VALUE + maxValue;
+                    }
+                } else {
+                    toolTipText = CONST_NUMERIC_REQUIRED + minValue + ' ' + CONST_NUMERIC_MAX_VALUE + maxValue;
+                }
+                
+                
+                $('#'+field).css('border-color', 'red');
+                $('#'+field).data('tooltiptext', toolTipText);
+
+                disableSavePerField(field);
+            }
+
+
+            function addOddNumberErrorField(field) {
+                if( getErrorField(field) !== '' ) {
+                    removeErrorField(field);
+                }
+                $('#' + field).data('tooltiptext', CONST_NUMERIC_EVEN_REQUIRED);
+                disableSavePerField(field);
+            }
+
+            function disableSavePerField(field) {
+                //disable save
+                $('#btn-save').attr('disabled', 'disabled');
+                var found = false;
+                for(var i=0;i < errorList.length;i++) {
+                    if(errorList[i] === field) {
+                    	found = true;
+                    }                	
+                }
+                if(!found) {
+                    errorList.push(field);
+                }
+            }
+
+            function validRange(val,min,max) {
+                if( isNaN(val) || val<min || val>max ) {
+                    return false;
+                }
+                return true;
+            }
+
+            function removeErrorField(field) {
+                var i;
+                var len = errorList.length;
+                for(i=0;i<len;i++) {
+                    if(errorList[i] === field) {
+                        $('#'+field).css('border-color', '');
+                        $('#'+field).data('tooltiptext', '');
+                        errorList.splice(i,1);
+                        break;
+                    }
+                }
+                
+                //re-enable if applicable
+                if(errorList<1) {
+                    $('#btn-save').removeAttr('disabled');
+                }
+            }
+
+            function getErrorField(field) {
+                var len = errorList.length;
+                for(var i=0;i<len;i++) {
+                    if(errorList[i] === field) {
+                        return field;
+                    }
+                }
+                return '';
+            }
+            
+            function hideAllFields() {
+
+                var i;
+                var fields = $('span[data-target]');
+                var len = fields.length;
+
+                for(i=0;i<len;i++) {
+
+                    $(fields[i]).hide();
+                }
+            }
+            
+            function valildConfigurationField(field) {
+                
+                if(field === 'id') {
+                    return false;
+                }
+                
+                if(field === 'uri') {
+                    return false;
+                }
+                
+                if(field === 'jcr:primaryType') {
+                    return false;
+                }
+                
+                
+                return true;
+            }
+
+            function getQueryParam(param) {
+                
+                var qStr = window.location.search.split('?')[1];
+                var val;
+                
+                if(qStr === undefined) {
+                    return qStr;
+                }
+                
+                val = qStr.split(param+'=')[1];
+                
+                if(val === undefined) {
+                    return val;
+                }
+                
+                val = val.split("&")[0];
+                
+                return decodeURIComponent(val);
+            }
+        });
+    
+
+    function submit(e) {
+        e.preventDefault();
+        //prevent creating empty set
+    }
+    
+    function serialize(wizard) {
+        var serializedForm = wizard.serializeArray();
+        //trim values
+        for (var i = 0, len = serializedForm.length; i < len; i++) {
+            serializedForm[i].value = $.trim(serializedForm[i].value);
+        }
+        return $.param(serializedForm);
+    }
+
+})(window, document, Granite, Granite.$);

@@ -1,0 +1,1721 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;
+/**
+ * Core Target Editor script.
+ * This script implements the UI behavior of the Target Editor.
+ */
+(function($, ns, channel, window) {
+
+    var debugMode = window.location.href.indexOf("?debug-target-mode=true") >= 0
+        || window.location.href.indexOf("&debug-target-mode=true") >= 0;
+
+    var _debug = function(args) {
+        if (debugMode) {
+            console.log(args);
+        }
+    };
+
+    _debug("[TargetedContentManagerUI] Script loaded");
+
+    /**
+     * Listen for 'targeting-layer-on' and 'targeted-editables-initialized' events as early as possible
+     */
+    var targetingLayerOnTriggered = false;
+    var targetedEditablesInitializedTriggered = false;
+
+    channel
+        .on("targeting-layer-on.targeted-content-manager-ui", function(event) {
+            _debug("[TargetedContentManagerUI] Caught 'targeting-layer-off' event, setting targetingLayerOnTriggered=true!");
+            targetingLayerOnTriggered = true;
+        })
+        .on("targeted-editables-initialized.targeted-content-manager-ui", function(event) {
+            _debug("[TargetedContentManagerUI] Caught 'targeted-editables-initialized' event, setting targetedEditablesInitializedTriggered=true!");
+            targetedEditablesInitializedTriggered = true;
+        })
+        .off("cui-contentloaded.targeted-content-manager-ui").on("cui-contentloaded.targeted-content-manager-ui", function(event) {
+            if (ns.ui.TargetedContentManagerUi
+                && $("#" + ns.ui.TargetedContentManagerUi.CAMPAIGN_SELECTOR_ELEMENT_ID).data("select")) {
+                if (targetingLayerOnTriggered) {
+                    _debug("[TargetedContentManagerUI] Detected that 'targeting-layer-on' has already been triggered, re-triggering...");
+                    ns.ui.TargetedContentManagerUi.targetingLayerOnHandler();
+                    targetingLayerOnTriggered = false;
+                }
+
+                if (targetedEditablesInitializedTriggered) {
+                    _debug("[TargetedContentManagerUI] Detected that 'targeted-editables-initialized' has already been triggered, re-triggering...");
+                    ns.ui.TargetedContentManagerUi.targetedEditablesInitializedHandler();
+                    targetedEditablesInitializedTriggered = false;
+                }
+            }
+        });
+
+    ns.ui.TargetedContentManagerUi = (function() {
+
+        var self = {},          //this object
+            experienceCount,    //the number of experiences we have
+            contentFrameContainer = $("#ContentWrapper").parent().get(0),
+            initialTop = $(contentFrameContainer).css("top"),        //the "top" property of the content frame. We need this when we reset the ui
+            currentExperienceIndex,
+            experienceRailVisible = false,
+
+            mainTemplate = $(ns.ui.TargetingTemplates["main-template"]);
+
+        //todo-move these constants to a separate file
+        self.ELEMENT_ID = "TargetEditorContent";
+        self.EXP_CHOOSER_ELEMENT_ID = "ExperienceChooser";
+        self.CAMPAIGN_SELECTOR_ELEMENT_ID = "CampaignSelector";
+
+        self.LOCAL_STORAGE_BRAND_KEY = "mode.target.brand";
+        self.LOCAL_STORAGE_ACTIVITY_KEY = "mode.target.activity";
+
+        /**
+         * Signals whether the targeting wizard is started or not.
+         * This parameter is updated using targeting-ui-experience-rail-shown/hidden events
+         * @type {boolean}
+         */
+        self.targetingWizardStarted = false;
+
+        /**
+         * The TargeteContentManager instance
+         * @type {{}}
+         */
+        self.contentManager = {};
+
+        /**
+         * The experience that's currently selected in the rail
+         * @type {{}}
+         */
+        self.selectedExperience = {};
+
+        /**
+         * Initializes the UI
+         * @param contentManager
+         */
+        self.initialize = function(contentManager) {
+
+            // set ambits for page
+            var pagePropsUrl = location.href;
+            // cut off selectors after last path segment in suffix
+            pagePropsUrl = pagePropsUrl.replace(/.*?\.html(\/.*?\/.*?)\..*/, "$1.targetingconfig.json");
+            _debug("[TargetedContentManagerUI] Loading config...");
+            $.get(Granite.HTTP.externalize(pagePropsUrl))
+             .done(function(data){
+                self.forceLocation = data["forceLocation"];
+                self.pageAmbits = data["ambits"];
+                self.targetingConfigLoaded = true;
+                _debug("[TargetedContentManagerUI] Triggering 'target-config-loaded'");
+                channel.trigger("target-config-loaded");
+             })
+             .fail(function(){
+                self.targetingConfigLoaded = true;
+                _debug("[TargetedContentManagerUI] Could not load config!");
+                 if (window.console) {
+                     console.error("Unable to load targeting config for page {}.", pagePropsUrl);
+                 }
+             });
+
+            self.contentManager = contentManager;
+            self.contentManager.ui = self;
+
+            self.experienceWizardDialog = false;
+            self.audiencePicker = false;
+
+            self.layerInitialized = false;
+
+            self.wizardStarted = false;
+
+            self.experienceRailWidgets = {
+                landingPage: {
+                    selector: "#ExperienceRailContainerXT",
+                    widget: undefined
+                },
+                abn: {
+                    selector: "#ExperienceRailContainerAB",
+                    widget: undefined
+                }
+            };
+
+            // storage for hidden editor item elements
+            self.editorLeftContainerHidden = [];
+
+            $("#" + self.ELEMENT_ID).append(mainTemplate);
+
+            // put everything in an object for quick access
+            self.$elements = {
+                content: $("#" + self.ELEMENT_ID),      // provided by repo
+                campaignToolbar: $(".campaigntoolbar"),
+                campaignSelector: $("#" + self.CAMPAIGN_SELECTOR_ELEMENT_ID),   // provided by repo
+                brandSelector: $("#BrandSelector"),
+                experienceChooserContainer: $("#" + self.EXP_CHOOSER_ELEMENT_ID),
+                experienceTabs: $(".experience-rail"),
+                buttonCreateActivity: $('.create-activity-button'),
+                buttonExperienceWizardNext: $("#WizardNext"),
+                buttonExperienceWizardBack: $("#WizardBack"),
+                buttonStartWizard: $(".targeting-wizard-start")
+            };
+
+            // attach delete actions to icons
+
+            // bind event listeners to UI elements
+            bindEventsListeners();
+
+            // initialize the MSM support
+            TargetingUI.MultiSiteTargeting.initialize({
+                contentManagerUI: self
+            });
+
+            self.$elements.experienceChooserContainer.hide();
+            var updateTargetingUI = function() {
+                self.$elements.content.show();
+                updateWizardStartButtonState();
+                updateAddExperienceModalButtonState();
+
+                // restore cached values if the layer was already initialized once
+                if (self.layerInitialized && self.targetingConfigLoaded) {
+                    restoreCachedValues();
+                } else {
+                    channel.on("target-config-loaded", function(){
+                        restoreCachedValues();
+                    });
+                }
+
+            };
+            // if the cq-page-info-loaded event is already triggered, we should update the Targeting UI right away rather than waiting for cq-page-info-loaded event
+            if (Granite.author.pageInfo && Granite.author.pageInfo.isTargetable && "Targeting" === Granite.author.layerManager.getCurrentLayer()) {
+                updateTargetingUI();
+            } else {
+                self.$elements.content.hide();
+                // listen for page info loaded events and update the UI accordingly
+                channel.on("cq-page-info-loaded", function(event){
+                    if (event.info.isTargetable && event.info.isTargetable === "true" && "Targeting" === Granite.author.layerManager.getCurrentLayer()) {
+                      updateTargetingUI();
+                    } else {
+                      // hide everything if we're not already in targeting mode
+                      self.$elements.content.hide();
+                    }
+                });
+            }
+        };
+
+        /* **** PRIVATE AREA ****************** */
+        self.MessageListener = (function () {
+            var _selfMessageListener = {};
+
+            (new Granite.author.MessageChannel("cqauthor", window)).mixin(_selfMessageListener);
+
+            var _wizardReady = function() {
+                self.experienceWizardDialog.show();
+                $(window).adaptTo("foundation-ui").clearWait();
+                _initializeWizardInsideEditor();
+                self.experienceWizardDialog.fullscreen = true;
+            };
+
+            var _wizardDone = function() {
+                closeWizardDialog();
+                toggleEditorGlobalBarSidepanel(true);
+                restoreBrandActivitySelectionStep();
+                updateWizardNextButton(0);
+                self.wizardStarted = false;
+            };
+
+            var _wizardNotification = function(payload) {
+                Granite.author.ui.helpers.notify({
+                    content: payload.content,
+                    type: payload.type
+                });
+            }
+
+            var _wizardValidation = function(payload) {
+                if (payload) {
+                    self.$elements.buttonExperienceWizardNext.removeAttr("disabled");
+                } else {
+                    self.$elements.buttonExperienceWizardNext.attr("disabled", "true");
+                }
+            };
+
+            var _wizardInheritanceUpdate = function() {
+                TargetingUI.MultiSiteTargeting.loadActivityInheritanceStatus();
+            };
+
+            var _wizardWait = function() {
+                $(window).adaptTo("foundation-ui").wait();
+            };
+
+            var _wizardClearWait = function() {
+                $(window).adaptTo("foundation-ui").clearWait();
+            };
+
+            var _wizardBlockNavigation = function() {
+                self.$elements.buttonExperienceWizardNext.attr("disabled", "true");
+                self.$elements.buttonExperienceWizardBack.attr("disabled", "true");
+            };
+
+            var _wizardAllowNavigation = function() {
+                self.$elements.buttonExperienceWizardNext.removeAttr("disabled");
+                self.$elements.buttonExperienceWizardBack.removeAttr("disabled");
+            };
+
+            var commands = {};
+            commands["wizard-ready"] = _wizardReady;
+            commands["wizard-done"] = _wizardDone;
+            commands["wizard-validation"] = _wizardValidation;
+            commands["wizard-notification"] = _wizardNotification;
+            commands["wizard-inheritance-update"] = _wizardInheritanceUpdate;
+            commands["wizard-wait"] = _wizardWait;
+            commands["wizard-clear-wait"] = _wizardClearWait;
+            commands["wizard-block-navigation"] = _wizardBlockNavigation;
+            commands["wizard-allow-navigation"] = _wizardAllowNavigation;
+
+            _selfMessageListener.subscribeRequestMessage("targeting-editor-cmd", function (message) {
+
+                if (typeof message === "undefined") {
+                    return;
+                }
+
+                if (message.data && message.data.cmd) {
+                    if (commands[message.data.cmd]) {
+                        commands[message.data.cmd].apply(undefined, [message.data.payload]);
+                    }
+                }
+
+            });
+
+            return _selfMessageListener;
+        })();
+
+        var updateAddExperienceModalButtonState = function () {
+            if (self.getCurrentBrand() !== ""
+                    || self.contentManager.currentBrand !== "") {
+                $("[href='#create-activity-modal']").css("display", "");
+                self.$elements.buttonCreateActivity.removeAttr("disabled");
+            } else {
+                $("[href='#create-activity-modal']").css("display", "none");
+                self.$elements.buttonCreateActivity.attr("disabled", "disabled");
+            }
+        };
+
+        var updateWizardStartButtonState = function () {
+            var selectedActivity = self.$elements.campaignSelector.val();
+            if (selectedActivity === undefined || selectedActivity === ""
+                    || self.contentManager.currentActivity === "") {
+                self.$elements.buttonStartWizard.attr("disabled", "disabled");
+            } else {
+                self.$elements.buttonStartWizard.removeAttr("disabled", "disabled");
+            }
+        };
+
+        var restoreCachedValues = function() {
+            // check local storage for brand and/or activity
+            var cachedBrand = localStorage.getItem(self.LOCAL_STORAGE_BRAND_KEY);
+            var cachedActivity = localStorage.getItem(self.LOCAL_STORAGE_ACTIVITY_KEY);
+
+            var selectBrand = undefined;
+            if (!cachedBrand) {
+                selectBrand = self.getCurrentBrand();
+                _debug("[TargetedContentManagerUI] No cached brand, using default selected " + selectBrand);
+            } else {
+                selectBrand = cachedBrand;
+                _debug("[TargetedContentManagerUI] Restoring cached brand " + cachedBrand);
+            }
+
+            if (cachedActivity
+                    && cachedActivity.indexOf(selectBrand + "/" + self.getAmbit()) == -1) {
+                // don't restore an activity that's not in the current ambit
+                cachedActivity = false;
+            }
+
+            var restoreStatus = {
+                brand: !!cachedBrand,
+                activity: !!cachedActivity
+            };
+
+            if (selectBrand) {
+                _debug("[TargetedContentManagerUI] Restoring cached brand " + selectBrand);
+                try {
+                    self.$elements.brandSelector.val(selectBrand);
+
+                    brandChooserSelectHandler({
+                        target: self.$elements.brandSelector,
+                        // only select first activity if we don't have a cached value
+                        // will lead to race condition between requests otherwise
+                        selectFirstActivity: cachedActivity !== undefined
+                    });
+
+                    restoreStatus.brand = true;
+                } catch (error) {
+                    _debug("[TargetedContentManagerUI] Can't restore cached value for the brand! " + error);
+                }
+            }
+
+            if (cachedActivity) {
+                _debug("[TargetedContentManagerUI] Restoring cached activity " + cachedActivity);
+                var cachedActivityEntry = self.$elements.campaignSelector.find("[value='" + cachedActivity + "']");
+
+                // only select activity if it's under the current brand
+                if (cachedActivityEntry.length > 0
+                    && cachedActivityEntry.css("display") != "none") {
+                    try {
+                        self.$elements.campaignSelector.val(cachedActivity);
+
+                        activityChooserSelectHandler({
+                            target: self.$elements.campaignSelector
+                        });
+
+                        restoreStatus.activity = true;
+                        self.contentManager.currentActivity = cachedActivity;
+                    } catch (error) {
+                        _debug("[TargetedContentManagerUI] Can't restore cached value for the activity! " + error);
+                    }
+                } else {
+                    _debug("[TargetedContentManagerUI] Cached activity not found in dropdown");
+                }
+            }
+
+            if (!restoreStatus.brand) {
+                selectFirstBrand();
+                filterActivities();
+            }
+
+            if (!restoreStatus.activity) {
+                selectFirstActivity();
+            }
+
+            updateAddExperienceModalButtonState();
+        };
+
+        var openCreateActivityDialog = function(event) {
+            var modalContainer = $("#create-activity-modal");
+            if (modalContainer.length > 0) {
+                var ccEnginePresent = !!(Granite.author.ContentFrame.contentWindow.CQ_Analytics && Granite.author.ContentFrame.contentWindow.CQ_Analytics.StoreRegistry && Granite.author.ContentFrame.contentWindow.CQ_Analytics.StoreRegistry.getStore('segments'));
+                var chEnginePresent = !!(Granite.author.ContentFrame.contentWindow.ContextHub && Granite.author.ContentFrame.contentWindow.ContextHub.getStore('segmentation'));
+
+                var targetingEngineSelect = $('coral-select.targeting-engine', modalContainer).get(0);
+
+                if (!chEnginePresent) {
+                   targetingEngineSelect.items.getAll().forEach(function(element,index) {
+                       if (element && element.value === CQ.TargetingConstants.ENGINE_CONTEXTHUB) {
+                           element.remove();
+                       }
+                   });
+                }
+
+                if (!ccEnginePresent) {
+                    targetingEngineSelect.items.getAll().forEach(function(element,index) {
+                        if (element && element.value === 'cq') {
+                            element.remove();
+                        }
+                    });
+                }
+                targetingEngineSelect.value = targetingEngineSelect.items.first.value;
+
+                // TODO: verify  property 'tntConfigPath' is not deprecated
+                if (Granite.author && Granite.author.pageInfo 
+                        && !Granite.author.pageInfo.tntConfigPath) {
+                    $('coral-dialog-content form coral-alert').remove();
+                    $('coral-dialog-content form', modalContainer).prepend(
+                        new Coral.Alert().set({
+                            variant: "warning",
+                            content: {
+                              innerHTML: Granite.I18n.get('No Adobe Target cloud service configuration<br>is associated with this site.')
+                            }
+                        })
+                    );
+                }
+    
+                _initializeActivityTypes(modalContainer.find("form"));
+
+                _bindActivityFormEngineSelectionHandler(modalContainer.find("form"));
+                _bindActivityFormTargetConfigSelectionHandler(modalContainer.find("form"));
+
+                modalContainer[0].show();
+            }
+        };
+
+        var _initializeActivityTypes = function(activityForm){
+
+            var tntConfigWidget = activityForm.find(".targeting-config"),
+                activityTypeWidget = activityForm.find(".targeting-activity-type")[0];
+
+            if (tntConfigWidget !== null && activityTypeWidget !== null) {
+                var tntConfig = tntConfigWidget.val();
+                if (tntConfig) {
+                    _populateActivityTypes(tntConfig, activityTypeWidget);
+                }
+            }
+        };
+
+        var openAddExperienceDialog = function(experienceOptions, experiencesWidget) {
+            var modalContainer = $("#create-experience-modal");
+            if (modalContainer.length > 0) {
+                modalContainer[0].show();
+
+                $(".add-experience-cancel").off("click.delete-experience")
+                    .on("click.delete-experience", function (e) {
+                        experiencesWidget.deleteExperience(experienceOptions.index, experienceOptions.experience);
+                    });
+
+                // listen for the "add experience" submit event
+                $(document).off("click", ".add-experience-submit-button")
+                    .on("click", ".add-experience-submit-button", function (e) {
+                    e.preventDefault();
+
+                    handleAddExperience(modalContainer, experienceOptions);
+                });
+
+                var defaultExperienceTitle = experienceOptions.experience.title || experienceOptions.experience.name;
+                var defaultExperienceName = experienceOptions.experience.name;
+
+                if (experienceOptions.experience
+                    && experienceOptions.experience.audience) {
+                    modalContainer.find("#experienceSegments").val(experienceOptions.experience.audience.path);
+
+                    defaultExperienceTitle = experienceOptions.experience.audience.name;
+                    defaultExperienceName = experienceOptions.experience.audience.name;
+                } else {
+                    modalContainer.find("#experienceSegments").val("");
+                }
+
+                $("#experienceTitleInput").val(defaultExperienceTitle.substr(0, 20));
+                $("#experienceNameInput").val(defaultExperienceName.toLowerCase().replace(/[^a-zA-Z0-9_\-,]/gi, "-"));
+
+                if (experienceOptions.experience.name != "") {
+                    modalContainer.find(".add-experience-submit-button").prop("disabled", false);
+                } else {
+                    modalContainer.find(".add-experience-submit-button").prop("disabled", true);
+                }
+
+                $("#experienceNameInput").on("input change", function(event) {
+                    var saveBtn = modalContainer.find(".add-experience-submit-button");
+                    // validator is not finished when event is fired, so validate manually
+                    var validator = $(window).adaptTo("foundation-registry").get('foundation.validation.validator')
+                                             .filter(function(data){
+                                                 if (data.selector === '[data-foundation-validation~="cq.personalization.pagename"]') {
+                                                     return true;
+                                                 }
+                                             });
+                    var isInvalid = validator ? validator[0].validate(event.target) !== undefined : false;
+
+                    if (isInvalid) {
+                        saveBtn.attr("disabled", true);
+                    } else {
+                        saveBtn.attr("disabled", false);
+                    }
+                });
+
+                var evt = new Event({target: $("#experienceNameInput").get(0) });
+                $("#experienceNameInput").trigger("input", evt);
+            }
+        };
+
+        var closeWizardDialog = function () {
+
+            $("#PersonalizationWizardDialog").remove();
+
+            self.experienceWizardDialog = false;
+
+            var wizardStepList = $("coral-steplist")[0];
+            wizardStepList.previous();
+            wizardStepList.previous();
+
+            $(".experience-rail").show();
+
+            // restore editor panel header z-index
+            $(".editor-panel-header").css("z-index", "");
+
+            self.$elements.brandSelector.find("button").removeAttr("disabled");
+            self.$elements.campaignSelector.find("button").removeAttr("disabled");
+            self.$elements.buttonExperienceWizardNext.removeAttr("disabled");
+
+            // refresh activity data
+            self.contentManager.onActivitySelected(self.contentManager.currentActivity);
+
+            channel.trigger("dialog-closed");
+        };
+
+        /**
+         * Updates the wizard's next button based on the current step of the wizard
+         * All steps except the last should show a forward icon button
+         * Last step should show a "Save" button
+         */
+        var updateWizardNextButton = function(stepIndex) {
+            // check if we reached the final step
+            if (stepIndex == 2) {
+                self.$elements.buttonExperienceWizardNext.get(0).label.innerHTML = Granite.I18n.get("Save");
+            } else {
+                self.$elements.buttonExperienceWizardNext.get(0).label.innerHTML = Granite.I18n.get("Next");
+            }
+        };
+
+        var handleExperienceWizardNext = function(event) {
+            var lastStepItem = $("#ExperienceChooser").find("coral-step").last();
+            var isLastStep = $(lastStepItem).is(".is-selected");
+            var prevIndex = -1;
+
+            if (!self.experienceWizardDialog) {
+
+                var ambitPath = self.$elements.brandSelector.val() + "/" + self.getAmbit();
+
+                var wizardSrc = Granite.HTTP.externalize("/libs/cq/personalization/touch-ui/content/v2/activities/createactivitywizard.html"
+                    + ambitPath
+                    + "?mode=editor"
+                    + "&path=" + Granite.author.pageInfo.status.path
+                    + "&activity=" + self.contentManager.currentActivity);
+
+                self.experienceWizardDialog = new Coral.Dialog().set({
+                    id: "PersonalizationWizardDialog",
+                    content: {
+                        innerHTML: "<iframe id='PersonalizationWizardFrame' name='PersonalizationWizardFrame' src='" + wizardSrc + "'></iframe>"
+                    },
+                    backdrop: "none"
+                });
+
+                $(window).adaptTo("foundation-ui").wait();
+                document.body.appendChild(self.experienceWizardDialog);
+
+                // close the sidepanel, if opened
+                Granite.author.SidePanel.close();
+                // hide sidepanel toggle
+                toggleEditorGlobalBarSidepanel(false);
+
+                // update editor panel header z-index
+                $(".editor-panel-header").css("z-index", 10020);
+
+                // hide the experiences
+                var experiencesWidgetObj = self.experienceRailWidgets[self.contentManager.currentActivityProperties.type];
+                if (experiencesWidgetObj) {
+                    $(experiencesWidgetObj.selector).hide();
+                }
+
+                $(".experience-rail").hide();
+                $("#BrandSelector").find("button").attr("disabled", "disabled");
+                $("#CampaignSelector").find("button").attr("disabled", "disabled");
+                $(".editor-EmulatorBar").removeClass("is-visible");
+            } else if (isLastStep) {
+                // save all the stuff
+                self.MessageListener.postMessage("personalization-wizard-cmd", {"cmd": "wizard:save"});
+            } else {
+                prevIndex = experienceWizardNext();
+            }
+
+            if (!isLastStep) {
+                updateWizardNextButton(prevIndex + 1);
+            }
+        };
+
+        var handleExperienceWizardBack = function(event) {
+            var prevIndex = experienceWizardBack();
+            updateWizardNextButton(prevIndex - 1);
+        }
+
+        var experienceWizardNext = function () {
+            _debug("[TargetedContentManagerUI] Advancing the wizard to the next step.");
+            self.MessageListener.postMessage("personalization-wizard-cmd", {"cmd": "wizard:next"});
+
+            var previousWizardIndex = getCurrentWizardStep();
+            $("#ExperienceChooser").find("coral-steplist")[0].next();
+
+            return previousWizardIndex;
+        }
+
+        var getCurrentWizardStep = function() {
+            var steps = $("#ExperienceChooser").find("coral-step");
+            var currentIndex = -1;
+            for (var idx = 0 ; idx < steps.length ; idx++) {
+                var currentStep = steps[idx];
+
+                if ($(currentStep).is(".is-selected")) {
+                    currentIndex = idx;
+                    break;
+                }
+            }
+
+            return currentIndex;
+        };
+
+        /**
+         * Toggles visibility of the editor global bar left container action
+         * items with the exception of the 'toggle-sidepanel'. The hidden
+         * elements are temporarily stored in 'self.editorLeftContainerHidden'.
+         * 
+         * @param {Boolean}
+         *            visible true shows actions, false hides them.
+         */
+        var toggleEditorGlobalBarLeftContainer = function(visible) {
+            var items = $('.editor-GlobalBar coral-actionbar-primary .editor-GlobalBar-item');
+            if (!visible) {
+                $.each(items, function(idx, elm){
+                    if (!$(elm).hasClass('toggle-sidepanel') 
+                            && $(elm).is(':visible')) {
+                        self.editorLeftContainerHidden.push(elm);
+                        $(elm).attr('disabled','disabled');
+                    }
+                })
+            } else {
+                $.each(self.editorLeftContainerHidden, function(idx, elm){
+                    $(elm).removeAttr('disabled');
+                });
+                self.editorLeftContainerHidden = [];
+            }
+        }
+
+        var toggleEditorGlobalBarSidepanel = function(visible) {
+            var toggle = $('.editor-GlobalBar coral-actionbar-primary .editor-GlobalBar-item.toggle-sidepanel');
+            if (visible) {
+                toggle.removeAttr('disabled');
+            } else {
+                toggle.attr('disabled','disabled');
+            }
+        }
+
+        var restoreBrandActivitySelectionStep = function () {
+            // hide the experiences container and show the campaign toolbar
+            self.$elements.campaignToolbar.show();
+            self.$elements.experienceChooserContainer.hide();
+            // show editor left container actions
+            toggleEditorGlobalBarLeftContainer(true);
+
+            channel.trigger("targeting-ui-experience-rail-hidden");
+
+            _toggleModeChange(true);
+        };
+
+        var experienceWizardBack = function() {
+            var previousWizardIndex = getCurrentWizardStep();
+            $("#ExperienceChooser").find("coral-steplist")[0].previous();
+
+            if (self.experienceWizardDialog) {
+                self.MessageListener.postMessage("personalization-wizard-cmd", {"cmd": "wizard:previous"});
+            }
+
+            if (previousWizardIndex == 1) {
+                // close the wizard if on the first step
+                closeWizardDialog();
+
+                // show the experiences
+                var experiencesWidgetObj = self.experienceRailWidgets[self.contentManager.currentActivityProperties.type];
+                if (experiencesWidgetObj) {
+                    $(experiencesWidgetObj.selector).show();
+                }
+
+                // show sidepanel toggle
+                toggleEditorGlobalBarSidepanel(true);
+            } else if (previousWizardIndex == 0) {
+                restoreBrandActivitySelectionStep();
+                self.wizardStarted = false;
+            }
+
+            return previousWizardIndex;
+        }
+
+        var selectFirstOption = function(el) {
+            var value = undefined;
+            el.find("[value]").each(function(index, element) {
+                if ($(element).css("display") != "none") {
+                    value = $(element).attr("value");
+                    return false;
+                }
+            });
+
+            if (value) {
+                el.val(value);
+            }
+
+            return value;
+        };
+
+        /**
+         * Hide activities outside of current ambit scope
+         */
+        var filterActivities = function () {
+            var currentBrand = self.$elements.brandSelector.val();
+            self.contentManager.currentBrand = currentBrand;
+            var ambitPath = currentBrand + "/" + self.getAmbit();
+            // hide activities outside of current ambit scope
+            // handle Coral
+            $.each(self.$elements.campaignSelector.find("coral-selectlist coral-selectlist-item"), function(index, option) {
+                var campaign = $(option).attr("value");
+                if (campaign
+                    && campaign.indexOf(ambitPath + "/") != 0) {
+                    $(option).hide();
+                }
+            });
+            // handle Native
+            var $nativeSelect = self.$elements.campaignSelector.find("select");
+            if ($nativeSelect.data("html") === undefined) {
+                $nativeSelect.data("html", $nativeSelect.html());
+            }
+            $.each(self.$elements.campaignSelector.find("select option"), function(index, option){
+                var campaign = $(option).attr("value");
+                if (campaign && campaign.indexOf(ambitPath + "/") !== 0) {
+                    $(option).remove();
+                }
+            });
+        };
+
+        var selectFirstBrand = function() {
+            selectFirstOption(self.$elements.brandSelector);
+        };
+
+        var selectFirstActivity = function () {
+            var selectedActivity = selectFirstOption(self.$elements.campaignSelector);
+
+            self.contentManager.onActivitySelected(selectedActivity);
+
+            // update selected activity in the experiences rail
+            updateSelectedActivityRail(selectedActivity);
+            updateWizardStartButtonState();
+        };
+
+        /**
+         * Callback handler for handling brand selection
+         * 
+         * @param {Object}  event Event object
+         * @param {Element} event.target Target DOM Element
+         * @param {Boolean} event.selectFirstActivity Optional indicator to trigger selectFirstActivity() 
+         */
+        var brandChooserSelectHandler = function(event) {
+            // restore activity options
+            self.$elements.campaignSelector.find("coral-selectlist coral-selectlist-item").show();
+            var $nativeSelect = self.$elements.campaignSelector.find("select"),
+                nativeHTML = $nativeSelect.data("html");
+            if (nativeHTML !== undefined) {
+                $nativeSelect.html(nativeHTML);
+            }
+
+            var currentBrand = $(event.target).val();
+            if (currentBrand != "") {
+                localStorage.setItem(self.LOCAL_STORAGE_BRAND_KEY, currentBrand);
+                filterActivities();
+            }
+
+            if (!event.selectFirstActivity) {
+                selectFirstActivity();
+            }
+            updateAddExperienceModalButtonState();
+        };
+
+        var updateSelectedActivityRail = function(selectedActivity) {
+            if (selectedActivity != "") {
+                var selectedOption = self.$elements.campaignSelector.find("[role='option'][value='" + selectedActivity + "']");
+                var selectedActivityDescription = $(".selected-activity-description-content").contents()[1];
+                if (selectedOption.length > 0
+                    && selectedActivityDescription) {
+                    selectedActivityDescription.innerHTML = selectedOption[0].innerHTML;
+                }
+
+                // load msm status for this activity
+                TargetingUI.MultiSiteTargeting.loadActivityInheritanceStatus();
+            }
+        };
+
+        var activityChooserSelectHandler = function(event) {
+            var currentActivity = "";
+            try {
+                currentActivity = $(event.target)[0].selectedItem.value;
+            } catch (error) {
+                currentActivity = $(event.target)[0].value;
+            }
+            _debug("[TargetedContentManagerUI] Selected activity [" + currentActivity + "]");
+            if (currentActivity !== self.contentManager.currentActivity) {
+                self.contentManager.onActivitySelected(currentActivity);
+                if (currentActivity === "") {
+                    self.$elements.experienceChooserContainer.hide();
+                    channel.trigger("targeting-ui-experience-rail-hidden");
+                }
+
+                if (currentActivity != "") {
+                    localStorage.setItem(self.LOCAL_STORAGE_ACTIVITY_KEY, currentActivity);
+                }
+            }
+
+            // update selected activity in the experiences rail
+            updateSelectedActivityRail(currentActivity);
+            updateWizardStartButtonState();
+        };
+
+        /**
+         * Toggles (hides) the mode change switcher (the layer change, the preview and the annotations buttons)
+         * @param visible true to enable the mode change switcher, false otherwise
+         */
+        var _toggleModeChange = function(visible) {
+            var state = visible ? "visible": "hidden";
+
+            var layerSwitch = $(".editor-GlobalBar-item.js-editor-LayerSwitcherTrigger[data-layer='Targeting']"),
+                container = layerSwitch.parents("coral-actionbar-secondary");
+
+            $(container).css({
+                "visibility": state
+            });
+
+            var emulatorButton = $(".js-editor-EmulatorBar-toggle");
+            emulatorButton.css({
+                "visibility": state
+            });
+        };
+
+
+        /**
+         * Registers event listeners
+         */
+        var bindEventsListeners = function() {
+
+            // The "create activity" button
+            $(".create-activity-button").on("click", openCreateActivityDialog);
+
+            // Handle experience wizard next/previos hit
+            self.$elements.buttonExperienceWizardNext.on("click", handleExperienceWizardNext);
+            self.$elements.buttonExperienceWizardBack.on("click", handleExperienceWizardBack);
+
+            self.$elements.buttonStartWizard.on("click", function(e) {
+                if (self.contentManager.experiences.length > 0) {
+                    // show the experience rail
+                    self.showExperienceRail();
+
+                    // hide brand and activity toolbar
+                    self.$elements.campaignToolbar.hide();
+
+                    // hide editor left container actions
+                    toggleEditorGlobalBarLeftContainer(false);
+
+                    channel.trigger("targeting-ui-experience-rail-shown");
+
+                    _toggleModeChange(false);
+
+                    self.wizardStarted = true;
+
+                    var createEnabled = $("#CanCreateAudience").val() == "true";
+
+                    // initialize audience picker
+                    var brandPath = self.getCurrentBrand();
+                    var splitBrand = brandPath.split("/");
+                    var brand = splitBrand[splitBrand.length - 1];
+
+                    var pickerConfig = {
+                        path: Granite.author.pageInfo.status.path,
+                        engine: self.contentManager.currentActivityProperties.engineType,
+                        brand: brand,
+                        tntConfigPath: self.contentManager.currentActivityProperties.tntConfigPath,
+                        url: brandPath + "/" + self.getAmbit() + "/jcr:content.audiences.json",
+                        listingUrl: brandPath + "/" + self.getAmbit() + "/jcr:content.audienceslistings.json",
+                        isAbActivity: self.contentManager.currentActivityProperties.type == "abn",
+                        createEnabled: createEnabled
+                    };
+
+                    self.audiencePicker = AudiencePickerHelper.getAudiencePicker(pickerConfig);
+                }
+            });
+
+            channel.off("targeting-layer-on.targeted-content-manager-ui")
+                .off("targeted-editables-initialized.targeted-content-manager-ui");
+
+            self.targetingLayerOnHandler = function(event) {
+                self.show();
+
+                // keep track that we initialized this once
+                self.layerInitialized = true;
+            };
+
+            // campaign (activity) selection
+            self.$elements.campaignSelector
+                .on("change", function(event) {
+                    _debug("[TargetedContentManagerUI] Detected change on " + event.target);
+                    activityChooserSelectHandler(event);
+                });
+
+            self.$elements.brandSelector
+                .on("change", function(event) {
+                    brandChooserSelectHandler(event);
+                });
+
+            self.targetedEditablesInitializedHandler = function(event) {
+                if (self.targetingConfigLoaded) {
+                    _debug("[TargetedContentManagerUI] Restoring cache immediately")
+                    restoreCachedValues();
+                } else {
+                    _debug("[TargetedContentManagerUI] Waiting for 'target-config-loaded' event to restore cache");
+                    channel.one("target-config-loaded", function(){
+                        restoreCachedValues();
+                    });
+                }
+            };
+
+            _debug("[TargetedContentManagerUI] Listening for events [targeting-ui-experience-rail-shown," +
+                " targeting-ui-experience-rail-hidden," +
+                " targeting-layer-off," +
+                " targeting-layer-on," +
+                " targeted-editables-initialized" +
+                " cq-sidepanel-resized] ...");
+            // listen on experience rail to know when to resize the content frame
+            channel
+                .on("targeting-ui-experience-rail-shown.experience-rail-visible", function(event) {
+                    if (!experienceRailVisible) {
+                        $(contentFrameContainer).css("top", $(".editor-panel-header").height());
+                        experienceRailVisible = true;
+                    }
+                    self.targetingWizardStarted = true;
+                })
+                .on("targeting-ui-experience-rail-hidden.experience-rail-hidden", function(event) {
+                    if (experienceRailVisible) {
+                        $(contentFrameContainer).css("top", $(".editor-panel-header").height());
+                        experienceRailVisible = false;
+                        self.targetingWizardStarted = false;
+                        // select the DEFAULT experience
+                        if (self.contentManager.experiences[0]) {
+                            self.contentManager.switchExperience(self.contentManager.experiences[0].path);
+                        }
+                    }
+                })
+                .on("targeting-layer-off", function(event) {
+                    _debug("[TargetedContentManagerUI] Caught 'targeting-layer-off' event, tearing down...");
+                    self.tearDown();
+                })
+                .on("targeting-layer-on.targeted-content-manager-ui", function(event){
+                    _debug("[TargetedContentManagerUI] Caught 'targeting-layer-on' event, showing Targeted Content Manager UI...");
+                    self.targetingLayerOnHandler(event);
+                }).on("targeted-editables-initialized.targeted-content-manager-ui", function(event) {
+                    _debug("[TargetedContentManagerUI] Caught 'targeted-editables-initialized' event");
+                    self.targetedEditablesInitializedHandler(event);
+                }).on("cq-sidepanel-resized", function(e) {
+                    // expand or colapse the experiences right rail
+                    var experiencesWidgetObj = self.experienceRailWidgets[self.contentManager.currentActivityProperties.type].widget;
+                    if (experiencesWidgetObj) {
+                        if(Granite.author.ui.SidePanel.isOpened()) {
+                            experiencesWidgetObj.collapseRail();
+                        } else {
+                            experiencesWidgetObj.expandRail();
+                        }
+                    }
+                });
+        }
+
+        /**
+         * Handler for the "addExperience" dialog.
+         * Fills additional fields on the form.
+         * @param $form
+         * @param experienceOptions
+         */
+        var handleAddExperience = function(addExperienceDialog, experienceOptions) {
+
+            var $form = addExperienceDialog.find("#create-experience-form");
+            var experienceTitle = $form.find("#experienceTitleInput").val();
+            var experienceName = $form.find("#experienceNameInput").val();
+
+            // fill in the additional details
+            $form.find("#experienceName").attr("value", experienceName);
+            $form.find("#experienceTitle").attr("value", experienceTitle);
+            var windowUI = $(window).adaptTo("foundation-ui");
+            windowUI.wait();
+            // hide the dialog
+            $form.find("#experienceTitleInput").val("");
+            addExperienceDialog[0].hide();
+            $.ajax({
+                type: "post",
+                url: ns.TargetedContentManager.currentActivity + "/*",
+                contentType: "application/x-www-form-urlencoded",
+                data: $form.serialize()
+            }).done(function (html) {
+                var $html = $(html);
+                var path = $html.find("#Location").attr("href");
+
+                // add the experience to the list
+                // this also creates offers for that experience
+                var addedExperience = ns.ExperienceFactory.getExperience(experienceTitle, experienceName, path, null);
+                addedExperience["msmIsLocal"] = true;
+                if (experienceOptions.experience
+                    && experienceOptions.experience.audience) {
+                    addedExperience.audience = experienceOptions.experience.audience;
+                }
+
+                var promises = self.contentManager.addExperience(addedExperience);
+                var postProcess = function() {
+
+                    // rebuild the experience tabs
+                    self.buildExperienceTabs(self.contentManager.experiences);
+                    var experiencesWidgetObj = self.experienceRailWidgets[self.contentManager.currentActivityProperties.type];
+                    if (typeof experiencesWidgetObj !== "undefined") {
+                        experiencesWidgetObj.widget.switchExperience(self.contentManager.experiences[self.contentManager.experiences.length-1], true);
+                    }
+                    // select the last experience
+                    self.contentManager.switchExperience(self.contentManager.experiences[self.contentManager.experiences.length-1].path);
+                    TargetingUI.MultiSiteTargeting.showExperiencesListLocalOfferMarkers();
+                    windowUI.clearWait();
+                };
+                if (promises.length > 0) {
+                    $.when.apply(promises).then(function() {
+                        postProcess();
+                    });
+                } else {
+                    postProcess();
+                }
+
+            }).fail(function (xhr, error, errorThrown) {
+                windowUI.clearWait();
+            });
+        };
+
+        var _bindActivityFormEngineSelectionHandler = function(activityForm) {
+
+            var activityFormEngineSelectionHandler = function(event) {
+                var selectedEngine = $(event.target).val();
+                var isTarget = CQ.TargetingConstants.ENGINE_TARGET == selectedEngine;
+                var targetingConfigWidget = activityForm.find(".targeting-config");
+                var activityTypeWidget = activityForm.find(".targeting-activity-type");
+                $('coral-dialog-content form coral-alert').remove();
+            	console.log('activityFormEngineSelectionHandler: isTarget=' + isTarget + ', Granite.author.pageInfo.tntConfigPath=' + Granite.author.pageInfo.tntConfigPath + ', config value=' + $(targetingConfigWidget)[0].querySelector('[name="targetConfig"]').value + "=");
+                if (isTarget && Granite.author && Granite.author.pageInfo && Granite.author.pageInfo.tntConfigPath 
+                    && !$(targetingConfigWidget)[0].querySelector('[name="targetConfig"]').value) {
+                    // target selected and config applied but not available for use => privilege issue
+                	console.log('activityFormEngineSelectionHandler: going to show privilege warning');
+                    $('coral-dialog-content form', $("#create-activity-modal")).prepend(
+                        new Coral.Alert().set({
+                            variant: "warning",
+                            content: {
+                              innerHTML: Granite.I18n.get('You do not have sufficient privileges to select a Target configuration.')
+                            }
+                        })
+                    );
+                	console.log('activityFormEngineSelectionHandler: alert shown successfully');
+                }
+                if (targetingConfigWidget.length > 0) {
+                    targetingConfigWidget[0].disabled = !isTarget;
+                }
+
+                if (activityTypeWidget.length > 0) {
+                    activityTypeWidget[0].disabled = !isTarget;
+                }
+
+            };
+
+            var targetingEngineWidget = activityForm.find(".targeting-engine");
+            var targetingEngineSelect = targetingEngineWidget;
+            if (targetingEngineSelect) {
+                targetingEngineSelect.off("change")
+                    .on("change", activityFormEngineSelectionHandler);
+
+                activityFormEngineSelectionHandler({
+                    "target": targetingEngineSelect
+                });
+            }
+        };
+
+        var _bindActivityFormTargetConfigSelectionHandler = function(activityForm) {
+            var tntSelectHandler = function(event) {
+                var tntConfigSelect = $(event.target);
+                var tntConfig = $(event.target).val();
+
+                var activityTypeWidget = activityForm.find(".targeting-activity-type")[0];
+                if (activityTypeWidget !== null) {
+                    _populateActivityTypes(tntConfig,activityTypeWidget);
+                }
+            };
+
+            var tntConfigSelect = activityForm.find(".targeting-config");
+            if (tntConfigSelect) {
+                tntConfigSelect.off("change")
+                    .on("change", tntSelectHandler);
+            }
+        };
+
+        var _getActivityFormTargetConfig = function(activityForm) {
+            try {
+                var targetConfigWidget = activityForm.find(".targeting-config");
+                if (targetConfigWidget.length > 0
+                    && targetConfigWidget[0].disabled == false) {
+                    return targetConfigWidget.val();
+                }
+            } catch (error) {
+                _debug("[TargetedContentManagerUI] Error getting target configuration from activity form!" + error);
+            }
+
+            return "";
+        };
+
+        var _initializeWizardInsideEditor = function () {
+            if (self.experienceWizardDialog) {
+                _debug("[TargetedContentManagerUI] Initializing Personalization wizard inside the editor...");
+                _debug("[TargetedContentManagerUI] Advancing the wizard to the diagram step.");
+
+                experienceWizardNext();
+
+                _debug("[TargetedContentManagerUI] Initializing Personalization wizard inside the editor completed.");
+            }
+        };
+
+        var _showAudiencePicker = function(audienceOptions) {
+            self.audiencePicker.reset();
+            self.audiencePicker.showPicker({
+                multiSelection: false
+            }).off("selected").on("selected", function (selectedAudiences) {
+                if (selectedAudiences.length > 0) {
+                    var audience = {
+                        name: selectedAudiences[0].name,
+                        path: selectedAudiences[0].id
+                    };
+
+                    audienceOptions.callback(audience);
+                }
+            })
+            .off("audience:created").on("audience:created", function (audience, success) {
+                _debug('[TargetedContentManagerUI] Successfully created audience: ' + audience.name);
+
+                var tntConfig = self.contentManager.currentActivityProperties.tntConfigPath;
+                AudienceManagement.createTargetAudience(audience, tntConfig, function() {
+                    self.showOperationResult(Granite.I18n.get("Successfully created new audience"), 0);
+                    success();
+                }, function(xhr) {
+                    var message = Granite.I18n.get("Your audience could not be saved successfully. Please try again.");
+                    if (xhr && xhr.responseJSON && xhr.responseJSON.errorMessage) {
+                        message = Granite.I18n.get("Your audience could not be saved successfully.<br>Reason: {0}", xhr.responseJSON.errorMessage);
+                    }
+
+                    $(window).adaptTo("foundation-ui").prompt(Granite.I18n.get("Error"),
+                        message,
+                        "error",
+                        [{
+                            id: "ok",
+                            text: Granite.I18n.get("Close")
+                        }]
+                    );
+                });
+            });
+        };
+
+        var _resizeExperiencesSideRail = function() {
+            var experiencesWidgetObj = self.experienceRailWidgets[self.contentManager.currentActivityProperties.type];
+
+            var emulatorToolbar = $(".editor-EmulatorBar");
+            if (emulatorToolbar.is(":visible")) {
+                $(experiencesWidgetObj.selector).addClass("emulator-visible");
+            } else {
+                $(experiencesWidgetObj.selector).removeClass("emulator-visible");
+            }
+
+            $(experiencesWidgetObj.selector).height($(contentFrameContainer).height());
+
+            TargetingUI.MultiSiteTargeting.showExperiencesListLocalOfferMarkers();
+        };
+
+        var _buildExperiencesSideRail = function(widgetConfig) {
+            var widget = undefined;
+            if (self.contentManager.currentActivityProperties.type == "abn") {
+                widget = new TSDK.UI.ExperienceRailAB(widgetConfig);
+            } else {
+                widget = new TSDK.UI.ExperienceRailXT(widgetConfig)
+                    .on('audience:select', function (options) {
+                        _showAudiencePicker(options);
+                    })
+                    .on('audience:edited', function (options) {
+                        _debug('[TargetedContentManagerUI] Changed audience at index ' + options.index + ' from [' + options.oldAudience.name + '] to [' + options.newAudience.name + ']');
+
+                        var updatedExperience = self.contentManager.experiences[options.index].path;
+
+                        $.ajax({
+                            type: "post",
+                            url: updatedExperience + "/jcr:content",
+                            contentType: "application/x-www-form-urlencoded",
+                            data: {
+                                "cq:segments": [options.newAudience.path]
+                            }
+                        }).done(function (html) {
+
+                        }).fail(function (xhr, error, errorThrown) {
+                            self.showOperationResult(Granite.I18n.getMessage("Error updating audience!"), true);
+                        });
+                    });
+            }
+
+            // Close sidepanel if experience is expanded
+            widget.on("rail:expanded", function(options){
+                Granite.author.ui.SidePanel.close();
+            });
+
+            return widget;
+        };
+
+        var _populateActivityTypes = function(tntConfig, activityTypeWidget) {
+
+            var activityTypesUrl = tntConfig + "/_jcr_content.activitytypes.json";
+            $.ajax(activityTypesUrl)
+                .done(function (response) {
+                    activityTypeWidget.items.clear();
+                    if (response["allowedActivities"] && response["allowedActivities"].length > 0) {
+                        $.each(response["allowedActivities"], function(idx, act){
+                            activityTypeWidget.items.add({
+                                "content":{
+                                    innerHTML:act["typeLabel"]
+                                },
+                                "value":act["type"]
+                            });
+                        });
+                    }
+                })
+                .fail(function (response) {
+                    console.log("Error: ", response);
+                });
+        };
+
+        /* **** END PRIVATE AREA ****************** */
+
+        $(document).on("cui-contentloaded", function (e) {
+            //activity creation code
+            var createActivityForm = $("#create-activity-form", e.target);
+            if (createActivityForm.length) {
+                var dialog = createActivityForm.closest("coral-dialog")[0];
+
+                createActivityForm.off("submit");
+                createActivityForm.on("submit", function (e) {
+                    e.preventDefault();
+                    //set current brand as parent path for the activity to create
+                    var currentBrand = self.$elements.brandSelector.val();
+                    var ambit = self.getAmbit();
+                    createActivityForm.find('input[name="parentPath"]').val(currentBrand + "/" + ambit);
+
+                    var activityTitle = createActivityForm.find('input[name="./jcr:title"]').val();
+                    var activityName = createActivityForm.find('input[name="name"]').val();
+
+                    var endpoint = currentBrand + "/" + ambit + "/jcr:content.activityupdate.json";
+
+                    var engineType = createActivityForm.find(".targeting-engine").val();
+                    var tntConfig = _getActivityFormTargetConfig(createActivityForm);
+                    var activityType = createActivityForm.find(".targeting-activity-type").val();
+
+                    var activityPath = currentBrand + "/" + ambit + "/" + activityName;
+
+                    var postData = {
+                        "activityPath": activityPath,
+                        "activityTitle": activityTitle,
+                        "activityTemplate": "/libs/cq/personalization/templates/campaign",
+                        "activityResourceType": "cq/personalization/components/campaignpage",
+                        "targetingEngine": engineType,
+                        "_charset_": "utf-8"
+                    };
+
+                    var activityTypeMarker = "AEM";
+
+                    if (engineType == CQ.TargetingConstants.ENGINE_TARGET) {
+                        if (typeof tntConfig != "undefined"
+                            && tntConfig != "") {
+                            $.extend(postData, {
+                                "activityCloudConfigs": tntConfig,
+                                "campaignType": activityType
+                            });
+
+                            activityTypeMarker = activityType == "landingPage" ? "XT" : "A/B";
+                        } else {
+                            return false;
+                        }
+                    }
+
+                    $.ajax({
+                        type: createActivityForm.prop("method"),
+                        url: endpoint,
+                        contentType: createActivityForm.prop("enctype"),
+                        data: postData
+                    }).done(function (html) {
+                        if (self.contentManager && self.contentManager.ClientContext) {
+                            var campaignStore = self.contentManager.ClientContext.get("campaign");
+                            var triggerCampaignSelection = function () {
+                                self.$elements.campaignSelector.trigger($.Event('selected', {selected: activityPath}));
+                                campaignStore.removeListener("update", triggerCampaignSelection);
+                            };
+                            campaignStore.addListener("update", triggerCampaignSelection);
+                            campaignStore.reload();
+                        }
+                        dialog.hide();
+                        self.showOperationResult(Granite.I18n.get("The activity was created successfully"), 0);
+
+                        updateWizardStartButtonState();
+
+                        createActivityForm.find('input[name="./jcr:title"]').val("");
+                        createActivityForm.find('input[name="name"]').val("");
+
+                        var aType = activityTypeMarker == "AEM" ? "aem" : (activityTypeMarker == "XT") ? "xt" : "ab";
+                        var activitySelect = self.$elements.campaignSelector;
+                        activitySelect[0].items.add({
+                            value: activityPath,
+                            content: {
+                                innerHTML: "<span class=\"badge\" data-activity-type=\"" + aType + "\">" + activityTypeMarker + "</span>" + activityTitle
+                            }
+                        });
+                        activitySelect.val(activityPath);
+                        activitySelect.trigger("change");
+
+                        self.contentManager.currentActivityProperties = {
+                            type: activityType,
+                            engineType: engineType,
+                            tntConfigPath: tntConfig,
+                            isLiveCopy: false
+                        };
+
+                    }).fail(function (xhr, error, errorThrown) {
+                        var cause = undefined;
+                        if (xhr.responseJSON) {
+                            cause = xhr.responseJSON.message;
+                        } else if (xhr.responseText) {
+                            var $html = $(xhr.responseText);
+                            if ($html.find('#Message').length > 0) {
+                                var message = $html.find('#Message').text();
+                                if (message) {
+                                    cause = message;
+                                }
+                            }
+                        }
+
+                        dialog.hide();
+                        createActivityForm.find('input[name="./jcr:title"]').val("");
+                        createActivityForm.find('input[name="name"]').val("");
+                        self.showOperationResult(Granite.I18n.get("An error occured while creating the activities"), 1, cause);
+                    });
+                });
+            }
+        });
+
+        /**
+         * Toggles the DOM element for this experience as "selected"
+         * @param index { Number } - the index of the "experience" tab in the experiences list
+         * @param experience { Object } - the actual experience
+         */
+        self.selectExperience = function(index, experience) {
+
+            // check if we're not selecting the currently selected experience
+            if (self.selectedExperience
+                && experience[ns.ExperienceFactory.props.PATH] === self.selectedExperience[ns.ExperienceFactory.props.PATH]) {
+                return;
+            }
+
+            //cleanup
+            $(".experience-row").removeClass("active");
+
+            //set active
+            $(".experience-row[data-index=" + index + "]").addClass("active");
+
+            // close the toolbar
+            if (window.Granite
+                && Granite.author
+                && Granite.author.EditorFrame
+                && Granite.author.EditorFrame.editableToolbar) {
+                Granite.author.EditorFrame.editableToolbar.close();
+            }
+            // END cleanup
+
+            self.selectedExperience = experience;
+        };
+
+        /**
+         * Toggle the UI visible
+         */
+        self.show = function() {
+            self.$elements.content.show();
+            updateWizardStartButtonState();
+            updateAddExperienceModalButtonState();
+            $(contentFrameContainer).css("top", parseInt(initialTop, 10) + self.$elements.content.height());
+        }
+
+        /**
+         * Hides the UI and resets everything
+         */
+        self.tearDown = function() {
+            self.selectedExperience = null;
+            self.$elements.experienceChooserContainer.hide();
+            self.$elements.content.hide();
+
+            var restoredTop = initialTop ? initialTop : "auto";
+            $(contentFrameContainer).css("top", restoredTop);
+            self.$elements.campaignSelector.val("").change();
+            try {
+                self.contentManager.reset();
+            } catch(e) {}
+            restoreBrandActivitySelectionStep();
+        }
+
+        /**
+         * Renders the experiences for this campaign
+         * @param experiences
+         */
+        self.buildExperienceTabs = function(experiences) {
+            _debug("[TargetedContentManagerUI] Rebuilding experience tabs...");
+
+            // map experiences so title is shown instead of name
+            var tsdkExperiences = experiences.map(function(exp){
+                exp.name = exp.title;
+                exp._name = exp.name;
+                return exp;
+            });
+
+            //cleanup
+            self.selectedExperience = {};
+
+            // overlay the method rendering the experience rename popover
+            // so we can limit the experience name to 20 chars
+            try {
+                if (TSDK.UI.Templates.ExperienceRailComponent.ExperienceRailRenamePopover
+                    && !TSDK.UI.Templates.ExperienceRailComponent.ExperienceRailRenamePopoverOverlaid) {
+                    TSDK.UI.Templates.ExperienceRailComponent.ExperienceRailRenamePopoverOverlaid = true;
+
+                    var oldPopoverRenderer = TSDK.UI.Templates.ExperienceRailComponent.ExperienceRailRenamePopover;
+
+                    TSDK.UI.Templates.ExperienceRailComponent.ExperienceRailRenamePopover = function (context, options) {
+                        var output = oldPopoverRenderer.call(oldPopoverRenderer, context, options);
+                        var jqOutput = $(output);
+                        jqOutput.find(".experience-title-input").attr("maxlength", 20);
+
+                        return jqOutput[0].outerHTML;
+                    };
+                }
+            } catch (e) {}
+
+            var experiencesWidgetObj = self.experienceRailWidgets[self.contentManager.currentActivityProperties.type];
+
+            if (!experiencesWidgetObj) {
+                console.warn("Unsupported activity type " + self.contentManager.currentActivityProperties.type);
+                return;
+            }
+
+            for (var actType in self.experienceRailWidgets) {
+                if (self.experienceRailWidgets.hasOwnProperty(actType)) {
+                    $(self.experienceRailWidgets[actType].selector).hide();
+                }
+            }
+
+            if (!experiencesWidgetObj.widget) {
+                var actionArray = [];
+                var widgetDataCfg = {};
+
+                if (self.contentManager.currentActivityProperties.type == "abn") {
+                    widgetDataCfg = {
+                        audience: "All Visitors",
+                        experiences: tsdkExperiences
+                    };
+
+                    actionArray = [
+                        TSDK.Enums.ExperienceRailActions.RENAME_EXPERIENCE,
+                        TSDK.Enums.ExperienceRailActions.DUPLICATE,
+                        TSDK.Enums.ExperienceRailActions.DELETE
+                    ];
+                } else {
+                    widgetDataCfg = {
+                        experiences: tsdkExperiences
+                    };
+
+                    actionArray = [
+                        TSDK.Enums.ExperienceRailActions.EDIT_AUDIENCE,
+                        TSDK.Enums.ExperienceRailActions.RENAME_EXPERIENCE,
+                        TSDK.Enums.ExperienceRailActions.DUPLICATE,
+                        TSDK.Enums.ExperienceRailActions.DELETE
+                    ];
+                }
+
+                var widgetConfig = {
+                    el: experiencesWidgetObj.selector,
+                    visible: true,
+                    data: widgetDataCfg,
+                    config: {
+                        autoAdd: true,
+                        activeIndex: 0,
+                        noAnimation: false,
+                        placement: "right",
+                        mode: "expanded",
+                        actions: actionArray,
+                        minCount: 0,
+                        maxCount: 50
+                    }
+                };
+
+
+                experiencesWidgetObj.widget = _buildExperiencesSideRail(widgetConfig);
+
+                experiencesWidgetObj.widget
+                    .on('error', function (options) {
+                        console.log('ERROR: ' + options.message);
+                    })
+                    .on('rail:collapsing rail:collapsed rail:expanding rail:expanded', function (railWidth) {
+                        _debug("[TargetedContentManagerUI] Rail expand/collapse event!");
+                    })
+                    .on('tab:switched', function (index) {
+                        _debug("[TargetedContentManagerUI] Switching to experience idx=" + index);
+                        var currentExperience = experiencesWidgetObj.widget.getExperiences()[index];
+                        CQ.TargetedContentManager.switchExperience(currentExperience.path);
+                        TargetingUI.MultiSiteTargeting.showExperiencesListLocalOfferMarkers();
+                    })
+                    .on('experience:add', function (options) {
+                        _debug("[TargetedContentManagerUI] Experience add called!");
+                        //options.callback(getMockExperience());
+                        // add audience info if this is AB widget
+                    })
+                    .on('experience:added', function (options) {
+                        openAddExperienceDialog(options, experiencesWidgetObj.widget);
+                        _debug('[TargetedContentManagerUI] Added experience [' + options.experience.name + '] at index ' + options.index);
+                    })
+                    .on("experience:deleted", function (options) {
+                        var deletedExperience = options.oldExperience;
+                        self.contentManager.deleteExperience(deletedExperience[ns.ExperienceFactory.props.PATH],
+                            function(experiences, scope) {
+                                scope.showOperationResult(Granite.I18n.getMessage("The experience has been deleted"), 0, "");
+                                scope.buildExperienceTabs(experiences);
+                                CQ.TargetedContentManager.switchExperience("DEFAULT");
+                            },
+                            self);
+                    })
+                    .on('experience:renamed', function(options) {
+                        _debug('[TargetedContentManagerUI] Renamed experience at index ' + options.index + ' from [' + options.oldName + '] to [' + options.newName + ']');
+                        $.ajax({
+                            type: "post",
+                            url: options.experience.path + "/jcr:content",
+                            contentType: "application/x-www-form-urlencoded",
+                            data: {
+                                "jcr:title": options.newName,
+                                "_charset_": "utf-8"
+                            }
+                        }).done(function (html) {
+                            self.showOperationResult(Granite.I18n.getMessage("The experience has been successfully renamed"), false);
+
+                            // update the experience in the experience store
+                            var experienceStore = self.contentManager.experiences;
+                            $.each(experienceStore, function(expIdx, currentExperienceObject) {
+                                if (currentExperienceObject.path == options.experience.path) {
+                                    // found the experience to update
+                                    currentExperienceObject.title = options.newName;
+                                    return false;
+                                }
+                            });
+                        }).fail(function (xhr, error, errorThrown) {
+                            self.showOperationResult(Granite.I18n.getMessage("Error renaming experience!"), true);
+                        });
+                    });
+            } else {
+                experiencesWidgetObj.widget.setExperiences([]);
+                experiencesWidgetObj.widget.setExperiences(tsdkExperiences);
+                if (tsdkExperiences && tsdkExperiences.length > 0) {
+                    experiencesWidgetObj.widget.switchExperience(0, true);
+                }
+            }
+            // TODO: Replace with proper event once ATSDK-154 is implemented
+            $(experiencesWidgetObj.selector).on('click','.experience-row .menu-button', function(evt) {
+                var experience = $(this).closest('.experience-row');
+                // same check as in TargetingUI.MultiSiteTargeting.ensureInheritanceBroken
+                // to suppress event propagation
+                if (TargetingUI.MultiSiteTargeting.isValidInheritance()
+                        && !TargetingUI.MultiSiteTargeting._isExperienceLocal(experience)) {
+                    evt.preventDefault();
+                    evt.stopPropagation();
+
+                    var t = evt.target;
+                    TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function(){
+                        // Dispatching via t.dispatchEvent(evt) does not work reliably
+                        // so we call the internal method directly as workaround
+                        experiencesWidgetObj.widget._handleMenuButtonClick(evt);
+                    }, experience);
+
+                    return false;
+                }
+
+                return true;
+            });
+
+            $(experiencesWidgetObj.selector).show();
+            _resizeExperiencesSideRail();
+
+            if (self.wizardStarted) {
+                self.$elements.buttonStartWizard.trigger("click");
+            }
+
+            // setup msm inheritance hooks
+            TargetingUI.MultiSiteTargeting.setupInheritanceHooks();
+        };
+
+        self.showExperienceRail = function() {
+            self.$elements.experienceChooserContainer.show();
+            _resizeExperiencesSideRail();
+        };
+
+
+        self.showOperationResult = function(text, isError, cause) {
+
+            var message = isError == 0 ? text : Granite.I18n.get(text + ". Reason: {0}", [cause]),
+                type = isError == 0 ? "success" : "error";
+
+            var ui = $(window).adaptTo("foundation-ui");
+            ui.notify(null,message,type);
+        }
+
+        self.getCurrentBrand = function() {
+            return self.$elements.brandSelector.val();
+        }
+
+        self.getAmbit = function() {
+            var brand = self.getCurrentBrand();
+            var ambit = CQ.TargetingConstants.AMBIT_DEFAULT_NAME;
+            var ambitReferences = self.pageAmbits || [];
+            // we expect one reference per brand, break when found
+            for (var i = 0; i < ambitReferences.length; i++) {
+                var ambitReference = ambitReferences[i].path;
+                // starts with
+                if (ambitReference.slice(0, brand.length) == brand) {
+                    ambit = ambitReference.replace(/.*\/(.*?)/, "$1");
+                    break;
+                }
+            }
+            return ambit;
+        }
+
+        self.doSaveToOfferLibrary = function(editable) {
+            var targetComponent = self.contentManager.getTargetParent(editable),
+                currentBrand = self.getCurrentBrand(),
+                ambit = self.getAmbit();
+
+            var offerLibraryPath = currentBrand + "/" + ambit + "/" + CQ.TargetingConstants.OFFER_LIBRARY_DEFAULT_NAME;
+
+            var offerPath = self.contentManager.offers[targetComponent.path],
+                url = "/libs/cq/personalization/touch-ui/content/v2/commons/savetolibrarymodal.html"
+                    + offerLibraryPath + "/jcr:content"
+                    + "?rootPath=" + offerLibraryPath
+                    + "&offerSource=" + offerPath;
+
+            var dialog = new Granite.author.ui.Dialog({
+                getConfig: function() {
+                    return {
+                        src:url,
+                        loadingMode:"auto",
+                        layout:"auto"
+                    }
+                },
+                refresh: function(){
+                    var deferred = $.Deferred();
+                    return deferred.promise();
+                }
+            });
+            Granite.author.DialogFrame.openDialog(dialog);
+
+            channel.on("dialog-fail", function(event, xhr){
+                var response = xhr.responseJSON;
+                self.showOperationResult("Failed to save offer", true, response.message);
+            });
+
+            channel.one("dialog-success", function(event, xhr){
+                channel.off("dialog-fail");
+                self.showOperationResult("Offer saved successfully",false);
+                self.contentManager.loadOffers(targetComponent, self.contentManager.selectedExperience);
+            })
+
+        }
+
+        return self;
+
+    })();
+
+}(jQuery, CQ, jQuery(document), this));

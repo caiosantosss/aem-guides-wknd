@@ -1,0 +1,485 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2015 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(document, XSS, Granite, $) {
+    "use strict";
+    
+    var bCreateLaunchMode = true;
+    var ui = $(window).adaptTo("foundation-ui");
+
+    function removeStep(wizard, step) {
+        var panel = step.closest("coral-panel");
+        var index = panel.index();
+
+
+        var stepListSteps = wizard.find(".foundation-layout-wizard2-steplist > coral-step");
+        var controlPanels = wizard.find(".foundation-layout-wizard2-controls > coral-panel");
+        
+        panel.detach();
+        
+        var step = stepListSteps[index];
+        step.remove();
+        
+        var control = controlPanels[index];
+        control.remove();
+        
+        return {
+            step: step,
+            content: panel[0],
+            control: control
+        };
+    }
+    
+    function appendStep(wizard, stepConfig) {
+        var contentPanels = wizard.find(".foundation-layout-wizard2-contents > coral-panel");
+        var stepListSteps = wizard.find(".foundation-layout-wizard2-steplist > coral-step");
+        var controlPanels = wizard.find(".foundation-layout-wizard2-controls > coral-panel");
+        var refIndex = contentPanels.length - 1;
+        var refPanel = $(contentPanels[refIndex]);
+        
+        $(stepListSteps[refIndex]).after(stepConfig.step);
+        refPanel.after(stepConfig.content);
+        $(controlPanels[refIndex]).after(stepConfig.control);
+    };
+
+    function _getLaunchItemFromPath(wizard, resourcePath){
+        var retVal = null;
+        if(wizard.childResourcePageList && wizard.childResourcePageList.length>0){
+            for(var index=0;index< wizard.childResourcePageList.length;index++){
+                var currentItem = wizard.childResourcePageList[index];
+                if(currentItem.path===resourcePath){
+                    retVal = currentItem;
+                    break;
+                }
+            }
+        }
+        return retVal;
+    };
+
+    function _removeResourcePath(wizard, resourcePath){
+        if(wizard.childResourcePageList && wizard.childResourcePageList.length>0){
+            for (var index=0; index < wizard.childResourcePageList.length; index++) {
+                var currentItem = wizard.childResourcePageList[index];
+                if(currentItem.path == resourcePath) {
+                    wizard.childResourcePageList.splice(index, 1);
+                    break;
+                }
+            }
+        }
+    };
+
+    function _appendResourcePage(wizard, resourcePath, bisDeep, bDisableDeep, bRefreshUI){
+        var bAdded = false;
+        if(!wizard.childResourcePageList){
+            wizard.childResourcePageList = [];
+        }
+        var newItem = {};
+        newItem.path = resourcePath;
+        newItem.disableDeep = bDisableDeep;
+        _validateResourcePage(newItem, bisDeep);
+        if(newItem.valid){
+            bAdded = true;
+            wizard.childResourcePageList.push(newItem);
+            if(bRefreshUI){
+                _refreshChildPageListUI(wizard);    
+            }
+        }
+        return bAdded;
+    };
+
+    function _getLaunchTable(wizard){
+        var table = wizard.find('table[is="coral-table"]');
+        return table[0];
+    };
+
+    function _getSelectedLaunchItems(wizard){
+        var launchTable = _getLaunchTable(wizard);
+        return launchTable.selectedItems;
+    };
+
+    function _removeAllRowsFromTable(launchTable){
+        var table_body = $(launchTable).find('tbody');
+        table_body.empty();
+    };
+
+    function _refreshChildPageListUI(wizard){
+        var launchTable = _getLaunchTable(wizard);
+        _removeAllRowsFromTable(launchTable);
+
+        //first clear all path fields
+        var input_array = wizard.find('input[name="srcPathList"]'), 
+            index;
+        for(index=0;index<input_array.length;index++){
+            var item = input_array[index];
+            item.parentElement.removeChild(item);
+        }
+        input_array = wizard.find('input[name="shallowList"]');
+        for(index=0;index<input_array.length;index++){
+            var item = input_array[index];
+            item.parentElement.removeChild(item);
+        }
+
+        for(var index=0; index< wizard.childResourcePageList.length; index++){
+            var currentItem = wizard.childResourcePageList[index];
+            _appendCurrentLaunchPage(wizard, launchTable, currentItem);
+        }
+        wizard.find('.foundation-collection-item-includesubpage coral-switch').on('change', function(evt){
+            var currentInput = $(evt.currentTarget);
+            var $tr = currentInput.closest('tr');
+            var currentPath = $tr.data('path');
+            var launchItem = _getLaunchItemFromPath(wizard,currentPath);
+            launchItem.cache.includesubpage = currentInput[0].checked;
+            _updatelaunchIncludeSubPageState(wizard, launchItem);
+        });
+        _updateButtonStates(wizard);
+    }
+
+    function _validateResourcePage(currentItem, bIsDeep){
+        //first find if we have all information about this item
+        if(!currentItem.info){
+            var url = Granite.HTTP.externalize(currentItem.path + "/jcr:content.json" , true);
+            // no further XSS encoding required here, as url is only used in a JavaScript
+            // context (still could make sense to validate/sanitize the URL, but that's not
+            // an XSS issue)
+            var data = Granite.HTTP.eval(url);
+            currentItem.info = data;
+        }
+        currentItem.valid = !!currentItem.info && !!currentItem.info["jcr:title"];
+        if(currentItem.valid){
+            //process more data now
+            currentItem.cache = {};
+            currentItem.cache.title = XSS.getXSSValue(currentItem.info["jcr:title"]);
+            var replicatedDate = currentItem.info["cq:lastReplicated"];
+            var momentDate = new moment(replicatedDate);
+            var bValidReplicatedDate = replicatedDate!=null && momentDate!=null && momentDate.isValid();
+            var strLastReplicationAction = currentItem.info["cq:lastReplicationAction"];
+            var strPublished = (bValidReplicatedDate && "Deactivate" != strLastReplicationAction) ? Granite.I18n.get("Published") : Granite.I18n.get("Not published");
+            var strModifiedBy = currentItem.info["cq:lastReplicatedBy"] || Granite.I18n.get("None");
+            var modifiedDate = currentItem.info["cq:lastModified"];
+            var strModifiedDate = "";
+            try{
+                var m = new moment(modifiedDate);
+                strModifiedDate = m.format('LL');
+            }catch(e){
+                strModifiedDate = "";
+            }
+            currentItem.cache.published = strPublished;
+            currentItem.cache.modifiedby = strModifiedBy;
+            currentItem.cache.modifieddate = strModifiedDate;
+            currentItem.cache.includesubpage = bIsDeep;
+        }
+    }
+
+    function _appendCurrentLaunchPage(wizard, launchTable, currentItem){
+        launchTable.multiple = true;
+        launchTable.selectable = true;
+        var table_row_text ='<tr is="coral-table-row" itemprop="item" class="foundation-collection-item"></tr>';
+        var table_content_text = '<td is="coral-table-cell" class="select"><coral-checkbox coral-table-rowselect></coral-checkbox></td>'+
+        '<td class="foundation-collection-item-title" is="coral-table-cell">'+currentItem.cache.title+'</td>'+
+        '<td class="foundation-collection-item-published" is="coral-table-cell">'+currentItem.cache.published+'</td>'+
+        '<td class="foundation-collection-item-modifiedby" is="coral-table-cell">'+currentItem.cache.modifiedby+'</td>'+
+        '<td class="foundation-collection-item-modifieddate" is="coral-table-cell">'+currentItem.cache.modifieddate+'</td>'+
+        '<td class="foundation-collection-item-includesubpage" is="coral-table-cell"><a><coral-switch ' + (currentItem.cache.includesubpage ? "checked" : "") + '></a></coral-switch></td>';
+        var $table_row = $(table_row_text);
+        $table_row.data('path',currentItem.path);
+        launchTable.items.add($table_row[0]);
+        $table_row[0].innerHTML = table_content_text;
+        if(currentItem.disableDeep){
+            $table_row.find('coral-switch')[0].disabled = true;
+        }
+        _appendHiddenField(wizard, 'srcPathList', currentItem.path, currentItem.path);
+        _appendHiddenField(wizard, 'shallowList', currentItem.path, !currentItem.cache.includesubpage);
+    }
+
+    function _updatelaunchIncludeSubPageState(wizard, launchItem){
+        var inputList = wizard.find('input[name="shallowList"]');
+        if(inputList!=null && inputList.length>0){
+            for(var index=0;index<inputList.length;index++){
+                var currentInput = $(inputList[index]);
+                if(currentInput.data('path')===launchItem.path){
+                    currentInput.attr('value', launchItem.cache.includesubpage ? "false": "true");
+                }
+            }
+        }
+    }
+
+    function _appendHiddenField(wizard, name, pathInfo, value) {
+        var wizard_form = $(wizard[0]);
+        var i;
+        var $hiddenField = $("<input type='hidden'/>").attr("name", name);
+        wizard_form.append($hiddenField);
+        $hiddenField.data('path',pathInfo);
+        if (value !== undefined) {
+            $hiddenField.attr("value", value);
+        }
+    };
+
+    function _updateButtonStates(wizard){
+        _updateDeleteButtonState(wizard);
+        _updateToggleButtonState(wizard);
+    };
+
+    function _updateToggleButtonState(wizard){
+        var wizardAPI = wizard.adaptTo("foundation-wizard");
+        wizardAPI.toggleNext(wizard.childResourcePageList.length>0);
+        setTimeout(function(){
+            wizardAPI.toggleNext(wizard.childResourcePageList.length>0);
+        },0);
+    };
+
+    function _updateDeleteButtonState(wizard){
+        var selectedLaunchItems = _getSelectedLaunchItems(wizard);
+        var deleteBtn = wizard.find(".foundation-collection-action-delete");
+        if(selectedLaunchItems!=null && selectedLaunchItems.length>0){
+            deleteBtn.removeAttr('hidden');
+        }
+        else {
+            deleteBtn.attr('hidden','hidden');
+        }
+    };
+
+    function _handleDeleteBtnClick(wizard){
+        var selectedLaunchItems = _getSelectedLaunchItems(wizard);
+        if(selectedLaunchItems!=null && selectedLaunchItems.length>0){
+            for(var index=0; index< selectedLaunchItems.length; index++){
+                var currentItem = $(selectedLaunchItems[index]);
+                _removeResourcePath(wizard, currentItem.data('path'));
+            }
+            _refreshChildPageListUI(wizard);
+        }
+    };
+
+    function _parse_url_params(){
+        var search_string = location.search;
+        function _parse_values_internal(params, pairs) {
+            var pair = pairs[0];
+            var parts = pair.split('=');
+            var key = decodeURIComponent(parts[0]);
+            var value = decodeURIComponent(parts.slice(1).join('='));
+
+            // Handle multiple parameters of the same name
+            if (typeof params[key] === "undefined") {
+              params[key] = value;
+            } else {
+              params[key] = [].concat(params[key], value);
+            }
+
+            return pairs.length == 1 ? params : _parse_values_internal(params, pairs.slice(1))
+        }
+        return search_string.length == 0 ? {} : _parse_values_internal({}, search_string.substr(1).split('&'));
+    };
+
+    function _getFormElement(){
+        var form = $(".cq-sites-createlaunch-form");
+        if(form==null || form.length ==0){
+            //this might be edit launch now
+            form = $('.cq-sites-editlaunch-form');
+            bCreateLaunchMode = false;
+        }
+        return form;
+    };
+    function _getWizardFromForm(form){
+        var wizard;
+        if(bCreateLaunchMode){
+            wizard = form.find(".cq-sites-createlaunch-wizard");
+        }
+        else{
+            wizard = form.find(".cq-sites-editlaunch-wizard");
+        }
+        return wizard;
+    };
+
+    $(function() {
+        var form = _getFormElement();
+        var wizard = _getWizardFromForm(form);
+        var ui = $(window).adaptTo("foundation-ui");
+        
+        var template = $(".cq-sites-createlaunch-template");
+        var templateConfig;
+        var templateDetached = false;
+        
+        requestAnimationFrame(function() {
+            if(bCreateLaunchMode){
+                templateConfig = removeStep(wizard, template);
+                templateDetached = true;
+            }
+        });
+        
+        form.on("change", "[name='shallow']", function(e) {
+            // These are hidden fields
+            var sourceRolloutConfig = form[0].elements.sourceRolloutConfigs[0];
+            var sourceRolloutConfigShallow = form[0].elements.sourceRolloutConfigs[1];
+            
+            sourceRolloutConfig.disabled = this.checked;
+            sourceRolloutConfigShallow.disabled = !this.checked;
+        });
+        
+        wizard.find(".foundation-collection-action-delete").click(function(e){
+            ui.prompt(Granite.I18n.get("Remove"),
+                Granite.I18n.get("Do you really want to remove selected pages?"), 
+                "error", 
+                [{
+                  text: Granite.I18n.get("Cancel"),
+                  id: "no"
+                 },
+                 {
+                  text: Granite.I18n.get("Remove"),
+                  id: "yes",
+                  warning: true
+                 }], 
+                function(btnId) {
+                  if (btnId === "yes") {
+                    _handleDeleteBtnClick(wizard);
+                  } 
+          });
+        });
+        
+        wizard.on("foundation-wizard-stepchange", function(e, to, from) {
+            setTimeout(function(wizard){
+                //we need to update the thumbnail UI as well
+                if(wizard.childResourcePageList && wizard.childResourcePageList.length>0){
+                    var currentPath = wizard.childResourcePageList[0].path;
+                    var src = Granite.HTTP.externalize(currentPath + ".thumb.319.319.png");
+                    $(".foundation-layout-thumbnail-image img").attr("src", src);
+                }
+            }, 0, wizard);
+        });
+
+        $(window).adaptTo("foundation-registry").register("foundation.picker.control.action", {
+            name: "cq.sites.createlaunch.addpages",
+            handler: function(name, el, config, selections) {
+                if (selections.length > 0) {
+                    ui.wait();
+                    var bAdded = false;
+                    var bRootPath = false;
+                    $.each(selections, function () {
+                        var strResourcePath = this.value;
+                        if(strResourcePath != '/content'){
+                            var currentItem = _getLaunchItemFromPath(wizard, strResourcePath);
+                            if(currentItem ==null){
+                                if(_appendResourcePage(wizard, strResourcePath, true, false, false)){
+                                    bAdded = true;
+                                }
+                            }
+                        }
+                        else{
+                            bRootPath = true;
+                        }
+                    });
+                    ui.clearWait();
+                    if(bAdded){
+                        _refreshChildPageListUI(wizard);
+                    }else if(!bRootPath){
+                        ui.prompt(Granite.I18n.get("Error"),
+                            Granite.I18n.get("Selected page(s) already exist in the list."),
+                            "error",
+                            [{
+                                text: Granite.I18n.get("Ok"),
+                                id: "no"
+                            }]
+                        );
+                    }
+                }
+            }
+        });
+
+        // autoselect source
+        setTimeout(function(){
+            var path_array = [];
+            var url_params = _parse_url_params();
+            if (url_params && url_params['source'] && url_params['source'].length>0) {
+                path_array = url_params['source'].split(',');
+            }
+            else if (window.location.hash) {
+                var path = window.location.hash.substring(1);
+                path_array = path.split(',');
+            }
+            var notemplate = url_params['notemplate'];
+            if(notemplate){
+                var templateinput = $($.find('input[name="page"][value="new"]')[0]);
+                var templateRadio = $(templateinput.closest('coral-radio')[0]);
+                templateRadio.hide();
+            }
+            if(!wizard.childResourcePageList){
+                wizard.childResourcePageList = [];
+            }
+            var createNested = url_params['create_nested_launch'];
+            if(path_array.length==0 && window._g_initial_edit_launch_list && window._g_initial_edit_launch_list.length){
+                //check if we have edit array with us
+                for(var index=0;index<window._g_initial_edit_launch_list.length;index++){
+                    var obj = window._g_initial_edit_launch_list[index];
+                    _appendResourcePage(wizard, obj.rootResource, obj.isDeep, true, false);
+                }
+                _refreshChildPageListUI(wizard);
+            }
+            else if(path_array && path_array.length>0){
+                for(var index=0;index<path_array.length;index++){
+                    var path = path_array[index];
+                    var deep = true;
+                    if (path.lastIndexOf("-", 0) === 0) {
+                        path = path.substring(1);
+                        deep = false;
+                    }
+                    _appendResourcePage(wizard, path, deep, createNested, false);
+                }
+                _refreshChildPageListUI(wizard);
+            }
+            //if there are some child pages added we should move to next page
+            if(wizard.childResourcePageList.length > 0 && createNested){
+                var wizardAPI = wizard.adaptTo("foundation-wizard");
+                wizardAPI.next();
+            }
+
+            setTimeout(function(){
+                _updateButtonStates(wizard);
+                wizard.find('table[is="coral-table"]').on("coral-table:change", function(e) {
+                    _updateButtonStates(wizard);
+                });
+                
+            },0);
+        },1000);
+
+        form.on("change", "[name='page']", function(e) {
+            var shallow = form.find("[name='shallow']").first();
+            var liveCopy = form.find("[name='isLiveCopy']").first();
+            
+            // var nextButton = wizard[0].controls.selectedItem.querySelector(".foundation-wizard-control[data-foundation-wizard-control-action='next']");
+            var nextButton = wizard.find(".foundation-layout-wizard2-controls > coral-panel[selected] .foundation-wizard-control[data-foundation-wizard-control-action='next']")[0];
+            
+            if (this.value === "new") {
+                appendStep(wizard, templateConfig);
+                templateDetached = false;
+
+                nextButton.label.textContent = Granite.I18n.get("Next");
+                nextButton.type = "button";
+                
+                shallow.prop("disabled", true).closest(".coral-Form-fieldwrapper").attr("hidden", "");
+                liveCopy.prop("disabled", true).closest(".coral-Form-fieldwrapper").attr("hidden", "");
+            } else {
+                if (!templateDetached) {
+                    removeStep(wizard, template);
+                    templateDetached = true;
+                }
+                
+                nextButton.label.textContent = Granite.I18n.get("Create");
+                nextButton.type = "submit";
+
+                shallow.prop("disabled", false).closest(".coral-Form-fieldwrapper").removeAttr("hidden");
+                liveCopy.prop("disabled", false).closest(".coral-Form-fieldwrapper").removeAttr("hidden");
+            }
+        });
+    });
+})(document, _g.XSS, Granite, Granite.$);

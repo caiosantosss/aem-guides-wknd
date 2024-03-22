@@ -1,0 +1,442 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * ___________________
+ * Copyright 2020 Adobe
+ * All Rights Reserved.
+ * NOTICE: All information contained herein is, and remains
+ * the property of Adobe and its suppliers, if any. The intellectual
+ * and technical concepts contained herein are proprietary to Adobe
+ * and its suppliers and are protected by all applicable intellectual
+ * property laws, including trade secret and copyright laws.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe.
+ */
+(function (window, document, Granite, $)  {
+
+    var ui = $(window).adaptTo("foundation-ui");
+    var index = window.location.pathname.lastIndexOf("/batchsetpreseteditor.html") + "/batchsetpreseteditor.html".length;
+    var suffix = window.location.pathname.substring(index);
+
+    var saveBtnId = '#btn-save';
+
+    var BLOCK__MATCH = ".block-name";
+    var BLOCK__BASE = ".block-base";
+    var BLOCK__SEQUENCE = ".block-sequence";
+
+    var PRESET_DATA_INCLUDE_DERIVED_YES = "yes";
+    var PRESET_DATA_INCLUDE_DERIVED_NO = "no";
+
+    var PRESET_DATA_VALUE__LITERAL = "literal";
+    var PRESET_DATA_VALUE__SEQUENCE = "sequence";
+    var PRESET_DATA_VALUE__COMPLEX = "rawcode";
+
+    //flags operations that the block does within its group
+
+    var PRESET_DATA_VALUE__GROUP_LOGICAL_OR = "or";
+
+    //flags regex blocks of literal type
+    var PRESET_DATA_VALUE__LITERAL_EXCLUDE = "exclude";
+    var PRESET_DATA_VALUE__LITERAL_ANY = "matchany";
+    var PRESET_DATA_VALUE__LITERAL_EXACT = "exact";
+
+    //flags regex blocks of sequence types
+    var PRESET_DATA_VALUE__SEQUENCE_ONE_CHARACTER = "one";
+    var PRESET_DATA_VALUE__SEQUENCE_ANY_NUMBER_OF_CHARACTERS = "anynumber";
+    var PRESET_DATA_VALUE__SEQUENCE_N_CHARACTERS = "series";
+
+    //flags case sensitivity for sequence blocks
+    var PRESET_DATA_VALUE__SEQUENCE_CASE_UPPER = "uppercase";
+    var PRESET_DATA_VALUE__SEQUENCE_CASE_LOWER = "lowercase";
+
+    //flags character type sensitivity for sequence blocks
+    var PRESET_DATA_VALUE__SEQUENCE_CHAR_ALPHA = "alpha";
+    var PRESET_DATA_VALUE__SEQUENCE_CHAR_NUMERIC = "numeric";
+    var PRESET_DATA_VALUE__SEQUENCE_CHAR_ALPHANUMERIC = "alphanumeric";
+    var PRESET_DATA_VALUE__SEQUENCE_CASE_INSENSITIVE = "insensitive";
+
+    $(document).one('foundation-contentloaded', function() {
+
+        function initWhenReady() {
+            $("[role='heading']").get(0).innerHTML += " <span style='font-weight: bold; color: #2c2c2c;'>" + curPreset.Name + "</span>";
+
+            $(saveBtnId).attr("disabled", "disabled");
+            $("#preset-name").val(curPreset.Name);
+            $("#preset-type").val(curPreset.Type);
+
+            $(".block-name-result").attr("readonly", "true");
+            $(".block-name-result").attr("variant", "quiet");
+            $(".block-base-result").attr("readonly", "true");
+            $(".block-base-result").attr("variant", "quiet");
+            $(".block-sequence-result").attr("readonly", "true");
+            $(".block-sequence-result").attr("variant", "quiet");
+
+            $("#prefix").val(curPreset.Prefix);
+            $("#suffix").val(curPreset.Suffix);
+
+            updateBlock(BLOCK__MATCH);
+            updateBlock(BLOCK__BASE);
+            updateBlock(BLOCK__SEQUENCE);
+
+            $(saveBtnId).on('click', submitChanges);
+            $(".destfolder").val(curPreset.Folder);
+            $("#derived-select").val(curPreset.SkipAutoSet == "true" ? PRESET_DATA_INCLUDE_DERIVED_NO : PRESET_DATA_INCLUDE_DERIVED_YES);
+            $(".main-block").trigger("change");
+        }
+
+        var isReadyToUse = false;
+        function tryInit(){
+            var selectComp = $("#derived-select").get(0);
+
+            Coral.commons.ready(selectComp, function() {
+                isReadyToUse = true;
+            });
+            if(!isReadyToUse) {
+                setTimeout(tryInit, 20);
+                return;
+            }
+            initWhenReady();
+        }
+
+        tryInit();
+
+    });
+
+    function generateExpression(mainBlockNm) {
+        var mainBlock = $(mainBlockNm);
+        var onematchCtnr = mainBlock.find(".onematch-ctnr");
+        var dynamicBlocks = onematchCtnr.find(".dynamic-block");
+        var expression = "";
+
+        for (var idx = 0; idx < dynamicBlocks.length; idx++) {
+            var dynamicBlock = $(dynamicBlocks[idx]);
+            var matchselect = dynamicBlock.find(".matchselect");
+
+            if(idx != 0) {
+                expression += dynamicBlock.find(".andselect").get(0).value == PRESET_DATA_VALUE__GROUP_LOGICAL_OR ? "|" : "";
+            }
+
+            switch (matchselect.get(0).value) {
+                case PRESET_DATA_VALUE__LITERAL:
+                    expression += getLiteral(dynamicBlock);
+                    break;
+                case PRESET_DATA_VALUE__SEQUENCE:
+                    expression += getSequence(dynamicBlock);
+                    break;
+                case PRESET_DATA_VALUE__COMPLEX:
+                    expression += getRawcode(dynamicBlock);
+                    break;
+            }
+        }
+        return expression;
+    }
+
+    function getLiteral(dynamicBlock) {
+        var expression = "";
+        switch (dynamicBlock.find(".literalsel").val()) {
+            case PRESET_DATA_VALUE__LITERAL_EXACT:
+                expression += dynamicBlock.find(".literal-inp").val();
+                break;
+            case PRESET_DATA_VALUE__LITERAL_ANY:
+                expression += "[" + dynamicBlock.find(".literal-inp").val() + "]";
+                break;
+            case PRESET_DATA_VALUE__LITERAL_EXCLUDE:
+                expression += "[^" + dynamicBlock.find(".literal-inp").val() + "]";
+                break;
+        }
+        return expression;
+    }
+
+    function getSequence(dynamicBlock) {
+        var expression = "";
+        var casesel;
+        switch(dynamicBlock.find(".casesel").val()) {
+            case PRESET_DATA_VALUE__SEQUENCE_CASE_INSENSITIVE:
+                casesel = "a-zA-Z";
+                break;
+            case PRESET_DATA_VALUE__SEQUENCE_CASE_UPPER:
+                casesel = "A-Z";
+                break;
+            case PRESET_DATA_VALUE__SEQUENCE_CASE_LOWER:
+                casesel = "a-z";
+                break;
+        }
+        switch(dynamicBlock.find(".alpphasel").val()) {
+            case PRESET_DATA_VALUE__SEQUENCE_CHAR_ALPHANUMERIC:
+                expression += "[" + casesel +"0-9]";
+                break;
+            case PRESET_DATA_VALUE__SEQUENCE_CHAR_ALPHA:
+                expression += "[" + casesel +"]";
+                break;
+            case PRESET_DATA_VALUE__SEQUENCE_CHAR_NUMERIC:
+                expression += "[0-9]";
+                break;
+        }
+
+        switch(dynamicBlock.find(".seriessel").val()) {
+            case PRESET_DATA_VALUE__SEQUENCE_ANY_NUMBER_OF_CHARACTERS:
+                expression += "+";
+                break;
+            case PRESET_DATA_VALUE__SEQUENCE_N_CHARACTERS:
+                expression += "{" + dynamicBlock.find(".dynamic-block-num-inp").val() + "}";
+                break;
+            case PRESET_DATA_VALUE__SEQUENCE_ONE_CHARACTER:
+                expression += "?";
+                break;
+        }
+
+        return expression;
+    }
+
+    function getRawcode(dynamicBlock) {
+        return dynamicBlock.find(".rawcode-inp").val();
+    }
+
+    function showRegExpErrorToast() {
+        ui.notify(
+            Granite.I18n.get("RegExp"),
+            Granite.I18n.get("Regular expression is invalid."),
+            "error"
+        );
+    }
+
+    function checkForGrouping(regexpstr) {
+        var regxstr = generateExpression(BLOCK__BASE);
+        if(regxstr && regxstr.length > 0) {
+            return true;
+        }
+
+        var regexpMatchAny = new RegExp(regexpstr + "|");
+        var res = regexpMatchAny.exec("");
+        return (res != null) && (res.length > 1);
+    }
+
+    function focusoutHandler(e) {
+        $(this).off( "focusout", focusoutHandler);
+        $(this).trigger("change");
+    }
+
+    function updateBlock(mainBlockNm) {
+
+        var mainBlock = $(mainBlockNm);
+
+        mainBlock.on("change", function (e) {
+            var regxstr = generateExpression(mainBlockNm);
+            var resel = $(mainBlockNm + "-result");
+            resel.val(regxstr);
+            var hasError = resel.hasClass('error');
+
+            var inps = $(this).find(".one-match input.literal-inp");
+            if(inps.length > 0) {
+                var cur = inps.get(inps.length - 1);
+                if(document.activeElement === cur) {
+                    // reenable verification
+                    $(cur).on( "focusout", focusoutHandler );
+                    return;
+                }
+            }
+
+            var regexres = null;
+            if(regxstr && regxstr.length > 0) {
+                try {
+                    regexres = new RegExp(regxstr);
+                    if(regexres != null) {// preserve previous code line to be removed by compressor
+                        resel.removeClass('error');
+                        mainBlock.removeClass('error');
+                    }
+                } catch(err) {
+                    resel.addClass('error');
+                    mainBlock.addClass('error');
+                    if(!hasError) {
+                        showRegExpErrorToast();
+                    }
+                }
+            } else {
+                if(mainBlock.find(".dynamic-block").length > 0) {
+                    resel.addClass('error');
+                    mainBlock.addClass('error');
+                    if(!hasError) {
+                        showRegExpErrorToast();
+                    }
+                } else {
+                    resel.removeClass('error');
+                    mainBlock.removeClass('error');
+                }
+            }
+
+            if($(".main-block.error").length > 0 || $(BLOCK__MATCH).find(".dynamic-block").length == 0) {
+                $(saveBtnId).attr("disabled", "disabled");
+            } else if(mainBlockNm == BLOCK__MATCH && !checkForGrouping(regxstr)) {
+                $(saveBtnId).attr("disabled", "disabled");
+            } else {
+                $(saveBtnId).removeAttr("disabled");
+            }
+        });
+
+        var mainBlockCtnr = mainBlock.find(".onematch-ctnr");
+        mainBlockCtnr.find(".matchselect").on("change", onMatchSelects);
+        mainBlockCtnr.find(".literalsel").on("change", onLiteralSelect);
+        mainBlockCtnr.find(".seriessel").on("change", onSeriesSelect);
+        mainBlockCtnr.find(".alpphasel").on("change", onCaseSelect);
+        mainBlockCtnr.find(".deletebtn").on("click", onDeleteBlock);
+
+        var dynamicBlocks = mainBlockCtnr.find(".dynamic-block");
+        if(dynamicBlocks.length != 0) {
+            $(dynamicBlocks[0]).find(".andor-match").hide();
+        }
+        mainBlock.find(".add-block-btn").on('click', function(e) {
+            addMatch(e);
+        });
+
+        Coral.commons.nextFrame(function () {
+            $(mainBlockNm + "-result").val(generateExpression(mainBlockNm));
+        });
+
+    }
+
+    function onMatchSelects(e) {
+        var dynamicBlock = $(e.target).closest(".dynamic-block");
+        dynamicBlock.find(".mvariants").hide();
+        dynamicBlock.find("." + $(e.target).val() + "-match").show();
+        dynamicBlock.find(".literalsel").trigger("change");
+        dynamicBlock.find(".rawcode-inp").val("*");
+    }
+
+    function onLiteralSelect(e) {
+        $(e.target).closest(".literal-match").find(".literal-inp").val("*");
+
+        $(saveBtnId).attr("disabled", "disabled");
+        $(e.target).closest(".main-block").trigger("change");
+    }
+
+    function onSeriesSelect(e) {
+        var numinpctnr = $(e.target).closest(".mvariants").find(".dynamic-block-num")
+        "series" == $(e.target).val() ? numinpctnr.show() : numinpctnr.hide();
+    }
+
+    function onCaseSelect(e) {
+        var casectnr = $(e.target).closest(".mvariants").find(".dynamic-block-case")
+        "numeric" != $(e.target).val() ? casectnr.show() : casectnr.hide();
+    }
+
+    function onDeleteBlock(e) {
+        e.preventDefault();
+        var mainBlock = $(e.target).closest(".main-block");
+        var onematchCtnr = mainBlock.find(".onematch-ctnr");
+        $(e.target).closest(".dynamic-block").remove();
+        var dynamicBlocks = onematchCtnr.find(".dynamic-block");
+        if(dynamicBlocks.length != 0) {
+            $(dynamicBlocks[0]).find(".andor-match").hide();
+        }
+
+        $(saveBtnId).attr("disabled", "disabled");
+
+        Coral.commons.nextFrame(function () {
+            mainBlock.trigger("change");
+            if(mainBlock.hasClass("block-base")) {
+                // force verification
+                $(BLOCK__MATCH).trigger("change");
+            }
+        });
+    }
+
+    function addMatch(e) {
+        var addNameMatchUrl = Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/s7dam/batchsetpresets/batchsetpreseteditor/onematchitem.html');
+        $.get(addNameMatchUrl).always(function(htmlTxt) {
+            if (htmlTxt){
+                try{
+
+                    var mainBlock = $(e.target).closest(".main-block");
+                    var onematchCtnr = mainBlock.find(".onematch-ctnr");
+
+                    var coralAnchorList = $('<div>');
+                    coralAnchorList.addClass("dynamic-block");
+                    coralAnchorList.html(htmlTxt.trim());
+                    onematchCtnr.append(coralAnchorList);
+                    coralAnchorList.find(".matchselect").on("change", onMatchSelects);
+                    coralAnchorList.find(".literalsel").on("change", onLiteralSelect);
+                    coralAnchorList.find(".seriessel").on("change", onSeriesSelect);
+                    coralAnchorList.find(".alpphasel").on("change", onCaseSelect);
+                    coralAnchorList.find(".deletebtn").on("click", onDeleteBlock);
+                    onematchCtnr.show();
+
+                    var dynamicBlocks = onematchCtnr.find(".dynamic-block");
+                    dynamicBlocks.find(".andor-match").show();
+                    $(dynamicBlocks[0]).find(".andor-match").hide();
+
+                    $(saveBtnId).attr("disabled", "disabled");
+
+                    Coral.commons.nextFrame(function () {
+                        // disable initial verification
+                        var inps = mainBlock.find(".one-match input.literal-inp");
+                        inps.get(inps.length - 1).focus();
+                        mainBlock.trigger("change");
+                    });
+                }catch(e){
+                }
+            }
+        });
+    }
+
+    function createParam(key, val) {
+        return key + ";" + (val == "" ? "" : $(val).val());
+    }
+
+    function submitChanges() {
+
+        if($(".main-block.error").length > 0) {
+            $(saveBtnId).attr("disabled", "disabled");
+            return;
+        } else {
+            $(saveBtnId).removeAttr("disabled");
+        }
+
+        var curbatchpreset = $("#preset-name").val();
+
+        var params = {};
+        params[':operation'] = isNewBatchset == "true" ? "create" : "update";
+
+        var basepath, postUrl;
+        if(Granite.Toggles.isEnabled("FT_ASSETS-14407") == true) {
+            basepath = suffix + "/";
+            postUrl = Granite.HTTP.externalize(encodeURI(basepath + ".batchpresets"));
+        } else {
+            basepath = BATCHSET_PRESETS + "/";
+            postUrl = Granite.HTTP.externalize(encodeURI(basepath + curPreset.Name +".batchpresets"));
+        }
+
+        params['name'] 		= curbatchpreset;
+        params['oldname'] 	= curPreset.Name;
+
+        var propertyArray = []
+        propertyArray.push(encodeURIComponent("jcr:title;" + curbatchpreset));
+        propertyArray.push(encodeURIComponent("active;true"));
+        propertyArray.push(encodeURIComponent("SkipAutoSet;" + ($("#derived-select").val() == PRESET_DATA_INCLUDE_DERIVED_NO)));
+        propertyArray.push(encodeURIComponent(createParam("Type", "#preset-type")));
+        propertyArray.push(encodeURIComponent("defaultNaming;false"));
+        propertyArray.push(encodeURIComponent(createParam("Match", BLOCK__MATCH + "-result")));
+        propertyArray.push(encodeURIComponent(createParam("BaseName", BLOCK__BASE + "-result")));
+        propertyArray.push(encodeURIComponent(createParam("Sequence", BLOCK__SEQUENCE + "-result")));
+        propertyArray.push(encodeURIComponent("SubType;"));
+        propertyArray.push(encodeURIComponent(createParam("Suffix", "#suffix")));
+        propertyArray.push(encodeURIComponent(createParam("Prefix", "#prefix")));
+        propertyArray.push(encodeURIComponent("Folder;" + $(".destfolder").val()));
+
+        params['propertyArray'] = propertyArray;
+
+        params['_charset_=UTF-8'] = '';
+
+        $.post(postUrl, params, function(args) {
+            redirect();
+        }).fail(function(args) {
+            $("#savebatchsetpreset-error").get(0).show();
+        });
+    }
+
+    function redirect() {
+        window.location.href = Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/s7dam/batchsetpresets.html');
+    }
+
+})(window, document, Granite, Granite.$);
+
+

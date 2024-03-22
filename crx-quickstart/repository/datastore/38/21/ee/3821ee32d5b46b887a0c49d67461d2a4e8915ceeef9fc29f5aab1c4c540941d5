@@ -1,0 +1,705 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2012 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(window, Granite, $, URITemplate, Coral) {
+    "use strict";
+
+    var wizardResizeListeners = new WeakMap();
+
+    var registry = $(window).adaptTo("foundation-registry");
+
+    function getURITemplateVariables(containers) {
+        var o = {};
+
+        // TODO Review the usage of ":input" to change it to select the logical field.
+        containers.find(":input").each(function() {
+            var el = $(this);
+
+            el.serializeArray().forEach(function(input) {
+                var name = input.name;
+                var value = input.value;
+
+                var newValue;
+                if (o.hasOwnProperty(name)) {
+                    var a = o[name];
+
+                    if (!Array.isArray(a)) {
+                        a = [ a ];
+                    }
+
+                    a.push(value);
+                    newValue = a;
+                } else {
+                    newValue = value;
+                }
+
+                o[name] = newValue;
+
+                var parent = $(el).attr("data-foundation-uritemplate-parent");
+                if (parent) {
+                    var p = o[parent] = o[parent] || {};
+                    p[name] = o[name];
+                }
+            });
+        });
+
+        return o;
+    }
+
+    function validate(step) {
+        if (step.data("foundationWizardStepValidation") === false) {
+            return true;
+        }
+
+        // TODO For now, let's just access private data of others for prechecked
+        // Once it is confirmed that this is what we want, we can simply expose adaptTo for prechecked validation
+        // e.g. `var isValidPrechecked = step.adaptTo("foundation-validation-prechecked").isValid();`
+        var isValidPrechecked = step.data("foundation-wizard-step.internal.valid");
+
+        if (isValidPrechecked !== undefined) {
+            return isValidPrechecked;
+        }
+
+        var allValid = true;
+
+        step.adaptTo("foundation-validation-helper").getSubmittables().forEach(function(v) {
+            var api = $(v).adaptTo("foundation-validation");
+
+            if (!api.checkValidity()) {
+                allValid = false;
+            }
+
+            api.updateUI();
+        });
+
+        return allValid;
+    }
+
+    function getObsoleteSteps(current) {
+        var result = [];
+
+        // get previously loaded steps and their chains
+        var loaded = current.data("foundation-wizard-step.internal.children");
+        if (loaded) {
+            loaded.each(function() {
+                var step = $(this);
+
+                var actualStep = step.data("foundation-layout-wizard2.internal.actualStep");
+                if (!actualStep) {
+                    actualStep = step;
+                }
+
+                result.push(actualStep);
+
+                $.merge(result, getObsoleteSteps(step));
+            });
+        }
+
+        return result;
+    }
+
+    function goNextStep(wizard, current, control) {
+        if (!validate(current)) {
+            return;
+        }
+
+        var wizardApi = wizard.adaptTo("foundation-wizard");
+
+        var src = control.data("foundationWizardControlSrc");
+
+        if (!src) {
+            wizardApi.next();
+            return;
+        }
+
+        var stepsForValues = $(wizardApi.getPrevSteps(current[0])).add(current);
+        var values = getURITemplateVariables(stepsForValues);
+        var url = URITemplate.expand(src, values);
+
+        var LAST_URL_KEY = "foundation-wizard-control.internal.lastURL";
+
+        var lastURL = control.data(LAST_URL_KEY);
+
+        if (lastURL === url) {
+            wizardApi.next();
+            return;
+        }
+
+        control.data(LAST_URL_KEY, url);
+
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+
+        $.ajax({
+            url: url,
+            cache: false
+        }).done(function(html) {
+            var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+            parser.parse(html).then(function(fragment) {
+                var steps = $(fragment.querySelectorAll(".foundation-wizard-step"));
+
+                wizardApi.remove(getObsoleteSteps(current));
+
+                // save new ones
+                current.data("foundation-wizard-step.internal.children", steps);
+
+                wizardApi.appendAfter(steps.toArray(), current[0]);
+                wizardApi.next();
+
+                ui.clearWait();
+            });
+        })
+            .fail(function() {
+                ui.clearWait();
+
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Something went wrong.");
+                ui.alert(title, message, "error");
+            });
+    }
+
+    function handleChange(wizard) {
+        var f = function(e) {
+            var control = $(this);
+            var action = control.data("foundationWizardControlAction");
+
+            var panel = control.closest("coral-panel");
+            if (!panel.prop("selected")) {
+                e.preventDefault();
+                return;
+            }
+
+            var currentStep = wizard.find(".foundation-wizard-step-active");
+
+            if (action === "next") {
+                if (control.prop("type") === "button") {
+                    e.preventDefault();
+                }
+
+                goNextStep(wizard, currentStep, control);
+            } else if (action === "prev") {
+                e.preventDefault();
+
+                var wizardApi = wizard.adaptTo("foundation-wizard");
+                wizardApi.prev();
+            }
+        };
+
+        wizard.on("click", ".foundation-wizard-control", f);
+
+        return function() {
+            wizard.off("click", ".foundation-wizard-control", f);
+        };
+    }
+
+    registry.register("foundation.layouts", {
+        name: "foundation-layout-wizard2",
+        doLayout: function(el, config) {
+            registerResize(el);
+            var wizard = $(el);
+
+            // foundation-layout-wizard2 is exclusively managing the layout of foundation-wizard only
+            if (!wizard.hasClass("foundation-wizard")) {
+                return;
+            }
+
+            if (wizard.data("foundation-layout-wizard2.internal.init") === true) {
+                return;
+            }
+
+            var stack = [];
+
+            stack.push((function() {
+                wizard.data("foundation-layout-wizard2.internal.stack", stack);
+
+                return function() {
+                    wizard.removeData("foundation-layout-wizard2.internal.stack");
+                };
+            })());
+
+            stack.push((function() {
+                wizard.data("foundation-layout-wizard2.internal.init", true);
+
+                return function() {
+                    wizard.removeData("foundation-layout-wizard2.internal.init");
+                };
+            })());
+
+            stack.push(handleChange(wizard));
+
+            var firstStep = wizard.find(".foundation-wizard-step").first();
+            if (firstStep.length) {
+                requestAnimationFrame(function() {
+                    firstStep.addClass("foundation-wizard-step-active");
+                    wizard.trigger("foundation-wizard-stepchange", [ firstStep[0] ]);
+                });
+            }
+        },
+        clean: function(el, config) {
+            cleanResize(el);
+
+            var stack = $(el).data("foundation-layout-wizard2.internal.stack");
+            if (stack) {
+                Granite.UI.Foundation.Utils.everyReverse(stack, function(v) {
+                    if (v) {
+                        v();
+                    }
+                    return true;
+                });
+            }
+
+            Granite.UI.Foundation.Layouts.clean(el);
+        }
+    });
+
+
+    registry.register("foundation.adapters", {
+        type: "foundation-wizard",
+        selector: ".foundation-layout-wizard2.foundation-wizard",
+        adapter: function(el) {
+            var wizard = $(el);
+
+            var extractStep = function(step) {
+                var title = step.attr("data-foundation-wizard-step-title");
+                var controls = step.children(".foundation-wizard-control")
+                    .detach()
+                    .addClass("foundation-layout-inline2-item");
+
+                var stepContent = step.children(".foundation-wizard-step-content")
+                    .removeClass("foundation-wizard-step-content")
+                    .addClass("foundation-wizard-step");
+                if (stepContent.length === 0) {
+                    stepContent = step;
+                } else {
+                    step.data("foundation-layout-wizard2.internal.actualStep", stepContent);
+                }
+
+                var wrapper = new Coral.Panel();
+                stepContent.appendTo(wrapper.content);
+
+                var inlineWrapper = document.createElement("div");
+                inlineWrapper.className = "foundation-layout-inline2 foundation-layout-inline2-gap";
+                var control = new Coral.Panel();
+                control.content.appendChild(inlineWrapper);
+                controls.appendTo(inlineWrapper);
+
+                return {
+                    step: new Coral.Step().set({
+                        label: {
+                            textContent: title
+                        }
+                    }),
+                    content: wrapper,
+                    control: control
+                };
+            };
+
+            // WARNING: The methods provided below MUST take into consideration
+            // when the Coral element is not yet upgraded.
+
+            return {
+                toggleNext: function(enable) {
+                    this.toggle("next", enable);
+                },
+
+                togglePrev: function(enable) {
+                    this.toggle("prev", enable);
+                },
+
+                toggleCancel: function(enable) {
+                    this.toggle("cancel", enable);
+                },
+
+                toggle: function(action, enable) {
+                    // eslint-disable-next-line max-len
+                    var button = wizard.find(".foundation-layout-wizard2-controls > coral-panel[selected] .foundation-wizard-control[data-foundation-wizard-control-action=" + action + "]");
+                    button.prop("disabled", !enable);
+                },
+
+                next: function() {
+                    var current = wizard.find(".foundation-layout-wizard2-contents > coral-panel[selected]");
+                    var next = current.next("coral-panel");
+
+                    if (!next.length) {
+                        return;
+                    }
+
+                    var nextIndex = next.index();
+
+                    wizard.find(".foundation-layout-wizard2-steplist > coral-step").eq(nextIndex).attr("selected", "");
+                    next.attr("selected", "");
+                    wizard.find(".foundation-layout-wizard2-controls > coral-panel").eq(nextIndex).attr("selected", "");
+
+                    var currentStep = current.find(".foundation-wizard-step").removeClass("foundation-wizard-step-active"); // eslint-disable-line max-len
+                    var nextStep = next.find(".foundation-wizard-step").addClass("foundation-wizard-step-active");
+
+                    wizard.trigger("foundation-wizard-stepchange", [ nextStep[0], currentStep[0] ]);
+                },
+
+                prev: function() {
+                    var current = wizard.find(".foundation-layout-wizard2-contents > coral-panel[selected]");
+                    var prev = current.prev("coral-panel");
+
+                    if (!prev.length) {
+                        return;
+                    }
+
+                    var prevIndex = prev.index();
+
+                    wizard.find(".foundation-layout-wizard2-steplist > coral-step").eq(prevIndex).attr("selected", "");
+                    prev.attr("selected", "");
+                    wizard.find(".foundation-layout-wizard2-controls > coral-panel").eq(prevIndex).attr("selected", "");
+
+                    var currentStep = current.find(".foundation-wizard-step").removeClass("foundation-wizard-step-active"); // eslint-disable-line max-len
+                    var prevStep = prev.find(".foundation-wizard-step").addClass("foundation-wizard-step-active");
+
+                    wizard.trigger("foundation-wizard-stepchange", [ prevStep[0], currentStep[0] ]);
+                },
+
+                append: function(steps, index) {
+                    var panels = wizard.find(".foundation-layout-wizard2-contents > coral-panel");
+
+                    var refPanel;
+                    if (index === undefined) {
+                        refPanel = panels[panels.length - 1];
+                    } else {
+                        refPanel = panels[index];
+                    }
+
+                    this.appendAfter(steps, refPanel.querySelector(".foundation-wizard-step"));
+                },
+
+                appendAfter: function(steps, refStep) {
+                    var stepList = [];
+                    var contents = [];
+                    var controls = [];
+
+                    steps.forEach(function(v) {
+                        var result = extractStep($(v));
+                        stepList.push(result.step);
+                        contents.push(result.content);
+                        controls.push(result.control);
+                    });
+
+                    var refPanel = $(refStep).closest("coral-panel");
+                    var refIndex = refPanel.index();
+
+                    wizard.find(".foundation-layout-wizard2-steplist > coral-step").eq(refIndex).after(stepList);
+                    refPanel.after(contents);
+                    wizard.find(".foundation-layout-wizard2-controls > coral-panel").eq(refIndex).after(controls);
+
+                    wizard.trigger("foundation-contentloaded");
+                    var resizeController = wizard.data("foundation-layout-wizard2.internal.resizeController");
+                    if (resizeController) {
+                        resizeController.updateElement(wizard.find(".foundation-layout-wizard2-steplist")[0]);
+                    }
+                },
+
+                remove: function(steps) {
+                    var stepListSteps = wizard.find(".foundation-layout-wizard2-steplist > coral-step");
+                    var controlPanels = wizard.find(".foundation-layout-wizard2-controls > coral-panel");
+                    var tobeRemoved = [];
+
+                    $(steps).each(function() {
+                        var step = $(this);
+                        var panel = step.closest("coral-panel");
+                        var index = panel.index();
+
+                        tobeRemoved.push(panel[0], stepListSteps[index], controlPanels[index]);
+                    });
+
+                    $(tobeRemoved).detach();
+
+                    var resizeController = wizard.data("foundation-layout-wizard2.internal.resizeController");
+                    if (resizeController) {
+                        resizeController.updateElement(wizard.find(".foundation-layout-wizard2-steplist")[0]);
+                    }
+                },
+
+                getPrevSteps: function(step) {
+                    return $(step)
+                        .closest("coral-panel")
+                        .prevAll("coral-panel")
+                        .find(".foundation-wizard-step")
+                        .toArray();
+                }
+            };
+        }
+    });
+
+    /**
+     * This function takes the container of the wizard and initializes the registerController
+     * @param el
+     */
+    function registerResize(el) {
+        var wizard = $(el);
+        var resizeController = wizard.data("foundation-layout-wizard2.internal.resizeController");
+        if (!resizeController) {
+            var stepList = wizard.find(".foundation-layout-wizard2-header > .foundation-layout-wizard2-steplist");
+            var title = wizard.find(".foundation-layout-wizard2-header > .foundation-layout-wizard2-title");
+            var controls = wizard.find(".foundation-layout-wizard2-header > .foundation-layout-wizard2-controls");
+
+            resizeController = new ResizeController({
+                elements: [ new ResizableElement({
+                    element: stepList[0],
+                    states: [ new ResizableElementState({
+                        fn: function(element) {
+                            var workingElement = element || this.element;
+                            workingElement.setAttribute("size", "L");
+                        }
+                    }), new ResizableElementState({
+                        fn: function(element) {
+                            var workingElement = element || this.element;
+                            workingElement.setAttribute("size", "S");
+                        }
+                    }) ]
+                }), new ResizableElement({
+                    element: title[0]
+                }), new ResizableElement({
+                    element: controls[0]
+                }) ],
+                container: stepList[0].parentElement
+            });
+            resizeController.measureElements().then(function() {
+                var listener = function(event) {
+                    requestAnimationFrame(function() {
+                        resizeController.checkResize();
+                    });
+                };
+
+                Coral.commons.addResizeListener(el, listener);
+                wizardResizeListeners.set(el, listener);
+
+                resizeController.checkResize();
+            });
+            // Store the resizeController on the wizard;
+            wizard.data("foundation-layout-wizard2.internal.resizeController", resizeController);
+        }
+    }
+
+    function cleanResize(el) {
+        if (wizardResizeListeners.get(el)) {
+            Coral.commons.removeResizeListener(el, wizardResizeListeners.get(el));
+            wizardResizeListeners.delete(el);
+        }
+        var wizard = $(el);
+        var resizeController = wizard.data("foundation-layout-wizard2.internal.resizeController");
+        if (resizeController) {
+            resizeController.clean();
+            $.removeData(wizard, "foundation-layout-wizard2.internal.resizeController");
+        }
+    }
+
+    /**
+     * This holds the state information
+     * @param config
+     * @constructor
+     */
+    function ResizableElementState(config) {
+        this.fn = config.fn;
+    }
+
+    ResizableElementState.prototype.clean = function() {
+        this.fn = null;
+    };
+
+    /**
+     * This is the wrapper class for a ResizableElement
+     * @param config
+     * @constructor
+     */
+    function ResizableElement(config) {
+        this.element = config.element;
+        this.currentState = 0;
+        this.measuredWidth = -1;
+        this.states = config.states;
+    }
+
+    /**
+     * Measures an element actual width by making a clone and measuring how much it would expand if it were inline-block
+     */
+    ResizableElement.prototype.measure = function(applyInitialState) {
+        var deferred = $.Deferred();
+        var $cloneEl = $(this.element)
+            .clone()
+            .css({
+                display: "inline-block",
+                width: "auto",
+                visibility: "hidden"
+            })
+            .appendTo("body");
+        if (applyInitialState && this.states && this.states.length) {
+            this.states[0].fn.call(this, $cloneEl[0]);
+        }
+        var self = this;
+        Coral.commons.ready(this.element, function() {
+            self.previousMeasuredWidth = self.measuredWidth;
+            self.measuredWidth = $cloneEl.outerWidth(true);
+            deferred.resolve(self.measuredWidth);
+            $cloneEl.remove();
+        });
+
+        return deferred.promise();
+    };
+
+    /**
+     * Executes the next states that should shrink the element
+     * @returns {Boolean}
+     */
+    ResizableElement.prototype.goToNextState = function() {
+        if (this.states && this.states.length && this.currentState < this.states.length - 1) {
+            // We can go to another shrink state
+            this.states[++this.currentState].fn.call(this);
+            return true;
+        }
+        return false;
+    };
+
+    /**
+     * Executes the previous state that should grow the element
+     * @returns {Boolean}
+     */
+    ResizableElement.prototype.goToPreviousState = function() {
+        if (this.states && this.states.length && this.currentState > 0) {
+            // We can go to another grow state
+            this.states[--this.currentState].fn.call(this);
+            return true;
+        }
+
+        return false;
+    };
+
+    /**
+     * Checks if the element overflows regarding to the measured width
+     * @returns {Boolean}
+     */
+    ResizableElement.prototype.overflows = function() {
+        return this.element.offsetWidth < this.measuredWidth;
+    };
+
+    /**
+     * Cleans the internal referances
+     */
+    ResizableElement.prototype.clean = function() {
+        this.element = null;
+        this.config = null;
+        this.states.forEach(function(state) {
+            state.clean();
+        });
+        this.states = null;
+    };
+    /**
+     * The ResizeController handles the management of the ResizeElements
+     * It will check for horizontal overflows and notify the ResizeElements if they have to adapt
+     * @param config
+     * @constructor
+     */
+    function ResizeController(config) {
+        this.config = config;
+        this.totalWidth = 0;
+        this.elementsMap = new WeakMap();
+        for (var i = 0; i < this.config.elements.length; ++i) {
+            this.elementsMap.set(this.config.elements[i].element, this.config.elements[i]);
+        }
+    }
+
+    /**
+     * This function measures all the elements and
+     * @returns Jquery.Promise this resolves after all elements have been measured and we know their totalWidth
+     */
+    ResizeController.prototype.measureElements = function() {
+        var deferred = $.Deferred();
+        var self = this;
+        var promises = this.config.elements.map(function(element) {
+            return element.measure();
+        });
+
+        $.when.apply($, promises).then(function() {
+            for (var i = 0; i < arguments.length; ++i) {
+                self.totalWidth += arguments[i] || 0;
+            }
+            deferred.resolve(self.totalWidth);
+        });
+
+        return deferred.promise();
+    };
+
+    /**
+     *  Checks if any element overflows. It will stop after the first overflow.
+     *  If an element overflow it doesn't necessarily mean it will be the element that has to change
+     */
+    ResizeController.prototype.elementsOverflow = function() {
+        // JQuery here so we can get the width without padding
+        return $(this.config.container).width() < this.totalWidth;
+    };
+
+    /**
+     * Checks if elements overflow and notifies the elements.
+     */
+    ResizeController.prototype.checkResize = function() {
+        var i;
+        var element;
+
+        if (this.elementsOverflow()) {
+            if (!this.hasOverflow) {
+                // TODO Generalize the use case not just one overflow down
+                for (i = 0; i < this.config.elements.length; ++i) {
+                    element = this.config.elements[i];
+                    if (element.goToNextState()) {
+                        this.hasOverflow = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            if (this.hasOverflow) {
+                for (i = 0; i < this.config.elements.length; ++i) {
+                    element = this.config.elements[i];
+                    if (element.goToPreviousState()) {
+                        this.hasOverflow = false;
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    /**
+     * Updates the width of an element. It will recompute the element width
+     * @param element
+     */
+    ResizeController.prototype.updateElement = function(element) {
+        var resizableElem = this.elementsMap.get(element);
+        var self = this;
+        if (resizableElem) {
+            var lastMeasuredWidth = resizableElem.measuredWidth;
+            resizableElem.measure(true).then(function(newMeasure) {
+                self.totalWidth -= lastMeasuredWidth;
+                self.totalWidth += newMeasure;
+                self.checkResize();
+            });
+        }
+    };
+
+    ResizeController.prototype.clean = function() {
+        this.config.elements.forEach(function(element) {
+            element.clean();
+        });
+        this.config = null;
+        this.elementsMap = null;
+    };
+})(window, Granite, Granite.$, Granite.URITemplate, Coral);

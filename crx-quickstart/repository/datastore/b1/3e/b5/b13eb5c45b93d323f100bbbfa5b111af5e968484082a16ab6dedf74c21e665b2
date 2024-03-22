@@ -1,0 +1,923 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * Constant for edit component drag and drop group.
+ * @member CQ.wcm.EditBase
+ * @static
+ * @final
+ * @type String
+ */
+CQ.wcm.EditBase.DD_GROUP_COMPONENT = "editcomponent";
+
+/**
+ * Constant for edit component drag and drop media group.
+ * @member CQ.wcm.EditBase
+ * @static
+ * @final
+ * @type String
+ */
+CQ.wcm.EditBase.DD_GROUP_ASSET = "media";
+
+/**
+ * Constant for edit component drag and drop page group.
+ * @member CQ.wcm.EditBase
+ * @static
+ * @final
+ * @type String
+ */
+CQ.wcm.EditBase.DD_GROUP_PAGE = "page";
+
+/**
+ * Constant for edit component drag and drop paragraph group.
+ * @member CQ.wcm.EditBase
+ * @static
+ * @final
+ * @type String
+ */
+CQ.wcm.EditBase.DD_GROUP_PARAGRAPH = "paragraph";
+
+/**
+ * Constant for edit component drag and drop product group.
+ * @member CQ.wcm.EditBase
+ * @static
+ * @final
+ * @type String
+ */
+CQ.wcm.EditBase.DD_GROUP_PRODUCT = "product";
+
+/**
+ * Constant for ExtJS drag and drop default group.
+ * @member CQ.wcm.EditBase
+ * @static
+ * @final
+ * @type String
+ */
+CQ.wcm.EditBase.DD_GROUP_DEFAULT = "default";
+
+/**
+ * @class CQ.wcm.EditBase.DragZone
+ * @extends CQ.Ext.dd.DragZone
+ * The EditBase.DragZone is a drag zone for the edit components, ie {@link CQ.wcm.EditBar} and {@link CQ.wcm.EditRollover}.
+ */
+CQ.wcm.EditBase.DragZone = CQ.Ext.extend(CQ.Ext.dd.DragZone, {
+    /**
+     * @cfg {CQ.wcm.EditBar/CQ.wcm.EditRollover} editComponent
+     * The edit component linked to this drag zone.
+     */
+    editComponent: null,
+
+    /**
+     * True if drop is cancelled.
+     * @private
+     * @type Boolean
+     */
+    isDropCancelled: false,
+
+    /**
+     * While dragging, currentDropTarget contains the drop target which is being flyed.
+     * @private
+     * @type {CQ.Ext.dd.DropTarget}
+     */
+    currentDropTarget: null,
+
+    constructor: function(el, config) {
+        config = config || {};
+
+        var div = document.createElement("div");
+
+        CQ.Ext.apply(config, {
+            ddel: div
+        });
+
+        if(config.editComponent) {
+            this.editComponent = config.editComponent;
+
+            this.editComponent.on("destroy",function() {
+                this.destroy();
+            },this);
+        }
+
+        CQ.wcm.EditBase.DragZone.superclass.constructor.call(this, el, config);
+    },
+
+    // overriding CQ.Ext.dd.DragZone#getDragData
+    getDragData: function(e) {
+        if (!this._dragData) {
+            var items = CQ.WCM.getSelectedItems();
+            if (items.length > 0 && !this.editComponent.selected) {
+                // other edit components are selected, but this one is dragged
+                items = [];
+            }
+            if (items.length == 0) {
+                // make sure this edit component gets dragged
+                items.push(this.editComponent);
+            }
+            var height = 0;
+            var width = 0;
+            for (var i = 0; i < items.length; i++) {
+                var editComponent = items[i];
+                var elem = editComponent.getEl();
+                if (editComponent.element) {
+                    elem = editComponent.element;
+                }
+                height += elem.getHeight();
+                if (elem.getWidth() > width) {
+                    width = elem.getWidth();
+                }
+                var margins = elem.getMargins("tb");
+                if( margins && !isNaN(margins)) {
+                    height += margins;
+                }
+            }
+
+            if (height > CQ.themes.wcm.EditBase.DDPROXY_MAXHEIGHT)
+                height = CQ.themes.wcm.EditBase.DDPROXY_MAXHEIGHT;
+            else if (height < CQ.themes.wcm.EditBase.DDPROXY_MINHEIGHT) {
+                height = CQ.themes.wcm.EditBase.DDPROXY_MINHEIGHT;
+            }
+
+            if (width > CQ.themes.wcm.EditBase.DDPROXY_MAXWIDTH)
+                width = CQ.themes.wcm.EditBase.DDPROXY_MAXWIDTH;
+            else if (width < CQ.themes.wcm.EditBase.DDPROXY_MINWIDTH) {
+                width = CQ.themes.wcm.EditBase.DDPROXY_MINWIDTH;
+            }
+
+            this.ddel.className = "cq-editcomponent-dragzone-proxy";
+            this.ddel.style.width = width + "px";
+            this.ddel.style.height = height + "px";
+            this.ddel.style.padding = "5px";
+
+            this._dragData = {
+                "ddel": this.ddel,
+                "items": items,
+                "width": width,
+                "height": height
+            };
+        }
+        return this._dragData;
+    },
+
+    /**
+     * Clears the current dragged data.
+     * @private
+     */
+    clearDragData: function() {
+        this._dragData = null;
+    },
+
+    /**
+     * Handles a ESC key press to cancel current drag.
+     * @param {CQ.Ext.EventObject} e The key press event object
+     * @private
+     */
+    handleOnESC: function(e) {
+        if(e.getKey()==e.ESC){
+            this.showEditComponent();
+            this.isDropCancelled = true;
+
+            this.unregisterESCKeyPress();
+            this.clearDragData();
+
+            //TODO improve if EXT provides a stop dragging method...
+            this.proxy.repair(this.getRepairXY(e, this.getDragData()), this.afterRepair, this);
+
+            if(this.currentDropTarget && this.currentDropTarget.editComponent)
+                this.currentDropTarget.editComponent.hideTarget();
+        }
+    },
+
+    /**
+     * Registers the ESC key press.
+     * @private
+     */
+    registerESCKeyPress: function() {
+        if(CQ.Ext.isIE) {
+            CQ.Ext.EventManager.on(window.document, "keypress", this.handleOnESC,this);
+        } else {
+            CQ.Ext.EventManager.on(window.document, "keypress", this.handleOnESC,this);
+            CQ.Ext.EventManager.on(CQ.WCM.getTopWindow().document, "keypress", this.handleOnESC,this);
+        }
+    },
+
+    /**
+     * Unregisters the ESC key press.
+     * @private
+     */
+    unregisterESCKeyPress: function() {
+        if(CQ.Ext.isIE) {
+            CQ.Ext.EventManager.un(window.document, "keypress", this.handleOnESC, this);
+        } else {
+            CQ.Ext.EventManager.un(window.document, "keypress", this.handleOnESC, this);
+            CQ.Ext.EventManager.un(CQ.WCM.getTopWindow().document, "keypress", this.handleOnESC, this);
+        }
+    },
+
+    // overriding CQ.Ext.dd.DragZone#onInitDrag
+    onInitDrag: function(x,y) {
+        CQ.wcm.EditBase.DragZone.superclass.onInitDrag.call(this,x,y);
+
+        //required for ESC listener
+        this.isDropCancelled = false;
+        this.currentDropTarget = null;
+
+        this.registerESCKeyPress();
+
+        this.hideEditComponent();
+    },
+
+    // overriding CQ.Ext.dd.DragZone#getRepairXY
+    getRepairXY: function(e, data) {
+        if(!this.isDropCancelled) {
+            this.showEditComponent();
+            if(this.editComponent && this.editComponent.element)
+                return this.editComponent.element.getXY();
+            else
+                return data.item.getXY();
+        }
+        return null;
+    },
+
+    /**
+     * Implements action on drop of this drag zone over a drop target.
+     * Method is called by {@link CQ.wcm.EditBase.DropTarget#notifyDrop}.
+     * @param {CQ.wcm.EditBase.DropTarget} dropTarget The calling drop target
+     * @param {EventObject} e The mouse up event
+     * @param {Object} data Dragged data
+     * @public
+     */
+    notifyDropDT: function(dropTarget, e, data) {
+        //drop has been perform, clear all cancel tracking stuffs
+        var res = false;
+        this.currentDropTarget = null;
+
+        if (!this.isDropCancelled && this.isDropAllowed(dropTarget)) {
+            var msg = CQ.I18n.getMessage("Moving paragraph...");
+            if( isCopy ) {
+                msg = CQ.I18n.getMessage("Copying paragraph...");
+            }
+            dropTarget.editComponent.maskTarget(msg);
+
+            this.unregisterESCKeyPress();
+            //try to insert dragged editComponent before drop target linked editComponent
+            var isCopy = e.ctrlKey;
+            var dragData = this.getDragData();
+            var data = [];
+            for (var i = 0; i < dragData.items.length; i++) {
+                var editComponent = dragData.items[i];
+                data.push(editComponent);
+            }
+
+            window.setTimeout(function() {
+
+                // prepare undo if necessary
+                var muu = CQ.undo.util.MultiUndoUtils;
+                var undoCfg = muu.begin();
+
+                // move/copy and record undo actions if necessary
+                var target = dropTarget.editComponent;
+                for (var i = 0; i < data.length; i++) {
+                    var editComponent = data[i];
+                    if (isCopy) {
+                        target.copyParagraph(editComponent.path, editComponent.getResourceType(), editComponent.hasAnnotations(), undoCfg);
+                    } else {
+                        var srcPath = editComponent.path;
+                        muu.determineMoveInformation(undoCfg, editComponent);
+                        var newPath = target.moveParagraph(srcPath, editComponent.getResourceType(), editComponent.hasAnnotations());
+                        if (newPath) {
+                            muu.addMoveAction(undoCfg, newPath, target);
+                        }
+                    }
+
+                    dropTarget.editComponent.hideTarget();
+                    editComponent.showElement();
+                    editComponent.show();
+                }
+
+                // we need to reverse the undo actions to ensure that the actions
+                // are executed in the order that are required for undoing a move
+                // (which is different from the "normal" order).
+                muu.reverseActions(undoCfg);
+                // commit undo step
+                muu.commit(undoCfg);
+            },1);
+            res = true;
+        }
+        this.clearDragData();
+        return res;
+
+    },
+
+    /**
+     * Shows the linked edit component.
+     * @private
+     */
+    showEditComponent: function() {
+        var dragData = this.getDragData();
+        for (var i = 0; i < dragData.items.length; i++) {
+            var editComponent = dragData.items[i];
+            editComponent.showElement();
+            editComponent.show();
+        }
+    },
+
+    /**
+     * Hides the linked edit component.
+     * @private
+     */
+    hideEditComponent: function() {
+        var dragData = this.getDragData();
+        for (var i = 0; i < dragData.items.length; i++) {
+            var editComponent = dragData.items[i];
+            editComponent.hideElement();
+            editComponent.hide();
+        }
+        //drop targets below the current edit component may have moved because of these hide()
+        this.DDM.refreshCache(this.groups);
+    },
+
+    /**
+     * Implements action when this drag zone enters over a drop target.
+     * Methods is called by {@link CQ.wcm.EditBase.DropTarget#notifyEnter}.
+     * @param {CQ.wcm.EditBase.DropTarget} dropTarget The calling drop target
+     * @param {EventObject} e The mouse up event
+     * @param {Object} data Dragged data
+     * @public
+     */
+    notifyEnterDT: function(dropTarget, e, data) {
+        if (this.isDropAllowed(dropTarget)) {
+            this.currentDropTarget = dropTarget;
+            dropTarget.editComponent.showTarget(this);
+        }
+        return '';
+    },
+
+    /**
+     * Implements action when this drag zone gets out of a drop target.
+     * Methods is called by {@link CQ.wcm.EditBase.DropTarget#notifyOut}.
+     * @param {CQ.wcm.EditBase.DropTarget} dropTarget The calling drop target.
+     * @param {EventObject} e The mouse up event
+     * @param {Object} data Dragged data
+     * @public
+     */
+    notifyOutDT: function(dropTarget, e, data) {
+        if (this.isDropAllowed(dropTarget)) {
+            this.currentDropTarget = null;
+        }
+        dropTarget.editComponent.hideTarget(true);
+        return '';
+    },
+
+    /**
+     * Implements action when this drag zone gets over of a drop target.
+     * Methods is called by {@link CQ.wcm.EditBase.DropTarget#notifyOver}.
+     * @param {CQ.wcm.EditBase.DropTarget} dropTarget The calling drop target
+     * @param {EventObject} e The mouse up event
+     * @param {Object} data Dragged data
+     * @public
+     */
+    notifyOverDT : function(dropTarget, e, data) {
+        if (this.isDropAllowed(dropTarget)) {
+            this.currentDropTarget = dropTarget;
+            dropTarget.editComponent.showTarget(this);
+            return this.dropAllowed;
+        } else {
+            this.currentDropTarget = null;
+            dropTarget.editComponent.hideTarget();
+            return this.dropNotAllowed;
+        }
+    },
+
+    /**
+     * Returns true if drop is allowed on the dropTarget param.
+     * @param {CQ.wcm.EditBase.DropTarget} dropTarget The calling drop target
+     * @return {Boolean} True if drop is allowed
+     * @public
+     */
+    isDropAllowed: function(dropTarget) {
+        // todo: check all if multiple
+        return (!this.isDropCancelled &&
+                CQ.Util.isIntersecting(this.groups,dropTarget.groups) &&
+                dropTarget.editComponent &&
+                this.editComponent &&
+                !this.editComponent.equals(dropTarget.editComponent) &&
+                dropTarget.editComponent.isInsertAllowed(this.editComponent.getResourceType()));
+    },
+
+    /**
+     * Remove all groups from current object.
+     * @private
+     */
+    clearGroups: function() {
+        this.groups = {};
+    },
+
+    /**
+     * Add current drop target to several groups.
+     * @param {Array/Object} Array of strings or group object (each property is a group name).
+     * @private
+     */
+    addToGroups: function(groups) {
+        if (groups instanceof Array) {
+            for (var i = 0; i < groups.length; i++) {
+                this.addToGroup(groups[i]);
+            }
+        } else {
+            for (var i in groups) {
+                this.addToGroup(groups[i]);
+            }
+        }
+    }
+});
+
+/**
+ * Returns an instance of an {@link CQ.wcm.EditBase.DragZone} and manages drag and drop groups.
+ * @static
+ * @param {Mixed} element The element
+ * @param {CQ.wcm.EditBar/CQ.wcm.EditRollover} editComponent The edit component
+ * @param {String[]} groups (optional) The drag & drop groups
+ * @return {CQ.wcm.EditBase.DragZone} The drag zone
+ * @public
+ */
+CQ.wcm.EditBase.DragZone.getInstance = function(element, editComponent, groups) {
+    var dz = new CQ.wcm.EditBase.DragZone(element,{"editComponent": editComponent});
+    if(groups) {
+        var i = 0;
+        for(;i<groups.length;i++)
+            dz.addToGroup(groups[i]);
+        //as ddGroup is not specified in the config, a "default" group has been set by Ext. Remove it.
+        dz.removeFromGroup(CQ.wcm.EditBase.DD_GROUP_DEFAULT);
+    }
+    return dz;
+};
+
+/**
+ * @class CQ.wcm.EditBase.DropTarget
+ * @extends CQ.Ext.dd.DropTarget
+ * The EditBase.DropTarget is a drop target for the edit components, ie {@link CQ.wcm.EditBar} and {@link CQ.wcm.EditRollover}.
+ */
+CQ.wcm.EditBase.DropTarget = CQ.Ext.extend(CQ.Ext.dd.DropTarget, {
+    constructor: function(el, config) {
+        config = config || {};
+
+        if(config.editComponent) {
+            this.editComponent = config.editComponent;
+
+            this.editComponent.on("destroy",function() {
+                this.destroy();
+            },this);
+        }
+
+        //call super constructor
+        CQ.wcm.EditBase.DropTarget.superclass.constructor.call(this, el, config);
+
+        this.highlight = new CQ.Highlight({
+            "element": this.el,
+            "cls": "cq-editbase-droptarget-highlight"
+        });
+
+        // dd from filesystem support
+        if (this.editComponent && window.addEventListener) {
+            var dom = CQ.Ext.get(el).dom;
+
+            // check if it's an empty component
+            if (this.editComponent.emptyComponent) {
+                dom = this.editComponent.emptyComponent.getEl().dom;
+            }
+            var self = this;
+            dom.addEventListener("dragenter", function(evt){
+                return self.notifyHTML5DragEnter(evt);
+            }, false);
+
+            dom.addEventListener("dragover", function(evt){
+                return self.notifyHTML5DragOver(evt);
+            }, false);
+
+            dom.addEventListener("dragleave", function(evt){
+                return self.notifyHTML5DragLeave(evt);
+            }, false);
+
+            dom.addEventListener("drop", function(evt){
+                return self.notifyHTML5Drop(evt);
+            }, false);
+        }
+
+    },
+
+    isCopyEvent: function (evt) {
+        // todo: check why firefox (3.6) does not recognize OS copy
+        return true || evt.dataTransfer.effectAllowed == "copy";
+    },
+
+    notifyHTML5DragEnter: function(evt) {
+//        console.log("enter", evt, this);
+        evt.preventDefault();
+        evt.stopPropagation();
+        if (this.isCopyEvent(evt)) {
+            if (this.editComponent) {
+                CQ.wcm.EditBase.TargetGhost.currentTarget = this;
+                this.editComponent.showTarget();
+            }
+            this.hideHighlight();
+        } else {
+            if (CQ.wcm.EditBase.TargetGhost.currentTarget == this) {
+                CQ.wcm.EditBase.TargetGhost.currentTarget = null;
+                if (this.editComponent) {
+                    this.editComponent.hideTarget(true);
+                }
+            }
+            this.showHighlight();
+        }
+        return false;
+    },
+
+    notifyHTML5DragOver: function(evt) {
+//        console.log("over", evt, this);
+        evt.preventDefault();
+        evt.stopPropagation();
+        if (this.isCopyEvent(evt)) {
+            if (this.editComponent && CQ.wcm.EditBase.TargetGhost.currentTarget != this) {
+                CQ.wcm.EditBase.TargetGhost.currentTarget = this;
+                this.editComponent.showTarget();
+            }
+            this.hideHighlight();
+        } else {
+            if (CQ.wcm.EditBase.TargetGhost.currentTarget == this) {
+                CQ.wcm.EditBase.TargetGhost.currentTarget = null;
+                if (this.editComponent) {
+                    this.editComponent.hideTarget(true);
+                }
+            }
+            this.showHighlight();
+        }
+        return false;
+    },
+
+    notifyHTML5DragLeave: function(evt) {
+//        console.log("leave", evt, this);
+        evt.preventDefault();
+        evt.stopPropagation();
+        if (this.isDropping) return; // sometime we get the leave event after dropping
+        if (CQ.wcm.EditBase.TargetGhost.currentTarget != this) {
+            CQ.wcm.EditBase.TargetGhost.currentTarget = null;
+            if (this.editComponent) {
+                this.editComponent.hideTarget(true);
+            }
+        }
+        this.hideHighlight();
+        return false;
+    },
+
+    notifyHTML5Drop: function(evt) {
+//        console.log("drop", evt, this);
+        evt.preventDefault();
+        evt.stopPropagation();
+        if (this.editComponent) {
+            this.isDropping = true;
+            if (this.isCopyEvent(evt)) {
+                CQ.wcm.EditBase.TargetGhost.currentTarget = null;
+                this.editComponent.showTarget();
+                this.html5UploadFiles(
+                        evt.dataTransfer.files,
+                        this.notifyFilesUploaded,
+                        this,
+                        CQ.wcm.EditBase.TargetGhost.getEl());
+            } else {
+                this.flash();
+                this.html5UploadFiles(
+                        evt.dataTransfer.files,
+                        this.notifyFilesUpdated,
+                        this,
+                        this.editComponent.getEl());
+            }
+            // always remove ghost (if html5UploadFiles() did not trigger the callback)
+            CQ.wcm.EditBase.TargetGhost.currentTarget = null;
+            if (this.editComponent) {
+                this.editComponent.hideTarget(true);
+            }
+        }
+        return false;
+    },
+
+    notifyFilesUploaded: function(records) {
+        var editComponent = this.editComponent;
+        var msg = CQ.I18n.getMessage("Inserting paragraph...");
+        editComponent.maskTarget(msg);
+
+        // prepare records
+        for (var i = 0; i < records.length; i++) {
+            var rec = records[i];
+            rec.params = { };
+            rec.params[rec.map.binaryProp] = rec.path;
+            rec.params[rec.map.fileNameProp] = rec.file.name;
+        }
+
+        window.setTimeout(function() {
+            for (var i = 0; i < records.length; i++) {
+                try {
+                    var rec = records[i];
+                    if (rec.notAllowed) continue;
+                    if (editComponent.createParagraph(rec.map.definition, rec.params) == null) {
+                        // par could no be created - usualy because the required component is not allowed
+                        CQ.Notification.notify(CQ.shared.XSS.getXSSValue(rec.file.name),
+                                CQ.I18n.getMessage("Failed to create paragraph with targeted component {0}{1}",
+                                        ["<br>",rec.map.resourceType],
+                                        "error message; name of the component that has been failed to insert"));
+                    }
+                } catch (e) {
+                    //console.log(e);
+                }
+            }
+        },1);
+        editComponent.hideTarget();
+        return false;
+    },
+    notifyFilesUpdated: function(records) {
+        var editComponent = this.editComponent;
+        this.hideHighlight();
+        window.setTimeout(function() {
+            try {
+                editComponent.updateParagraph("./file"+CQ.Sling.MOVE_SUFFIX, records[0].path, {});
+            } catch (e) {
+                CQ.Log.error(e);
+            }
+        },1);
+        return false;
+    },
+    /**
+     * demo hack
+     * html5 drag drop of files, uploads to par
+     * merge with code in siteadmin and create eventually better class
+     *
+     * @param {Array} files
+     * @param {Function} callback
+     * @param {Object} scope
+     */
+    html5UploadFiles: function(files, callback, scope, alignTo) {
+        var uploader = {
+            current:0,
+            uploaded:0,
+            totalSize: 0,
+            records: [],
+
+            // Bug #33540
+            // Files provided via drag&drop can be folders although they are not
+            // supported for uploads. Unfortunately there is no deterministic way
+            // to detect whether a file object represents a folder or not. Thus we
+            // use information from size (0 or very small), type (empty) and name
+            // (no extension) in a heuristical approach.
+            isFile: function(file) {
+                // do not upload empty files or folders
+                if (file.size == 0) {
+                    return false;
+                }
+                // small files with no type and no extension are considered folders
+                if (file.size < 512 && file.type == "" && file.name.indexOf(".") < 0) {
+                    return false;
+                }
+                return true;
+            },
+
+            upload: function(files) {
+                this.records = [];
+                for (var i = 0; i < files.length; i++) {
+                    var file = files[i];
+                    if (this.isFile(file)) {
+                        // ignore folders
+                        this.totalSize+=file.fileSize;
+                        this.records.push({file:file});
+                    }
+                    else {
+                        CQ.Notification.notify(CQ.shared.XSS.getXSSValue(file.name),
+                                CQ.I18n.getMessage("It is not possible to upload folders"));
+                    }
+                }
+                if (this.records.length == 0) {
+                    return;
+                }
+
+                this.progress = new CQ.Ext.ProgressBar();
+                this.mainWin = new CQ.Ext.Window({
+                    width     : 400,
+                    title     : "File Upload",
+                    layout    : "anchor",
+                    pageX: alignTo.getLeft(),
+                    pageY: alignTo.getTop(),
+                    closable : false,
+                    items     : [this.progress]
+                }).show();
+
+                // create xhr and register events
+                var self = this;
+                var req = new XMLHttpRequest();
+                req.upload.addEventListener("load", function(evt) {
+                    self.uploaded += self.currentSize;
+                    self.uploadNext();
+                }, false);
+                req.upload.addEventListener("progress", function(evt) {
+                    self.progress.updateProgress((self.uploaded+evt.loaded) / self.totalSize);
+                }, false);
+
+                this.xhr = req;
+                this.uploadNext();
+            },
+
+            finish: function() {
+                this.mainWin.close();
+                this.mainWin.destroy();
+                delete this.mainWin;
+                delete this.progress;
+                callback.call(scope, this.records);
+            },
+
+            uploadNext: function() {
+                if (this.current >= this.records.length) {
+                    this.progress.updateProgress(1.0);
+                    this.finish();
+                    return;
+                }
+                var rec = this.records[this.current++];
+                var file = rec.file;
+
+                var map = null;
+                for (var j=0;j<CQ.EDITBASE_DD_MIMEMAPPING.length; j++) {
+                    map = CQ.EDITBASE_DD_MIMEMAPPING[j];
+                    if (file.type.match(map.mimeType)) {
+                        break;
+                    }
+                }
+                if (!map.definition) {
+                    map.definition = CQ.WCM.getComponentConfig(map.resourceType);
+                }
+                rec.map = map;
+
+                if (!scope.editComponent.isInsertAllowed(rec.map.definition.resourceType)) {
+                    rec.notAllowed = true;
+                    CQ.Notification.notify(CQ.shared.XSS.getXSSValue(rec.file.name),
+                            CQ.I18n.getMessage("Failed to create paragraph with targeted component {0}{1}",
+                                    ["<br>",rec.map.resourceType],
+                                    "error message; name of the component that has been failed to insert"));
+                    if (this.current >= this.records.length) {
+                        this.progress.updateProgress(1.0);
+                        this.finish();
+                        return;
+                    }
+                    else {
+                        this.uploadNext();
+                    }
+                }
+
+                this.currentSize = file.fileSize;
+
+                this.progress.updateProgress(this.uploaded / this.totalSize);
+                var sfx = "";
+                if (this.records.length > 1) {
+                    sfx = " (" + this.current + "/" + this.records.length + ")";
+                }
+                this.progress.updateText("Uploading " + CQ.shared.XSS.getXSSValue(file.name) + sfx);
+
+                // check for form data
+                var tmpName = "file" + (new Date).getTime();
+                var tmpPath = scope.editComponent.path.replace(/\/\*$/, "");
+                rec.path = tmpPath + "/" + tmpName;
+                if (window.FormData) {
+                    var f = new FormData();
+                    f.append(tmpName, file);
+                    this.xhr.open("POST", tmpPath, true);
+                    this.xhr.send(f);
+                } else {
+                    this.xhr.open("PUT", encodeURI(rec.path), true);
+                    this.xhr.send(file);
+                }
+            }
+        };
+        return uploader.upload(files);
+    },
+
+    /**
+     * Handles when the source is dropped over this drop target.
+     * If exists, calls {@link CQ.wcm.EditBase.DragZone#notifyDropDT} method on drag source object.
+     * If not calls, super class {@link CQ.Ext.dd.DropTarget#notifyDrop} method.
+     * @public
+     */
+    notifyDrop: function(dragSource, e, data) {
+        var res;
+        if(dragSource.notifyDropDT)
+            res = dragSource.notifyDropDT(this, e, data);
+        else
+            res = CQ.wcm.EditBase.DropTarget.superclass.notifyDrop.call(this, dragSource, e, data);
+        e.stopEvent();
+        return res;
+    },
+
+    /**
+     * Handles when the source is now over this drop target.
+     * If exists, calls {@link CQ.wcm.EditBase.DragZone#notifyEnterDT} method on drag source object.
+     * If not calls, super class {@link CQ.Ext.dd.DropTarget#notifyEnter} method.
+     * @public
+     */
+    notifyEnter: function(dragSource, e, data) {
+        if(dragSource.notifyEnterDT)
+            return dragSource.notifyEnterDT(this, e, data);
+        else
+            return CQ.wcm.EditBase.DropTarget.superclass.notifyEnter.call(this, dragSource, e, data);
+
+    },
+
+    /**
+     * Handles when the source is now out of this drop target.
+     * If exists, calls {@link CQ.wcm.EditBase.DragZone#notifyOutDT} method on drag source object.
+     * If not, calls super class {@link CQ.Ext.dd.DropTarget#notifyOut} method.
+     * @public
+     */
+    notifyOut: function(dragSource, e, data) {
+        if(dragSource.notifyOutDT)
+            return dragSource.notifyOutDT(this, e, data);
+        else
+            return CQ.wcm.EditBase.DropTarget.superclass.notifyOut.call(this, dragSource, e, data);
+    },
+
+    /**
+     * Handles when the source is now over this drop target.
+     * If exists, calls {@link CQ.wcm.EditBase.DragZone#notifyOverDT} method on drag source object.
+     * If not, calls super class {@link CQ.Ext.dd.DropTarget#notifyOver} method.
+     * @public
+     */
+    notifyOver : function(dragSource, e, data) {
+        if(dragSource.notifyOverDT)
+            return dragSource.notifyOverDT(this, e, data);
+        else
+            return CQ.wcm.EditBase.DropTarget.superclass.notifyOver.call(this, dragSource, e, data);
+    },
+
+    /**
+     * Shows highlight.
+     * @private
+     */
+    showHighlight: function() {
+        this.highlight.showFrame();
+    },
+
+    /**
+     * Hides highlight.
+     * @private
+     */
+    hideHighlight: function() {
+        this.highlight.hideFrame();
+    },
+
+    /**
+     * Flashes highlight.
+     * @private
+     */
+    flash: function() {
+        this.highlight.flash();
+    },
+
+    /**
+     * Normalizes highlight.
+     * @private
+     */
+    normalize: function() {
+        this.el.stopFx();
+        // todo: workaround necessary because stopFx doesn't stop fx (ext js 2.1)
+        this.el.fxQueue = [];
+    }
+
+});
+
+/**
+ * Returns an instance of a {@link CQ.wcm.EditBase.DropTarget} and manages drag and drop groups.
+ * @static
+ * @param {Mixed} element The element
+ * @param {CQ.wcm.EditBar/CQ.wcm.EditRollover} editComponent The edit component
+ * @param {String[]} groups (optional) The drag & drop groups
+ * @param {Object} config (optional) The config object
+ * @return {CQ.wcm.EditBase.DropTarget} The drop target
+ */
+CQ.wcm.EditBase.DropTarget.getInstance = function(element, editComponent, groups, config) {
+    config = config || {};
+
+    if(editComponent)
+        config.editComponent = editComponent;
+
+    var dt = new CQ.wcm.EditBase.DropTarget(element,config);
+
+    if(groups) {
+        var i = 0;
+        for(;i<groups.length;i++)
+            dt.addToGroup(groups[i]);
+        //as ddGroup is not specified in the config, a "default" group has been set by Ext. Remove it.
+        dt.removeFromGroup(CQ.wcm.EditBase.DD_GROUP_DEFAULT);
+    }
+    return dt;
+};

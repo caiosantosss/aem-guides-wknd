@@ -1,0 +1,1352 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2012 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%><%
+%><%@page session="false" contentType="text/html; charset=utf-8"%><%
+%><%@page import="java.util.ArrayList,
+                java.util.Arrays,
+                java.util.Calendar,
+                java.util.Iterator,
+                java.util.List,
+                java.util.Locale,
+                java.util.ResourceBundle,
+                javax.jcr.Node,
+                javax.jcr.Property,
+                javax.jcr.RepositoryException,
+                javax.jcr.Session,
+                javax.jcr.Value,
+                javax.jcr.lock.LockManager,
+                javax.jcr.security.AccessControlManager,
+                javax.jcr.security.Privilege,
+                org.apache.commons.io.FilenameUtils,
+                org.apache.jackrabbit.api.security.user.Authorizable,
+                org.apache.jackrabbit.api.security.user.User,
+                org.apache.jackrabbit.util.Text,
+                org.apache.sling.api.resource.Resource,
+                org.apache.sling.api.resource.ResourceResolver,
+                org.apache.sling.api.resource.ValueMap,
+                org.apache.sling.featureflags.Features,
+                com.adobe.granite.comments.CommentCollection,
+                com.adobe.granite.comments.CommentManager,
+                com.adobe.granite.security.authorization.AuthorizationService,
+                com.adobe.granite.security.user.UserProperties,
+                com.adobe.granite.security.user.UserPropertiesManager,
+                com.adobe.granite.security.user.util.AuthorizableUtil,
+                com.adobe.granite.ui.components.ComponentHelper,
+                com.adobe.granite.ui.components.Config,
+                com.adobe.granite.ui.components.ExpressionHelper,
+                com.adobe.granite.xss.XSSAPI,
+                com.day.cq.commons.LabeledResource,
+                com.day.cq.commons.LanguageUtil,
+                com.day.cq.commons.date.RelativeTimeFormat,
+                com.day.cq.commons.jcr.JcrConstants,
+                com.day.cq.dam.api.Asset,
+                com.day.cq.dam.api.DamConstants,
+                com.day.cq.dam.api.Rendition,
+                com.day.cq.dam.api.s7dam.constants.S7damConstants,
+                com.day.cq.dam.commons.util.DamUtil,
+                com.day.cq.dam.commons.util.PrivateFolderAndCollectionUtil,
+                com.day.cq.dam.commons.util.S73DHelper,
+                com.day.cq.dam.commons.util.S7SetHelper,
+                com.day.cq.dam.commons.util.UIHelper,
+                com.day.cq.dam.entitlement.api.EntitlementConstants,
+                com.day.cq.dam.usage.api.AssetUsageTracker,
+                com.day.cq.i18n.I18n"%>
+<%
+%><%@taglib prefix="sling" uri="http://sling.apache.org/taglibs/sling/1.0"%><%
+%><%@taglib prefix="cq" uri="http://www.day.com/taglibs/cq/1.0"%><%
+%><%@taglib prefix="ui" uri="http://www.adobe.com/taglibs/granite/ui/1.0"%><%
+%><cq:defineObjects /><%
+    ComponentHelper cmp = new ComponentHelper(pageContext);
+    ExpressionHelper ex = cmp.getExpressionHelper();
+    I18n i18n = new I18n(slingRequest);
+    Session session = resourceResolver.adaptTo(Session.class);
+    AccessControlManager acm = session.getAccessControlManager();
+
+    ResourceBundle resourceBundle = slingRequest.getResourceBundle(slingRequest.getLocale());
+    boolean showQuickActions = true;
+    Object quickActionsAttr = request.getAttribute("com.adobe.cq.item.quickActions");
+    if (quickActionsAttr != null) {
+        if (quickActionsAttr.getClass().getName().equals("java.lang.String")) {
+            showQuickActions =  ((String)quickActionsAttr).equals("true");
+        } else {
+            showQuickActions = ((Boolean)quickActionsAttr).booleanValue();
+        }
+    }
+
+    String requestSuffix = "";
+    Object requestSuffixAttr = request.getAttribute("com.adobe.cq.item.requestSuffix");
+    if (requestSuffixAttr != null) {
+        if (requestSuffixAttr.getClass().getName().equals("java.lang.String")) {
+            requestSuffix =  (String)requestSuffixAttr;
+            requestSuffix = xssAPI.encodeForHTML(ex.get(requestSuffix, String.class));
+        }
+    }
+
+    String requestPrefix = "";
+    Object requestPrefixAttr = request.getAttribute("com.adobe.cq.item.requestPrefix");
+    if (requestPrefixAttr != null) {
+        if (requestPrefixAttr.getClass().getName().equals("java.lang.String")) {
+            requestPrefix =  (String)requestPrefixAttr;
+            requestPrefix = xssAPI.encodeForHTML(ex.get(requestPrefix, String.class));
+        }
+    }
+
+    UserPropertiesManager upm = resourceResolver.adaptTo(UserPropertiesManager.class);
+    UserProperties userProps = upm.getUserProperties(resourceResolver.adaptTo(Authorizable.class), "");
+    final boolean showDesktopLinks = "true".equals(userProps.getProperty("preferences/showAssetDesktopLinks"));
+
+    final Features featureManager = sling.getService(Features.class);
+    boolean isProcessingProfileEntitled = false;
+    if (featureManager.getFeature(EntitlementConstants.ASSETS_PROCESSINGPROFILE_FEATURE_FLAG_PID)!=null && featureManager.isEnabled(EntitlementConstants.ASSETS_PROCESSINGPROFILE_FEATURE_FLAG_PID)) {
+        isProcessingProfileEntitled = true;
+    }
+
+    String assetsVanity = "/assets.html";
+    String assetDetailsVanity = "/assetdetails.html";
+    int assetCardSize = 240;
+    String type = "";
+
+    String adminUrl = request.getContextPath() + assetsVanity;
+    Node childAsset = resource.adaptTo(Node.class);
+    Node parentNode = childAsset.getParent();
+    String childPath = childAsset.getPath();
+
+    boolean isDAMAdmin = false;
+    AuthorizationService authorizationService = sling.getService(AuthorizationService.class);
+    if (authorizationService != null && session != null) {
+        isDAMAdmin = authorizationService.hasAdministrativeAccess(session);
+    }
+
+    boolean hasJcrWrite = false, hasReplicate = false, hasJcrRead = false, hasRemoveNode = false, hasModifyProperties = false, hasAddChild = false, hasModifyAccessControl = false;
+
+    if (isDAMAdmin) {
+        hasJcrWrite = hasReplicate = hasJcrRead = hasRemoveNode = hasModifyProperties = hasAddChild = hasModifyAccessControl = true;
+    } else {
+        Privilege p[] = UIHelper.getAllPermission(acm, resource);
+        if (p[0].equals(acm.privilegeFromName(Privilege.JCR_ALL))) {
+            hasJcrWrite = hasReplicate = hasJcrRead = hasRemoveNode = hasModifyProperties = hasAddChild = hasModifyAccessControl = true;
+        } else {
+            for(int i=0;i<p.length;i++){
+                if(p[i].getName().equals("rep:write") || p[i].getName().equals("jcr:write")){
+                    hasJcrWrite=true;
+                    hasRemoveNode=true;
+                    hasAddChild=true;
+                    hasModifyProperties=true;
+                }
+                if(p[i].getName().equals("crx:replicate")){
+                    hasReplicate=true;
+                }
+                if(p[i].getName().equals("jcr:modifyAccessControl")){
+                    hasModifyAccessControl=true;
+                }
+                if(p[i].equals(acm.privilegeFromName(Privilege.JCR_READ))){
+                    hasJcrRead=true;
+                }
+                if(p[i].equals(acm.privilegeFromName(Privilege.JCR_REMOVE_NODE))){
+                    hasRemoveNode=true;
+                }
+                if(p[i].equals(acm.privilegeFromName(Privilege.JCR_MODIFY_PROPERTIES))){
+                    hasModifyProperties=true;
+                }
+                if(p[i].equals(acm.privilegeFromName(Privilege.JCR_ADD_CHILD_NODES))){
+                    hasAddChild=true;
+                }
+            }
+        }
+    }
+
+    String resourceTitle=xssAPI.encodeForHTML(UIHelper.getTitle(resource));
+
+    // TODO CQ-65393
+    boolean isContentFragment = this.isContentFragment(resource);
+    if (isContentFragment) {
+        ValueMap contentProps = resource.getChild(JcrConstants.JCR_CONTENT)
+                .adaptTo(ValueMap.class);
+        String title = contentProps.get(JcrConstants.JCR_TITLE, resource.getName());
+        resourceTitle = xssAPI.encodeForHTML(title);
+    }
+
+    childPath = Text.escapePath(childPath);
+    long ck = UIHelper.getCacheKiller(childAsset);
+
+    String applicableRelationships = "cq-damadmin-admin-actions-removefromcollection ";
+    applicableRelationships += "cq-siteadmin-admin-actions-copy-activator";
+
+    if (hasReplicate) {
+        applicableRelationships += " cq-damadmin-admin-actions-publish-activator";
+        applicableRelationships += " cq-damadmin-admin-actions-unpublish-activator";
+        applicableRelationships += " cq-siteadmin-admin-actions-publish-activator";
+        applicableRelationships += " cq-siteadmin-admin-actions-unpublish-activator";
+    }
+
+    if (hasRemoveNode) {
+        applicableRelationships += " cq-damadmin-admin-actions-move-activator";
+        applicableRelationships += " cq-damadmin-admin-actions-delete-activator";
+    }
+
+    String publishedDate = null;
+    long publishDateInMillis = -1;
+    String publishedBy = null;
+    Boolean deactivated = false;
+    boolean enabledDynamicMedia = false;
+    if (featureManager.getFeature(EntitlementConstants.ASSETS_DYNAMICMEDIA_FEATURE_FLAG_PID)!=null &&
+            featureManager.isEnabled(EntitlementConstants.ASSETS_DYNAMICMEDIA_FEATURE_FLAG_PID)) {
+        enabledDynamicMedia = true;
+    }
+    boolean dynamicVideo = false; // indicate if S7 BasicVideoViewer will be used for video preview
+    Resource contentRes = resource.getChild("jcr:content");
+    String status = "";
+
+    // For type nt:folder, the properties related to resource node is present at the folder level
+    if (contentRes == null) {
+        contentRes = resource;
+    }
+
+    if(contentRes != null){
+        ValueMap contentVm = contentRes.adaptTo(ValueMap.class);
+        Calendar cal = contentVm.get("cq:lastReplicated", Calendar.class);
+        publishedDate = formatDate(cal, null, resourceBundle);
+        if (cal != null) {
+            publishDateInMillis = contentVm.get("cq:lastReplicated", Calendar.class).getTimeInMillis();
+        }
+        publishedBy = AuthorizableUtil.getFormattedName(resource.getResourceResolver(), contentVm.get("cq:lastReplicatedBy", String.class));
+
+        String lastReplicationAction = contentVm.get("cq:lastReplicationAction", String.class);
+        deactivated = "Deactivate".equals(lastReplicationAction) ? true : false;
+    }
+
+    if (childAsset.isNodeType("dam:Asset")) {
+        long width = 0;
+        long height = 0;
+        String size = "0.0 B";
+        long bytes=0;
+        String mimeType = "";
+        String resolution="";
+        String comments="";
+        String lastModified, lastModifiedBy;
+        String s7damType = "";
+        //can't use resource directly, as the resource.getResourceType (in DamUtil#isAsset) gets the renderer as this component is included using sling:include
+        type = DamUtil.isSubAsset(resourceResolver.getResource(resource.getPath()))? "subasset":"asset";
+        Asset asset = resource.adaptTo(Asset.class);
+
+        //asset-usages
+        AssetUsageTracker assetUsageTracker = sling.getService(AssetUsageTracker.class);
+        long assetScore = 0;
+        int assetUsageCount   = 0;
+        String assetRecentUsage = null;
+
+        List<AssetUsageTracker.AggregateUsageInfo> assetAggregateStats = null;
+        String [] usagesStatsRequired = {"campaign","target","social","mediaOptimizer","aem","unknown"};
+        assetAggregateStats = assetUsageTracker.getUsageStats(asset,new ArrayList<String>(Arrays.asList(usagesStatsRequired)));
+        if(assetAggregateStats!=null && !assetAggregateStats.isEmpty()) {
+            assetUsageCount   = assetAggregateStats.size();
+            assetRecentUsage = assetAggregateStats.get(0).usageType;
+        }
+        assetScore = assetUsageTracker.getAssetScore(asset);
+
+        //comments
+        CommentManager cm = sling.getService(CommentManager.class);
+        final CommentCollection collection = cm.getCollection(resource, CommentCollection.class);
+        int commentsCount = 0;
+        if (null != collection) {
+            commentsCount = collection.getCommentList().size();
+            if (commentsCount > 0) {
+                comments  = "<i class=\""+getCoralIconClasses(cmp, "icon-comment")+"\">"+"</i>"+ commentsCount;
+            }
+        }
+
+        //pull s7damType to see if it is a video we can preview in grid view
+        if (childAsset.hasNode(JcrConstants.JCR_CONTENT) &&
+                childAsset.getNode(JcrConstants.JCR_CONTENT).hasProperty("dam:s7damType")) {
+            s7damType = childAsset.getNode(JcrConstants.JCR_CONTENT).getProperty("dam:s7damType").getString();
+        }
+
+        //lastModified & lastModifiedBy
+        RelativeTimeFormat rtf = new RelativeTimeFormat("r", resourceBundle);
+        long assetLastModification = asset.getLastModified();
+        ValueMap vm = resource.adaptTo(ValueMap.class);
+        if (assetLastModification == 0) {
+            Calendar created = vm.get("jcr:created", Calendar.class);
+            assetLastModification = (null != created) ? created.getTimeInMillis() : 0;
+        }
+        lastModified = outVar(xssAPI, i18n, rtf.format(assetLastModification, true));
+        String assetModifier = asset.getModifier();
+        lastModifiedBy = AuthorizableUtil.getFormattedName(resource.getResourceResolver(), assetModifier);
+        if (null == assetModifier) {
+            assetModifier = "";
+        }
+        // Also check asset modifier should not be empty. see CQ-39542
+        if (!"".equals(assetModifier) && upm.getUserProperties(assetModifier, "profile") == null) {
+            lastModifiedBy = i18n.get("External User");
+        }
+        if (S7SetHelper.isS7Set(resource)){
+            String assetType = "set";
+            String setType = xssAPI.encodeForHTML(vm.get(JcrConstants.JCR_CONTENT+ "/" + S7damConstants.PN_S7_TYPE,"").toUpperCase());
+            boolean canEdit = hasJcrWrite;
+            boolean canEditMetadata = hasModifyProperties;
+            applicableRelationships += " foundation-damadmin-properties-activator cq-damadmin-admin-actions-add-to-collection-activator";
+            if (canEdit) {
+                applicableRelationships += " dam-assetedit-action-select";
+            }
+
+            String setThumbnailUrl="";
+            int setThumbnailWidth =0;
+            String setManualThumbnailUrl = xssAPI.getValidHref(vm.get(JcrConstants.JCR_CONTENT+ "/metadata/manualThumbnail", ""));
+            //check custom thumbnail
+            if (setManualThumbnailUrl.isEmpty() ) {
+                Rendition setThumbnailRendition = UIHelper.getBestfitRendition(asset, 319);
+                if(setThumbnailRendition != null) {
+                    try {
+                        //use the existing thumbnail
+                        setThumbnailWidth = (int)width;
+                        setThumbnailUrl = asset.getPath() + "/jcr:content/renditions/" + setThumbnailRendition.getName();
+                    } catch(Exception e) {
+                    }
+                } else {
+                    //default thumbnail
+                    setThumbnailUrl = asset.getPath() + ".thumb.319.319.png";
+                }
+            }
+            else {
+                setThumbnailUrl = setManualThumbnailUrl  + ".thumb.319.319.png";
+            }
+%>
+<article class="foundation-collection-item card-collection card-asset stack" data-timeline="true" data-asset-type ="<%= assetType %> data-foundation-collection-item-id="<%= xssAPI.encodeForHTMLAttr(resource.getPath()) %>" data-path="<%= xssAPI.encodeForHTMLAttr(resource.getPath()) %>" data-type="<%= type %>" data-asset-type ="<%= assetType %>" data-can-edit-metadata="<%= canEditMetadata %>" data-can-edit = "<%=canEdit%>">
+<i class="select"></i>
+<%if (hasJcrWrite) { %>
+<cq:include script = "reorder.jsp"/>
+<cq:include script = "status-banner.jsp"/>
+<cq:include script = "metadatastatus.jsp"/>
+<% } %>
+<a data-foundation-content-history-title="<%= resourceTitle %>" href="<%=request.getContextPath()%>/mnt/overlay/dam/gui/content/s7dam/sets/setpreview.html<%= xssAPI.encodeForHTMLAttr(childPath) %>" >
+               <span class="image">
+                <img class="show-grid" src="<%=request.getContextPath() + requestPrefix + setThumbnailUrl%>?ch_ck=<%=ck%><%=requestSuffix%>"
+                     alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource))%>">
+                <img class="show-list" src="<%=request.getContextPath() + requestPrefix + setThumbnailUrl%>?ch_ck=<%=ck%><%=requestSuffix%>"
+                     alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource))%>">
+               </span>
+    <div class="label">
+        <div class="main">
+            <h4><%=resourceTitle%></h4>
+        </div>
+        <p class="language"><%=getDisplayLanguage(resource.getPath(), true)%></p>
+        <cq:include script = "status-lister.jsp"/>
+        <p class="type"><%= xssAPI.encodeForHTML(setType) %></p>
+        <p class="resolution"></p>
+        <p class="size"></p>
+        <cq:include script = "rating.jsp"/>
+        <div class="info">
+            <% if (publishDateInMillis < assetLastModification) {%>
+            <p class="modified"><i class="<%=getCoralIconClasses(cmp, "icon-edit")%>"></i> <span class="date"><%= lastModified%></span> <span class="user"><%= xssAPI.encodeForHTML(lastModifiedBy)%></span></p>
+
+            <% } else {%>
+            <p class="modified"></p>
+            <%} %>
+            <% if (publishedDate != null && !deactivated) {%>
+            <p class="published dataful" title="<%= i18n.get("Asset Publication Status") %>">
+                <i class="<%=getCoralIconClasses(cmp, "icon-globe")%>"></i> <span class="status"><%= i18n.get("Published") %></span> <span class="date" data-timestamp="<%= publishDateInMillis %>"><%= publishedDate %></span> <span class="user"><%= xssAPI.encodeForHTML(publishedBy) %></span>
+            </p>
+            <% } else if (publishedDate != null && deactivated) { // expecting a previous publishing date otherwise it couldn't be deactivated
+            %>
+            <p class="published dataful" title="<%= i18n.get("Asset Publication Status") %>">
+                <i class="<%=getCoralIconClasses(cmp, "icon-unpublish")%>"></i> <span class="status"><%= i18n.get("Unpublished") %></span> <span class="date" data-timestamp="<%= publishDateInMillis %>"><%= publishedDate %></span> <span class="user"><%= xssAPI.encodeForHTML(publishedBy) %></span>
+            </p>
+            <% } %>
+            <p class="comments" data-comments="<%=commentsCount%>"><%=comments %></p>
+            <p class="ppinfo" data-ppinfo=""></p>
+        </div>
+    </div>
+</a><% if (showQuickActions) { %>
+<div class="foundation-collection-quickactions" data-foundation-collection-quickactions-rel="<%= applicableRelationships %>">
+    <button class="aem-assets-admin-actions-edit-activator dam-assetedit-action-select" title="<%=i18n.get("Edit") %>" type="button" autocomplete="off"
+            data-href="<%=request.getContextPath() %>/mnt/overlay/dam/gui/content/s7dam/sets/setmembers/edit.html" data-pageheading="<%= i18n.get("AEM Assets | Asset Editor")%>" data-contextpath="/mnt/overlay/dam/gui/content/s7dam/sets/setmembers.html">
+        <i class="<%=getCoralIconClasses(cmp, "icon-edit") %>"></i></button>
+    <button class="foundation-damadmin-properties-activator dam-collection-metadata-action"
+            title="<%= i18n.get("Properties") %>" type="button" autocomplete="off" data-pageheading = "AEM Assets | Asset Metadata Editor" data-contextpath="/assetdetails.html"
+            data-href="<%= request.getContextPath() %>/mnt/overlay/dam/gui/content/assets/metadataeditor.html">
+        <i class="<%=getCoralIconClasses(cmp, "icon-info-circle") %>"></i></button>
+    <button class="foundation-collection-action refresh-foundation-content-on-back" data-foundation-collection-action='{"action": "cq.wcm.copy"}'
+            type="button" autocomplete="off" title="<%= i18n.get("Copy") %>">
+        <i class="coral-Icon coral-Icon--copy coral-Icon--sizeXS"></i>
+    </button>
+</div><%} %>
+
+</article>
+<% }
+else {
+    boolean isProduct = false;
+    boolean hasSubassets = false;
+    if (resource.getChild("subassets") != null){
+        hasSubassets = true;
+    }
+
+    //size, width & height, status
+    if (childAsset.hasNode("jcr:content/metadata")) {
+        Node metadataNode = childAsset.getNode("jcr:content" + "/" + "metadata");
+        try {
+            width = Long.valueOf(DamUtil.getValue(metadataNode, "tiff:ImageWidth", DamUtil.getValue(metadataNode, "exif:PixelXDimension", "")));
+            height = Long.valueOf(DamUtil.getValue(metadataNode, "tiff:ImageLength", DamUtil.getValue(metadataNode, "exif:PixelYDimension", "")));
+        } catch (Exception e) {
+
+        }
+        try {
+            isProduct = !DamUtil.getValue(metadataNode,"cq:productReference", "").isEmpty();
+        }
+        catch(Exception e) {}
+        try {
+            bytes =  Long.valueOf(DamUtil.getValue(metadataNode, "dam:size", "0"));
+            //size
+            if (bytes == 0 && asset.getOriginal() != null) {
+                bytes = asset.getOriginal().getSize();
+            }
+            size = UIHelper.getSizeLabel(bytes, slingRequest);
+        } catch(Exception e) {}
+
+        try {
+            status = DamUtil.getValue(metadataNode, "dam:status", "");
+        } catch(Exception e) {
+
+        }
+    }
+
+    // display mime type is shown on card (in grid view) and in list view
+    String displayMimeType="";
+    Resource lookupResource = resourceResolver.getResource("/mnt/overlay/dam/gui/content/assets/jcr:content/mimeTypeLookup");
+    boolean canCompare = false;
+    String[] comparableMimeTypes = {
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/gif",
+      "image/bmp",
+      "image/tiff",
+      "image/vnd.adobe.photoshop",
+      "application/x-photoshop",
+      "application/photoshop",
+      "application/psd",
+      "image/psd"
+    };
+
+    //mimeType
+    if (asset.getMimeType() != null) {
+        mimeType = asset.getMimeType();
+        String ext = mimeType.substring(mimeType.lastIndexOf('/') + 1, mimeType.length());
+        if((displayMimeType = UIHelper.lookupMimeType(ext,lookupResource,true)) == null) {
+            displayMimeType = "";
+        }
+        if (displayMimeType.length() == 0 && mimeType.startsWith("image")) {
+            displayMimeType = "IMAGE";
+        } else if (displayMimeType.length() == 0 && mimeType.startsWith("text")) {
+            displayMimeType = "DOCUMENT";
+        } else if (displayMimeType.length() == 0 && (mimeType.startsWith("video") || mimeType.startsWith("audio"))) {
+            displayMimeType = "MULTIMEDIA";
+        } else if (S73DHelper.isS73D(resource)) {
+            Resource assetContent = resource.getChild("jcr:content");
+            displayMimeType = (assetContent != null) ? assetContent.getValueMap().get("dam:s7damType", "").toUpperCase() : "";
+            String extension = FilenameUtils.getExtension(resource.getName());
+            if (!extension.isEmpty()) {
+                displayMimeType += " (" + extension + ")";
+            }
+        } else if (displayMimeType.length() == 0 && mimeType.startsWith("application")) {
+            int idx_1 = ext.lastIndexOf('.');
+            int idx_2 = ext.lastIndexOf('-');
+            int lastWordIdx = (idx_1 > idx_2)?idx_1:idx_2;
+            displayMimeType = ext.substring(lastWordIdx+1).toUpperCase();
+        }
+        // Content Fragments need an additional check to be detected precisely
+        if (displayMimeType.equals("DOCUMENT") && isContentFragment) {
+            displayMimeType = "CONTENT FRAGMENT";
+        }
+        if (contains(comparableMimeTypes, mimeType)) {
+            canCompare = true;
+        }
+    }
+    if(displayMimeType.length() == 0 && asset.getName() != null) {
+        String filename = asset.getName();
+        String ext = filename.substring(filename.lastIndexOf(".") + 1, filename.length());
+        if((displayMimeType = UIHelper.lookupMimeType(ext,lookupResource,true)) == null) {
+            displayMimeType = "";
+        }
+    }
+    //resolution
+    if (width != 0 && height != 0) {
+        resolution = UIHelper.getResolutionLabel(width, height, slingRequest);
+    }
+    //thumbnailUrl
+    adminUrl = adminUrl.replace(assetsVanity, assetDetailsVanity);
+    String thumbnailUrl="";
+    int thumbnailWidth =0;
+
+    if (isContentFragment) {
+        thumbnailUrl = "/libs/dam/cfm/admin/content/static/thumbnail_fragment.png";
+        if (resourceResolver.getResource(thumbnailUrl) == null) {
+            thumbnailUrl = asset.getPath() + ".thumb.319.319.png";
+        }
+    } else {
+        Rendition thumbnailRendition = UIHelper.getBestfitRendition(asset, 319);
+        if (thumbnailRendition != null) {
+            try {
+                //use the existing thumbnail
+                thumbnailWidth = (int) width;
+                thumbnailUrl = asset.getPath() + "/jcr:content/renditions/" + thumbnailRendition.getName();
+            } catch (Exception e) {
+            }
+        } else {
+            //default thumbnail
+            thumbnailUrl = asset.getPath() + ".thumb.319.319.png";
+        }
+    }
+
+    thumbnailUrl = Text.escapePath(thumbnailUrl);
+
+    if (hasJcrRead) {
+        applicableRelationships += " foundation-damadmin-properties-activator cq-damadmin-admin-actions-add-to-collection-activator";
+    }
+
+    if (hasJcrWrite) {
+        applicableRelationships += " cq-damadmin-admin-actions-open-activator dam-assetedit-action-select aem-assets-admin-actions-shoppableedit-activator";
+    }
+    if (hasAddChild) {
+        applicableRelationships += " cq-damadmin-admin-actions-open-activator icon-note";
+    }
+
+    boolean canAnnotate = false;
+    String[] annotatableMimeTypes = { "image/jpeg", "image/jpg", "image/png", "image/gif" };
+    if (hasAddChild &&  hasModifyProperties) {
+        if (contains(annotatableMimeTypes, mimeType) || UIHelper.getBestfitRendition(asset, 319) != null) {
+            canAnnotate = true;
+        }
+    }
+
+    boolean canEdit = false;
+    boolean canEditMetadata = false;
+    boolean isLocked = isLocked(resourceResolver, childAsset);
+    // attempt to find a editor that can handle this resource if has the
+    // permission to edit
+    if (hasJcrWrite) {
+        canEditMetadata = true;
+        if (!isLocked) {
+            Resource editors = resource.getResourceResolver().getResource("/libs/dam/gui/content/assets/editors");
+            for (Iterator<Resource> it = editors.listChildren(); it.hasNext();) {
+                Resource child = it.next();
+                Config editorPropCfg = new Config(child);
+                String[] mimeTypes = editorPropCfg.get("mimetypes", String[].class);
+                if (mimeTypes != null && contains(mimeTypes, mimeType)) {
+                    canEdit = true;
+                    break;
+                }
+            }
+        }
+    } else if (hasModifyProperties) {
+        canEditMetadata = true;
+    }
+    boolean isCheckedOut = UIHelper.isCheckedOutByDrive(asset);
+    boolean isVideo = false;
+
+    String oggRenditionPath = "";
+    String mp4RenditionPath = "";
+    String m4VRenditionPath = "";
+
+    if (mimeType.contains("video") && !s7damType.equals(S7damConstants.S7_VIDEO_AVS)) {
+
+        for (Iterator<Rendition> it = asset.listRenditions(); it.hasNext();) {
+            Rendition rendition = it.next();
+            String renditionMimeType = rendition.getMimeType();
+
+            if (null != renditionMimeType) {
+                if (renditionMimeType.equals("video/ogg")) {
+                    oggRenditionPath = rendition.getPath();
+                }
+
+                if (renditionMimeType.equals("video/mp4")) {
+                    mp4RenditionPath = rendition.getPath();
+                }
+                // handling mime types video/m4v, video/x-m4v
+                if ( rendition.getMimeType().endsWith("m4v")) {
+                    m4VRenditionPath = rendition.getPath();
+                }
+            }
+
+        }
+        if (mimeType.equals("video/mp4") || mimeType.equals("video/ogg") ||
+                !oggRenditionPath.equals("") || !mp4RenditionPath.equals("") || !m4VRenditionPath.equals("") ||
+                mimeType.equals("video/quicktime") || mimeType.equals("video/x-ms-wmv")) {
+            isVideo = true;
+            canAnnotate = true;
+            canEdit = true;
+        }
+    }
+
+    boolean isAudio = false;
+    String mpegAudioRenditionPath = "";
+    String oggAudioRenditionPath = "";
+    String wavAudioRendtionPath = "";
+
+    if(mimeType.contains("audio")){
+        for (Iterator<Rendition> it = asset.listRenditions(); it.hasNext();) {
+            Rendition rendition = it.next();
+            String renditionMimeType = rendition.getMimeType();
+
+            if (null != renditionMimeType) {
+                if (renditionMimeType.equals("audio/mpeg") ) {
+                    mpegAudioRenditionPath = rendition.getPath();
+                }
+                if (renditionMimeType.equals("audio/ogg") ) {
+                    oggAudioRenditionPath = rendition.getPath();
+                }
+                if( renditionMimeType.equals("audio/x-wav") || renditionMimeType.equals("audio/wav") ) {
+                    wavAudioRendtionPath = rendition.getPath();
+                }
+            }
+
+        }
+        if ( ! mpegAudioRenditionPath.equals("") || ! oggAudioRenditionPath.equals("") || ! wavAudioRendtionPath.equals("")){
+            isAudio = true;
+        }
+
+    }
+    //ids print
+    String assetType = "";
+    if (asset.getRendition("cq-indesign-print")!=null){
+        assetType = "idsprint";
+    }
+
+    if (mimeType.contains("video") && childAsset.isNodeType("dam:Asset") && enabledDynamicMedia &&
+            (s7damType.equals(S7damConstants.S7_VIDEO_AVS) || s7damType.equals(S7damConstants.S7_VIDEO))) {
+        dynamicVideo = true;
+        canEdit = true;
+    }
+
+
+%><article class="foundation-collection-item card-asset" itemprop="item" itemscope="" data-asset-mimetype ="<%= mimeType %>" data-can-edit-metadata="<%= canEditMetadata %>" data-can-edit="<%=canEdit %>" data-has-subassets="<%=hasSubassets %>" data-can-annotate="<%=canAnnotate %>" data-foundation-collection-item-id="<%= xssAPI.encodeForHTMLAttr(resource.getPath()) %>" data-path="<%= xssAPI.encodeForHTMLAttr(resource.getPath()) %>" data-type="<%=type %>" data-asset-type ="<%= assetType %>" data-timeline="true" data-is-locked="<%=isLocked %>" data-checked-out="<%=isCheckedOut %>" data-status="<%=status %>" data-is-viewer-video="<%=dynamicVideo%>" data-can-compare="<%=canCompare%>">
+<i class="select"></i>
+<%if (hasJcrWrite) { %>
+<cq:include script = "reorder.jsp"/>
+<% } %>
+<cq:include script = "card-banner.jsp"/>
+<cq:include script = "status-banner.jsp"/>
+<cq:include script = "metadatastatus.jsp"/>
+<cq:include script="link.jsp"/> <%
+    String classname = (thumbnailWidth > 0 && thumbnailWidth < assetCardSize) ? "low-resolution" : "";
+%> <span class="image <%= classname %>"> <%
+    // for DM videos, use BasicVideoViewer for preview
+    // otherwise, use <video> for preview
+    if (dynamicVideo) {
+%>
+            <img class="show-grid"
+                 id="video-preview-<%=xssAPI.encodeForHTMLAttr(resource.getPath())%>"
+                 data-s7asset="<%=xssAPI.encodeForHTMLAttr(resource.getPath()) %>"
+                 data-s7host="<%=request.getContextPath()%>is/image/"
+                 data-s7type="<%=s7damType%>"
+                <% if (s7damType.equals(S7damConstants.S7_VIDEO)) { %> data-s7playback="native" <% } %>
+                 src="<%=request.getContextPath() + requestPrefix + thumbnailUrl %>?ch_ck=<%=ck%><%=requestSuffix%>"
+                 alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource)) %>" itemprop="thumbnail">
+            <img class="show-list" src="<%=request.getContextPath() + requestPrefix + thumbnailUrl %>?ch_ck=<%=ck%><%=requestSuffix%>"
+                 alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource))%>" itemprop="thumbnail">
+            <div class="video-playback">
+                <i class="dm-video-play <%=getCoralIconClasses(cmp, "icon-play-circle") %> large" style="float: right"></i>
+            </div>
+<%
+} else if (isVideo) {
+%> <video  class="video" width="100%"
+           preload="none" poster="<%=request.getContextPath() + requestPrefix + thumbnailUrl %>?ch_ck=<%=ck%><%=requestSuffix%>">
+        <%
+            if (!"".equals(oggRenditionPath)) {
+        %>
+        <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + oggRenditionPath)%>?ch_ck=<%=ck%><%=requestSuffix%>" type="video/ogg">
+        <%
+        }  if (!"".equals(mp4RenditionPath)) {
+        %>
+        <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + mp4RenditionPath)%>?ch_ck=<%=ck%><%=requestSuffix%>" type="video/mp4">
+        <%
+        }  if (!"".equals(m4VRenditionPath)) {
+        %>
+        <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + m4VRenditionPath)%>?ch_ck=<%=ck%><%=requestSuffix%>" type="video/m4v">
+        <%
+            }
+        %>
+        <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + asset.getPath())%>?ch_ck=<%=ck%><%=requestSuffix%>" type="video/mp4">
+        <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + asset.getPath())%>?ch_ck=<%=ck%><%=requestSuffix%>" type="video/ogg">
+        <%=i18n.get("Your browser does not support the video tag.") %>
+    </video>
+        <div class="video-playback">
+            <i class="<%=getCoralIconClasses(cmp, "icon-play-circle") %> large" style="float: right"></i>
+        </div>
+
+           <%}
+           else if (isAudio) {
+           %>
+            <img class="show-grid"
+                 src="<%=request.getContextPath() + requestPrefix + thumbnailUrl %>?ch_ck=<%=ck%><%=requestSuffix%>"
+                 alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource)) %>" itemprop="thumbnail">
+            <audio  class="audio" width="100%"  >
+
+                <%
+                    if (!"".equals(oggAudioRenditionPath)) {
+                %>
+                <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + oggAudioRenditionPath)%>?ch_ck=<%=ck%><%=requestSuffix%>" type="audio/ogg">
+                <%
+                } else if (!"".equals(wavAudioRendtionPath)) {
+                %>
+                <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + wavAudioRendtionPath)%>?ch_ck=<%=ck%><%=requestSuffix%>" type="audio/x-wav">
+                <%
+                } else if (!"".equals(mpegAudioRenditionPath)) {
+                %>
+                <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + mpegAudioRenditionPath)%>?ch_ck=<%=ck%><%=requestSuffix%>" type="audio/mpeg">
+                <%
+                    }
+                %>
+                <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + asset.getPath())%>?ch_ck=<%=ck%><%=requestSuffix%>" type="audio/mpeg">
+                <source src="<%=xssAPI.getValidHref(request.getContextPath() + requestPrefix + asset.getPath())%>?ch_ck=<%=ck%><%=requestSuffix%>" type="audio/ogg">
+                <%=i18n.get("Your browser does not support the audio tag.") %>
+            </audio>
+        <div class="audio-playback">
+            <i class="<%=getCoralIconClasses(cmp, "icon-play-circle") %> large" style="float: right"></i>
+        </div>
+
+           <%}
+           else {%>
+            <img class="show-grid"
+                 src="<%=request.getContextPath() + requestPrefix + thumbnailUrl %>?ch_ck=<%=ck%><%=requestSuffix%>"
+                 alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource)) %>" itemprop="thumbnail">
+            <img class="show-list" src="<%=request.getContextPath() + requestPrefix + thumbnailUrl %>?ch_ck=<%=ck%><%=requestSuffix%>"
+                 alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource))%>" itemprop="thumbnail">
+            <%} %>
+    </span>
+
+    <span class="asset-usage-stats ">
+         <% if(assetUsageCount   > 0 )
+         {
+         %>
+            <ul class ="coral-List--minimal asset-usage-stats-container">
+            <%
+
+            for(int i =0;i<assetAggregateStats.size();i++)
+            {
+                AssetUsageTracker.AggregateUsageInfo usage = assetAggregateStats.get(i);
+            %>
+                <li class = "solution-usage-info">
+                <%
+                if(usage.usageType.equals("campaign") )
+                {
+                %>
+                    <span class="coral-Icon coral-Icon--sizeS coral-Icon--campaign is-selected " ></span>
+                <%
+                } else if(usage.usageType.equals("target") ) {
+                %>
+                    <i class="coral-Icon coral-Icon--sizeS coral-Icon--adobeTarget is-selected " ></i>
+                <%
+                } else if(usage.usageType.equals("social") ) {
+                %>
+                    <i class="coral-Icon coral-Icon--sizeS coral-Icon--adobeSocial is-selected " ></i>
+                <%
+                } else if(usage.usageType.equals("mediaOptimizer") ) {
+                %>
+                    <i class="coral-Icon coral-Icon--sizeS coral-Icon--adobeMediaOptimizer is-selected " ></i>
+                <%
+                } else if(usage.usageType.equals("aem") ) {
+                %>
+                    <i class="coral-Icon coral-Icon--sizeS coral-Icon--adobeExperienceManager is-selected " ></i>
+                <%
+                } else if(usage.usageType.equals("unknown") ) {
+                %>
+                    <i class="coral-Icon coral-Icon--sizeS coral-Icon--dataCorrelated is-selected " ></i>
+                <%
+                }
+                %>
+
+
+                <span class="last-usage-date"><%=usage.lastUsedTime %></span>
+                <span class="usage-count"><%=usage.usageCount %></span>
+            </li>
+            <%
+                }
+            %>
+
+
+        </ul>
+        <%
+        } else {
+        %>
+            <div class ="not-used-with-solution-message"><%=i18n.get("Not used with any solution.") %></div>
+        <%
+            }
+        %>
+
+    </span>
+<div class="label">
+    <div class="main">
+        <%if(isCheckedOut) {%>
+        <h4><i class="<%=getCoralIconClasses(cmp, "icon-lock-on") %>" title="<%=i18n.get("Checked out by {0}", null, UIHelper.getCheckedOutby(asset)) %>"></i><%=resourceTitle%> </h4>
+        <%} else { %>
+        <h4><%=resourceTitle%></h4>
+        <%} %>
+        <cq:include script = "status.jsp"/>
+    </div>
+    <meta itemprop="title" content="<%=resourceTitle%>" />
+    <p class="language"><%=getDisplayLanguage(resource.getPath(), true)%></p>
+    <cq:include script = "status-lister.jsp"/>
+    <p class="type" itemprop="assettype"><%if (isProduct) {%><i class="coral-Icon coral-Icon--box"></i> <%}%><%= xssAPI.encodeForHTML(i18n.getVar(displayMimeType)) %></p>
+    <p class="resolution" data-width="<%= width%>" itemprop="resolution"><%= xssAPI.encodeForHTML(resolution)%></p>
+    <p class="size" data-bytes="<%= bytes%>" itemprop="size"><%=size%></p>
+    <cq:include script = "rating.jsp"/>
+    <div class="info">
+        <section class="status-icons">
+            <cq:include script = "status-icon.jsp"/>
+            <%  if (commentsCount > 0) {%>
+            <span class="comment-card" data-comments="<%=commentsCount%>"><%=comments %></span>
+            <%  } %>
+        </section>
+        <% if (publishDateInMillis < assetLastModification) {%>
+        <p class="modified"><i class="<%=getCoralIconClasses(cmp, "icon-edit")%>"></i> <span class="date" itemprop="lastmodified" data-timestamp="<%=assetLastModification %>"><%= lastModified%></span> <span class="user" itemprop="lastmodifiedby"><%= xssAPI.encodeForHTML(lastModifiedBy)%></span></p>
+
+        <%} else { %>
+        <p class="modified"></p>
+        <%} %>
+
+        <p class="asset-score" data-score = "<%=assetScore   %>">
+            <% if(assetScore   > 0 ) { %>
+            <i class="coral-Icon coral-Icon--sizeXS coral-Icon--trophy  asset-score-icon" ></i><%=assetScore%>
+            <% } %>
+        </p>
+
+        <% if (publishedDate != null && !deactivated) {%>
+        <p class="published dataful" title="<%= i18n.get("Asset Publication Status") %>" itemprop="publish" itemscope="">
+            <i class="<%=getCoralIconClasses(cmp, "icon-globe")%>"></i> <span class="status" itemprop="status"><%= i18n.get("Published") %></span> <span class="date" itemprop="time" data-timestamp="<%= publishDateInMillis %>"><%= publishedDate %></span> <span class="user" itemprop="actor"><%= xssAPI.encodeForHTML(publishedBy) %></span>
+        </p>
+        <% } else if (publishedDate != null && deactivated) { // expecting a previous publishing date otherwise it couldn't be deactivated
+        %>
+        <p class="published dataful" title="<%= i18n.get("Asset Publication Status") %>" itemprop="publish" itemscope="">
+            <i class="<%=getCoralIconClasses(cmp, "icon-unpublish")%>"></i> <span class="status" itemprop="status"><%= i18n.get("Unpublished") %></span> <span class="date" itemprop="time" data-timestamp="<%= publishDateInMillis %>"><%= publishedDate %></span> <span class="user" itemprop="actor"><%= xssAPI.encodeForHTML(publishedBy) %></span>
+        </p>
+        <% } else { %><p class="published" title="<%= i18n.get("Asset Publication Status") %>" itemprop="publish" itemscope=""></p><% } %>
+        <p class="comments" data-comments="<%=commentsCount%>"><%=comments %></p>
+        <p class="ppinfo" data-ppinfo=""></p>
+
+
+
+        <% if(assetUsageCount   > 0 ) {
+            if("campaign".equals(assetRecentUsage)) {
+        %>
+        <p class="coral-Icon coral-Icon--campaign coral-Icon--sizeXS solution-used-icon " >
+                <%  } else if ("target".equals(assetRecentUsage)) {
+            %>
+        <p class="coral-Icon coral-Icon--adobeTarget coral-Icon--sizeXS solution-used-icon " >
+                <%    } else if("social".equals(assetRecentUsage)) {
+            %>
+        <p class="coral-Icon coral-Icon--adobeSocial coral-Icon--sizeXS solution-used-icon " >
+                <%  } else if("mediaOptimizer".equals(assetRecentUsage)) {
+            %>
+        <p class="coral-Icon coral-Icon--adobeMediaOptimizer coral-Icon--sizeXS solution-used-icon " >
+            <%  } else if("aem".equals(assetRecentUsage)) {
+            %>
+        <p class="coral-Icon coral-Icon--adobeExperienceManager coral-Icon--sizeXS solution-used-icon " >
+            <%  } else if("unknown".equals(assetRecentUsage)) {
+            %>
+        <p class="coral-Icon coral-Icon--dataCorrelated coral-Icon--sizeXS solution-used-icon " >
+            <%  } if(assetUsageCount >1) {
+            %>
+            +<%=assetUsageCount-1   %></p>
+        <%
+                }
+            }
+        %>
+
+        <p class="comments" data-comments="<%=commentsCount%>"><%=comments %></p>
+
+
+    </div>
+</div>
+</a> <%
+    boolean isAssetExpired = false;
+    boolean isSubAssetExpired = false;
+    boolean isDownloadAllowedForAdmins = false;
+    boolean canShare = false;
+
+    if(request.getAttribute("com.adobe.assets.expiry.status") != null)
+        isAssetExpired = (Boolean)request.getAttribute("com.adobe.assets.expiry.status");
+    if(request.getAttribute("com.adobe.assets.subasset.expiry.status") != null)
+        isSubAssetExpired = (Boolean)request.getAttribute("com.adobe.assets.subasset.expiry.status");
+    if(request.getAttribute("com.adobe.assets.expiry.isDownloadAllowedForAdmins") != null)
+        isDownloadAllowedForAdmins = (Boolean)request.getAttribute("com.adobe.assets.expiry.isDownloadAllowedForAdmins");
+    if (isDownloadAllowedForAdmins || (!isAssetExpired && !isSubAssetExpired)) {
+        applicableRelationships += " cq-damadmin-admin-actions-download-activator ";
+    }
+    if(!(isAssetExpired || isSubAssetExpired) && hasModifyAccessControl) {
+        canShare = true;
+        applicableRelationships +=" cq-damadmin-admin-actions-adhocassetshare-activator";
+        applicableRelationships +=" cq-damadmin-admin-actions-publicLinkShare-activator";
+    }
+    if (canShare) {
+        applicableRelationships +=" cq-damadmin-admin-actions-share-activator";
+    }
+    else {
+        applicableRelationships.replace("cq-damadmin-admin-actions-share-activator", "");
+    }
+
+    if (showQuickActions) {
+%>
+<div class="foundation-collection-quickactions" data-foundation-collection-quickactions-rel="<%= applicableRelationships %>"><%
+
+    if (canEdit && !isAssetExpired && !isSubAssetExpired) {%>
+    <%
+        if (mimeType.contains("video") && childAsset.isNodeType("dam:Asset") && enabledDynamicMedia && (s7damType.equals(S7damConstants.S7_VIDEO_AVS) || s7damType.equals(S7damConstants.S7_VIDEO))) {
+    %><a class="aem-assets-admin-actions-edit-activator dam-assetedit-action-select" href="<%=request.getContextPath() %>/libs/dam/gui/content/s7dam/shoppablevideo/editor.html<%=childPath%>"
+        data-pageheading="<%= i18n.get("AEM Assets | Asset Editor") %>" title="<%=i18n.get("Edit") %>">
+    <% } else { %><button class="aem-assets-admin-actions-edit-activator dam-assetedit-action-select" title="<%=i18n.get("Edit") %>" type="button" autocomplete="off"
+            data-href="<%=request.getContextPath() %>/mnt/overlay/dam/gui/content/assets/assetedit.html" data-pageheading="<%= i18n.get("AEM Assets | Asset Editor")%>"
+            data-contextpath="/assetdetails.html">
+    <%
+        }
+    %>
+        <i class="<%=getCoralIconClasses(cmp, "icon-edit") %>"></i></button>
+    <%} if (canAnnotate) {
+    %><a class="dam-asset-annotate-action"
+         title="<%= i18n.get("Annotate") %>" href="<%=request.getContextPath()%>/mnt/overlay/dam/gui/content/assets/annotate.html<%=childPath%>">
+        <i class="<%=getCoralIconClasses(cmp, "icon-note") %>"></i>
+    </a><%
+        }
+
+    %><button class="foundation-damadmin-properties-activator"
+              title="<%= i18n.get("Properties") %>" type="button" autocomplete="off" data-pageheading = "AEM Assets | Asset Metadata Editor" data-contextpath = "/assetdetails.html"
+              data-href="<%= request.getContextPath() %>/mnt/overlay/dam/gui/content/assets/metadataeditor.html">
+        <i class="<%=getCoralIconClasses(cmp, "icon-info-circle") %>"></i></button>
+    <%
+        if (!type.equals("subasset") && (isDownloadAllowedForAdmins || (!isAssetExpired && !isSubAssetExpired ))) {
+            if( bytes != 0 ) {
+    %><button class="cq-damadmin-admin-actions-download-activator foundation-collection-action"
+              title="<%= i18n.get("Download") %>" data-href="/mnt/overlay/dam/gui/content/assets/downloadasset.html" data-haslicense-href="/mnt/overlay/dam/gui/content/assets/haslicense.html"
+              data-license-href="/mnt/overlay/dam/gui/content/assets/licensecheck.html"
+              data-toggle="modal">
+        <i class="<%=getCoralIconClasses(cmp, "icon-download") %>"></i></button>
+    <%      } %>
+    <cq:include script="copy-action.jsp"/>
+    <%
+        }
+        if (showDesktopLinks) {
+    %>
+    <button class="dam-asset-desktop-action"
+            title="<%= i18n.get("Reveal on desktop") %>"
+            type="button"
+            autocomplete="off"
+            data-path="<%= childPath %>"
+            data-href-query=""
+            data-toggle="modal">
+        <i class="<%=getCoralIconClasses(cmp, "icon-open") %>"></i></button>
+    <%
+        }
+
+    %></div> <%} %>
+</article>
+<%}
+} else if (childAsset.isNodeType("nt:folder")) {
+    type = "directory";
+    boolean canShare = false;
+    boolean isMACShared = false;
+    boolean isCCShared = false;
+    boolean isMPShared = false;
+    String sharedParentPath = null;
+    boolean isRootMACShared = false;
+    boolean isRootMPShared = false;
+    if (childAsset.hasProperty("dam:ccTeamMembers")) {
+        isCCShared = true;
+    } else {
+        Node sharedCCParent = findSharedParent(childAsset, "dam:ccTeamMembers");
+        if (sharedCCParent != null) {
+            isCCShared = true;
+        }
+    }
+    if (childAsset.hasProperty("macConfig") ) {
+        isMACShared = true;
+    } else {
+        Node sharedParent = findSharedParent(childAsset, "macConfig");
+        if (sharedParent != null) {
+            sharedParentPath = sharedParent.getPath();
+            isRootMACShared = true;
+        }
+    }
+    if (childAsset.hasProperty("mpConfig") ) {
+        isMPShared = true;
+    } else {
+        Node sharedParent = findSharedParent(childAsset, "mpConfig");
+        if (sharedParent != null) {
+            sharedParentPath = sharedParent.getPath();
+            isRootMPShared = true;
+        }
+    }
+
+    // Processing profile details
+    String[] profileTitleList = new String[]{"","","","",""};
+    String[] profilePropertyList = new String[]{"jcr:content/metadataProfile", "jcr:content/processingProfile", "jcr:content/imageProfile", "jcr:content/videoProfile", "jcr:content/batchSetPreset"};
+    String[] profileNamePropertyList = new String[]{"jcr:content/jcr:title", "name", "jcr:content/jcr:title", "", "jcr:content/jcr:title"};
+    for(int i=0; i< profileNamePropertyList.length; i++) {
+        if (childAsset.hasProperty(profilePropertyList[i])) {
+
+            Property prop = childAsset.getProperty(profilePropertyList[i]);
+            ArrayList<String> profilePaths = new ArrayList<String>();
+            if("jcr:content/batchSetPreset".equals(profilePropertyList[i])) {
+                Value[] vals  = prop.getValues();
+                for(Value val : vals) {
+                    profilePaths.add(val.getString());
+                }
+            } else {
+                profilePaths.add(prop.getValue().getString());
+            }
+
+            ArrayList<String> profileNames = new ArrayList<>();
+
+            for(String profilePath : profilePaths) {
+                if(profilePath.trim().isEmpty()){
+                    continue;
+                }
+                Resource res = resourceResolver.getResource(profilePath);
+                if (res != null) {
+                    Node node = res.adaptTo(Node.class);
+                    if (node != null) {
+                        String jcrTitle = "";
+                        if(node.hasProperty(profileNamePropertyList[i])){
+                            jcrTitle = node.getProperty(profileNamePropertyList[i]).getValue().getString();
+                        }
+
+                        // store jcr:title value if available, as that is always preferable over name
+                        profileNames.add(jcrTitle != null && !jcrTitle.trim().isEmpty() ? jcrTitle : node.getName());
+                    }
+                }
+            }
+            profileTitleList[i] = String.join(", ", profileNames);
+        }
+    }
+    // Metadata Schema details
+    String metadataSchema = "";
+    if (childAsset.hasProperty("jcr:content/metadataSchema")) {
+        metadataSchema = childAsset.getProperty("jcr:content/metadataSchema").getValue().getString();
+    }
+
+    if (hasJcrRead) {
+        applicableRelationships +=" foundation-damadmin-properties-activator icon-share cq-damadmin-admin-actions-download-activator dam-asset-createtask-action-activator cq-damadmin-admin-actions-add-to-collection-activator";
+    }
+
+    if (hasModifyAccessControl) {
+        canShare = true;
+        applicableRelationships +=" cq-damadmin-admin-actions-foldershare";
+        applicableRelationships +=" cq-damadmin-admin-actions-adhocassetshare-activator";
+        applicableRelationships +=" cq-damadmin-admin-actions-publicLinkShare-activator";
+    }
+
+    boolean showCCQuickAction = false;
+    if (hasJcrWrite && hasReplicate) {
+        canShare = true;
+        applicableRelationships += " cq-damadmin-admin-actions-macshare-activator";
+        applicableRelationships += " cq-damadmin-admin-actions-ccshare-activator";
+        applicableRelationships += " cq-damadmin-admin-actions-mpshare-activator";
+        showCCQuickAction = true;
+    }
+
+    if (isMACShared || isCCShared || isRootMACShared || isMPShared || isRootMPShared) {
+        applicableRelationships = applicableRelationships.replace("cq-damadmin-admin-actions-move-activator", "").replace("cq-damadmin-admin-actions-delete-activator", "");
+    }
+
+    if (canShare) {
+        applicableRelationships += " cq-damadmin-admin-actions-share-activator";
+    }
+    else {
+        applicableRelationships.replace("cq-damadmin-admin-actions-share-activator", "");
+    }
+
+    boolean manualThumbnailExists = false;
+    // Path at which the manual thumbnail(if present) exists
+    String manualThumbnailPath = resource.getPath() + "/jcr:content/manualThumbnail.jpg";
+    Resource manualThumbnail = resourceResolver.getResource(manualThumbnailPath);
+    if (null != manualThumbnail) {
+        manualThumbnailExists = true;
+    }
+
+    if (!(childAsset.hasProperty("hidden") && childAsset.getProperty("hidden").getString().equals("true"))) {
+%><article class="foundation-collection-item card-<%=type %>" itemprop="item" itemscope="" data-is-mac-shared="<%=isMACShared %>" data-is-cc-shared="<%=isCCShared %>" data-is-root-mac-shared="<%=isRootMACShared %>" data-shared-root="<%= xssAPI.encodeForHTMLAttr(sharedParentPath) %>" data-is-mpc-shared="<%=isMPShared %>" data-is-root-mp-shared="<%=isRootMPShared %>" data-foundation-collection-item-id="<%= xssAPI.encodeForHTMLAttr(resource.getPath()) %>" data-path="<%= xssAPI.encodeForHTMLAttr(resource.getPath()) %>" data-type="<%=type %>" data-timeline="true" data-references="true" data-metadata-schema="<%= metadataSchema %>">
+    <i class="select"></i>
+    <%if (hasJcrWrite) { %>
+    <cq:include script = "reorder.jsp"/>
+    <% } %>
+    <cq:include script = "card-banner.jsp"/>
+    <cq:include script="link.jsp"/>
+        <span class="image">
+            <% if (manualThumbnailExists) {
+                //UIHelper.getCacheKiller() generates the cache killer based on default thumbnail's last modified time.
+                int cck = 600000 + (int)(Math.random() * (600001));
+            %>
+                <img class="show-grid" itemprop="thumbnail" src="<%=request.getContextPath() + requestPrefix + xssAPI.getValidHref(childPath)%>/jcr:content/manualThumbnail.jpg?ch_ck=<%=cck%><%=requestSuffix%>"
+                     alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource))%>">
+              <% } else { %>
+                 <img class="show-grid" itemprop="thumbnail" src="<%=request.getContextPath() + requestPrefix + xssAPI.getValidHref(childPath)%>.folderthumbnail.jpg?width=240&height=140&ch_ck=<%=ck%><%=requestSuffix%>"
+                      alt="<%=xssAPI.encodeForHTMLAttr(getDescription(resource))%>">
+              <% } %>
+            <i class="show-list <%=getCoralIconClasses(cmp, "icon-folder")%>"></i>
+        </span>
+    <div class="label">
+        <div class="main">
+            <h4 ><%=resourceTitle%></h4>
+            <meta itemprop="title" content="<%=resourceTitle%>" />
+        </div>
+        <p class="language"><%=getDisplayLanguage(resource.getPath(), false)%></p>
+        <div class="expirystatus"></div>
+        <p class="type" itemprop="assettype"><%= i18n.get("FOLDER") %></p>
+        <div class="info">
+            <p class="resolution"></p>
+            <p class="size"></p>
+            <div class="rating"></div>
+            <p class="modified"></p>
+            <p class="asset-score"></p>
+            <% if (isCCShared) {
+                String title = i18n.get("Shared with Creative Cloud");
+            %>   <i class="<%=getCoralIconClasses(cmp, "icon-creative-cloud") %> is-selected" title="<%=title %>"><%=  " " + title %></i>
+            <%} else if(isMACShared || isRootMACShared) {
+                String title = i18n.get("Shared with Marketing Cloud");%>
+            <i class="<%=getCoralIconClasses(cmp, "icon-share-check") %> is-selected" title="<%= title %>"><%=  " " +  title %></i>
+            <%}
+            else if(isMPShared || isRootMPShared) {
+                String title = i18n.get("Shared with Brand Portal");%>
+            <i class="<%=getCoralIconClasses(cmp, "icon-share-check") %> is-selected" title="<%= title %>"><%=  " " +  title %></i>
+            <%}%>
+            <p class="published dataful" itemprop="publish" itemscope="">
+                <% if (publishedDate != null && !deactivated) {%>
+                <i class="<%=getCoralIconClasses(cmp, "icon-globe") %>" title="<%= i18n.get("Asset Publication Status") %>"></i> <span class="status" itemprop="status"><%= i18n.get("Published") %></span> <span class="date" itemprop="time" data-timestamp="<%= publishDateInMillis %>"><%= publishedDate %></span> <span class="user" itemprop="actor"><%= xssAPI.encodeForHTML(publishedBy) %></span>
+                <% } else if (publishedDate != null && deactivated) { // expecting a previous publishing date otherwise it couldn't be deactivated
+                %>
+                <i class="<%=getCoralIconClasses(cmp, "icon-unpublish") %>" title="<%= i18n.get("Asset Publication Status") %>"></i> <span class="status" itemprop="status"><%= i18n.get("Unpublished") %></span> <span class="date" itemprop="time" data-timestamp="<%= publishDateInMillis %>"><%= publishedDate %></span> <span class="user" itemprop="actor"><%= xssAPI.encodeForHTML(publishedBy) %></span>
+                <% }%>
+            </p>
+            <p class = "comments"></p>
+
+            <%if(PrivateFolderAndCollectionUtil.isPrivate(resource.getResourceResolver().adaptTo(Session.class), resource.getPath())){
+            %><p class="private-status">
+            <i class="coral-Icon coral-Icon--sizeXS coral-Icon--key" title="<%= i18n.get("Private Folder") %>"></i>
+        </p><%
+            }%>
+
+            <% if(isProcessingProfileEntitled && (!profileTitleList[0].trim().isEmpty() || !profileTitleList[1].trim().isEmpty() || !profileTitleList[2].trim().isEmpty())){ %>
+            <p class="ppinfo">
+
+                <%
+                    if (!profileTitleList[0].trim().isEmpty()) {
+                        String toolTip = i18n.get("Metadata Profile:") + " " + xssAPI.encodeForHTML(profileTitleList[0].trim());
+                %><span class="specific-profile-info" title="<%= toolTip %>"><i class="coral-Icon coral-Icon--sizeXS coral-Icon--data"></i><span><%= xssAPI.encodeForHTML(profileTitleList[0].trim()) %></span></span>
+                <% } %>
+
+                <%
+                    if (!profileTitleList[1].trim().isEmpty()) {
+                        String toolTip = i18n.get("Processing Profile:") + " " + xssAPI.encodeForHTML(profileTitleList[1].trim());
+                %><span class="specific-profile-info" title="<%= toolTip %>"><i class="coral-Icon coral-Icon--sizeXS coral-Icon--gear"></i><span><%= xssAPI.encodeForHTML(profileTitleList[3].trim()) %></span></span>
+                <% } %>
+
+                <%
+                    if (!profileTitleList[2].trim().isEmpty()) {
+                        String toolTip = i18n.get("Image Profile:") + " " + xssAPI.encodeForHTML(profileTitleList[2].trim());
+                %><span class="specific-profile-info" title="<%= toolTip %>"><i class="coral-Icon coral-Icon--sizeXS coral-Icon--image"></i><span><%= xssAPI.encodeForHTML(profileTitleList[1].trim()) %></span></span>
+                <% } %>
+
+                <%
+                    if (!profileTitleList[3].trim().isEmpty()) {
+                        String toolTip = i18n.get("Video Profile:") + " " + xssAPI.encodeForHTML(profileTitleList[3].trim());
+                %><span class="specific-profile-info" title="<%= toolTip %>"><i class="coral-Icon coral-Icon--sizeXS coral-Icon--film"></i><span><%= xssAPI.encodeForHTML(profileTitleList[2].trim()) %></span></span>
+                <% } %>
+
+                <%
+                    if (!profileTitleList[4].trim().isEmpty()) {
+                        String toolTip = i18n.get("Batch Set Preset(s):") + " " + xssAPI.encodeForHTML(profileTitleList[4].trim());
+                %><span class="specific-profile-info" title="<%= toolTip %>"><i class="coral-Icon coral-Icon--sizeXS coral-Icon--film"></i><span><%= xssAPI.encodeForHTML(profileTitleList[4].trim()) %></span></span>
+                <% } %>
+            </p>
+
+            <% } else { %>
+            <p class="shared" >
+                    <% } %>
+
+        </div>
+    </div>
+    </a> <% if (showQuickActions) { %>
+    <div class="foundation-collection-quickactions" data-foundation-collection-quickactions-rel="<%= applicableRelationships %>">
+        <%if (showCCQuickAction) { %>
+        <button class="foundation-damadmin-properties-activator cq-damadmin-admin-actions-ccshare-activator refresh-foundation-content-on-back" data-contextpath = "/assets.html" data-pageheading="AEM Assets | Creative Cloud Share"
+                title="<%=i18n.get("Share using Creative Cloud")%>" type="button" data-href="/mnt/overlay/dam/gui/content/assets/ccsharewizard.html<%=childPath%>" autocomplete="off"
+                data-foundation-mode-value="default">
+            <i class="<%=getCoralIconClasses(cmp, "icon-share") %>"></i>
+        </button>
+        <% }%>
+        <a class="cq-damadmin-admin-actions-add-to-collection-activator"
+           title="<%=i18n.get("Add to Collection") %>" href="<%=request.getContextPath()%>/mnt/overlay/dam/gui/content/collections/addtocollectionwizard.html/content/dam/collections?item=<%=childPath%>">
+            <i class="<%=getCoralIconClasses(cmp, "icon-collection-add-to")%>"></i>
+        </a>
+        <button class="cq-damadmin-admin-actions-download-activator foundation-collection-action"
+                title="<%= i18n.get("Download") %>" data-href="/mnt/overlay/dam/gui/content/assets/downloadasset.html" data-haslicense-href="/mnt/overlay/dam/gui/content/assets/haslicense.html"
+                data-license-href="/mnt/overlay/dam/gui/content/assets/licensecheck.html" data-toggle="modal">
+            <i class="<%=getCoralIconClasses(cmp, "icon-download") %>"></i>
+        </button>
+        <button class="foundation-collection-action refresh-foundation-content-on-back" data-foundation-collection-action='{"action": "cq.wcm.copy"}'
+                type="button" autocomplete="off" title="<%= i18n.get("Copy") %>">
+            <i class="coral-Icon coral-Icon--copy coral-Icon--sizeXS"></i>
+        </button>
+        <button class="cq-damadmin-admin-actions-publish-activator refresh-foundation-content-on-back"
+                title="<%= i18n.get("Publish") %>" type="button" autocomplete="off"
+                data-foundation-mode-value="default">
+            <i class="<%=getCoralIconClasses(cmp, "icon-globe") %>"></i>
+        </button>
+        <%
+            if (showDesktopLinks) {
+        %>
+        <button class="dam-asset-desktop-action"
+                title="<%= i18n.get("Reveal on desktop") %>"
+                type="button"
+                autocomplete="off"
+                data-path="<%= childPath %>"
+                data-href-query=""
+                data-toggle="modal">
+            <i class="<%=getCoralIconClasses(cmp, "icon-open") %>"></i>
+        </button>
+    </div> <%
+        }
+    }
+%>
+
+</article>
+<%
+        }
+    }
+
+%>
+<%!String outVar(XSSAPI xssAPI, I18n i18n, String text) {
+    if (text != null) return xssAPI.encodeForHTML(i18n.getVar(text));
+    return "";
+}
+
+    boolean isContentFragment(Resource resource) {
+        Resource contentResource = resource.getChild(JcrConstants.JCR_CONTENT);
+        boolean isFragment = false;
+        if (contentResource != null) {
+            ValueMap contentProps = contentResource.adaptTo(ValueMap.class);
+            isFragment = contentProps.get("contentFragment", false);
+        }
+        return isFragment;
+    }
+
+    String getDescription(Resource resource) {
+        try {
+            Asset asset = resource.adaptTo(Asset.class);
+            if (asset != null) {
+                if (this.isContentFragment(resource)) {
+                    ValueMap contentProps = resource.getChild(JcrConstants.JCR_CONTENT)
+                            .adaptTo(ValueMap.class);
+                    return contentProps.get(JcrConstants.JCR_DESCRIPTION, "");
+                }
+                Node metadataNode = asset.adaptTo(Node.class).getNode("jcr:content" + "/" + "metadata");
+                return DamUtil.getValue(metadataNode, "dc:description", resource.getName());
+            } else {
+                LabeledResource lr = resource.adaptTo(LabeledResource.class);
+                if (lr != null) {
+                    return lr.getDescription() != null ? lr.getDescription() : "";
+                }
+            }
+        } catch (Exception e) {
+            log("getTitle: " + e.getMessage());
+        }
+
+        return resource.getName();
+    }
+
+    String formatDate(Calendar cal, String defaultValue, ResourceBundle rb) {
+        if (cal == null) return defaultValue;
+
+        RelativeTimeFormat rtf = new RelativeTimeFormat("r", rb);
+        return rtf.format(cal.getTimeInMillis(), true);
+    }
+
+
+    boolean contains(String[] mimeTypes, String mimeType) {
+        for (String item:mimeTypes) {
+            if (item.equalsIgnoreCase(mimeType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    String getCoralIconClasses(ComponentHelper cmp, String icon) {
+        return "coral-Icon coral-Icon--sizeXS " + cmp.getIconClass(icon);
+    }
+
+    String getDisplayLanguage(String sourcePath, Boolean asset) {
+		String locale = null;
+		Locale localeObj = null;
+		String langValue = "";
+        String root = LanguageUtil.getLanguageRoot(sourcePath);
+        if (root != null && !(asset && root.equals(sourcePath))) {
+            locale = root.substring(root.lastIndexOf("/") + 1);
+        }
+
+        if (locale != null) {
+            localeObj = LanguageUtil.getLocale(locale);
+            if (localeObj != null) {
+                langValue = localeObj.getDisplayLanguage();
+            }
+            langValue += " (" + locale + ")";
+        }
+        return langValue;
+    }
+
+    Node findSharedParent(Node currentNode, String propName) throws RepositoryException {
+        if (currentNode == null || DamConstants.MOUNTPOINT_ASSETS.equals(currentNode.getPath())) {
+            return null;
+        }
+        Node parent = currentNode.getParent();
+        if (parent.hasProperty(propName)) {
+            return parent;
+        }
+        return findSharedParent(parent, propName);
+    }
+    boolean isLocked(ResourceResolver resourceResolver, Node node) {
+        boolean isLocked = false;
+
+        try {
+            String lockedBy="";
+            final LockManager lockManager = resourceResolver.adaptTo(
+                    Session.class).getWorkspace().getLockManager();
+            if(node != null) {
+                if (node.isLocked()) {
+                    isLocked=true;
+                    lockedBy = lockManager.getLock(
+                            node.getPath()).getLockOwner();
+
+                }else if (node.hasNode(JcrConstants.JCR_CONTENT)){
+                    Node contentNode = node.getNode(JcrConstants.JCR_CONTENT);
+                    if(contentNode.isLocked()){
+                        isLocked = true;
+                        lockedBy = lockManager.getLock(contentNode.getPath()).getLockOwner();
+                    }
+                }
+                if(isLocked){
+                    User self = resourceResolver.adaptTo(User.class);
+                    String selfId = self.getID();
+                    isLocked = !selfId.equals(lockedBy);
+                }
+                return isLocked;
+            }
+        } catch (Exception ex) {
+            log("Exception occurred while checking whether the node is locked: "
+                    + ex.getMessage());
+        }
+        return true;
+    }
+
+%>

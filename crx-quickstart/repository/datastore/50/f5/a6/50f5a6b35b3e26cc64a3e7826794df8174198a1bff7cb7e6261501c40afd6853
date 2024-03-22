@@ -1,0 +1,825 @@
+/**
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+/**
+ * @class CQ.taskmanagement.TaskEditor
+ * @extends CQ.Ext.Panel
+ * The Task Editor used in Task Management
+ * @constructor
+ * Creates a new Task Editor.
+ */
+CQ.taskmanagement.TaskEditor = CQ.Ext.extend(CQ.Ext.Panel, {
+    /**
+     * @cfg {Object} infoPanel
+     * The config for the panel wrapping the thumbnail and general information.
+     * See {@link CQ.Ext.Panel} for config options.
+     */
+
+    tabs: [],
+
+    /**
+     * Processes the specified records. This method should only be used as
+     * a callback by the component's store when loading content.
+     * @param {CQ.Ext.data.Record[]} recs The records
+     * @param {Object} opts (optional) The options, such as the scope
+     * @param {Boolean} success True if retrieval of records was
+     *        successful
+     * @private
+     */
+    processRecords: function(recs, opts, success) {
+        var rec;
+        if (success) {
+            rec = recs[0];
+        } else {
+            CQ.Log.warn("CQ.taskmanagement.TaskEditor#processRecords: retrieval of records unsuccessful");
+            rec = new CQ.data.SlingRecord();
+            rec.data = {};
+        }
+
+        this.hideLoadMask();
+        this.fireEvent("loadcontent", this, recs, opts, success);
+    },
+
+    getTaskDataFromInfoPanel: function() {
+        var taskCreateInfo = {
+            properties: {
+                taskPriority: this.taskInfoPanel.find("name", "taskPriority")[0].getValue(),
+                taskDueDate: this.taskInfoPanel.find("name", "taskDueDate")[0].getValue()
+            },
+            contentPath: this.taskInfoPanel.find("name", "contentPath")[0].getValue(),
+            name: this.taskInfoPanel.find("name", "taskName")[0].getValue(),
+            description: this.taskInfoPanel.find("name", "taskDescription")[0].getValue(),
+            ownerId: this.taskInfoPanel.find("name", "taskOwner")[0].getValue()
+        };
+        if (this.parentTaskId!=null) {
+            taskCreateInfo.parentTaskId = this.parentTaskId;
+        }
+
+        return taskCreateInfo;
+    },
+
+    /**
+     * @private
+     */
+    updateTask: function(doComplete, selectedAction, commentFromDialog) {
+        var taskEditor = this;
+        var config = {
+            "success": function() {
+                // timeout required for modified date in info
+                window.setTimeout(function() {
+                    taskEditor.refreshGrid();
+                    delete taskEditor.info;
+                    taskEditor.refreshInfo();
+                }, 600);
+            },
+            "failure": function(panel, action) {
+                taskEditor.hideLoadMask();
+                taskEditor.notify(action.result ? action.result.Message : "");
+            }
+        };
+
+        if (taskEditor.isTaskInfoValid()) {
+            var updatedTaskInfo = this.getTaskDataFromInfoPanel();
+            if (doComplete===true) {
+                updatedTaskInfo.status = "COMPLETE";
+            }
+            if (commentFromDialog) {
+                if (updatedTaskInfo.properties) {
+                    updatedTaskInfo.properties.comment = commentFromDialog;
+                } else {
+                    updatedTaskInfo.properties = {
+                        "comment": commentFromDialog
+                    };
+                }
+            }
+
+            var url = "/libs/granite/taskmanager/updatetask";
+            var completeParams = {
+                taskId: this.taskInfo.id,
+                _charset_:"utf-8"
+            };
+            if (selectedAction) {
+                completeParams.selectedAction = selectedAction;
+            }
+
+            CQ.Ext.Ajax.request({
+                "url": url,
+                "method": "POST",
+                "jsonData": JSON.stringify(updatedTaskInfo),
+                "params": completeParams,
+                "success": function(response, options) {
+                    if (doComplete) {
+                        CQ.Notification.notify(null, CQ.I18n.getMessage("Task Completed"));
+                    } else {
+                        CQ.Notification.notify(null, CQ.I18n.getMessage("Task Updated"));
+                    }
+
+                    taskEditor.taskInfo = JSON.parse(response.responseText);
+                    taskEditor.updateTaskInUI();
+                    taskEditor.enableButtonsFromTaskInfo();
+                    taskEditor.refreshGrid();
+                },
+                "failure": function(response, options) {
+                    if (doComplete) {
+                        CQ.Notification.notify(null, CQ.I18n.getMessage("Failed to complete task"));
+                    } else {
+                        CQ.Notification.notify(null, CQ.I18n.getMessage("Failed to update task"));
+                    }
+                }
+            });
+        } else {
+            CQ.Ext.Msg.show({
+                title:CQ.I18n.getMessage('Validation Failed'),
+                msg: CQ.I18n.getMessage('Verify the values of the marked fields.'),
+                buttons: CQ.Ext.Msg.OK,
+                icon: CQ.Ext.Msg.ERROR
+            });
+        }
+    },
+    isTaskInfoValid: function() {
+        return this.taskInfoPanel.form.isValid();
+    },
+
+
+
+    /**
+     * Returns an array of configs for the buttons
+     * @type {Object[]}
+     * @private
+     */
+    getButtonsConfig: function(buttons, actionNames) {
+        var taskEditor = this;
+        var b = [ "->" ];
+        if (typeof buttons == "string") {
+            // buttons: CQ.taskmanagement.TaskEditor.SAVE  =>  buttons: [ CQ.taskmanagement.TaskEditor.SAVE ]
+            buttons = [buttons];
+        }
+        for (var i=0; i < buttons.length; i++) {
+            if (typeof buttons[i] == "string") {
+
+                // save button
+                if (buttons[i] == CQ.taskmanagement.TaskEditor.SAVE) {
+                    var saveButton = new CQ.Ext.Button({
+                        "text": CQ.I18n.getMessage("Save"),
+                        "disabled": this.readOnly,
+                        "cls": "cq-btn-save",
+                        "scope": this,
+                        "minWidth": CQ.taskmanagement.themes.TaskEditor.MIN_BUTTON_WIDTH,
+                        "handler": function(button) {
+                            this.updateTask(false, null);
+                        }
+                    });
+                    b.push(saveButton);
+                }
+
+                else if (buttons[i] == CQ.taskmanagement.TaskEditor.COMPLETE) {
+                    var taskEditor = this;
+                    var completeButton = new CQ.Ext.Button({
+                        "text": CQ.I18n.getMessage("Complete Task..."),
+                        "disabled": this.readOnly,
+                        "cls": "cq-btn-complete",
+                        "scope": this,
+                        "minWidth": CQ.taskmanagement.themes.TaskEditor.MIN_BUTTON_WIDTH,
+                        "handler": function(button) {
+                            var completeTaskDialogConfig = {
+                                "okHandler": function(selectedActionId, commentFromDialog) {
+                                    taskEditor.updateTask(true, selectedActionId, commentFromDialog);
+                                }
+                            };
+
+                            var dialog = new  CQ.taskmanagement.CompleteTaskDialog(completeTaskDialogConfig, actionNames);
+                            dialog.show();
+                        }
+                    });
+                    b.push(completeButton);
+                }
+
+                // reset button
+                else if (buttons[i] == CQ.taskmanagement.TaskEditor.RESET) {
+                    var resetButton = new CQ.Ext.Button({
+                        "text": CQ.I18n.getMessage("Reset"),
+                        "disabled": this.readOnly,
+                        "cls": "cq-btn-reset",
+                        "scope": this,
+                        "minWidth": CQ.taskmanagement.themes.TaskEditor.MIN_BUTTON_WIDTH,
+                        "handler": function(button) {
+                            taskEditor.loadMask.show();
+                        }
+                    });
+                    b.push(resetButton);
+                }
+                // refresh info panel button
+                else if (buttons[i] == CQ.taskmanagement.TaskEditor.REFRESH_INFO) {
+                    var refreshButton = new CQ.Ext.Button({
+                        "tooltip": CQ.I18n.getMessage("Refresh"),
+                        "tooltipType": "title",
+                        "iconCls":"cq-siteadmin-refresh",
+                        "scope": this,
+                        "handler": function(button) {
+                            var now = new Date().getTime();
+                            m.show();
+                            delete this.info;
+                            this.refreshInfo();
+                            window.setTimeout(function(){m.hide();}, this.getTimeoutTime(now));
+                        }
+                    });
+                    b.push(refreshButton);
+              }
+            }
+            else {
+                if(buttons[i]) {
+                    if (typeof buttons[i].handler == "string") {
+                        buttons[i].handler = eval(buttons[i].handler);
+                    }
+
+                    b.push(CQ.Util.applyDefaults(buttons[i], {
+                        "minWidth": CQ.taskmanagement.themes.TaskEditor.MIN_BUTTON_WIDTH,
+                        "scope": this
+                    }));
+                }
+            }
+        }
+        return b;
+    },
+
+    /**
+     * Returns if the asset is of a GIF, PNG or JPEG image.
+     * @param {String} name
+     * @private
+     */
+    isImage: function(name) {
+        name = name ? name.toLowerCase() : this.fileName.toLowerCase();
+        if (name.indexOf(".") == -1) return false; // no extension
+        var is = false;
+        var ext = ["jpg", "gif", "png", "jpeg"];
+        for (var i = 0; i < ext.length; i++) {
+            if (name.lastIndexOf("." + ext[i]) == name.length - ext[i].length - 1) {
+                is = true;
+                break;
+            }
+        }
+        return is;
+    },
+
+    /**
+     * Returns info of the specified name.
+     * @param {String} name
+     * @param {boolean} force True to request the info from the server
+     * @private
+     */
+    getInfo: function(name, force) {
+        if (force || !this.info) {
+            var info = {};
+
+            var mod = "";
+            try {
+                mod = new Date(info["jcr:content"]["jcr:lastModified"]);
+                mod = CQ.taskmanagement.TaskProjects.formatDate(mod);
+            }
+            catch (e) {}
+
+
+            var dim = "";
+
+
+            this.info = {
+                "title": this.taskInfo.name, // "Hacked Title", // meta["dc:title"] ? meta["dc:title"] : "",
+                "name":this.taskInfo.name,
+                "lastModified": mod,
+                "dimensions": dim
+            };
+        }
+        return this.info[name];
+    },
+
+    /**
+     * Returns an array of configs for the tabs
+     * @type {Object[]}
+     * @private
+     */
+    getTabsConfig: function(tabs) {
+        var t = [];
+        if (typeof tabs == "string") {
+            // tabs: CQ.taskmanagement.TaskEditor.SUBASSETS  =>  tabs: [ CQ.taskmanagement.TaskEditor.SUBASSETS ]
+            tabs = [tabs];
+        }
+
+        for (var i=0; i < tabs.length; i++) {
+            if (typeof tabs[i] == "string") {
+
+            }
+        }
+        return t;
+    },
+
+    /**
+     * Refreshes the info
+     * @private
+     */
+    refresh: function() {
+        delete this.info;
+        this.refreshInfo();
+        this.refreshGrid();
+    },
+
+    /**
+     * Refreshes the info panel
+     * @private
+     */
+    refreshInfo: function() {
+        this.titleInfo.updateText(this.getInfo("title"));
+        this.lastModifiedInfo.updateText(this.getInfo("lastModified"));
+        if (this.dimensionsInfo) this.dimensionsInfo.updateHtml(this.getInfo("dimensions"));
+    },
+
+    /**
+     * Refreshes the taskmanager grid
+     */
+    refreshGrid: function() {
+        CQ.Ext.getCmp("cq-taskmanager" + "-grid").getStore().reload();
+        CQ.taskmanagement.TaskManagementAdmin.reloadSelectedNode();
+    },
+
+    /**
+     * Shows the loading mask with the given message or "Saving...".
+     * @param msg {String} The message (optional)
+     */
+    showSaveMask: function(msg) {
+        this.showLoadMask(msg || CQ.I18n.getMessage("Saving..."));
+    },
+
+    /**
+     * Shows the loading mask with the given message or "Loading...".
+     * @param msg {String} The message (optional)
+     */
+    showLoadMask: function(msg) {
+        // apply mask to this.body in order to be able to close a tab in case
+        // the mask is unexpected not hidden
+        this.loadMask = new CQ.Ext.LoadMask(this.body, {
+            "msg": msg || CQ.I18n.getMessage("Loading...")
+        });
+        this.loadMask.show();
+    },
+
+    /**
+     * Hides the loading mask
+     */
+    hideLoadMask: function() {
+        if (this.loadMask) this.loadMask.hide();
+    },
+
+    /**
+     * Hides the loading mask
+     * @deprecated
+     */
+    hideSaveMask: function() {
+        this.hideLoadMask();
+    },
+
+
+    // to avoid flickering display loading messages at least 600 ms
+    getTimeoutTime: function(time) {
+        var delta = new Date().getTime() - time;
+        var min = 600;
+        if (delta > min) return 1;
+        return min - delta;
+    },
+
+    /**
+     * Displays the specified error message and hides the loading mask.
+     * @param msg {String} The error message (optional)
+     */
+    notify: function(msg) {
+        this.hideLoadMask();
+        if (!msg) msg = CQ.I18n.getMessage("Unspecified error");
+        CQ.Notification.notify(CQ.I18n.getMessage("Error"), msg);
+    },
+
+    /**
+     * Applies {@link CQ.Ext.form.Field#readOnly readOnly} recursively to the specified items.
+     * @param items
+     * @private
+     */
+    applyReadOnly: function(items) {
+
+        if (items === undefined) {
+            return;
+        }
+        for (var i = 0; i < items.length; i++) {
+            try {
+                if (items[i].items) {
+                    // assuming is panel
+                    this.applyReadOnly(items[i].item);
+                }
+                items[i].readOnly = true;
+            }
+            catch (e) {
+                CQ.Log.warn("CQ.taskmanagement.TaskEditor#applyReadOnly: " + e.message);
+            }
+        }
+    },
+
+    constructor: function(config) {
+        var ae = this;
+        this.path = config.path;
+        this.taskInfo = config.taskInfo;
+        this.pathEncoded = CQ.HTTP.encodePath(this.path);
+        if (config.path) {
+            this.fileName = config.path.substring(config.path.lastIndexOf("/") + 1);
+            this.parentPath = config.path.substring(0, config.path.lastIndexOf("/"));
+        }
+        this.readOnly = config.readOnly || config.taskInfo.status==="COMPLETE";
+
+        var taskEditorCustomBBar = [
+            "->",
+            CQ.taskmanagement.TaskEditor.SAVE
+            ];
+        if (this.taskInfo.actionNames) {
+            this.taskInfo.actionNames.map(function(item) { taskEditorCustomBBar.push(item); });
+        } else {
+            taskEditorCustomBBar.push(CQ.taskmanagement.TaskEditor.COMPLETE);
+        }
+        taskEditorCustomBBar.push(CQ.taskmanagement.TaskEditor.RESET);
+
+        config = CQ.Util.applyDefaults(config, {
+            "layout": "border",
+            "closable": true,
+            "header": false,
+            "border": false,
+            "cls": "cq-taskeditor",
+            "contentPath": "/jcr:content/metadata",
+            "title": CQ.shared.XSS.getXSSValue(CQ.shared.Util.ellipsis(this.fileName, 30)),
+            "thumbnailWidth": 250, // TODO - 319
+            "thumbnailHeight": 250, // TODO - 319
+            "thumbnailServlet": "thumb",
+            "thumbnailExtension": "png",
+            "bbar": taskEditorCustomBBar,
+            "bbarCfg": { buttonAlign: "right" },
+            "bbarWest": [
+                CQ.taskmanagement.TaskEditor.REFRESH_INFO
+            ],
+            "tabs": [ ]
+        });
+
+
+        // ---------------------------------------------------------------------
+        // info panel (west)
+        // ---------------------------------------------------------------------
+
+        var items = [];
+
+        this.titleInfo = new CQ.Static({
+           "cls": "cq-taskeditor-title",
+           "text": this.getInfo("title"),
+           "colspan": 2
+        });
+        items.push(this.titleInfo);
+
+        items.push(new CQ.Static({
+            "cls": "infoLabel",
+            "small": true,
+            "text": CQ.I18n.getMessage("Name")
+        }));
+        items.push(new CQ.Static({
+            "small": true,
+            "right": true,
+            "text": this.fileName
+        }));
+
+        if (config.assetInfo.size) {
+            items.push(new CQ.Static({
+                "cls": "infoLabel",
+                "small": true,
+                "text": CQ.I18n.getMessage("Size")
+            }));
+            this.sizeInfo = new CQ.Static({
+                "small": true,
+                "right": true,
+                "text": CQ.Util.formatFileSize(config.assetInfo.size)
+            });
+            items.push(this.sizeInfo);
+        }
+
+        items.push(new CQ.Static({
+            "cls": "infoLabel",
+            "small": true,
+            "text": CQ.I18n.getMessage("Modified")
+        }));
+        this.lastModifiedInfo = new CQ.Static({
+            "small": true,
+            "right": true,
+            "text": config.assetInfo.lastModified ? CQ.taskmanagement.TaskProjects.formatDate(new Date(config.assetInfo.lastModified)) : ""
+        });
+        items.push(this.lastModifiedInfo);
+
+        if (config.assetInfo.mime) {
+            items.push(new CQ.Static({
+                "cls": "infoLabel",
+                "small": true,
+                "text": CQ.I18n.getMessage("Type")
+            }));
+            this.typeInfo = new CQ.Static({
+                "small": true,
+                "right": true,
+                "text": config.assetInfo.mime
+            });
+            items.push(this.typeInfo);
+        }
+
+        if (config.assetInfo.width && config.assetInfo.height) {
+            items.push(new CQ.Static({
+                "cls": "infoLabel",
+                "small": true,
+                "text": CQ.I18n.getMessage("Dimensions")
+            }));
+            this.dimensionsInfo = new CQ.Static({
+                "small": true,
+                "right": true,
+                "html": config.assetInfo.width + ' &times; ' + config.assetInfo.height
+            });
+            items.push(this.dimensionsInfo);
+        }
+
+        items.push(new CQ.Static({
+            "colspan": 2,
+            "small": true,
+            "right": true,
+            "cls": "cq-taskeditor-download",
+            "html": '<a href="' + CQ.HTTP.externalize(CQ.shared.XSS.getXSSValue(this.pathEncoded)) + '" target="_blank" title="' + CQ.shared.XSS.getXSSValue(this.path) + '">' + CQ.I18n.getMessage("Download") + '</a>'
+        }));
+
+        // ---------------------------------------------------------------------
+        // tab panel (east)
+        // ---------------------------------------------------------------------
+
+        var tabs = this.getTabsConfig(config.tabs);
+        if (tabs.length > 0) {
+            var tabPanelConfig = CQ.Util.applyDefaults(config.tabPanel, {
+                "xtype": "tabpanel",
+                "region": "east",
+                "width": CQ.taskmanagement.themes.TaskEditor.EAST_PANEL_WIDTH,
+                "split": true,
+                "collapsible":true,
+                "collapseMode":"mini",
+                "hideCollapseTool": true,
+                "margins":"5 5 5 0",
+                "enableTabScroll": true,
+                "cls": "cq-taskeditor-east",
+                "activeTab": 0,
+                "plain": true,
+                "footer": false,
+                "items": tabs,
+                "listeners": {
+                    "tabchange": function (tabpanel, panel) {
+                        panel.doLayout();
+                    }
+                }
+            });
+            this.tabPanel = CQ.Util.build(tabPanelConfig);
+        }
+
+
+        // ---------------------------------------------------------------------
+        // form panel (center)
+        // ---------------------------------------------------------------------
+
+        // delete the bbar cfg - otherwise would be used as buttons config for the main panel
+        delete config.bbar;
+
+        var buttonsArray = [CQ.taskmanagement.TaskEditor.SAVE];
+        buttonsArray.push(CQ.taskmanagement.TaskEditor.COMPLETE);
+        buttonsArray.push(CQ.taskmanagement.TaskEditor.RESET);
+
+        var customButtonBarConfig = this.getButtonsConfig(buttonsArray, this.taskInfo.actionNames);
+        var panelConfig = {
+            "region": "center",
+            "buttonAlign": "right",
+            "autoScroll": true,
+            "cls": "cq-taskeditor-center",
+            "margins": this.tabPanel ? "5 0 5 0" : "5 5 5 0",
+            "labelWidth": CQ.taskmanagement.themes.TaskEditor.LABEL_WIDTH,
+            "defaults": {
+                "anchor": CQ.Ext.isIE6 ? "92%" : CQ.Ext.isIE7 ? "96%" : "100%",
+                "stateful": false
+            },
+            "bbar": customButtonBarConfig,
+            "cleanUp": function() {
+                // used in TagInputField when default namespace is undefined and
+                // a new label has been entered (bug 29859)
+                ae.hideLoadMask();
+            },
+            layout: {
+                type: "form"
+            },
+            items: [
+                {
+                    xtype: 'textfield',
+                    name: 'taskName',
+                    fieldLabel: CQ.I18n.getMessage("Name"),
+                    fieldDescription : CQ.I18n.getMessage("The name of this task"),
+                    readOnly: true
+                },
+                {
+                    xtype: 'textfield',
+                    name: 'taskStatus',
+                    fieldLabel: CQ.I18n.getMessage("Status"),
+                    fieldDescription : CQ.I18n.getMessage("The status of this task"),
+                    readOnly: true
+                },
+                {
+                    xtype: 'authselection',
+                    name: 'taskOwner',
+                    displayField:"principal",
+                    fieldDescription: CQ.I18n.getMessage("The owner of this task"),
+                    fieldLabel: CQ.I18n.getMessage("Assign To"),
+                    allowBlank:false
+                },
+                {
+                    xtype: 'pathfield',
+                    name: 'contentPath',
+                    fieldLabel: CQ.I18n.getMessage("Content Path"),
+                    fieldDescription : CQ.I18n.getMessage("The content to monitor for this task"),
+                    rootTitle : CQ.I18n.getMessage("Content")
+                },
+                {
+                    xtype: 'textarea',
+                    name: 'taskDescription',
+                    fieldLabel: CQ.I18n.getMessage("Description"),
+                    fieldDescription : CQ.I18n.getMessage("Provide a description of the task")
+                },
+                {
+                    "xtype":"combo",
+                    "name":"taskPriority",
+                    "fieldLabel":CQ.I18n.getMessage("Task Priority"),
+                    "fieldDescription":CQ.I18n.getMessage("Select a priority for this task"),
+                    "displayField":"name",
+                    "valueField":"priority",
+                    "selectOnFocus":true,
+                    "triggerAction":"all",
+                    "editable":false,
+                    "mode": 'local',
+                    "store":
+                        new CQ.Ext.data.SimpleStore({
+                                fields: ['priority','name'],
+                                data: [
+                                    ["High",CQ.I18n.getMessage("High")],
+                                    ["Medium",CQ.I18n.getMessage("Medium")],
+                                    ["Low",CQ.I18n.getMessage("Low")]
+                                ]
+                            }
+                        )
+                },
+                {
+                    xtype: 'datetime',
+                    name: 'taskDueDate',
+                    fieldLabel: CQ.I18n.getMessage("Due Date"),
+                    fieldDescription: CQ.I18n.getMessage("The due date of this task"),
+                    validate: function() {
+                        var currentValue = this.getValue();
+                        if (currentValue===undefined || currentValue==="") {
+                            // empty due date is allowed
+                            return true;
+                        }
+                        // we have a date -> make sure it's later than right now...
+                        var currentDate = new Date();
+                        // add one minute
+                        currentDate.setMinutes(currentDate.getMinutes()+2);
+                        var result = currentDate<currentValue;
+                        if (!result) {
+                            var dtfInvalidMsg = CQ.I18n.getMessage("Due date set in the past");
+                            this.tf.markInvalid(dtfInvalidMsg);
+                            this.df.markInvalid(dtfInvalidMsg);
+                            this.markInvalid("..");
+                            return false;
+                        } else {
+                            this.tf.clearInvalid();
+                            this.df.clearInvalid();
+                            return true;
+                        }
+
+                    }
+                }
+            ]
+        };
+
+        if (this.readOnly) {
+            this.applyReadOnly(panelConfig.items);
+        }
+
+        this.taskInfoPanel = new CQ.Ext.FormPanel(panelConfig);
+
+        config.items = [];
+        if (this.tabPanel) config.items.push(this.tabPanel);
+        config.items.push(this.taskInfoPanel);
+
+        this.updateTaskInUI();
+        this.enableButtonsFromTaskInfo();
+        CQ.taskmanagement.TaskEditor.superclass.constructor.call(this, config);
+
+        this.setUpDateTimeFieldErrorClearer();
+    },
+    updateTaskInUI: function() {
+        this.taskInfoPanel.find("name", "taskName")[0].setValue(this.taskInfo.name);
+        this.taskInfoPanel.find("name", "taskStatus")[0].setValue(CQ.taskmanagement.TaskManagementAdmin.getLocalizedStatusMessage(this.taskInfo));
+        this.taskInfoPanel.find("name", "taskOwner")[0].setValue(this.taskInfo.ownerId);
+        this.taskInfoPanel.find("name", "taskPriority")[0].setValue(this.taskInfo.properties.taskPriority);
+        this.taskInfoPanel.find("name", "taskDescription")[0].setValue(this.taskInfo.description);
+        this.taskInfoPanel.find("name", "contentPath")[0].setValue(this.taskInfo.contentPath);
+        this.taskInfoPanel.find("name", "taskDueDate")[0].setValue(this.taskInfo.properties.taskDueDate);
+    },
+    enableButtonsFromTaskInfo: function() {
+        this.taskInfoPanel.getBottomToolbar().items.each(function(button) {
+            if (button instanceof CQ.Ext.Button) {
+                button.setDisabled(this.isTaskCompleted());
+            }
+        }, this)
+    },
+    isTaskCompleted: function() {
+        return this.taskInfo && this.taskInfo.status && this.taskInfo.status.toLowerCase()=="complete";
+    },
+
+    // the DateTimeField only clears either the time or the date sub-field
+    // -> add a change listener to clear both fields
+    setUpDateTimeFieldErrorClearer: function() {
+        var dateTimeField = this.taskInfoPanel.find("name", "taskDueDate")[0];
+        if (dateTimeField) {
+            dateTimeField.df.addListener("change", function() {
+                dateTimeField.df.clearInvalid();
+                dateTimeField.tf.clearInvalid();
+            });
+            dateTimeField.tf.addListener("change", function() {
+                dateTimeField.df.clearInvalid();
+                dateTimeField.tf.clearInvalid();
+            });
+        }
+    },
+
+    initComponent: function(){
+        CQ.taskmanagement.TaskEditor.superclass.initComponent.call(this);
+
+        //todo: find out why some panels need an extra doLayout
+        var ae = this;
+        window.setTimeout(function() {
+            ae.taskInfoPanel.doLayout(); // required for empty tag fields
+
+            if (ae.tabPanel) ae.tabPanel.doLayout();
+            try {
+                //todo: does not work reliably in IE
+                ae.loadMask = new CQ.Ext.LoadMask(ae.formPanel.body);
+                ae.loadMask.show();
+            }
+            catch(e) {}
+        }, 1);
+    }
+    
+    
+});
+
+CQ.Ext.reg("taskeditor", CQ.taskmanagement.TaskEditor);
+
+/**
+ * The value for {@link #bbar} to create the Save button.
+ * @static
+ * @final
+ * @type String
+ */
+CQ.taskmanagement.TaskEditor.SAVE = "SAVE";
+
+/**
+ * The value for {@link #bbar} to create the Complete button.
+ * @static
+ * @final
+ * @type String
+ */
+CQ.taskmanagement.TaskEditor.COMPLETE = "COMPLETE";
+
+/**
+ * The value for {@link #bbar} to create the Reset button.
+ * @static
+ * @final
+ * @type String
+ */
+CQ.taskmanagement.TaskEditor.RESET = "RESET";
+
+/**
+ * The value for {@link #bbarWest} to create the refresh button.
+ * @static
+ * @final
+ * @type String
+ */
+CQ.taskmanagement.TaskEditor.REFRESH_INFO = "REFRESH_INFO";
+

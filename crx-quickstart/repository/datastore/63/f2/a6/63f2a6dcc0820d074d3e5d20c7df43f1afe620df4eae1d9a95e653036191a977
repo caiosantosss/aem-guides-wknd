@@ -1,0 +1,1638 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(document, $) {
+    "use strict";
+
+    var debugMode = window.location.href.indexOf("?debug-target-mode=true") >= 0
+        || window.location.href.indexOf("&debug-target-mode=true") >= 0;
+
+    var _debug = function(args) {
+        if (debugMode) {
+            console.log(args);
+        }
+    };
+
+    window.PersonalizationWizard = window.PersonalizationWizard || (function() {
+
+        var COMMAND_SERVLET_URL = "/libs/cq/analytics/testandtarget/command";
+        var DEFAULT_EXPERIENCE = {
+            title: Granite.I18n.get("DEFAULT"),
+            name: Granite.I18n.get("DEFAULT"),
+            label: "DEFAULT [Control]",
+            path: "DEFAULT"
+        };
+
+        var ALL_AUDIENCES = {
+            name: "All Visitors",
+            path: "all"
+        };
+
+        var ERROR_KEYS = {
+            "err.activity.noexperiences":Granite.I18n.get("This activity has no experiences"),
+            "err.experience.nooffers": Granite.I18n.get("The following experience has no offers:"),
+            "err.experience.nosegments":Granite.I18n.get("The following experience has no segments:"),
+            "err.experience.wrongoffercount":Granite.I18n.get("The following experience has the wrong offer count: "),
+            "err.activity.wrongpercentage":Granite.I18n.get("The overall visitor percentage is different than 100")
+        };
+
+        var _self = {};
+
+        _self.editedActivity = "";
+        _self.editStartDate = undefined;
+        _self.editEndDate = undefined;
+        _self.editDatesInitialized = false;
+        _self.editedAbAudience = undefined;
+        _self.currentAmbit = "";
+        _self.isOverwrite = undefined;
+        _self.experiences = [];
+        _self.initialized = false;
+        _self.listenersBound = false;
+        _self.goalsChanged = false;
+        _self.mboxesLoaded = false;
+
+
+        _self.audienceOptions = undefined;
+        _self.experienceOptions = undefined;
+        _self.audiencePicker = undefined;
+        _self.activityType = null;
+
+        var _updateCurrentAudience = function(target) {
+            _self.currentAudienceContainer = target.closest(".audience-chooser-container");
+        };
+
+        var _enableDisableCalendar = function(calendarContainer, isDisabled) {
+            if (isDisabled) {
+                calendarContainer.find("input,button").attr("disabled", "disabled");
+                calendarContainer.find("input[type='text']").val("");
+            } else {
+                calendarContainer.find("input,button").removeAttr("disabled");
+            }
+        };
+
+        var selectDurationChangeHandler = function(e) {
+            var container = $(e.target).closest(".duration-select-container");
+            var calendar = container.next(".time-container").find(".duration-calendar");
+
+            _enableDisableCalendar(calendar, $(e.target).val() == 0);
+
+            _self.validate();
+        };
+
+        var getParams = function () {
+            var path = _getUrlParameter("path");
+            var selectedEngine = $(".create-activity-wizard .targeting-engine").val();
+            var selectedTntCfg = "";
+            try {
+                selectedTntCfg = $(".create-activity-wizard .targeting-config").val();
+            } catch (e) {
+
+            }
+
+            var params = "?engine=" + selectedEngine;
+
+            if (path) {
+                params += "&path=" + path;
+            }
+
+            if (selectedEngine == "tnt") {
+                var clientCode = $("coral-select-item[value='" + selectedTntCfg + "']").attr("itemprop");
+                if (clientCode) {
+                    params += "&clientcode=" + clientCode;
+                }
+                if (_self.isAbActivity()) {
+                    params += "&allAudiences=true";
+                }
+            } else {
+                var ambit = _self.currentAmbit;
+                var brand = ambit.substr(0, ambit.lastIndexOf("/"));
+                if (brand.lastIndexOf("/") >= 0) {
+                    brand = brand.substr(brand.lastIndexOf("/") + 1);
+                }
+                if (brand) {
+                    params += "&brand=" + brand;
+                }
+            }
+
+            params += "&_charset_=utf-8";
+
+            return params;
+        };
+
+        var _wait = function(clear) {
+            if (PersonalizationHelper.areWeInIframe()) {
+                PersonalizationHelper.postMessage("targeting-editor-cmd", {"cmd" : "wizard-wait"});
+            } else {
+                $(window).adaptTo("foundation-ui").wait();
+            }
+        }
+
+        var _clearWait = function() {
+            if (PersonalizationHelper.areWeInIframe()) {
+                PersonalizationHelper.postMessage("targeting-editor-cmd", {"cmd" : "wizard-clear-wait"});
+            } else {
+                $(window).adaptTo("foundation-ui").clearWait();
+            }
+        }
+
+        var _notify = function(msg, type) {
+            if (PersonalizationHelper.areWeInIframe()) {
+                PersonalizationHelper.postMessage("targeting-editor-cmd", {
+                    "cmd" : "wizard-notification",
+                    "payload": {
+                        content: Granite.I18n.get(msg),
+                        type: type
+                    }
+                });
+            } else {
+                var windowUI = $(window).adaptTo("foundation-ui");
+
+                windowUI.notify("", Granite.I18n.get(msg), type);
+            }
+        };
+
+        var _hideDefaultExperienceActions = function() {
+            var jqExperienceActions = $(".target-ab-diagram-mapping .experience-options-button");
+            if (jqExperienceActions.length > 0) {
+                $(jqExperienceActions[0]).css("visibility", "hidden");
+            }
+        };
+
+        var allowActivityTypeChange = function() {
+            return typeof _self.editedActivity == "undefined"
+                || _self.editedActivity == "";
+        };
+
+        var fetchMboxes = function(callBack) {
+            var selectedEngine = $(".create-activity-wizard .targeting-engine").val();
+            var selectedTntCfg = "";
+            try {
+                selectedTntCfg = $(".create-activity-wizard .targeting-config").val();
+            } catch (e) {
+
+            }
+
+            _wait();
+
+            // if we're editing an existing activity that's using a4t, wait for the a4t.ready event that's
+            // triggered when the a4t data is loaded in the goals widget
+            // otherwise wait for the a4t init complete
+            var waitForEvent = "";
+            if (_self.hasConfiguredA4TGoalsMetrics()) {
+                waitForEvent = "a4t.ready";
+            } else {
+                waitForEvent = "a4t.init-complete";
+            }
+            $(document).one(waitForEvent, function(event) {
+                _clearWait();
+            });
+
+            function fetchMboxesDone() {
+                _self.mboxesLoaded = true;
+                TargetingUI.A4T.initializeA4T(selectedTntCfg, callBack);
+            };
+
+            if (selectedEngine == "tnt"
+                && selectedTntCfg != "") {
+                Granite.$.ajax({
+                    type: "get",
+                    url: selectedTntCfg + "/jcr:content.mboxlist.json",
+                    cache: false,
+                    success: function(data, status, xhr) {
+                        if (window.TSDK && TSDK.UI) {
+                            TSDK.UI.mboxes = data;
+                        }
+
+                        fetchMboxesDone();
+                    },
+                    error: function(xhr) {
+                        fetchMboxesDone();
+                    }
+                });
+            } else {
+                fetchMboxesDone();
+            }
+        };
+
+        _self.setDefaultVisitorPercentage = function(percentage) {
+            DEFAULT_EXPERIENCE["visitorPercentage"] = percentage;
+        };
+
+        _self.targetingEngineSelectHandler = function(e) {
+            var selectedEngine = $(this).val();
+            var tntConfig = $(".create-activity-wizard .targeting-config")[0].value;
+
+            if (selectedEngine == "tnt") {
+                PersonalizationHelper.enableSelectWidget(".create-activity-wizard .targeting-config");
+                PersonalizationHelper.enableSelectWidget(".create-activity-wizard .targeting-activity-type", allowActivityTypeChange);
+
+                var activityTypeWidget = $(".create-activity-wizard .targeting-activity-type")[0];
+
+                _populateActivityTypes(tntConfig, activityTypeWidget);
+
+                _self.mboxesLoaded = false;
+            } else {
+                PersonalizationHelper.disableSelectWidget(".create-activity-wizard .targeting-config");
+                PersonalizationHelper.disableSelectWidget(".create-activity-wizard .targeting-activity-type", allowActivityTypeChange);
+                _self.mboxesLoaded = true;
+            }
+
+            _initializeAudiencePicker(tntConfig);
+
+            if (!_self.mboxesLoaded) {
+                fetchMboxes();
+            }
+
+            _self.validate();
+        };
+
+        _self.validate = function() {
+            var valid = true;
+
+            var activeStep = $(".foundation-wizard-step.foundation-wizard-step-active");
+            if (activeStep.length == 0) {
+                // fallback for when there's no 'foundation-wizard-step-active', select the one that's not visible
+                activeStep = $(".foundation-wizard-step").not(".u-coral-hidden");
+            }
+            if (activeStep.find(".create-activity-diagram-container").length > 0) {
+                var diagramWidget = undefined;
+                var diagramSelector = "";
+                if (_self.isAbActivity()) {
+                    diagramSelector = ".target-ab-diagram-mapping";
+
+                    // hide the default experience actions
+                    _hideDefaultExperienceActions();
+                } else {
+                    diagramSelector = ".target-diagram-mapping";
+                }
+
+                diagramWidget = activeStep.find(diagramSelector).data("diagram");
+                if (diagramWidget) {
+                    // inject aem validation routine
+                    if (!diagramWidget.aemValidate) {
+                        diagramWidget.aemValidate = function() {
+                            var isValid = diagramWidget.validate();
+
+                            // apply other validation rules
+                            var diagramData = diagramWidget.getData();
+                            var hasAudience = false;
+                            var visitorPercentage = 0;
+
+                            if (_self.isAbActivity()) {
+                                hasAudience = diagramData.audience && diagramData.audience.name;
+                                isValid = isValid && hasAudience && diagramData.experiences.length > 1;
+                            } else {
+                                visitorPercentage = 100;
+                            }
+
+                            $(".diagram-row").removeClass("error-row");
+                            for (var idx = 0 ; idx < diagramData.experiences.length ; idx ++) {
+                                var currentExperience = diagramData.experiences[idx];
+
+                                // check for duplicates
+                                var hasDuplicate = false;
+                                for (var idx2 = 0 ; idx2 < diagramData.experiences.length ; idx2 ++) {
+                                    if (idx2 != idx
+                                        && diagramData.experiences[idx2].name == diagramData.experiences[idx].name) {
+                                        hasDuplicate = true;
+
+                                        // mark as erroneous field
+                                        $(".diagram-row[data-index='" + idx + "']").addClass("error-row");
+                                        $(".diagram-row[data-index='" + idx2 + "']").addClass("error-row");
+                                        break;
+                                    }
+                                }
+
+                                if (!_self.isAbActivity()) {
+                                    hasAudience = currentExperience.audience && currentExperience.audience.name;
+                                } else {
+                                    visitorPercentage += currentExperience.visitorPercentage;
+                                }
+
+                                isValid = isValid && !hasDuplicate && hasAudience;
+                            }
+
+                            isValid = isValid && (100 == visitorPercentage);
+
+                            if (!isValid) {
+                                $(".diagram-row").addClass("error-row");
+                            }
+
+                            return isValid;
+                        };
+                    }
+
+                    valid = diagramWidget.aemValidate();
+                } else {
+                    valid = false;
+                }
+            } else if (activeStep.find(".details-step-container").length > 0) {
+                var selectedEngine = $(".targeting-engine").val();
+                if (selectedEngine == "tnt") {
+                    try {
+                        valid = $(".targeting-config").val() != "";
+                    } catch (e) {
+                        valid = false;
+                    }
+                }
+                valid = valid && $("[name='name']").val() != "";
+            } else if (activeStep.find(".goals-container").length > 0) {
+                if (window.TargetingUI
+                    && window.TargetingUI.GoalsAndMetrics
+                    && _self.isTargetActivity()) {
+                    try {
+                        var goalsComponent = window.TargetingUI.GoalsAndMetrics.components[0];
+                        valid = goalsComponent.validate(_self.goalsChanged);
+
+                        // make sure all autocompletes have a value
+                        $(".goals-container coral-autocomplete").each(function(index, field) {
+                            if (field.value === "") {
+                                valid = false;
+                                field.invalid = true;
+                                return false;
+                            }
+                        });
+                    } catch (e) {
+                        valid = false;
+                    }
+                }
+
+                // validate start and end dates
+                var startOption = _getDurationSelectValue(".start-duration-select .duration-selector");
+                var startTime = _getDatePickerValue(".start-time .duration-calendar");
+                var endOption = _getDurationSelectValue(".end-duration-select .duration-selector");
+                var endTime = _getDatePickerValue(".end-time .duration-calendar");
+                var currentTime = moment();
+
+                var validEndTime = endOption != "1"
+                    || (endTime && endTime.isAfter(currentTime));
+                var endInput = $(".end-time .duration-calendar").find("[handle='input']");
+                endInput.prop("invalid", !validEndTime);
+
+                var validStartTime = startOption != "1"
+                    || (startTime && (endTime == false || startTime.isBefore(endTime)));
+                var startInput = $(".start-time .duration-calendar").find("[handle='input']");
+                startInput.prop("invalid", !validStartTime);
+
+                valid = valid && validStartTime && validEndTime;
+            }
+
+            $(".foundation-wizard").adaptTo("foundation-wizard").toggleNext(valid);
+
+            PersonalizationHelper.postMessage("targeting-editor-cmd", {
+                "cmd" : "wizard-validation",
+                "payload": valid
+            });
+        };
+
+        _self.updateCalendarStates = function() {
+            var startDurationSelectorValue = 0;
+            try {
+                startDurationSelectorValue = $(".start-duration-select .duration-selector").val();
+            } catch (e) {}
+
+            var endDurationSelectorValue = 0;
+            try {
+                endDurationSelectorValue = $(".end-duration-select .duration-selector").val();
+            } catch(e) {}
+
+
+            _enableDisableCalendar($(".start-time .duration-calendar"), startDurationSelectorValue == 0);
+            _enableDisableCalendar($(".end-time .duration-calendar"), endDurationSelectorValue == 0);
+        }
+
+        var _findDuplicateMappings = function(mappings, startIndex, audiencePath, experienceName) {
+            var result = [];
+
+            if (typeof audiencePath === "undefined" || audiencePath === "") {
+                return result;
+            }
+
+            for (var idx = startIndex ; idx < mappings.length ; idx++) {
+                var mappingContainer = $(mappings[idx]);
+
+                var checkAudiencePath = $(mappingContainer.find(".current-audience")[1]).data("audience-path");
+                var checkExperienceName = mappingContainer.find(".current-experience").data("experience-name");
+
+                if ((checkAudiencePath == audiencePath && !_self.isAbActivity())
+                    || checkExperienceName == experienceName) {
+                    result.push(mappingContainer);
+                }
+            }
+
+            return result;
+        };
+
+        var _ensureDefaultExperiencePresent = function() {
+            var abWidget = $(".target-ab-diagram-mapping").data("diagram");
+            var defaultExpNeedsAdding = false;
+
+            if (abWidget
+                && abWidget.getData()) {
+
+                var experiences = abWidget.getData().experiences;
+                if (experiences.length > 0) {
+                    var firstExperience = experiences[0];
+                    if (firstExperience.name != DEFAULT_EXPERIENCE.name) {
+                        // first experience not the default, add it
+                        defaultExpNeedsAdding = true;
+                    }
+                } else {
+                    defaultExpNeedsAdding = true;
+                }
+
+                if (defaultExpNeedsAdding) {
+                    // ensure we add the default experience as the first mapping
+                    abWidget.addExperience(DEFAULT_EXPERIENCE);
+
+                    // re-validate
+                    _self.validate();
+                }
+            }
+        };
+
+        var _toggleAllAudiences = function() {
+            var allAudienceOption = $(".audience-list-container").find(".all-audiences");
+            if (_self.isAbActivity()) {
+                allAudienceOption.css("display", "table-row");
+            } else {
+                allAudienceOption.hide();
+            }
+        };
+
+        var _populateActivityTypes = function(tntConfig, activityTypeWidget) {
+
+            var activityTypesUrl = tntConfig + "/_jcr_content.activitytypes.json";
+            $.ajax(activityTypesUrl)
+                .done(function (response) {
+                    var selectedIdx = -1;
+                    activityTypeWidget.items.clear();
+                    if (response["allowedActivities"] && response["allowedActivities"].length > 0) {
+                        $.each(response["allowedActivities"], function(idx, act){
+                            activityTypeWidget.items.add({
+                                "content":{
+                                    innerHTML:act["typeLabel"]
+                                },
+                                "value":act["type"]
+                            });
+                            if (_self.activityType != null && act["type"] == _self.activityType) {
+                                selectedIdx = idx;
+                            }
+                        });
+
+                        if (activityTypeWidget.items.length > 0) {
+                            var item = (selectedIdx >= 0)
+                                            ? activityTypeWidget.items.getAll()[selectedIdx]
+                                            : activityTypeWidget.items.first();
+
+                            if (item !== undefined) {
+                                item.selected = true;
+                            }
+                        }
+                    }
+                })
+                .fail(function (response) {
+                    console.log("Error: ", response);
+                });
+        };
+
+        var _targetingConfigSelectHandler = function(event) {
+            var activityTypeWidget = $(".create-activity-wizard .targeting-activity-type")[0],
+                tntConfig = $(".create-activity-wizard .targeting-config")[0];
+
+            _initializeAudiencePicker(tntConfig.value);
+
+            if (activityTypeWidget && tntConfig) {
+                _populateActivityTypes(tntConfig.value, activityTypeWidget);
+            }
+
+        };
+
+        var _targetingActivityTypeSelectHandler = function(event) {
+            var activityType = $(this).val();
+            if (activityType !== null) {
+                _self.activityType = activityType;
+            }
+
+            _toggleAllAudiences();
+        };
+
+        var _initializeAudiencePicker = function(tntConfigPath) {
+            var audiencesEndpoint = _self.currentAmbit + "/jcr:content.audiences.json";
+            var audiencesListingsEndpoint = _self.currentAmbit + "/jcr:content.audienceslistings.json";
+            var params = getParams();
+
+            var engineType = $(".create-activity-wizard .targeting-engine")[0].value;
+            var workflowConfigRules = AudiencePickerHelper.getAudienceWorkflowConfigRules(engineType, tntConfigPath);
+            var createEnabled = $("#CanCreateAudience").val() == "true"
+                    && _self.isTargetActivity();
+
+            _self.audiencePicker = new TSDK.UI.AudiencePicker({
+                config: {
+                    search: "server",
+                    create: createEnabled,
+                    pagination: true,
+                    engine: engineType,
+                    multiTenant: true,
+                    multiTenantHiddenPathSegment: "/etc/segmentation"
+                },
+                fetchOptions: {
+                    url: audiencesEndpoint + params,
+                    listingsUrl: audiencesListingsEndpoint,
+                    baseUrl: audiencesEndpoint,
+                    urlParams: params,
+                    preprocess: function (response) {
+                        return response.items;
+                    },
+                    hasMore: 'hasMore',
+                    pageSize: 100
+                },
+                audienceWorkflow: {
+                    rules: workflowConfigRules
+                }
+            });
+        };
+
+        var _showAudiencePicker = function() {
+            PersonalizationHelper.postMessage("targeting-editor-cmd", {"cmd" : "wizard-block-navigation"});
+            _self.audiencePicker.reset();
+            _self.audiencePicker.showPicker({
+                multiSelection: false
+            }).off("selected").on("selected", function (selectedAudiences) {
+                PersonalizationHelper.postMessage("targeting-editor-cmd", {"cmd" : "wizard-allow-navigation"});
+                if (selectedAudiences.length > 0) {
+                    var addAudienceObj = {
+                        name: selectedAudiences[0].name,
+                        path: selectedAudiences[0].id
+                    };
+
+                    if (!_self.audienceOptions) {
+                        $(document).trigger({
+                            type: "add-new-audience",
+                            audience: addAudienceObj
+                        });
+                    } else {
+                        _self.audienceOptions.callback(addAudienceObj);
+
+                        _self.audienceOptions = undefined;
+                    }
+
+                    _self.validate();
+                }
+            })
+            .off("audience:created").on("audience:created", function (audience, success) {
+                _debug('Successfully created audience: ' + audience.name);
+
+                var tntConfig = $(".create-activity-wizard .targeting-config")[0].value;
+                AudienceManagement.createTargetAudience(audience, tntConfig, function() {
+                    _notify(
+                        Granite.I18n.get("Successfully created new audience"),
+                        Granite.author ? Granite.author.ui.helpers.NOTIFICATION_TYPES.SUCCESS : "success"
+                    );
+                    success();
+                }, function(xhr) {
+                    var message = Granite.I18n.get("Your audience could not be saved successfully. Please try again.");
+                    if (xhr && xhr.responseJSON && xhr.responseJSON.errorMessage) {
+                        message = Granite.I18n.get("Your audience could not be saved successfully.<br>Reason: {0}", xhr.responseJSON.errorMessage);
+                    }
+
+                    $(window).adaptTo("foundation-ui").prompt(Granite.I18n.get("Error"),
+                        message,
+                        "error",
+                        [{
+                            id: "ok",
+                            text: Granite.I18n.get("Close")
+                        }]
+                    );
+                });
+            });
+
+            $(".close-button[coral-close]").on("click", function(e) {
+                PersonalizationHelper.postMessage("targeting-editor-cmd", {"cmd" : "wizard-allow-navigation"});
+                _self.validate();
+            });
+        };
+
+        /**
+         * Gets the duration select value
+         * @param durationSelector - jquery selector for the duration type
+         */
+        var _getDurationSelectValue = function(durationSelector) {
+            var startOption = -1;
+            if ($(durationSelector).val()) {
+                startOption = $(durationSelector).val();
+            }
+
+            return startOption;
+        };
+
+        /**
+         * Gets the value of a date picker widget
+         * @param datePickerSelector - jquery selector for the date picker
+         */
+        var _getDatePickerValue = function(datePickerSelector) {
+            var datePickerValue = false;
+            var datePicker = $(datePickerSelector);
+            if (datePicker.length > 0) {
+                var datePickerValStr = datePicker.val();
+                if (datePickerValStr) {
+                    datePickerValue = moment(datePickerValStr);
+                }
+            }
+
+            return datePickerValue;
+        };
+
+        var _getUrlParameter = function(paramName) {
+            var queryString = window.self.location.search;
+            var searchToken = paramName + "=";
+            var idx = queryString.indexOf(searchToken);
+            var paramValue = undefined;
+            if (idx >= 0) {
+                var endIdx = queryString.indexOf("&", idx + searchToken.length);
+                if (endIdx >= 0) {
+                    paramValue = queryString.substring(idx + searchToken.length, endIdx);
+                } else {
+                    paramValue = queryString.substring(idx + searchToken.length);
+                }
+            }
+
+            return paramValue;
+        };
+
+        var _limitExperienceNameLength = function() {
+            // limit experience names inputs to 20 chars
+            $(".experience-title-input").attr("maxlength", 20);
+        };
+
+        /**
+         * Handles the error message retrieved from the synchronization command.
+         * This message may contain validation errors that need to be passed through the i18n filter
+         * @param response the response in JSON format
+         * @returns a i18n'd string
+         * @private
+         */
+        var _handleSynchronizationErrorMessage = function(response) {
+
+            if (response.hasOwnProperty("errorType")
+                && response["errorType"] === "validation") {
+
+                var errorKey = response["errorKey"],
+                    errorObject = response["errorObject"];
+
+                return (typeof errorObject !== "undefined") ?
+                    ERROR_KEYS[errorKey] + " " + errorObject :
+                    ERROR_KEYS[errorKey];
+
+            } else {
+                return Granite.I18n.get(response["message"]);
+            }
+
+        };
+
+        _self.isTargetActivity = function() {
+            var selectedTntCfg = "";
+
+            try {
+                var selectedEngine = $(".create-activity-wizard .targeting-engine").val();
+                if (selectedEngine == "tnt") {
+                    selectedTntCfg = $(".create-activity-wizard .targeting-config").val();
+                }
+            } catch (e) {}
+
+            return typeof selectedTntCfg != "undefined"
+                && selectedTntCfg != "";
+        };
+
+        _self.isAbActivity = function () {
+           return "abn" == _self.activityType;
+        };
+
+        _self.initializeDiagram = function(jqDiagram) {
+            var dataInitialized = jqDiagram.data("initialized");
+            if (dataInitialized) {
+                return;
+            }
+
+            jqDiagram.data("initialized", true);
+
+            var diagramWidget = jqDiagram.data("diagram");
+
+            $.each(_self.experiences, function(index, experienceObj) {
+                var tsdkExpObj = Object.assign({}, experienceObj, {name: experienceObj.title, _name: experienceObj.name});
+
+                if (!_self.isAbActivity()) {
+                    diagramWidget.addExperienceTargeting(tsdkExpObj);
+                } else {
+                    diagramWidget.addExperience(tsdkExpObj);
+                }
+            });
+        };
+
+        _self.addExperience = function(experienceObj) {
+            if (experienceObj) {
+                //lastAdded.data("experience-hook", experienceObj);
+
+                // if experience object is set this is part of the initial setup
+                // save it for comparison at the last step
+                _self.experiences.push(experienceObj);
+            }
+        };
+
+        _self.bindListeners = function() {
+            _debug("[PersonalizationWizard] Binding event listeners...");
+            $(".add-new-experience-mapping").off("click")
+                .on("click", function(e) {
+
+                    if (_self.isAbActivity()) {
+                        $(document).trigger("add-new-experience.ab-diagram");
+                    } else {
+                        _showAudiencePicker();
+                    }
+            });
+
+            $("#experience-name-form").off("submit")
+                .on("submit", function(e) {
+                    e.preventDefault();
+                    var form = $(e.target);
+                    form.closest("coral-dialog")[0].hide();
+
+                    var experienceTitle = $("[name='experienceTitle']").val()
+                    var experienceName = $("[name='experienceName']").val();
+
+                    if (experienceName
+                        && experienceName !== "") {
+
+                        var tsdkExpObj = {
+                            name: experienceTitle,
+                            _name: experienceName
+                        };
+
+                        if (_self.experienceOptions) {
+                            _self.experienceOptions.callback(tsdkExpObj);
+
+                            _self.experienceOptions = undefined;
+                        }
+                    }
+
+                    $("#experience-name-form").find("[name='experienceTitle']").val("");
+                    $("#experience-name-form").find("[name='experienceName']").val("");
+                    $(".experience-name-button-confirm").attr("disabled", "disabled");
+                    _limitExperienceNameLength();
+                    _self.validate();
+            });
+
+            $(document).off("diagram-ab-widgets-ready")
+                .on("diagram-ab-widgets-ready", function(e) {
+                    if (_self.isAbActivity()) {
+                        _ensureDefaultExperiencePresent();
+                        _self.initializeDiagram($(".target-ab-diagram-mapping"));
+                    }
+                });
+
+            $(document).off("diagram-xt-widgets-ready")
+                .on("diagram-xt-widgets-ready", function(e) {
+                    if (!_self.isAbActivity()) {
+                        _self.initializeDiagram($(".target-diagram-mapping"));
+                    }
+                });
+
+            $(document).off("targeting-ui.goals-and-metrics.model-changed")
+                .on("targeting-ui.goals-and-metrics.model-changed", function(event) {
+                _self.goalsChanged = true;
+                _self.validate();
+            })
+
+            $(document).off("click tap", ".experience-setter-link")
+                .on("click tap", ".experience-setter-link", function(e) {
+                var activator = $(e.target);
+                var experienceContainer = activator.closest(".experience-container");
+
+                var experienceName = experienceContainer.find(".current-experience").data("experience-name");
+                var experienceTitle = experienceContainer.find(".current-experience").data("experience-title");
+
+                if (DEFAULT_EXPERIENCE.name == currentExperience) {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    return false;
+                }
+
+                _self.currentExperienceContainer = experienceContainer;
+
+                if (currentExperience) {
+                    $("#experience-name-modal").find("[name='experienceTitle']").val(experienceTitle);
+                    $("#experience-name-modal").find("[name='experienceName']").val(experienceName);
+                } else {
+                    $("#experience-name-modal").find("[name='experienceTitle']").val("");
+                    $("#experience-name-modal").find("[name='experienceName']").val("");
+                }
+            });
+
+            $(document).off("click tap", ".audience-chooser-link")
+                .on("click tap", ".audience-chooser-link", function(e) {
+                _updateCurrentAudience($(e.target));
+            });
+
+            $(document).off("click tap", ".audience-chooser-trigger,.audience-chooser-link")
+                .on("click tap", ".audience-chooser-trigger,.audience-chooser-link", function(e) {
+                e.preventDefault();
+                _updateCurrentAudience($(e.target).closest(".audience-chooser-container"));
+                _showAudiencePicker();
+                return false;
+            });
+
+            $(document).off("click tap", ".audience-chooser-container")
+                .on("click tap", ".audience-chooser-container", function(e) {
+                e.preventDefault();
+                _updateCurrentAudience($(e.target).closest(".audience-chooser-container"));
+                _showAudiencePicker();
+                return false;
+            });
+
+            $(document).off("click tap", ".experience-container")
+                .on("click tap", ".experience-container", function(e) {
+                    e.preventDefault();
+                    $(e.target).find(".experience-setter-link .current-experience").click();
+                    return false;
+                });
+
+            $(document).off("edit-existing-audience")
+                .on("edit-existing-audience", function(e) {
+                    _self.audienceOptions = e.options;
+
+                    _showAudiencePicker();
+                });
+
+            $(document).off("add-new-experience.xt-diagram")
+                .on("add-new-experience.xt-diagram", function(e) {
+                    _self.experienceOptions = e.options;
+
+                    $("#experience-name-modal")[0].show();
+                });
+
+            $(document).off("edit-existing-experience")
+                .on("edit-existing-experience", function(e) {
+                    _self.experienceOptions = e.options;
+
+                    if (e.options
+                        && e.options.experience
+                        && e.options.experience.name) {
+                        $("#experience-name-form").find("[name='experienceTitle']").val(e.options.experience.title);
+                        $("#experience-name-form").find("[name='experienceName']").val(e.options.experience.name);
+                    }
+
+                    $("#experience-name-modal")[0].show();
+                });
+
+            $("form.create-activity-wizard").off("submit")
+                .on("submit", function (event) {
+                event.preventDefault();
+
+                var selectedTntCfg = "";
+                var selectedEngine = $(".targeting-engine").val();
+
+                if (selectedEngine != "tnt") {
+                    selectedTntCfg = "";
+                } else {
+                    try {
+                        selectedTntCfg = $(".targeting-config").val();
+                    } catch (e) {
+
+                    }
+                }
+
+                _self.saveExperienceWizardData("", selectedTntCfg);
+                return false;
+            });
+
+            $(document).off("change", "coral-autocomplete")
+                .on("change", "coral-autocomplete", function(e) {
+                    _self.validate();
+                });
+
+            $(document).off("focusout", ".experience-percentage")
+                .on("focusout", ".experience-percentage", function(e) {
+                    var target = $(e.target);
+                    if (target.val() == "") {
+                        target.val(0);
+                    }
+                    _self.validate();
+                });
+
+            $(document).off("keydown", ".experience-percentage")
+                .on("keydown", ".experience-percentage", function(e) {
+                    var keyCode = e.charCode || e.keyCode || 0;
+                    var valid = false;
+
+
+                    if ((keyCode >= "0".charCodeAt(0) && keyCode <= "9".charCodeAt(0))
+                        || keyCode == 46 || keyCode == 8 || keyCode == 9) {
+                        valid = true;
+                    }
+
+                    return valid;
+                });
+
+            $(document).off("rename-experience changed-experience-percentage")
+                .on("rename-experience changed-experience-percentage", function(event) {
+                    _hideDefaultExperienceActions();
+                    var jqDiagram = _self.isAbActivity()
+                        ? $(".target-ab-diagram-mapping")
+                        : $(".target-diagram-mapping");
+                    TargetingUI.MultiSiteTargeting.showDiagramLocalOfferMarkers(jqDiagram, _self.isAbActivity());
+                    _limitExperienceNameLength();
+                    _self.validate();
+                });
+
+            $(document).off("remove-audience-experience")
+                .on("remove-audience-experience", function(event) {
+                    var payload = event.payload;
+
+                    // mark the experience for deletion, if this is part of the initial setup
+                    $.each(_self.experiences, function(index, experienceObj) {
+                        if (experienceObj.path == payload.experiencePath
+                            || (experienceObj.audience && experienceObj.audience.path && experienceObj.audience.path == payload.audiencePath) ) {
+                            experienceObj.deleted = true;
+                            return false;
+                        }
+                    });
+
+                    _hideDefaultExperienceActions();
+                    _self.validate();
+                });
+
+            _debug("[PersonalizationWizard] Listening for wizard step changes event");
+            $(".foundation-wizard").off("foundation-wizard-stepchange")
+                .on("foundation-wizard-stepchange", function(e){
+
+                _debug("[PersonalizationWizard] Wizard step change event listener handler.");
+                _self.validate();
+
+                var activeStep = $(arguments[1]);
+                if (activeStep.find(".settings-container").length > 0) {
+                    // hide the goals and metrics if this is not a target activity
+                    if (_self.isTargetActivity()) {
+                        activeStep.find(".goals-container").show();
+                    } else {
+                        activeStep.find(".goals-container").hide();
+                    }
+
+                    // initialize date selectors, if not yet initialized
+                    if (!_self.editDatesInitialized && _self.editedActivity != "") {
+                        _self.setStartDate(_self.editStartDate);
+                        _self.setEndDate(_self.editEndDate);
+                        _self.editDatesInitialized = true;
+                    }
+
+                    // update calendar states
+                    _self.updateCalendarStates();
+                } else if (activeStep.find(".create-activity-diagram-container").length > 0) {
+                    var jqDiagram = undefined;
+
+                    if (_self.activityType === null) {
+                        var activityType = $(".create-activity-wizard .targeting-activity-type").val();
+                        if (activityType !== null) {
+                            _self.activityType = activityType;
+                        }
+                    }
+
+                    if (_self.isAbActivity()) {
+                        jqDiagram = $(".target-ab-diagram-mapping");
+                        $(".target-ab-diagram-mapping").show();
+                        $(".target-diagram-mapping").hide();
+
+                        // make sure we have the default experience in the diagram
+                        _ensureDefaultExperiencePresent();
+
+                        // set ALL_AUDIENCES as the default selected audience
+                        _self.initializeABAudience(_self.editedAbAudience);
+                    } else {
+                        jqDiagram = $(".target-diagram-mapping");
+                        $(".target-ab-diagram-mapping").hide();
+                        $(".target-diagram-mapping").show();
+                    }
+
+                    TargetingUI.MultiSiteTargeting.showDiagramLocalOfferMarkers(jqDiagram, _self.isAbActivity());
+
+                    _limitExperienceNameLength();
+                }
+            });
+
+            _self.listenersBound = true;
+
+            _debug("[PersonalizationWizard] Event listeners bound!");
+        };
+
+        _self.setupWizard = function() {
+            if (_self.initialized
+                || $(".create-activity-wizard").length <= 0) {
+                return;
+            }
+            var ambitValue = $("[name='content-suffix']").val();
+            if ( typeof ambitValue !== "undefined" && ambitValue != ""
+                    && (typeof _self.currentAmbit == "undefined" || _self.currentAmbit == "")) {
+                _self.currentAmbit = $("[name='content-suffix']").val();
+            }
+
+            if (!_self.listenersBound) {
+                _self.bindListeners();
+            } else {
+                _debug("[PersonalizationWizard] Event listeners already bound!");
+            }
+
+            $(".end-duration-select .duration-selector").on("change", selectDurationChangeHandler);
+            $(".start-duration-select .duration-selector").on("change", selectDurationChangeHandler);
+            $(".create-activity-wizard .targeting-engine").on("change", _self.targetingEngineSelectHandler);
+            $(".create-activity-wizard .targeting-config").on("change", _targetingConfigSelectHandler);
+            $(".create-activity-wizard .targeting-activity-type").on("change", _targetingActivityTypeSelectHandler);
+
+            $(".duration-calendar").on("change", function(e) {
+                _self.validate();
+            });
+
+            // trigger targeting engine handler to disable related fields
+            // and initialize audience picker
+            Coral.commons.ready($(".targeting-engine"), function() {
+                $(".targeting-engine").trigger("change");
+            });
+
+            // fill fields when editing an existing activity
+            _self.initializeEditedActivity();
+
+            // check if we are inside an iframe
+            if (PersonalizationHelper.areWeInIframe()) {
+                // hide the wizard header
+                var createActivityWizard = $(".create-activity-wizard");
+                createActivityWizard.addClass("target-editor-frame");
+            }
+
+            _self.initialized = true;
+
+            var requestStep = _getUrlParameter("step");
+
+            if (typeof requestStep == "undefined") {
+                var showWizardContent = function() {
+                    $(".create-activity-wizard").show();
+
+                    if (!$(".create-activity-wizard").is(":visible")) {
+                        // if still not visible schedule for deferred execution
+                        setTimeout(function () {
+                            showWizardContent();
+                        }, 100);
+                    }
+                };
+
+                PersonalizationHelper.postMessage("targeting-editor-cmd", {"cmd" : "wizard-ready"});
+                showWizardContent();
+            } else {
+                setTimeout(function () {
+                    while (requestStep > 0) {
+                        $(".foundation-wizard").adaptTo("foundation-wizard").next();
+                        requestStep--;
+                    }
+                    $(".create-activity-wizard").show();
+                }, 200);
+            }
+        };
+
+        _self.initializeMetrics = function (metricsDataHolder) {
+            var metricsArray = metricsDataHolder;
+            if (typeof  metricsDataHolder != "object") {
+                metricsArray = JSON.parse(metricsDataHolder);
+            }
+
+            function loadMetrics(data) {
+                function initMetrics() {
+                    var goalsMetricsComponent = window.TargetingUI.GoalsAndMetrics.components[0];
+
+                    goalsMetricsComponent.setData(data);
+                    goalsMetricsComponent.goals.metrics.collapseInactiveMetrics();
+                    _self.validate();
+                };
+
+                if (!_self.mboxesLoaded) {
+                    fetchMboxes(function() {
+                        initMetrics();
+                    });
+                } else {
+                    initMetrics();
+                }
+            };
+
+            if (window.TargetingUI
+                && window.TargetingUI.GoalsAndMetrics
+                && window.TargetingUI.GoalsAndMetrics.components.length > 0) {
+                loadMetrics(metricsArray);
+            } else {
+                $(document).one("targeting-ui.goals-and-metrics.init-complete", function(event) {
+                    loadMetrics(metricsArray);
+                });
+            }
+        };
+
+        _self.initializeABAudience = function (abTestAudienceObj) {
+
+            if (!abTestAudienceObj || !abTestAudienceObj["path"]) {
+                abTestAudienceObj = ALL_AUDIENCES;
+            }
+
+            var abWidget = $(".target-ab-diagram-mapping").data("diagram");
+            if (abWidget
+                && abWidget.getData().audience
+                && abWidget.getData().audience.path != abTestAudienceObj.path) {
+                abWidget._setAudience(abTestAudienceObj);
+            }
+        };
+
+        _self.setStartDate = function(startDateStr) {
+            if (startDateStr) {
+                $(".start-duration-select").find(".duration-selector").val("1");
+                $(".start-time").find(".duration-calendar").val(startDateStr);
+            }
+        };
+
+        _self.getStartDate = function() {
+            var startOption = _getDurationSelectValue(".start-duration-select .duration-selector");
+
+            var startTime = false;
+            if (startOption > 0) {
+                startTime = _getDatePickerValue(".start-time .duration-calendar");
+            }
+
+            return startTime;
+        };
+
+        _self.setEndDate = function(endDateStr) {
+            if (endDateStr) {
+                $(".end-duration-select").find(".duration-selector").val("1");
+                $(".end-time").find(".duration-calendar").val(endDateStr);
+            }
+        };
+
+        _self.getEndDate = function() {
+            var endOption = _getDurationSelectValue(".end-duration-select .duration-selector");
+
+            var endTime = false;
+            if (endOption > 0) {
+                endTime = _getDatePickerValue(".end-time .duration-calendar");
+            }
+
+            return endTime;
+        };
+
+        _self.setPriority = function(priorityStr) {
+            if (typeof priorityStr != "undefined"
+                && priorityStr !== "") {
+                var prioritySlider = $(".priority-slider")[0];
+                if (prioritySlider._values) {
+                    prioritySlider.set("_values", [priorityStr]);
+                } else {
+                    setTimeout(function () {
+                        _self.setPriority(priorityStr);
+                    }, 200);
+                }
+            }
+        };
+
+        _self.hasConfiguredA4TGoalsMetrics = function() {
+            var dataHolder = $(".activity-wizard-data");
+            if (dataHolder.length > 0
+                && dataHolder.data("edit") == true
+                && dataHolder.data("metrics-json")
+                && JSON.stringify(dataHolder.data("metrics-json")).indexOf("analytics") > 0) {
+                return true;
+            }
+
+            return false;
+        };
+
+        _self.initializeEditedActivity = function () {
+            var dataHolder = $(".activity-wizard-data");
+            if (dataHolder.length > 0
+                && dataHolder.data("edit") == true) {
+                _self.editedActivity = dataHolder.data("path");
+                $("[name='title']").val(dataHolder.data("title"));
+                $("[name='name']").val(dataHolder.data("name")).attr("disabled", "disabled");
+                $("[name='objective']").val(dataHolder.data("objective"));
+                var targetingEngine = dataHolder.data("targeting-engine");
+
+                Coral.commons.ready($(".targeting-engine"), function() {
+                    $(".targeting-engine").val(targetingEngine).trigger("change");
+                });
+
+                if (dataHolder.data("target-config")) {
+                    var targetConfigPath = dataHolder.data("target-config");
+                    var targetConfigurationSelect = $(".targeting-config");
+                    targetConfigurationSelect.val(targetConfigPath);
+
+                    // check if the value was set, in case the framework was mistakenly saved
+                    if (targetConfigurationSelect.val() != targetConfigPath
+                        && targetConfigPath.lastIndexOf("/") >= 0) {
+                        // try to set value to the config path parent
+                        targetConfigPath = targetConfigPath.substr(0, targetConfigPath.lastIndexOf("/"));
+                        targetConfigurationSelect.val(targetConfigPath);
+                    }
+                }
+
+                var activityType = dataHolder.data("activity-type");
+                _self.activityType = activityType;
+
+                if (typeof activityType != "undefined"
+                    && activityType != "") {
+                        $(".create-activity-wizard .targeting-activity-type").val(activityType);
+                    // this can't be changed once set --> disable the field
+                    PersonalizationHelper.disableSelectWidget(".create-activity-wizard .targeting-activity-type");
+                }
+
+                if (typeof targetingEngine != "undefined"
+                    && targetingEngine != "") {
+
+                    // disable engine change once set
+                    PersonalizationHelper.disableSelectWidget(".create-activity-wizard .targeting-engine");
+                }
+                // trigger change event to force validation
+                $("[name='title']").trigger("change");
+
+                if (dataHolder.data("default-visitor-percentage")) {
+                    _self.setDefaultVisitorPercentage(dataHolder.data("default-visitor-percentage"));
+                }
+
+                var experienceIdx = 0;
+                var abAudienceInitialized = false;
+                while (dataHolder.data("experience-name-" + experienceIdx)) {
+                    var audienceName = dataHolder.data("audience-name-" + experienceIdx);
+                    var audiencePath = dataHolder.data("audience-path-" + experienceIdx);
+                    var experienceTitle = dataHolder.data("experience-title-" + experienceIdx);
+                    var experienceName = dataHolder.data("experience-name-" + experienceIdx);
+                    var experiencePath = dataHolder.data("experience-path-" + experienceIdx);
+                    var experienceMsmIsLocal = dataHolder.data("experience-msm-is-local-" + experienceIdx);
+                    var visitorPercentage = parseFloat(dataHolder.data("experience-visitor-percentage-" + experienceIdx));
+                    var isVisitorPercentageLocked = (!isNaN(visitorPercentage) && isFinite(visitorPercentage));
+
+                    experienceIdx++;
+
+                    if (!abAudienceInitialized && _self.isAbActivity()
+                        && audienceName && audiencePath) {
+                        _self.editedAbAudience = {
+                            "name": audienceName,
+                            "path": audiencePath
+                        };
+
+                        abAudienceInitialized = true;
+                    }
+
+                    _self.addExperience({
+                        title: experienceTitle,
+                        name: experienceName,
+                        path: experiencePath,
+                        visitorPercentage: visitorPercentage,
+                        isVisitorPercentageLocked: isVisitorPercentageLocked,
+                        msmIsLocal: experienceMsmIsLocal,
+                        audience: {
+                            name: audienceName,
+                            path: audiencePath
+                        }
+                    });
+                }
+
+                // load goals and metrics, if any
+                if (dataHolder.data("metrics-json")) {
+                    _self.initializeMetrics(dataHolder.data("metrics-json"));
+                }
+
+                _self.editStartDate = dataHolder.data("on-time");
+                _self.editEndDate = dataHolder.data("off-time");
+                _self.setPriority(dataHolder.data("priority"));
+
+                $(".foundation-wizard").adaptTo("foundation-wizard").toggleNext(true);
+            }
+
+            // initialize the MSM support
+            TargetingUI.MultiSiteTargeting.initialize({
+                activityPath: _self.editedActivity
+            });
+            TargetingUI.MultiSiteTargeting.loadActivityInheritanceStatus();
+        };
+
+        /**
+         * Builds a json string containing the experience operations (delete, create, update) that need to be performed based
+         * on the current status of the data in the wizard
+         */
+        _self.getExperienceMappingJSON = function (activityPath) {
+            var experienceMappingObjArray = [];
+
+            // compile information about the experiences present in the wizard
+            var diagramSelector = "";
+            if (_self.isAbActivity()) {
+                diagramSelector = ".target-ab-diagram-mapping";
+            } else {
+                diagramSelector = ".target-diagram-mapping";
+            }
+
+            var diagramWidget = $(".create-activity-diagram-container").find(diagramSelector).data("diagram");
+            if (diagramWidget) {
+                var mappingData = diagramWidget.getData();
+
+                var audienceName = undefined;
+                var audiencePath = undefined;
+
+                if (_self.isAbActivity()) {
+                    audienceName = mappingData.audience.name;
+                    audiencePath = mappingData.audience.path;
+                }
+
+                $.each(_self.experiences, function(index, experienceObj) {
+
+                    var isInDiagram = false;
+                    $.each(mappingData.experiences, function (diagramIdx, diagramExperienceObj) {
+                        if (experienceObj.path === diagramExperienceObj.path) {
+                            isInDiagram = true;
+                            return false;
+                        }
+                    });
+
+                    // mark for deletion if an experience with this path is not present in the diagram
+                    if (experienceObj.deleted == true && !isInDiagram) {
+                        experienceMappingObjArray.push({
+                            "experiencePath": experienceObj.path,
+                            "isDeleted": true
+                        });
+                    }
+                });
+
+                for (var idx = 0 ; idx < mappingData.experiences.length ; idx ++) {
+                    var currentExperience = mappingData.experiences[idx];
+                    if (!_self.isAbActivity()) {
+                        audienceName = currentExperience.audience.name;
+                        audiencePath = currentExperience.audience.path;
+                    }
+
+                    var experiencePath = currentExperience.path;
+                    // use overwritten model to show title
+                    var experienceTitle = currentExperience.name;
+                    var experienceName = currentExperience._name;
+                    var visitorPercentage = 0;
+
+                    if (_self.isAbActivity()
+                        && DEFAULT_EXPERIENCE.path == experiencePath) {
+                        // don't do anything with the default experience
+                        continue;
+                    }
+
+                    var audiencePaths = [];
+                    if (_self.isAbActivity()) {
+                        audiencePaths = ALL_AUDIENCES.path == audiencePath
+                            ? undefined : [audiencePath];
+                    } else {
+                        audiencePaths = [audiencePath];
+                    }
+
+                    var experienceMappingObj = {
+                        "title": experienceTitle,
+                        "isDeleted": false
+                    };
+
+                    if (audiencePaths) {
+                        $.extend(experienceMappingObj, {
+                            "audiencePaths": audiencePaths
+                        });
+                    }
+
+                    if (experienceName
+                        && !experiencePath) {
+                        // compute the experience path for creation
+                        experiencePath = activityPath + "/" + experienceName;
+                    }
+
+                    $.extend(experienceMappingObj, {
+                        "experiencePath": experiencePath,
+                        "resourceType": "cq/personalization/components/experiencepage",
+                        "template": "/libs/cq/personalization/templates/experience"
+                    });
+
+                    if (_self.isAbActivity()) {
+                        visitorPercentage = currentExperience.visitorPercentage;
+                        $.extend(experienceMappingObj, {
+                            "visitorPercentage": visitorPercentage
+                        });
+                    }
+
+                    if (audiencePath
+                            && experiencePath) {
+                        experienceMappingObjArray.push(experienceMappingObj);
+                    }
+                }
+            }
+
+            return JSON.stringify(experienceMappingObjArray);
+        };
+
+        _self.synchronizeCampaign = function(activityPath) {
+            var postUrl = COMMAND_SERVLET_URL,
+                postData = {
+                    "cmd":"synchronizeCampaign",
+                    "campaignPath":activityPath
+                };
+
+            return $.ajax({
+                type:"POST",
+                url:postUrl,
+                data:postData
+            });
+        }
+
+        _self.saveExperienceWizardData = function(activityPath, tntConfig) {
+
+            // build the goals and metrics
+            var goalsAndMetricsData = {};
+            if (window.TargetingUI
+                && window.TargetingUI.GoalsAndMetrics
+                && window.TargetingUI.GoalsAndMetrics.components.length > 0) {
+                var goalsComponent = window.TargetingUI.GoalsAndMetrics.components[0];
+
+                var metricsJson = JSON.stringify(goalsComponent.getData());
+                goalsAndMetricsData["goalsMetrics"] = metricsJson;
+            }
+
+            var syncToTarget = (typeof tntConfig !== "undefined");
+
+            var targetEndpoint = _self.currentAmbit + "/jcr:content.activityupdate.json";
+
+            var activityTitle = $("[name='title']").val();
+            var activityName = $("[name='name']").val();
+            var activityDescription = $("[name='objective']").val();
+
+            var targetingEngine = $(".create-activity-wizard .targeting-engine").val();
+
+            if (!activityPath) {
+                if (_self.editedActivity
+                    && _self.editedActivity != "") {
+                    activityPath = _self.editedActivity;
+                } else {
+                    activityPath = _self.currentAmbit + "/" + activityName;
+                }
+            }
+
+            var startOption = _getDurationSelectValue(".start-duration-select .duration-selector");
+
+            var startTime = "";
+            if (startOption > 0) {
+                var momentObj = _getDatePickerValue(".start-time .duration-calendar");
+                if (momentObj) {
+                    startTime = momentObj.format("DD.MM.YYYY HH:mm:ss");
+                }
+            }
+
+            var endOption = _getDurationSelectValue(".end-duration-select .duration-selector");
+
+            var endTime = "";
+            if (endOption > 0) {
+                var momentObj = _getDatePickerValue(".end-time .duration-calendar");
+                if (momentObj) {
+                    endTime = momentObj.format("DD.MM.YYYY HH:mm:ss");
+                }
+            }
+
+            var prioritySlider = $(".priority-slider")[0];
+            var priority = 1;
+            if (prioritySlider._values) {
+                priority = prioritySlider._values[0];
+            } else {
+                priority = $(".priority-slider").val();
+            }
+
+            var overwriteParam = false;
+            if (_self.editedActivity
+                && _self.editedActivity != "") {
+                overwriteParam = true;
+            } else if (typeof _self.isOverwrite != "undefined"
+                && _self.isOverwrite == true) {
+                overwriteParam = true;
+            }
+
+            var postData = {
+                "activityPath": activityPath,
+                "activityTitle": activityTitle,
+                "activityDescription": activityDescription,
+                "activityTemplate": "/libs/cq/personalization/templates/campaign",
+                "activityResourceType": "cq/personalization/components/campaignpage",
+                "targetingEngine": targetingEngine,
+                "activityCloudConfigs": tntConfig,
+                "onTime": startTime,
+                "offTime": endTime,
+                "priority": priority,
+                "overwrite": overwriteParam,
+                "experienceOperations": _self.getExperienceMappingJSON(activityPath),
+                "_charset_": "utf-8",
+                "campaignType":_self.activityType
+            };
+
+            $.extend(postData, goalsAndMetricsData);
+
+            if (_self.isAbActivity()) {
+                var abWidget = $(".target-ab-diagram-mapping").data("diagram");
+                var defaultPercentage = abWidget.getData().experiences[0].visitorPercentage;
+                $.extend(postData, {
+                    "defaultVisitorPercentage": defaultPercentage
+                });
+            }
+
+            var windowUI = $(window).adaptTo("foundation-ui");
+
+            var wizardDone = function() {
+                _clearWait();
+                if ($("[data-editor-mode='true']").length <= 0) {
+                    // go to return url if not in edit mode
+                    var returnUrl = $("[data-foundation-wizard-control-action='cancel']").attr("href");
+                    window.location.href = returnUrl;
+                }
+
+                PersonalizationHelper.postMessage("targeting-editor-cmd", {"cmd" : "wizard-done"});
+            };
+
+            var successMsg = "";
+            (typeof tntConfig !== "undefined" && tntConfig != "") ?
+                successMsg = Granite.I18n.get("Your activity was saved and synchronized to Target.") :
+                successMsg = Granite.I18n.get("Your activity was saved.");
+
+            _wait();
+            Granite.$.ajax({
+                type: "post",
+                url: targetEndpoint,
+                contentType: "application/x-www-form-urlencoded",
+                data: postData,
+                success: function(data, status, xhr) {
+                    if (syncToTarget) {
+                        _self.synchronizeCampaign(activityPath)
+                            .done(function(data){
+                                _notify(successMsg,
+                                    Granite.author ? Granite.author.ui.helpers.NOTIFICATION_TYPES.SUCCESS : "success");
+                                wizardDone();
+                            })
+                            .fail(function(data) {
+                                var message = _handleSynchronizationErrorMessage(data.responseJSON);
+                                _clearWait();
+                                windowUI.prompt(Granite.I18n.get("Error"),
+                                    Granite.I18n.get("Your activity was saved but it wasn't synchronized to Target. Reason:") + "</br></br>" + message, "error",
+                                    [{
+                                            id: "ok",
+                                            text: Granite.I18n.get("Close")
+                                    }],
+                                    function (btnId) {
+                                        if (btnId === "ok") {
+                                            wizardDone();
+                                        }
+                                    });
+                            });
+                    } else {
+                        _notify("Your activity was saved successfully.",
+                            Granite.author ? Granite.author.ui.helpers.NOTIFICATION_TYPES.SUCCESS : "success");
+                        wizardDone();
+                    }
+                },
+                error: function(xhr) {
+                    var message = Granite.I18n.get("Your activity could not be saved successfully. Please try again.");
+                    if (xhr && xhr.responseJSON) {
+                        message = Granite.I18n.get("Your activity could not be saved successfully. Reason: {0}", xhr.responseJSON.message, "String inserted: Activity with this name already exists!");
+                    }
+                    _clearWait();
+                    windowUI.prompt(Granite.I18n.get("Error"),
+                        message,
+                        "error",
+                        [{
+                            id: "ok",
+                            text: Granite.I18n.get("Close")
+                        }]
+                    );
+                }
+            });
+        };
+
+
+        return _self;
+    }());
+
+    $(document).off("foundation-contentloaded.personalization-wizard-setup")
+        .on("foundation-contentloaded.personalization-wizard-setup", function (e) {
+        PersonalizationWizard.setupWizard();
+    });
+    $(document).off("cui-contentloaded.personalization-wizard-setup")
+        .on("cui-contentloaded.personalization-wizard-setup", function (e) {
+        PersonalizationWizard.setupWizard();
+    });
+    PersonalizationWizard.setupWizard();
+})(document, Granite.$);
+

@@ -1,0 +1,371 @@
+<%--
+  ADOBE CONFIDENTIAL
+  ___________________
+
+  Copyright 2015 Adobe
+  All Rights Reserved.
+
+  NOTICE: All information contained herein is, and remains
+  the property of Adobe and its suppliers, if any. The intellectual
+  and technical concepts contained herein are proprietary to Adobe
+  and its suppliers and are protected by all applicable intellectual
+  property laws, including trade secret and copyright laws.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe.
+--%><%
+%><%@include file="/libs/granite/ui/global.jsp" %><%
+%><%@page import="java.io.UnsupportedEncodingException,
+                  java.net.URLDecoder,
+                  java.net.URLEncoder,
+                  java.util.ArrayList,
+                  java.util.Iterator,
+                  java.util.List,
+                  java.util.Map,
+                  java.util.Map.Entry,
+                  javax.jcr.RepositoryException,
+                  org.apache.commons.lang3.StringUtils,
+                  org.apache.jackrabbit.util.Text,
+                  org.apache.sling.api.SlingHttpServletRequest,
+                  org.apache.sling.commons.json.JSONArray,
+                  org.apache.sling.commons.json.JSONException,
+                  org.apache.sling.commons.json.JSONObject,
+                  org.apache.sling.resourcemerger.api.ResourceMergerService,
+                  com.adobe.granite.omnisearch.api.core.OmniSearchService,
+                  com.adobe.granite.ui.components.AttrBuilder,
+                  com.adobe.granite.ui.components.Config,
+                  com.adobe.granite.ui.components.ExpressionHelper,
+                  com.adobe.granite.ui.components.Tag,
+                  com.day.cq.search.facets.Bucket,
+                  com.day.cq.search.facets.Facet,
+                  com.adobe.granite.ui.components.ValueMapResourceWrapper,
+                  com.day.cq.search.facets.buckets.ValueRangeBucket,
+                  com.day.cq.search.result.SearchResult" %><%
+
+final Config cfg = cmp.getConfig();
+final ExpressionHelper ex = cmp.getExpressionHelper();
+final OmniSearchService searchService = sling.getService(OmniSearchService.class);
+final ResourceMergerService resourceMerger = sling.getService(ResourceMergerService.class);
+
+final String targetCollection = cfg.get("targetCollection", String.class);
+final String modeGroup = cfg.get("modeGroup", String.class);
+final String consoleId = cfg.get("consoleId", String.class);
+
+// in case the location is set, we need to render the facets accordingly
+final String location = request.getParameter("location");
+
+final List<String> clientLibs = new ArrayList<String>();
+final List<Resource> viewCache = new ArrayList<Resource>();
+final String layoutId = "shell.omnisearch.results.layoutId";
+final String targetViewName = getTargetViewName(slingRequest, layoutId);
+
+Resource currentView = null;
+Resource searchPredicates = null;
+Resource searchRailRes = null;
+String cardPath = "";
+String sortConfigPath = null;
+boolean supportSorting = false;
+boolean facetAggregateCount = true;
+
+// by default we assume multiresults until a valid location has been confirmed
+Resource searchResults = resource.getChild("multiresults");
+
+if (!StringUtils.isBlank(location)) {
+    searchPredicates = searchService.getModuleConfiguration(resourceResolver, location);
+
+    if (searchPredicates != null) {
+        if (resourceMerger != null) {
+            Resource tempSearchPredicates = resourceMerger.getMergedResource(searchPredicates);
+            if (tempSearchPredicates != null) {
+                searchPredicates = tempSearchPredicates;
+            }
+        }
+
+        searchResults = resource.getChild("singleresults");
+
+        ValueMap vm = searchPredicates.getValueMap();
+
+        for (String s : vm.get("clientlibs", new String[0])) {
+            clientLibs.add(s);
+        }
+
+        cardPath = vm.get("cardPath", String.class);
+
+    }
+} else {
+    Map<String, Resource> modules = searchService.getModules(resourceResolver);
+
+    for (Entry<String, Resource> entry : modules.entrySet()) {
+        Resource res = entry.getValue();
+
+        if (resourceMerger != null) {
+            Resource tempRes = resourceMerger.getMergedResource(res);
+            if (tempRes != null) {
+                res = tempRes;
+            }
+        }
+
+        ValueMap vm = res.getValueMap();
+
+        for (String s : vm.get("clientlibs", new String[0])) {
+            clientLibs.add(s);
+        }
+    }
+}
+
+Boolean omnisearchOpenedThroughFilter = Boolean.parseBoolean(request.getParameter("opened-through-filter"));
+
+// Not execute query when omnisearch opened through filter GRANITE-36936
+if (!Boolean.TRUE.equals(omnisearchOpenedThroughFilter)) {
+    // update view cache.
+    // it will hold all supported views
+    // also update currentView value
+    int i = 0;
+    for (Iterator<Resource> it = searchResults.getChild("views").listChildren(); it.hasNext();) {
+        Resource item = it.next();
+
+        if ((!StringUtils.isBlank(location)) && item.getName().equals("card") && StringUtils.isBlank(cardPath)) {
+            // card path is not provided in omnisearch metadata node, skip the card view.
+            // list view is not being checked, since listItemPath has to be available omnisearch metadata node.
+            continue;
+        }
+
+        if (i == 0 || item.getName().equals(targetViewName)) {
+            currentView = item;
+        }
+
+        viewCache.add(item);
+        i++;
+    }
+}
+
+// add selection bar, only when search predicate present
+if (searchPredicates != null) {
+    // search predicate properties based on location
+    ValueMap properties = searchPredicates.getValueMap();
+
+    facetAggregateCount = properties.get("facetAggregateCount", true);
+    searchRailRes = resourceResolver.getResource(properties.get("searchRailPath", String.class));
+    sortConfigPath = StringUtils.trimToNull(properties.get("configPath", String.class));
+    supportSorting = properties.get("supportSorting", false);
+
+    AttrBuilder selectionAttrs = new AttrBuilder(request, xssAPI);
+    selectionAttrs.add("id", "granite-shell-search-result-selectionbar");
+    selectionAttrs.addClass("granite-collection-selectionbar");
+    selectionAttrs.addClass("foundation-mode-switcher");
+    selectionAttrs.add("data-foundation-mode-switcher-group", modeGroup);
+    selectionAttrs.addClass("foundation-collection-actionbar");
+    selectionAttrs.add("data-foundation-collection-actionbar-target", targetCollection);
+
+    %><div <%= selectionAttrs %>>
+        <div class="foundation-mode-switcher-item" data-foundation-mode-switcher-item-mode="selection">
+            <coral-actionbar class="betty-ActionBar betty-ActionBar--large">
+                <coral-actionbar-primary><%
+                    String actionsPath = properties.get("actionsPath", "actions/selection");
+                    Resource selection = searchPredicates.getChild(actionsPath);
+                    if (selection != null) {
+                        for (Iterator<Resource> it = selection.listChildren(); it.hasNext();) {
+                            Resource item = it.next();
+
+                            if (!cmp.getRenderCondition(item, true).check()) {
+                                continue;
+                            }
+                            %><coral-actionbar-item><%
+                                AttrBuilder selectionItemAttrs = new AttrBuilder(request, xssAPI);
+                                selectionItemAttrs.addClass("betty-ActionBar-item");
+                                cmp.include(item, new Tag(selectionItemAttrs));
+                            %></coral-actionbar-item><%
+                        }
+                    }
+                %></coral-actionbar-primary>
+                <coral-actionbar-secondary>
+                    <coral-actionbar-item><%
+                        AttrBuilder deselectAttrs = new AttrBuilder(request, xssAPI);
+                        deselectAttrs.add("is", "coral-button");
+                        deselectAttrs.add("variant", "quiet");
+                        deselectAttrs.add("type", "button");
+                        deselectAttrs.add("icon", "close");
+                        deselectAttrs.add("iconposition", "right");
+                        deselectAttrs.add("iconsize", "S");
+                        deselectAttrs.addClass("betty-ActionBar-item");
+                        deselectAttrs.addClass("granite-collection-deselect");
+                        deselectAttrs.add("data-granite-collection-deselect-target", targetCollection);
+                        deselectAttrs.add("data-foundation-command", "escape");
+                        deselectAttrs.add("data-granite-collection-deselect-template", i18n.get("Remove {0} selected items", null, "{{count}}"));
+
+                        AttrBuilder counterAttrs = new AttrBuilder(request, xssAPI);
+                        counterAttrs.addClass("foundation-admin-selectionstatus");
+                        counterAttrs.add("data-foundation-admin-selectionstatus-template", i18n.get("{0} selected", null, "{{count}}"));
+                        counterAttrs.add("data-foundation-admin-selectionstatus-target", targetCollection);
+
+                        %><button <%= deselectAttrs %>><span <%= counterAttrs %>></span></button>
+                    </coral-actionbar-item>
+                </coral-actionbar-secondary>
+            </coral-actionbar>
+        </div>
+    </div><%
+}
+
+// add selection bar, only when search predicate present
+if (!clientLibs.isEmpty()) {
+    %><ui:includeClientLib categories="<%= StringUtils.join(clientLibs, ",") %>"/><%
+}
+
+// add titlebar, only when search predicate resource present or,
+// search result support more than one view.
+if (searchRailRes != null || viewCache.size() > 1) {
+    %><betty-titlebar id="granite-omnisearch-result-actionbar">
+        <betty-titlebar-title>
+            <span class="granite-title" role="heading" aria-level="2"><%= xssAPI.encodeForHTML(i18n.get("Search Results")) %></span>
+        </betty-titlebar-title>
+        <betty-titlebar-primary><%
+
+            if (searchRailRes != null) {
+                %><label id="cyclebutton-omnisearch-result-rail-toggle-label" for="granite-omnisearch-result-rail-toggle" class="u-coral-screenReaderOnly"><%= xssAPI.encodeForHTML(i18n.get("Change Filters")) %></label>
+                <coral-cyclebutton id="granite-omnisearch-result-rail-toggle" class="granite-toggleable-control" aria-labelledby="cyclebutton-omnisearch-result-rail-toggle-label" icon="railLeft" displaymode="icontext">
+                    <coral-cyclebutton-item
+                        displaymode="icon"
+                        data-granite-toggleable-control-target="#granite-omnisearch-result-rail"
+                        data-granite-toggleable-control-action="hide"><%= xssAPI.encodeForHTML(i18n.get("Content Only")) %></coral-cyclebutton-item>
+                    <coral-cyclebutton-item
+                        data-granite-toggleable-control-target=".granite-omnisearch-predicates"
+                        data-granite-toggleable-control-action="show"><%= xssAPI.encodeForHTML(i18n.get("Filters")) %></coral-cyclebutton-item>
+                </coral-cyclebutton><%
+            }
+
+        %></betty-titlebar-primary>
+        <betty-titlebar-secondary><%
+            AttrBuilder selectAllAttrs = new AttrBuilder(request, xssAPI);
+            selectAllAttrs.addClass("foundation-collection-selectall");
+            selectAllAttrs.addClass("coral-Button--graniteActionBar");
+            selectAllAttrs.add("data-foundation-collection-selectall-target", targetCollection);
+            selectAllAttrs.add("data-foundation-command", "ctrl+a");
+            selectAllAttrs.add("trackingfeature", "aem:search");
+            selectAllAttrs.add("trackingelement", "selectall");
+            %><button is="coral-button" type="button" variant="quiet" icon="selectAll" <%= selectAllAttrs %>><%= xssAPI.encodeForHTML(i18n.get("Select All")) %></button><%
+
+            // add sorting element only when current location support it.
+            if(supportSorting) {
+                Resource sortResource =  searchResults.getChild("sort");
+                if (sortResource != null) {
+                    if(sortConfigPath != null) {
+                        final String customSortConfig = sortConfigPath;
+                        sortResource = new ValueMapResourceWrapper(sortResource, "granite/ui/components/shell/collectionpage/sort") {
+                            public ValueMap getValueMap() {
+                                ValueMap vm = super.getValueMap();
+                                vm.put("configPath", customSortConfig);
+                                return vm;
+                            }
+                        };
+                    }
+                    AttrBuilder attrs = new AttrBuilder(request, xssAPI);
+                    attrs.add("data-shell-collection-target", targetCollection);
+                    attrs.add("data-shell-console-id", consoleId + "-" + location);
+                    cmp.include(sortResource, new Tag(attrs));
+                }
+            }
+
+            if (!Boolean.TRUE.equals(omnisearchOpenedThroughFilter)) {
+                // add paging status
+                %><granite-pagingstatus class="granite-collection-pagingstatus" data-granite-collection-pagingstatus-target="#granite-omnisearch-result"></granite-pagingstatus><%
+            }
+
+            // add switcher element
+            if (viewCache.size() > 1) {%>
+            <label id="cyclebutton-omnisearch-result-view-toggle-label" for="granite-omnisearch-result-view-toggle" class="u-coral-screenReaderOnly"><%= xssAPI.encodeForHTML(i18n.get("Switch between list view and card view")) %></label><%
+                AttrBuilder switcherAttrs = new AttrBuilder(request, xssAPI);
+                switcherAttrs.add("id", "granite-omnisearch-result-view-toggle");
+                switcherAttrs.addClass("granite-collection-switcher");
+                switcherAttrs.add("data-granite-collection-switcher-target", targetCollection);
+                switcherAttrs.add("aria-labelledby", "cyclebutton-omnisearch-result-view-toggle-label");
+                %><coral-cyclebutton <%= switcherAttrs %>><%
+                    for (Resource item : viewCache) {
+                        Config itemCfg = new Config(item);
+
+                        String src = ex.getString(itemCfg.get("src", String.class));
+
+                        AttrBuilder itemAttrs = new AttrBuilder(request, xssAPI);
+                        itemAttrs.add("data-granite-collection-switcher-src", handleURITemplate(src, request));
+                        itemAttrs.add("icon", itemCfg.get("icon", String.class));
+                        itemAttrs.addSelected(item.getName().equals(currentView.getName()));
+
+                        %><coral-cyclebutton-item <%= itemAttrs %>><%= outVar(xssAPI, i18n, itemCfg.get("jcr:title", String.class)) %></coral-cyclebutton-item><%
+                    }
+                %></coral-cyclebutton><%
+            }
+        %></betty-titlebar-secondary>
+    </betty-titlebar><%
+}
+
+%><div id="granite-omnisearch-result-content" class="foundation-layout-panel-content" data-support-sorting=<%= supportSorting %>><%
+    if (currentView != null) {
+        %><sling:include resource="<%= currentView %>" /><%
+    }
+%></div><%
+
+SearchResult searchResult = (SearchResult) request.getAttribute("com.day.cq.search.result.SearchResult");
+if (searchResult != null) {
+    JSONObject configJson = new JSONObject();
+    configJson.put("showAggregateCount", facetAggregateCount);
+
+    AttrBuilder facetsAttrs = new AttrBuilder(request, xssAPI);
+    facetsAttrs.add("id", "granite-omnisearch-facet");
+    facetsAttrs.addBoolean("hidden", true);
+    facetsAttrs.add("data-granite-omnisearch-facet-config", configJson.toString());
+    facetsAttrs.add("data-granite-omnisearch-facet-facets", getFacetJson(searchResult).toString());
+
+    %><div <%= facetsAttrs %>></div><%
+}
+%><%!
+
+private static String handleURITemplate(String src, HttpServletRequest request) {
+    if (src != null && src.startsWith("/")) {
+        return request.getContextPath() + src;
+    }
+    return src;
+}
+
+private static String getTargetViewName(SlingHttpServletRequest request, String layoutId) {
+    try {
+        layoutId = URLEncoder.encode(layoutId, "utf-8");
+        Cookie cookie = request.getCookie(layoutId);
+
+        if (cookie == null) {
+            return null;
+        }
+
+        return URLDecoder.decode(cookie.getValue(), "utf-8");
+    } catch (UnsupportedEncodingException impossible) {
+        throw new RuntimeException(impossible);
+    }
+}
+
+private static JSONObject getFacetJson(SearchResult searchResult) throws RepositoryException {
+    JSONObject json = new JSONObject();
+
+    for (Entry<String, Facet> entry : searchResult.getFacets().entrySet()) {
+        try {
+        	JSONArray bucketsJson = new JSONArray();
+
+        	for (Bucket bucket : entry.getValue().getBuckets()) {
+                // Range-based facets are not supported yet
+                if (bucket instanceof ValueRangeBucket) {
+                    continue;
+                }
+                JSONObject bucketJson = new JSONObject();
+                bucketJson.put("value", bucket.getValue());
+                bucketJson.put("count", bucket.getCount());
+
+                bucketsJson.put(bucketJson);
+            }
+            if (bucketsJson.length() > 0) {
+                json.put(entry.getKey(), bucketsJson);
+            }
+        } catch (JSONException impossible) {
+            throw new RuntimeException(impossible);
+        }
+    }
+
+    return json;
+}
+%>

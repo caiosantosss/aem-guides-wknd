@@ -1,0 +1,460 @@
+/*
+* ADOBE CONFIDENTIAL
+*
+* Copyright 2020 Adobe Systems Incorporated
+* All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and may be covered by U.S. and Foreign Patents,
+* patents in process, and are protected by trade secret or copyright law.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+*/
+//DimensionWorker.js
+(function (window, $, StandardWorker)  {
+    "use strict";
+
+    var self;
+
+    // asset selector type filters
+    var DIMENSION = "dn";
+
+    // events
+    var EVT_LAUNCH_FOLDER_PICKER    = "launch-folder-picker",
+        EVT_LAUNCH_ASSET_PICKER     = "launch-asset-picker",
+        EVT_ITEM_SELECTED           = "item-selected";
+
+    // labels
+    var LABEL_CAMERAS      = Granite.I18n.get("Cameras"),
+        LABEL_DIMENSION     = Granite.I18n.get("Dimension"),
+        LABEL_TARGET_FOLDER = Granite.I18n.get("Target Folder"),
+        LABEL_DIMENSION_ASSET   = Granite.I18n.get("Dimension Asset");
+
+    // prompts
+    var PROMPT_SELECT_TARGET_FOLDER     = Granite.I18n.get("Select an optional target folder to create assets"),
+        PROMPT_SELECT_DIMENSION_ASSET   = Granite.I18n.get("Select Dimension Asset");
+
+    // selector
+    var SEL_TARGET_FOLDER           = ".dimension-target-folder",
+        SEL_TARGET_FOLDER_WRAPPER   = "#dimension-target-folder-wrapper",
+        SEL_SUB_ITEM                = ".sub-item";
+
+    // replacement options
+    var DN_OBJECT = "dnreplaceobject",
+        DN_RENDER = "dnrender";
+
+    var ASSET = "asset";
+
+    // Initialize DimensionWorker
+    class DimensionWorker extends StandardWorker {
+        constructor(options) {
+            super(options);
+            self = this;
+        }
+    }
+
+    // shared mimetype
+    DimensionWorker.prototype.DEFAULT_INCLUDE = "image/.*";
+    DimensionWorker.prototype.EXCLUDE_FORMATS = ["image/png", "image/gif", "image/tiff", "image/jpeg", "image/bmp", "image/psd", "image/psb", "image/eps", "image/svg", "image/dng"];
+    DimensionWorker.prototype.INCLUDE_FORMATS = ["image/.*", "image/png", "image/gif", "image/tiff", "image/jpeg", "image/psd","image/svg", "model/gltf-binary"];
+
+    DimensionWorker.prototype.init = function(options) {
+        self = this;
+        this.$parent = options.$parent;
+        this.$container = options.$container;
+    }
+
+    // setup ui (do nothing)
+    DimensionWorker.prototype.setupUI = function() {
+        // wrapper for target folder
+        var $pathBrowserWrapper = $(SEL_TARGET_FOLDER_WRAPPER);
+
+        // create text field
+        var opts = {};
+        opts.label          = LABEL_TARGET_FOLDER;
+        opts.className      = SEL_TARGET_FOLDER.replace(".", "");
+        opts.placeholder    = PROMPT_SELECT_TARGET_FOLDER;
+        opts.$wrapper       = $pathBrowserWrapper;
+        var $folderPath     = this.componentFactory.createTextfield(opts);
+
+        // create action button button for path browse
+        var params = {
+            "$wrapper": $pathBrowserWrapper,
+            "icon": "folder", 
+            "variant":"quiet", 
+            "className":"action-btn btn-browse-path"
+        }
+
+        // create delete button and add to DOM
+        var $btnBrowsePath = this.componentFactory.createIconButton(params);
+        $btnBrowsePath.data("$target", $folderPath.find("input"));
+        $btnBrowsePath.on("click", function() {
+            $(document).trigger({ 
+                "type": EVT_LAUNCH_FOLDER_PICKER, 
+                "target": $(this).data("$target")
+            });
+        });
+        // positon folder icons, this does not work in the css file
+        $(".dimension .btn-browse-path").css("margin-top", "36px");
+
+        $(self.SEL_PROFILE_INFO).on(self.ITEM_UPDATED, function() {
+            // show / hide "Add New" button
+            if ($(".dimension .item-wrapper").length < 1) {
+                $(".dimension .btn-add-new").show();
+            }
+            else {
+                $(".dimension .btn-add-new").hide();
+            }
+        });
+    }
+
+    DimensionWorker.prototype.data = function() {
+
+        var data = [];
+
+        // get renditions
+        $(".dimension .item-content").each(function() {
+
+            // get source reference
+            var srcVal = $(this).find("input.source").val();
+
+            var rendition = {};
+
+            // generate rendition name from source
+            var baseName = srcVal.substring(srcVal.lastIndexOf("/") + 1).split(".")[0];
+            rendition.name = baseName;
+
+            // get render/replacement option
+            var renderOperation = $(this).find("coral-select.replace").val();
+
+            // set operation base props
+            rendition.operation = {
+                "id": renderOperation,
+                "cameras": $("coral-autocomplete.cameraList").data("items")
+            }
+
+            // set replacement option, includes, excludes based on render operation
+            if (renderOperation === DN_RENDER) {
+                rendition.operation.texture = $(this).find("coral-select.texture").val();
+                rendition.includes = "image/.*,application/pdf,application/postscript";
+            }
+            else if (renderOperation === DN_OBJECT) {
+                rendition.operation.modelId = $(this).find("coral-select.object").val();
+                rendition.includes = "model/gltf-binary";
+            }
+
+            // get glb export option
+            // store in "rendition" which will be turned into its own rendition
+            const glbExport =  $("coral-checkbox.glbCheckbox").attr("checked");
+            if (glbExport === "checked") { // undefined if not checked
+                rendition.glbExport = true;
+            }
+
+            // set excludes
+            rendition.excludes = "video/.*";
+
+            // set source
+            rendition.sources = {"dimension" : srcVal};
+
+            // add rendition
+            data.push(rendition);
+        });
+        return data;
+    }
+
+    DimensionWorker.prototype.addRow = function(data) {
+
+        data = (data)? data : {};
+        data.watermark = (data["watermark"])? data["watermark"] : false;
+
+        // create worker item and get content
+        var $contentWrapper = this.createWorkerItem();
+
+        // add custom rows
+        this.appendCustomRows($contentWrapper, data);
+
+        // dispatch event to update count in tab list
+        $("#profile-info").trigger("ITEM_ADDED");
+
+        return $contentWrapper;
+    }
+    
+    DimensionWorker.prototype.appendCustomRows = function($wrapper, data) {
+        // hide width and height controls
+        $wrapper.find(".coral-Form-fieldwrapper.width").hide();
+        $wrapper.find(".coral-Form-fieldwrapper.height").hide();
+        $wrapper.find(".coral-Form-fieldwrapper.rendition-name").css({
+            "width": "100%",
+            "padding-right": "5px"
+        });
+
+        data = data || {};
+        this.createRow($wrapper, LABEL_DIMENSION);
+
+        // set target folder
+        var targetFolder = data.targetFolder;
+        if (targetFolder) {
+            $("input" + SEL_TARGET_FOLDER).val(targetFolder);
+        }
+
+        var $selectedOperationRow = self.createRow($wrapper, undefined, "selected-operation-wrapper");
+        var cameras = (data.operation && data.operation.cameras) || [];
+        var source = (data.sources && data.sources.dimension) || "";
+        var object = (data.operation && data.operation.modelId) || "";
+        var texture = (data.operation && data.operation.texture) || "";
+        var glbExport = data.glbExport || false;
+
+        self.createDimensionRenderControls(LABEL_DIMENSION_ASSET, PROMPT_SELECT_DIMENSION_ASSET, $selectedOperationRow, source, cameras, texture, object, glbExport);
+
+        // positon folder icons, this does not work in the css file
+        $(".dimension .btn-browse-path").css("margin-top", "36px");
+    }
+
+    DimensionWorker.prototype.createAssetPickerControl = function(label, prompt, $wrapper, contentType, className, value, assetType) {
+        // assetType
+        var eventType;
+
+        if (contentType === ASSET) {
+            eventType = EVT_LAUNCH_ASSET_PICKER;
+        }
+        else {
+            eventType = EVT_LAUNCH_FOLDER_PICKER;
+        }
+
+        // create text field
+        var opts = {};
+        if (className) {
+            opts.className = className;
+        }
+        opts.label          = label;
+        opts.placeholder    = prompt;
+        opts.$wrapper       = $wrapper;
+        opts.value          = value;
+        var $assetPath      = this.componentFactory.createTextfield(opts);
+        $assetPath = $assetPath.find("input");
+
+        // create action button button for path browse
+        var params = {
+            "$wrapper": $wrapper,
+            "icon": "folder", 
+            "variant":"quiet", 
+            "className":"action-btn btn-browse-path"
+        }
+
+        // create delete button and add to DOM
+        var $btnBrowsePath = this.componentFactory.createIconButton(params);
+        $btnBrowsePath.data("$target", $assetPath);
+        $btnBrowsePath.on("click", function() {
+            $(document).trigger({ 
+                "assetType": assetType, 
+                "type": eventType, 
+                "target": $(this).data("$target")
+            });
+        });
+        return $assetPath;
+    }
+
+    // manage sub controls for dimension operations
+    DimensionWorker.prototype.createDimensionRenderControls = function(label, prompt, $wrapper, source, cameras, texture, dnObject, glbExport) {
+        // create asset picker
+        var $assetPath = this.createAssetPickerControl(label, prompt, $wrapper, ASSET, "source", source, DIMENSION);
+
+        // handle asset selection (load cameras and textures)
+        $assetPath.on(EVT_ITEM_SELECTED, function() {
+            // load cameras & textures
+            var camerasValues = [];
+            var cameraItems = [];
+            var objects = [];
+            var replaceOpts = [
+                {value: DN_OBJECT, content: {textContent: Granite.I18n.get("Replace Object")}},
+                {value: DN_RENDER, content: {textContent: Granite.I18n.get("Replace Texture")}}
+            ];
+
+            var textures = [];
+            var path = $(this).val();
+            var url = path + "/_jcr_content/metadata.children.2.json";
+
+            // remove previously added items
+            if ($wrapper.parent().find(SEL_SUB_ITEM)) {
+                $wrapper.parent().find(SEL_SUB_ITEM).remove();
+            }
+
+            // get ui reference
+            var ui = $(window).adaptTo('foundation-ui');
+            // show wait cursor
+            ui.wait();
+
+            $.get(Granite.HTTP.externalize(url)).done(function (response) {
+
+                for (const item of response) {
+                    if (item.id === "cameras") {
+                        self.mapItems(item, "cameras_").forEach(item => {
+                            const itemObject = {
+                                value: item.value,
+                                label: item.content && item.content.textContent
+                            };
+                            cameraItems.push(itemObject)
+                            if (cameras.includes(item.value)) {
+                                camerasValues.push(itemObject);
+                            }
+                        });
+                    } else if (item.id === "models") {
+                        self.mapItems(item, "models_").forEach(item =>
+                            objects.push(item)
+                        );
+                    } else if (item.id === "textures") {
+                        self.mapItems(item, "textures_").forEach(item =>
+                            textures.push(item)
+                        );
+                    }
+                }
+
+                // create dimension select control for cameras	
+                var $camerasRow = self.createRow($wrapper.parent(), undefined, "selected-operation-wrapper " + SEL_SUB_ITEM.replace(".", ""));
+                var opts        = {};
+                opts.className  = self.LARGE + " cameraList";
+                opts.items      = cameraItems;
+                opts.values     = camerasValues;
+                opts.label      = LABEL_CAMERAS;
+                opts.name       = LABEL_CAMERAS;
+                opts.prompt     = Granite.I18n.get("Select one or more cameras");
+                opts.tooltip    = Granite.I18n.get("Please select one or more camera view/s");
+                opts.$wrapper   = $camerasRow;
+                self.componentFactory.createCameraChooser(opts).on("tagremoved change", function() {
+                    $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+                });
+
+                // create dimension checkbox for glb export
+                var $glbExportsRow = self.createRow($wrapper.parent(), undefined, "selected-operation-wrapper " + SEL_SUB_ITEM.replace(".", ""));
+                var opts        = {};
+                opts.className  = self.LARGE + " glbCheckbox";
+                opts.label      = Granite.I18n.get("gLB export");
+                opts.checked    = glbExport;
+                opts.tooltip    = Granite.I18n.get("Please check the box for gLB export");
+                opts.$wrapper   = $glbExportsRow;
+                self.componentFactory.createCheckBox(opts).on("change", function() {
+                    $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+                });
+
+
+                // clear cameras, reset glbExport
+                // this is only needed when the page loads, list is not needed for subsequent request
+                cameras = "";
+                glbExport = false;
+
+                // create replace option (objects, textures) select control
+                var $replaceSelectRow = self.createRow($wrapper.parent(), undefined, "selected-operation-wrapper " + SEL_SUB_ITEM.replace(".", ""));
+                var opts            = {};
+                opts.className      = self.LARGE + " replace";
+                opts.label          = Granite.I18n.get("Replace object or texture");
+                opts.prompt         = Granite.I18n.get("Select a replacement option");
+                opts.$wrapper       = $replaceSelectRow;
+
+                var $operationSelector = self.componentFactory.createSelectControl(opts, 
+                        replaceOpts, 
+                        opts.value
+                    ).on("change", function() {
+                        var operation = $(this).val();
+
+                        // hide ALL replacement options in the container
+                        $(this).data("parent").find(".replacementOption").hide();
+
+                        // show selected option
+                        $(this).data("parent").find("." + operation).show();
+
+                        // notify that something changed
+                        $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+
+                        // scroll to bottom of page to show replacement options
+                        var selProfileWrapper = "#profile-content-wrapper";
+                        $(selProfileWrapper).animate({ scrollTop: $(selProfileWrapper).prop("scrollHeight") }, 1000);
+                    });
+                // get ref to parent wrapper
+                $operationSelector.data("parent", $wrapper.parent());
+
+                // create object select control for objects
+                var $objectsRow = self.createRow($wrapper.parent(), undefined, "selected-operation-wrapper " + SEL_SUB_ITEM.replace(".", ""));
+                $objectsRow.addClass("replacementOption");
+                $objectsRow.addClass(DN_OBJECT);
+                $objectsRow.hide();
+
+                var options      = {};
+                options.className  = self.LARGE + " object";
+                options.label      = Granite.I18n.get("Objects");
+                options.$wrapper   = $objectsRow;
+                options.value      = dnObject;
+
+                // add object select control to dom
+                var $objects = self.componentFactory.createSelectControl(options, objects, options.value);
+                $objects.on("change", function() {
+                    $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+                });
+
+                // create dimension select control for textures
+                var $texturesRow = self.createRow($wrapper.parent(), undefined, "selected-operation-wrapper " + SEL_SUB_ITEM.replace(".", ""));
+                $texturesRow.addClass("replacementOption");
+                $texturesRow.addClass(DN_RENDER);
+                $texturesRow.hide();
+
+                var opts            = {};
+                opts.className      = self.LARGE + " texture";
+                opts.label          = Granite.I18n.get("Textures");
+                opts.$wrapper       = $texturesRow;
+                opts.value          = texture;
+
+                // create textures select control
+                var $textures = self.componentFactory.createSelectControl(opts, textures, opts.value);
+                $textures.on("change", function() {
+                    $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+                });
+
+                // remove wait cursor
+                ui.clearWait();
+
+                // give reference to object and texture selector to operation selector (combobox) show/hide
+                $operationSelector.data(DN_OBJECT, $objectsRow);
+                $operationSelector.data(DN_RENDER, $texturesRow);
+
+                // if a texure object is selected update ui
+                if ($textures.val()) {
+                    $operationSelector.val(DN_RENDER);
+
+                } else if ($objects.val()) {
+                    $operationSelector.val(DN_OBJECT);
+                }
+                // trigger change to force ui update.
+                $operationSelector.trigger("change");
+
+                // notify validator (we need a delay to give the UI an opportunity to render 
+                // in order udpate tab count
+                setTimeout(function(){
+                    $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+                }, 100);
+            });
+        });
+
+        if (source && source.length > 0) {
+            $assetPath.trigger(EVT_ITEM_SELECTED);
+            // notify validator
+            $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+        }
+    }
+
+    DimensionWorker.prototype.mapItems = function(item, prefix) {
+        return Object.entries(item)
+            .filter(([key]) => key.startsWith(prefix))
+            .map(([_, value]) => ({
+                value: value.id,
+                content: {
+                    textContent: value.name || value.id
+                }
+            }));
+    }
+
+    // DimensionWorker to global namespace
+    window.DimensionWorker = DimensionWorker;
+}(window, jQuery, StandardWorker, dimensionWorkerData));

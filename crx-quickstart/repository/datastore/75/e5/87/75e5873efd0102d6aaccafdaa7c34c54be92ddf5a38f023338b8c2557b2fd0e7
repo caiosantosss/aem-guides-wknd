@@ -1,0 +1,624 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * This class is used for displaying a report in a tabular (grid) view.
+ * @class CQ.reports.views.GridView
+ * @extends CQ.reports.View
+ */
+// todo reimplement/restructure - too messy ATM
+CQ.reports.views.GridView = CQ.Ext.extend(CQ.reports.View, {
+
+    /**
+     * @private
+     */
+    grid: null,
+
+    /**
+     * @private
+     */
+    columns: null,
+
+    /**
+     * @private
+     */
+    report: null,
+
+    /**
+     * @private
+     */
+    processor: null,
+
+    /**
+     * @private
+     */
+    defaultStore: null,
+
+    /**
+     * @private
+     */
+    completeData: null,
+
+    /**
+     * @private
+     */
+    dataOffset: null,
+
+    /**
+     * @private
+     */
+    isApplicatorySortChange: false,
+
+    /**
+     * @cfg {Number} rowsPerPage
+     * @since 5.5
+     * Number of rows that are displayed per page; defaults to 100
+     */
+    rowsPerPage: 0,
+
+
+    constructor: function(config) {
+        config = config || {
+                "rowsPerPage": 100
+            };
+        CQ.reports.views.GridView.superclass.constructor.call(this, config);
+    },
+
+    /**
+     * @private
+     */
+    createColumnDefs: function() {
+        var columnDefs = [ ];
+        var fieldDefs = [ ];
+        var colCnt = this.columns.length;
+        var hasGroupedCols = (this.report.createGroupedColumns().length > 0);
+        for (var c = 0; c < colCnt; c++) {
+            var column = this.columns[c];
+            var dataId = column.getDataId();
+            var name = "<b>" + CQ.I18n.getVarMessage(column.getName()) + "</b>";
+            var isGrouped = column.isGrouped();
+            var isFiltered = column.hasActiveFilters();
+            var isAggregated = hasGroupedCols && !isGrouped
+                    && (column.getAggregate() != null);
+            if (isGrouped || isFiltered || isAggregated) {
+                name += " (";
+                if (isGrouped) {
+                    name += CQ.I18n.getMessage("grouped");
+                } else if (isAggregated) {
+                    name += CQ.I18n.getVarMessage(column.getAggregateDescription());
+                }
+                if (isFiltered) {
+                    if (isGrouped || isAggregated) {
+                        name +=", ";
+                    }
+                    name += CQ.I18n.getMessage("filtered");
+                }
+                name += ")";
+            }
+            // determine (Ext) renderer
+            var fieldType = this.processor.getActualColumnType(column);
+            var renderer = undefined;
+            if (hasGroupedCols) {
+                if (isGrouped) {
+                    renderer = column.getTextRenderer();
+                } else {
+                    renderer = CQ.reports.Column.defaultTextRenderer;
+                }
+            } else {
+                renderer = column.getTextRenderer();
+            }
+            if (fieldType == "list") {
+                renderer = function(v) {
+                        // todo find a better solution for this
+                        var baseCls = "cq-reports-listaggregate";
+                        var clsCollapsed = "cq-reports-listaggregate-collapsed";
+                        var clsExpanded = "cq-reports-listaggregate-expanded";
+                        var clickFn = "var el = CQ.Ext.get(this); "
+                                + "if (el.hasClass('" + clsExpanded + "')) {"
+                                + "el.removeClass('" + clsExpanded + "');"
+                                + "el.addClass('" + clsCollapsed + "');"
+                                + "} else {"
+                                + "el.removeClass('" + clsCollapsed + "');"
+                                + "el.addClass('" + clsExpanded + "');"
+                                + "}";
+                        return "<div class=\"" + baseCls + " " + clsCollapsed + "\" "
+                                + "onclick=\"" + clickFn + "\">" + v + "</div>";
+                    };
+            }
+            columnDefs.push({
+                    "id": dataId,
+                    "header": name,
+                    "dataIndex": dataId,
+                    "sortable": this.report.isEditMode,
+                    "renderer": renderer
+                });
+        }
+        return columnDefs;
+    },
+
+    /**
+     * @private
+     */
+    createColumnModel: function(columnDefs, oldColModel) {
+        // resort columns
+        var c;
+        var sortedColDefs = [ ];
+        for (c = 0; c < columnDefs.length; c++) {
+            var colIndex = (oldColModel != null ? oldColModel.translateColumn(c) : c);
+            sortedColDefs.push(columnDefs[colIndex]);
+        }
+        // restore widths from old column model
+        if (oldColModel) {
+            var oldCols = oldColModel.columns;
+            if (oldCols.length == sortedColDefs.length) {
+                for (c = 0; c < oldCols.length; c++) {
+                    if (oldCols[c]) {
+                        sortedColDefs[c].width = oldCols[c].width;
+                    }
+                }
+            }
+        }
+        return new CQ.reports.ui.ReportColumnModel({
+                defaults: {
+                        width: 120,
+                        sortable: this.report.isEditMode
+                    },
+                columns: sortedColDefs,
+                grid: this.grid
+            });
+    },
+
+    // overrides CQ.reports.View#render
+    render: function(parentEl, report) {
+        this.report = report;
+        this.columns = report.columns;
+        this.processor = new CQ.reports.data.Processor(report);
+        this.defaultStore = new CQ.reports.data.ReportingStore(this.processor, {
+                "listeners": {
+                        "preprocessed": this.reconfigureGrid,
+                        "exception": this.handleError,
+                        "scope": this
+                    }
+            });
+        var defs = this.createColumnDefs();
+        var view;
+        if (this.report.isEditMode) {
+            view = new CQ.reports.ui.ReportGridView(this.report, {
+                    "forceFit": true,
+                    "listeners": {
+                            "beforecolcontextmenu": this.adjustMenu,
+                            "oncolcontextmenuclicked": this.handleReportItemClicked,
+                            "colremoverequested": this.removeColumn,
+                            "colinsertrequested": this.insertColumn,
+                            "colmoverequested": this.moveColumn,
+                            "scope": this
+                        }
+                });
+        } else {
+            view = new CQ.reports.ui.ReportGridView(this.report, {
+                    "forceFit": true
+                });
+        }
+        this.pagingToolbar = new CQ.Ext.PagingToolbar({
+                "pageSize": this.rowsPerPage,
+                "store": this.defaultStore,
+                "listeners": {
+                        "change": function(tb, obj) {
+                                if (obj) {
+                                    if (obj.pages < obj.activePage) {
+                                        tb.changePage(obj.pages);
+                                    }
+                                }
+                            }
+                    },
+                "displayInfo": true,
+                "displayMsg": 'Displaying rows {0} - {1} of {2}',
+                "emptyMsg": "No rows to display",
+                // overrides CQ.Ext.PagingToolbar#doRefresh
+                "doRefresh": function() {
+                        report.reload(true);
+                    }
+            });
+        this.grid = new CQ.Ext.grid.GridPanel({
+                "store": this.defaultStore,
+                "colModel": this.createColumnModel(defs),
+                "view": view,
+                "sm": new CQ.Ext.grid.RowSelectionModel({
+                        "singleSelect" :true
+                    }),
+                "width": "auto",
+                "height": "auto",
+                "frame": false,
+                "loadMask": true,
+                "border": false,
+                "iconCls": "icon-grid",
+                "cls": "cq-reports-gridview",
+                "enableHdMenu": this.report.isEditMode,
+                "enableColumnMove": this.report.isEditMode,
+                "bbar": this.pagingToolbar
+            });
+        this.grid.render(parentEl);
+        this.initializeEditables();
+    },
+
+    initializeEditables: function() {
+        var editables = CQ.WCM.getEditables();
+        var repPath = this.report.reportPath;
+        for (var e in editables) {
+            if (editables.hasOwnProperty(e)) {
+                if (e.length > repPath.length) {
+                    var subPath = e.substring(repPath.length);
+                    var lastSepPos = subPath.lastIndexOf("/");
+                    if (lastSepPos > 0) {
+                        var columnPath = subPath.substring(lastSepPos);
+                        if (columnPath != "/*") {
+                            this.initializeEditable(editables[e]);
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    initializeEditable: function(ed) {
+        if (!ed["_rep_initialized"]) {
+                ed["_rep_initialized"] = true;
+                ed.on(CQ.wcm.EditBase.EVENT_AFTER_DELETE, function() {
+                        var colRemoved = this.report.columns[this.colIndexToRemove];
+                        if (colRemoved.isSorted()) {
+                            this.report.fireSortingChanged(-1, null);
+                        }
+                        this.report.columns.splice(this.colIndexToRemove, 1);
+                        var cm = this.grid.getColumnModel();
+                        cm.notifyColumnRemoved(this.colIndexToRemove);
+                        this.report.fireStructureChanged();
+                    }, this);
+        }
+    },
+
+    destroy: function(parentEl) {
+        this.grid.destroy();
+        this.grid = null;
+
+    },
+
+    // overrides CQ.reports.View#reload
+    reload: function(isForced) {
+        if (this.report.isServerInteractiveProcessing() || (isForced === true)) {
+            // todo reimplement error handling
+            // no sorting info - it will be automatically provided from the serverside
+            this.defaultStore.setDefaultSort(null, null);
+            var options = this.defaultStore.lastOptions;
+            if (!options) {
+                options = {
+                        "params": {
+                                "start": 0,
+                                "limit": this.rowsPerPage
+                            }
+                    };
+            } else {
+                if (options.params) {
+                    delete options.params.sort;
+                    delete options.params.dir;
+                }
+            }
+            this.defaultStore.load(options);
+        } else {
+            var sortedCols = this.report.createSortedColumns();
+            if (sortedCols.length > 0) {
+                var col = sortedCols[0].data;
+                this.defaultStore.setDefaultSort(col.getDataId(),
+                        col.getSortingDirection());
+            }
+            this.defaultStore.removeAllRecords();
+            this.reconfigureGrid();
+        }
+    },
+
+    notifyStructureChanged: function() {
+        this.reload();
+    },
+
+    reconfigureGrid: function() {
+        // adjust field types
+        var defs = this.createColumnDefs();
+        this.grid.reconfigure(this.defaultStore, this.createColumnModel(defs,
+                this.grid.getColumnModel()));
+    },
+
+    adjustMenu: function(menu, col) {
+        // note that this method is currently called twice due to some hack that calls
+        // the show method of the menu twice to ensure the correct position of the menu
+        var column = this.columns[col];
+        var groupByItem = menu.items.get("groupBy");
+        if (groupByItem) {
+            groupByItem.setDisabled(!column.isGroupable());
+            groupByItem.setChecked(column.isGrouped(), true);
+        }
+        var filtersItem = menu.items.get("filters");
+        if (filtersItem) {
+            filtersItem.setDisabled(!column.hasFilters() || column.isAggregated());
+        }
+        var aggregateItem = menu.items.get("aggregate");
+        if (aggregateItem) {
+            var gv = this.grid.getView();
+            var aggregatesMenu = gv.aggregateMenu;
+            aggregatesMenu.removeAll();
+            var aggregates = column.getAvailableAggregates();
+            if ((aggregates != null) && (aggregates.length == 0)) {
+                aggregates = null;
+            }
+            aggregateItem.setDisabled(aggregates == null);
+            if (aggregates != null) {
+                var items = [ ];
+                var aggregateCnt = aggregates.length;
+                for (var a = 0; a < aggregateCnt; a++) {
+                    var aggregate = aggregates[a];
+                    var menuItem = new CQ.Ext.menu.CheckItem({
+                            "itemId": aggregate.type,
+                            "text": CQ.I18n.getVarMessage(aggregate.text),
+                            "checked": (column.getAggregate() == aggregate.type),
+                            "group": "aggregates",
+                            "listeners": {
+                                "checkchange": function(item, isChecked) {
+                                    if (isChecked) {
+                                        this.fireEvent("oncolcontextmenuclicked",
+                                                "aggregate", this.hdCtxIndex, item.itemId);
+                                    }
+                                },
+                                "scope": gv
+                            }
+                        });
+                    items.push(menuItem);
+                    aggregatesMenu.addItem(menuItem);
+                }
+            }
+        }
+        var genericPropsItem = menu.items.get("genericprops");
+        if (genericPropsItem) {
+            genericPropsItem.setDisabled(!column.isGeneric());
+        }
+    },
+
+    handleReportItemClicked: function(id, col, value, alignPos) {
+        switch (id) {
+            case "groupBy":
+                this.changeGrouping(col, value);
+                break;
+            case "filters":
+                this.showFiltersForColumn(col, alignPos);
+                break;
+            case "aggregate":
+                this.changeAggregate(col, value);
+                break;
+            case "genericprops":
+                var column = this.columns[col];
+                CQ.reports.utils.EditUtils.changeGenericProps(column, alignPos);
+                break;
+        }
+    },
+
+    changeGrouping: function(col, isGrouped) {
+        // col is already translated here
+        var column = this.columns[col];
+        column.setGrouped(isGrouped === true);
+    },
+
+    changeAggregate: function(col, aggregate) {
+        // col is already translated here
+        var column = this.columns[col];
+        column.setAggregate(aggregate);
+    },
+
+    notifyUpdateStart: function() {
+        this.grid.loadMask.show();
+    },
+
+    notifyUpdateEnd: function() {
+        this.grid.loadMask.hide();
+    },
+
+    showFiltersForColumn: function(col, alignPos) {
+        // col is already translated here
+        var column = this.columns[col];
+        var filterDialog = column.filterDialog;
+        if (!filterDialog) {
+            var filters = column.getFilters();
+            var contentItems = [ ];
+            for (var f = 0; f < filters.length; f++) {
+                var ui = filters[f].ui;
+                if (ui) {
+                    contentItems.push(filters[f].ui);
+                }
+            }
+            filterDialog = this.createWindow(column, contentItems, this.applyFilters);
+            column.filterDialog = filterDialog;
+        }
+        CQ.reports.utils.EditUtils.alignDialogToColHeader(filterDialog, alignPos, 260);
+        filterDialog.show();
+    },
+
+    applyFilters: function(column) {
+        column.applyFilters(true);
+    },
+
+    insertColumn: function(colToInsert, refColIndex, insertPos) {
+        var cols = this.report.columns;
+        var colCnt = cols.length;
+        var refCol, refEditable;
+        if (insertPos == "after") {
+            if (refColIndex < (colCnt - 1)) {
+                refColIndex++;
+                refCol = cols[refColIndex];
+            } else {
+                refEditable = CQ.reports.utils.EditUtils.getNewColumnEditable();
+            }
+        } else {
+            refCol = cols[refColIndex];
+        }
+        if (refCol || refEditable) {
+            if (refCol && !refEditable) {
+                var refPath = refCol.dataPath;
+                refEditable = CQ.WCM.getEditable(refPath);
+            }
+            if (refEditable) {
+                var parPath = refEditable.createParagraph(colToInsert);
+                if (parPath) {
+                    // remove column stub that was created by the paragraph's reload
+                    // (component creates a "addColumn" statement; we'll have to handle that
+                    // manually)
+                    this.report.columns.length--;
+                    var compPath = colToInsert.path;
+                    var col = new CQ.reports.Column({
+                            "dataPath": parPath,
+                            "componentPath": compPath
+                        });
+                    if (refCol) {
+                        this.report.insertColumn(col, refColIndex);
+                    } else {
+                        refColIndex = this.report.columns.length;
+                        this.report.addColumn(col);
+                    }
+                    col.loadDef(new CQ.reports.utils.RequestSync({
+                            onLoadFn: function() {
+                                    var colInserted = this.report.columns[refColIndex];
+                                    var cm = this.grid.getColumnModel();
+                                    cm.notifyColumnInserted(refColIndex);
+                                    this.initializeEditables();
+                                    this.report.fireStructureChanged();
+                                    if (colInserted.isGeneric()) {
+                                        CQ.reports.utils.EditUtils.changeGenericProps(
+                                                colInserted);
+                                    }
+                                }.createDelegate(this)
+                        }));
+                }
+            }
+        }
+    },
+
+    moveColumn: function(colIndexOld, colIndexNew) {
+        var cols = this.report.columns;
+        var colToMove = cols[colIndexOld];
+        // consider that both column indexes point to the unmodified column list
+        var insertColIndex = colIndexNew;
+        if (insertColIndex > colIndexOld) {
+            insertColIndex++;
+        }
+        // move paragraph seems to work the other way around than one might think; the
+        // semantic is: Move a paragraph, specified by its path (= the column moved), before
+        // myself (= the column that occupied the column's new position before)
+        var srcEditable = CQ.WCM.getEditable(colToMove.dataPath);
+        var destEditable;
+        if (insertColIndex >= cols.length) {
+            destEditable = CQ.reports.utils.EditUtils.getNewColumnEditable();
+        } else {
+            var destCol = cols[insertColIndex];
+            destEditable = CQ.WCM.getEditable(destCol.dataPath);
+        }
+        var srcPath = colToMove.dataPath;
+        var newPath = destEditable.moveParagraph(srcPath, srcEditable.params[
+                "./sling:resourceType"]);
+        if (newPath) {
+            // remove column stub that was created by the paragraph's reload (component
+            // creates a "addColumn" statement; we'll have to handle that manually)
+            cols.length--;
+            this.report.moveColumn(colIndexOld, colIndexNew);
+            this.report.fireStructureChanged();
+        } else {
+            // Reload page if error occured (grid is invalid now)
+            CQ.Util.reload();
+        }
+    },
+
+    removeColumn: function(colIndexToRemove) {
+        var colToRemove = this.report.columns[colIndexToRemove];
+        var colPath = colToRemove.dataPath;
+        if (colPath) {
+            var compInstance = CQ.WCM.getEditable(colPath);
+            this.colIndexToRemove = colIndexToRemove;
+            compInstance.removeParagraph();
+        }
+    },
+
+
+    // todo remove - will finally be implemented as "popup dialog", not as a (full-fledged) window
+    createWindow: function(column, contentItems, applyFn) {
+        applyFn = applyFn.createDelegate(this);
+        return new CQ.Ext.Window({
+                "filteredColumn": column,
+                "renderTo": CQ.Util.ROOT_ID,
+                "title": CQ.I18n.getMessage("Filter settings"),
+                "width": 260,
+                "height": 140,
+                "modal": true,
+                "layout": "fit",
+                "stateful": false,
+                "items": [ {
+                            "xtype": "panel",
+                            "layout": "fit",
+                            "bodyStyle": "overflow: auto;",
+                            "stateful": false,
+                            "items": contentItems
+                        }
+                    ],
+                "buttons": [ {
+                            "itemId": "okButton",
+                            "name": "okButton",
+                            "text": CQ.I18n.getMessage("Apply"),
+                            "handler": function() {
+                                    var win = this.findParentByType(CQ.Ext.Window);
+                                    win.hide();
+                                    applyFn(win.filteredColumn);
+                                },
+                            "disabled": false
+                        }, {
+                            "itemId": "cancelButton",
+                            "name": "cancelButton",
+                            "text": CQ.I18n.getMessage("Cancel"),
+                            "handler": function() {
+                                    var win = this.findParentByType(CQ.Ext.Window);
+                                    win.hide();
+                                },
+                            "disabled": false
+                        }
+                    ]
+            });
+    },
+
+    handleError: function() {
+        var response = arguments[4];
+        var errorType = response.raw.error;
+        switch (errorType) {
+            case "oak_index_required":
+                CQ.Ext.Msg.alert(
+                        CQ.I18n.getMessage("Could not retrieve data"),
+                        CQ.I18n.getMessage("Result set is too large to process. Please add an Oak index for this report as described in the documentation."));
+                break;
+            default:
+                CQ.Ext.Msg.alert(
+                        CQ.I18n.getMessage("Could not retrieve data"),
+                        CQ.I18n.getMessage("An internal error has occurred."));
+                break;
+        }
+    }
+
+});
+
+
+/**
+ * Height of the insert element (in a currently empty report)
+ * @type Number
+ * @static
+ * @private
+ */
+CQ.reports.views.GridView.INSERT_ELEMENT_HEIGHT = 80;

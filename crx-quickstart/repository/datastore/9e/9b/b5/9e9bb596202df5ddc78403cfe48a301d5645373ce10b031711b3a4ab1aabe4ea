@@ -1,0 +1,2217 @@
+/*
+ * Copyright 1997-2011 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.form.SmartImage.ImagePanel
+ * @private
+ * The SmartImage.ImagePanel provides a panel that can be
+ * used for displaying and processing images.
+ * <p>
+ * The implementation offers the following features:
+ * <ul>
+ * <li>Zooming</li>
+ * <li>Scrolling</li>
+ * <li>Shapes that can be displayed on top of the image</li>
+ * <li>Shape sets that accumulate Shapes (for example the shapes used in a single tool) and
+ * provide some functionality to manipulate these shapes as a whole</li>
+ * <li>Basic implementation of user interactions (interactions have actually to be handled
+ * by the Shape implementation, but SmartImage.ImagePanel provides the basic functionality
+ * for deciding which Shape has to handle the interaction)</li>
+ * </ul>
+ */
+CQ.form.SmartImage.ImagePanel = CQ.Ext.extend(CQ.Ext.Panel, {
+
+    // Properties --------------------------------------------------------------------------
+
+    /**
+     * Flag if the component is entirely initialized. This is only the case if the first
+     * "resize" event (stating the actual size of the working area) has been received. There
+     * should be no drawing operation and calculation before isInitialized == true.
+     * @private
+     * @type Boolean
+     */
+    isInitialized: false,
+
+    /**
+     * @cfg {String} backgroundColor
+     * Background color; format: todo ???
+     */
+    backgroundColor: null,
+
+    /**
+     * The image to display/process; must be set separately using {@link #updateImage}
+     * @private
+     * @type CQ.form.SmartImage.Image
+     */
+    imageToDisplay: null,
+
+    /**
+     * Zoom factor; 0 means "basic image size", 0.1 means "basic image size" * 1.1, and so
+     * on
+     * @private
+     * @type Number
+     * @see CQ.form.SmartImage.ImagePanel#basicImageSize
+     */
+    zoom: 0,
+
+    /**
+     * Current rotation in degrees; currently only 0, 90, 180, 270 are supported
+     * @private
+     * @type Number
+     */
+    rotation: 0,
+
+    /**
+     * Ignores rotation setting if set to true
+     * @private
+     * @type Boolean
+     */
+    ignoreRotation: false,
+
+    /**
+     * Basic component size. This is the space available for all elements of the
+     * ImagePanel, including scrollbars. Properties: width, height
+     * @private
+     * @type Object
+     */
+    basicSize: null,
+
+    /**
+     * Working area size. This is the space available for displaying and processing the
+     * image. It is usually basicSize minus the size of the scrollbars. Properties:
+     * width, height
+     * @private
+     * @type Object
+     */
+    workingAreaSize: null,
+
+    /**
+     * The original image size. Properties: width, height
+     * @private
+     * @type Object
+     */
+    originalImageSize: null,
+
+    /**
+     * The "basic image size". The basic image size is the size the image has in unzoomed
+     * state. It is either the original size of the image (if it fits completely into
+     * the working area) or a scaled-down version that fits completely into the working
+     * area. Note that this value respects rotation. Properties: width, height
+     * @private
+     * @type Object
+     */
+    basicImageSize: null,
+
+    /**
+     * The zoomed size. This is the size of the image when displayed with the currently
+     * set zoom factor. Note that this value respects rotation. Properties: width, height
+     * @private
+     * @type Object
+     */
+    zoomedImageSize: null,
+
+    /**
+     * The center point of the current view. The center point is in the center of the
+     * current display state (considering scrollbar state) and is used when zooming in to
+     * keep focus. The center point is calculated in the coordinate system of the original
+     * image size. Properties: x, y
+     * @private
+     * @type Object
+     */
+    centerPoint: null,
+
+    /**
+     * The current internal display offsets. This object reflects the state of the
+     * scrollbars and defines the image fragment actually displayed. Properties: x, y
+     * @private
+     * @type Object
+     */
+    internalOffset: null,
+
+    /**
+     * @cfg {Object} internalPadding
+     * The internal display padding. The specified amount (of pixels) is at least available
+     * as a visible border when editing an image. Properties: width (horizontal padding),
+     * height (vertical padding). Note that the values specified are actually used for each
+     * border; i.e. if a width of 4 is specified, actually each of the left and right
+     * borders is set to 4 pixels, summing up to horizontal borders of 8 pixels altogehther.
+     */
+    internalPadding: null,
+
+    /**
+     * <p>The DOM object used for internally positioning the layers required by this
+     * implementation.</p>
+     * <p>Child nodes are: {@link #scrollerDiv and {@link #canvasDiv}</p>
+     * @private
+     * @type HTMLElement
+     */
+    positioningContainer: null,
+
+    /**
+     * <p>The DOM object used to display the scrollbars.</p>
+     * <p>Child node is: {@link #spacerImage}</p>
+     * @private
+     * @type HTMLElement
+     */
+    scollerDiv: null,
+
+    /**
+     * <p>The DOM Image object used to determine the value range of the scrollbars. This
+     * corresponds to the size of the working area or the zoomed size of the image,
+     * whichever is bigger.</p>
+     * <p>This is also used as the hotspot object (required for IE) and therefore always
+     * kept "on top".</p>
+     * @private
+     * @type Image
+     */
+    spacerImage: null,
+
+    /**
+     * <p>The DOM object containing the canvas.</p>
+     * <p>Child node is: {@link #imageCanvas}</p>
+     * @private
+     * @type HTMLElement
+     */
+    canvasDiv: null,
+
+    /**
+     * The image canvas (emulated for IE)
+     * @private
+     * @type HTMLElement
+     */
+    imageCanvas: null,
+
+    /**
+     * The distance between the left/top border of the working area to the respective
+     * image border. The contained properties (x, y) are != 0 only if the image does not
+     * fully cover the working area in the respective direction
+     * @private
+     */
+    imageOffsets: null,
+
+    /**
+     * Table containing shape sets; Key: Shape set ID; Value: The
+     * {@link CQ.form.SmartImage.ShapeSet}
+     * @private
+     * @type Object
+     */
+    shapeSets: null,
+
+    /**
+     * Array with additional shape definitions which are required for correct handling
+     * and display on Internet Explorer. Element properties: container (the DOM element
+     * containing the emulated canvas object), canvas (the emulated canvas object), shape
+     * (backreference to the shape the shape definition is used for)
+     * @private
+     * @type Object[]
+     */
+    shapeDefs: null,
+
+    /**
+     * Array with currently rolled over shapes
+     * @private
+     * @type CQ.form.SmartImage.Shape[]
+     */
+    rolledOverShapes: null,
+
+    /**
+     * Array with currently selected shapes
+     * @private
+     * @type CQ.form.SmartImage.Shape[]
+     */
+    selectedShapes: null,
+
+    /**
+     * Array with Shapes that are scheduled for dragging during the processing of an "add
+     * request" event
+     * @private
+     * @type CQ.form.SmartImage.Shape[]
+     */
+    scheduledDragShapes: null,
+
+    /**
+     * @cfg {Number} tolerance
+     * The tolerance distance in pixels. This is the maximum distance the mouse pointer must
+     * have to the outline of a shape to still be considered as being "on" that outline.
+     * Defaults to 3.
+     */
+    tolerance: 0,
+
+    /**
+     * @cfg {String} canvasClass
+     * CSS class to be used as canvas style
+     */
+    canvasClass: null,
+
+    /**
+     * Absolute tolerance distance
+     * @private
+     * @type Number
+     * @see #tolerance
+     */
+    zoomedTolerance: 0,
+
+    /**
+     * Flag if rollover handling is currently blocked
+     * @private
+     * @type Boolean
+     */
+    isRollOverHandlingBlocked: false,
+
+    /**
+     * The current document, cached as a {@link CQ.Ext.Element}
+     * @private
+     * @type CQ.Ext.Element
+     */
+    doc: null,
+
+    /**
+     * Array of temporary handlers used for a better Drag &amp; Drop experience; will be
+     * added by {@link #onMouseDown} and removed by {@link onMouseUp}; Element properties:
+     * el (the {@link CQ.Ext.Element} the handler should be added to), handlerName (the
+     * name of the event the handler is used for; i.e. "click", "mouseup", "mousedown"), fn,
+     * scope
+     * @private
+     * @type Object[]
+     */
+    temporaryHandlers: null,
+
+
+    // Object lifecycle --------------------------------------------------------------------
+
+    constructor: function(config) {
+        if (!config) {
+            config = { };
+        }
+        var defaults = {
+            "backgroundColor": CQ.themes.SmartImage.BACKGROUND_COLOR,
+            "canvasClass": CQ.themes.SmartImage.CANVAS_CLASS,
+            "border": false,
+            "layout": "fit",
+            "zoom": 0,
+            "tolerance": 3,
+            "internalPadding": {
+                "width": 8,
+                "height": 8
+            }
+        };
+        this.addEvents(
+            /**
+             * @event smartimage.zoomchange
+             * Fires after the zoom factor has changed.
+             * @param {Number} zoom New zoom factor
+             * @deprecated Use {@link CQ.form.SmartImage.ImagePanel#zoomchange zoomchange} instead
+             */
+            "smartimage.zoomchange",
+            /**
+             * @event zoomchange
+             * Fires after the zoom factor has changed.
+             * @param {Number} zoom New zoom factor
+             * @since 5.3
+             */
+            "zoomchange",
+
+            /**
+             * @event smartimage.addrequest
+             * Fires when the image panel has detected a click that could be interpreted
+             * as a request by the user to add a new object (i.e. doesn't select or drag
+             * anything)
+             * @param {Object} coords The coordinates for this event
+             * @deprecated Use {@link CQ.form.SmartImage.ImagePanel#addrequest addrequest} instead
+             */
+            "smartimage.addrequest",
+            /**
+             * @event addrequest
+             * Fires when the image panel has detected a click that could be interpreted
+             * as a request by the user to add a new object (i.e. doesn't select or drag
+             * anything)
+             * @param {Object} coords The coordinates for this event
+             * @since 5.3
+             */
+            "addrequest",
+
+            /**
+             * @event smartimage.custom
+             * A customized event that is related to the shape that fires it.
+             * @deprecated This event has actually never been used/fired
+             */
+            "smartimage.custom",
+
+            /**
+             * @event smartimage.selchanged
+             * Fired after the selection changed
+             * @param {CQ.form.SmartImage.Shape[]} selectedShapes Array of all shapes that
+             *        are currently selected
+             * @deprecated Use {@link CQ.form.SmartImage.ImagePanel#selectionchange selectionchange} instead
+             */
+            "smartimage.selchanged",
+            /**
+             * @event selectionchange
+             * Fired after the selection changed
+             * @param {CQ.form.SmartImage.Shape[]} selectedShapes Array of all shapes that
+             *        are currently selected
+             * @since 5.3
+             */
+            "selectionchange",
+
+            /**
+             * @event smartimage.rollover
+             * Fired after one or more shapes changed its/their rollover state.
+             * @param {CQ.form.SmartImage.Shape[]} selectedShapes Array of all shapes that
+             *        are currently rolled over
+             * @deprecated Use {@link CQ.form.SmartImage.ImagePanel#rollover rollover} instead
+             */
+            "smartimage.rollover",
+            /**
+             * @event rollover
+             * Fired after one or more shapes changed its/their rollover state.
+             * @param {CQ.form.SmartImage.Shape[]} selectedShapes Array of all shapes that
+             *        are currently rolled over
+             * @since 5.3
+             */
+            "rollover",
+
+            /**
+             * @event smartimage.dragchange
+             * Fired after one or more shapes changed their state through Drag &amp; Drop.
+             * @param {CQ.form.SmartImage.Shape[]} draggedShapes Array of all shapes that
+             *        are affected by this event
+             * @param {Boolean} isDragEnd True if the event signals the end of a drag
+             *        operation
+             * @deprecated Use {@link CQ.form.SmartImage.ImagePanel#dragchange dragchange} instead
+             */
+            "smartimage.dragchange",
+            /**
+             * @event dragchange
+             * Fired after one or more shapes changed their state through Drag &amp; Drop.
+             * @param {CQ.form.SmartImage.Shape[]} draggedShapes Array of all shapes that
+             *        are affected by this event
+             * @param {Boolean} isDragEnd True if the event signals the end of a drag
+             *        operation
+             * @since 5.3
+             */
+            "dragchange",
+
+            /**
+             * @event smartimage.contentchange
+             * Fired after the content changed through one of the tools and other tools
+             * should adjust theirselves to these changes. For example: If rotation is
+             * changed, any tool might want to rotate its content accordingly.
+             * @param {Object} changeDef An object that describes the content change;
+             *        property changeType is used as an identifier for the change; if
+             *        change type is "rotate": property newValue (Number) describes the
+             *        new rotation angle (in degrees, property valueDelta (Number) describes
+             *        the difference between old and new rotation angles (in degrees)
+             * @deprecated Use {@link CQ.form.SmartImage.ImagePanel#contentchange contentchange} instead
+             */
+            "smartimage.contentchange",
+            /**
+             * @event contentchange
+             * Fired after the content changed through one of the tools and other tools
+             * should adjust theirselves to these changes. For example: If rotation is
+             * changed, any tool might want to rotate its content accordingly.
+             * @param {Object} changeDef An object that describes the content change;
+             *        property changeType is used as an identifier for the change; if
+             *        change type is "rotate": property newValue (Number) describes the
+             *        new rotation angle (in degrees, property valueDelta (Number) describes
+             *        the difference between old and new rotation angles (in degrees)
+             * @since 5.3
+             */
+            "contentchange",
+
+            /**
+             * @event smartimage.defaultview
+             * Event that is fired when the component is switched to default view (no zoom
+             * applied, no active tool).
+             * @deprecated Use {@link CQ.form.SmartImage.ImagePanel#defaultview defaultview} instead
+             */
+            "smartimage.defaultview",
+            /**
+             * @event defaultview
+             * Event that is fired when the component is switched to default view (no zoom
+             * applied, no active tool).
+             * @since 5.3
+             */
+            "defaultview"
+        );
+        CQ.Util.applyDefaults(config, defaults);
+        CQ.form.SmartImage.ImagePanel.superclass.constructor.call(this, config);
+        this.shapeSets = { };
+        this.rolledOverShapes = [ ];
+        this.selectedShapes = [ ];
+        this.scheduledDragShapes = [ ];
+        this.internalOffset = {
+            "x": 0,
+            "y": 0
+        };
+    },
+
+    /**
+     * <p>Creates all necessary DOM objects for the canvas implementation and necessary
+     * helper objects (mostly required for IE compatibility reasons).</p>
+     * <p>Note that all DOM objects are created without sizes. The correct sizes will be
+     * set in the first call to {@link notifyResize}, when it is ensured that the
+     * ancestor objects have already been calculated/sized.</p>
+     * @param {Mixed} ct container element
+     * @param {Number} pos insert position
+     */
+    onRender: function(ct, pos) {
+        CQ.form.SmartImage.ImagePanel.superclass.onRender.call(this, ct, pos);
+
+        this.el.setVisibilityMode(CQ.Ext.Element.DISPLAY);
+
+        // create a surrounding DIV, used as a positioning container
+        this.positioningContainer = document.createElement("div");
+        this.positioningContainer.style.position = "relative";
+        this.positioningContainer.style.top = "0";
+        this.positioningContainer.style.left = "0";
+        this.body.dom.appendChild(this.positioningContainer);
+
+        // create a DIV for the canvas and add the default canvas to it
+        this.canvasDiv = document.createElement("div");
+        this.canvasDiv.style.position = "absolute";
+        this.canvasDiv.style.top = "0";
+        this.canvasDiv.style.left = "0";
+        this.positioningContainer.appendChild(this.canvasDiv);
+
+        // create a DIV used for scrolling and as a container for a spacer (as required
+        // by Internet Explorer to have a topmost hotspot layer)
+        this.scrollerDiv = document.createElement("div");
+        this.scrollerDiv.style.position = "absolute";
+        this.scrollerDiv.style.top = "0";
+        this.scrollerDiv.style.left = "0";
+        this.scrollerDiv.style.overflow = "scroll";
+        CQ.Ext.EventManager.on(this.scrollerDiv, "scroll", this.handleScroll, this);
+        this.positioningContainer.appendChild(this.scrollerDiv);
+
+        // create hotspot spacer
+        this.spacerImage = document.createElement("img");
+        this.spacerImage.src = CQ.Ext.BLANK_IMAGE_URL;
+        this.scrollerDiv.appendChild(this.spacerImage);
+        // display: block required for Firefox
+        this.spacerImage.style.display = "block";
+        // deactivate image toolbar (IE)
+        if (CQ.Ext.isIE) {
+            this.spacerImage.galleryimg = false;
+        }
+
+        this.imageCanvas = this.createCanvas(this.canvasDiv, 1, 1);
+        this.doc = CQ.Ext.get(document);
+
+        if (this.canvasClass) {
+            CQ.Ext.get(this.imageCanvas).addClass(this.canvasClass);
+        }
+        if (this.backgroundColor != null) {
+            this.imageCanvas.style.backgroundColor = this.backgroundColor;
+        }
+
+        // register handlers
+        CQ.Ext.EventManager.on(this.spacerImage, "mousemove", this.onMouseMove, this);
+        CQ.Ext.EventManager.on(this.spacerImage, "mousedown", this.onMouseDown, this);
+        CQ.Ext.EventManager.on(this.spacerImage, "mouseup", this.onMouseUp, this);
+        CQ.Ext.EventManager.on(this.spacerImage, "mouseout", this.onComponentLeave, this);
+    },
+
+
+    // Canvas styling ----------------------------------------------------------------------
+
+    /**
+     * Adds the specified CSS class to the canvas.
+     * @param {String} classToAdd The CSS class to add
+     */
+    addCanvasClass: function(classToAdd) {
+        CQ.Ext.get(this.imageCanvas).addClass(classToAdd);
+    },
+
+    /**
+     * Removes the specified CSS class from the canvas
+     * @param {String} classToRemove The CSS class to remove
+     */
+    removeCanvasClass: function(classToRemove) {
+        CQ.Ext.get(this.imageCanvas).removeClass(classToRemove);
+    },
+
+
+    // Image handling ----------------------------------------------------------------------
+
+    /**
+     * <p>Updates the image to display/process.</p>
+     * <p>The method can deal with not yet fully loaded images. The zoom factor is reset and
+     * all working areas are initialized once the image is fully loaded (or immediately, if
+     * the image is already available).</p>
+     * @param {CQ.form.SmartImage.Image} image the image to display/process
+     */
+    updateImage: function(image) {
+        this.imageToDisplay = image;
+        if (this.rendered) {
+            if (this.imageToDisplay.isLoaded) {
+                this.handleImageLoaded();
+            } else {
+                var oldLoadHandler = this.imageToDisplay.loadHandler;
+                this.imageToDisplay.loadHandler = function() {
+                    this.handleImageLoaded();
+                    if (oldLoadHandler) {
+                        oldLoadHandler(this.imageToDisplay);
+                    }
+                }.createDelegate(this);
+            }
+        }
+    },
+
+    /**
+     * Switches to the default view, which is the most suitable image (usually the processed
+     * image) without any tool selected.
+     */
+    switchToDefaultView: function() {
+        this.fireEvent("defaultview");
+        this.fireEvent("smartimage.defaultview"); // deprecated as of 5.3
+        this.setZoom(0);
+        this.fireEvent("zoomchange", 0);
+        this.fireEvent("smartimage.zoomchange", 0);  // deprecated as of 5.3
+    },
+
+
+    // Event handling ----------------------------------------------------------------------
+
+    /**
+     * <p>Handler that reacts on resizing the surrounding dialog.</p>
+     * <p>Note that we can't override Ext's onResize method, as it doesn't seem to work
+     * with CardLayouts properly.</p>
+     * @param {Number} width New width of the ImagePanel
+     * @param {Number} height New height if the ImagePanel
+     */
+    notifyResize: function(width, height) {
+        this.body.setSize(width, height);
+        this.calculateBasicSize();
+        this.propagateWorkingArea(this.notifyResizeAsync.createDelegate(this));
+    },
+
+    /**
+     * <p>Asynchronous part of {@link #notifyResize}. Will be called after notifyResize's
+     * call to {@link #propagateWorkingArea} (which has some asynchronous parts due to
+     * browser issues) has completed.</p>
+     * @private
+     */
+    notifyResizeAsync: function() {
+        if (CQ.Ext.isIE && this.shapeDefs) {
+            var shapeCnt = this.shapeDefs.length;
+            for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+                var shapeDef = this.shapeDefs[shapeIndex];
+                this.setCanvasSize(shapeDef.canvas, this.workingAreaSize);
+            }
+        }
+        if (this.imageToDisplay && this.imageToDisplay.isLoaded) {
+            this.calculateBasicImageSize();
+            this.calculateZoomedImageSize();
+            this.adjustSpacerImage();
+            this.propagateImage();
+        }
+        this.isInitialized = true;
+    },
+
+    /**
+     * <p>Handler for mouse move events.</p>
+     * <p>If a drag &amp; drop operation is active, the dragging is handled. If a deferred
+     * drag &amp; drop operation is scheduled and the user has dragged it the required
+     * minimum distance, the deferred drag operation becomes active.</p>
+     * <p>If no drag &amp; drop has to be handled, the rollover handling is done instead:
+     * The onRollOver/onRollOut/onRolledOver handlers of registered and visible
+     * {@link CQ.form.SmartImage.Shape}s are called accordingly.
+     * @param {Event} event The mouse click event
+     */
+    onMouseMove: function(event) {
+        if (!this.zoomedImageSize) {
+            return;
+        }
+        var isWaitingForDeferredDrag = false;
+        var transformedCoords = this.calculateTransformedCoords(event);
+        if (this.deferredDragShapes != null) {
+            // deferred Drag & Drop
+            isWaitingForDeferredDrag = true;
+            if (transformedCoords.isVirtual) {
+                return;
+            }
+            var delta = this.calculateDistance(
+                this.draggingBaseCoords.unzoomedUnclipped,
+                transformedCoords.unzoomedUnclipped);
+            if (delta >= this.zoomedTolerance) {
+                this.directDragShapes = this.deferredDragShapes;
+                this.fireDragStart(this.draggingBaseCoords);
+                this.deferredDragShapes = null;
+            }
+        }
+        if (this.directDragShapes != null) {
+            // Drag & Drop
+            var refCoords = transformedCoords.unzoomedUnclipped;
+            var xOffs = refCoords.x - this.draggingBaseCoords.unzoomed.x;
+            var yOffs = refCoords.y - this.draggingBaseCoords.unzoomed.y;
+            this.fireMove(xOffs, yOffs, transformedCoords);
+            this.fireEvent("dragchange", this.directDragShapes, false);
+            this.fireEvent("smartimage.dragchange", this.directDragShapes, false); // deprecated as of 5.3
+        } else if (!isWaitingForDeferredDrag && !this.isRollOverHandlingBlocked) {
+            this.executeFnOnShapes(function(shape) {
+                var isRollover = (this.rolledOverShapes.indexOf(shape) >= 0);
+                var isTouched = shape.isTouched(transformedCoords, this.zoomedTolerance);
+                if (isTouched != isRollover) {
+                    if (isTouched) {
+                        this.addShapeToRollovers(shape, transformedCoords);
+                    } else {
+                        this.removeShapeFromRollovers(shape, transformedCoords);
+                    }
+                } else if (isTouched) {
+                    // send onRolledOver if the shape is still rolled over, but the
+                    // mouse has moved
+                    if (shape.onRolledOver(transformedCoords)) {
+                        this.drawImage();
+                    }
+                }
+            }.createDelegate(this), true);
+            this.fireEvent("rollover", this.rolledOverShapes);
+            this.fireEvent("smartimage.rollover", this.rolledOverShapes); // deprecated as of 5.3
+        }
+        if (!CQ.Ext.isIE) {
+            event.stopPropagation();
+        } else {
+            return false;
+        }
+    },
+
+    /**
+     * <p>Handler for "leaving the component when no dragging is active".</p>
+     * <p>Sends onRollOut events to all {@link CQ.form.SmartImage.Shape}s that are currently
+     * rolled over.</p>
+     */
+    onComponentLeave: function() {
+        // pointer is not on the image anymore -> send onRollout events to all
+        // shapes that are currently rolled over if there is no drag & drop operation active
+        // at the moment
+        if (this.directDragShapes == null) {
+            var requiresRedraw = false;
+            var shapeCnt = this.rolledOverShapes.length;
+            for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+                var shapeToRollOut = this.rolledOverShapes[shapeIndex];
+                if (shapeToRollOut.onRollOut()) {
+                    requiresRedraw = true;
+                }
+            }
+            this.rolledOverShapes.length = 0;
+            if (requiresRedraw) {
+                this.drawImage();
+            }
+            this.fireEvent("rollover", [ ]);
+            this.fireEvent("smartimage.rollover", [ ]); // deprecated as of 5.3
+        }
+    },
+
+    /**
+     * <p>Handler for mouse down events.</p>
+     * <p>All currently rolled over shapes are checked if any of them is available for
+     * "direct dragging", which is usually the case when a point move is executed rather
+     * than a "whole shape" move. If no direct dragging is possible, shapes that signal
+     * a "deferred dragging" (which is executed only when the user has dragged the shape
+     * over a certain distance, as defined by the {@link tolerance} property) are
+     * collected and marked for becoming active later.</p>
+     * @param {Event} event The mouse event
+     */
+    onMouseDown: function(event) {
+        if (!this.zoomedImageSize) {
+            return;
+        }
+        var coords = this.calculateTransformedCoords(event);
+        this.scheduledDragShapes.length = 0;
+        this.fireEvent("addrequest", coords);
+        this.fireEvent("smartimage.addrequest", coords); // deprecated as of 5.3
+        var scheduledDragCnt = this.scheduledDragShapes.length;
+        if ((this.rolledOverShapes.length > 0) || (scheduledDragCnt > 0)) {
+            var directDragShapes = [ ];
+            var deferredDragShapes = [ ];
+            var shapeCnt = this.rolledOverShapes.length;
+            for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+                var shapeToCheck = this.rolledOverShapes[shapeIndex];
+                if (shapeToCheck.isDirectlyDraggable(coords, this.zoomedTolerance)) {
+                    directDragShapes.push(shapeToCheck);
+                } else if (shapeToCheck.isDeferredDraggable(coords, this.zoomedTolerance)) {
+                    deferredDragShapes.push(shapeToCheck);
+                }
+            }
+            for (var scheduleIndex = 0; scheduleIndex < scheduledDragCnt; scheduleIndex++) {
+                var shapeToAdd = this.scheduledDragShapes[scheduleIndex];
+                shapeToAdd.onAddForDrag(coords);
+                directDragShapes.push(shapeToAdd);
+            }
+            if (directDragShapes.length > 0) {
+                this.directDragShapes = directDragShapes;
+                this.deferredDragShapes = null;
+                this.draggingBaseCoords = coords;
+                this.fireDragStart(coords);
+                this.fireEvent("dragchange", this.directDragShapes, false);
+                this.fireEvent("smartimage.dragchange", this.directDragShapes, false); // deprecated as of 5.3
+            } else if (deferredDragShapes.length > 0) {
+                this.directDragShapes = null;
+                this.deferredDragShapes = deferredDragShapes;
+                this.draggingBaseCoords = coords;
+            } else {
+                this.directDragShapes = null;
+                this.deferredDragShapes = null;
+                this.draggingBaseCoords = null;
+            }
+        }
+        this.addTemporaryHandler(this.doc, "mousemove", this.onMouseMove, this);
+        // IE will send mouseUp automatically to the object that received the mouseDown
+        // event, but Firefox sends it to the object that currently is under the mouse
+        // pointer, so we will install a mouseup handler on the document that forwards
+        // it to the correct mouseUp handler
+        if (CQ.Ext.isGecko) {
+            this.addTemporaryHandler(this.doc, "mouseup",  this.onMouseUp, this);
+        }
+    },
+
+    /**
+     * <p>Handler for mouse up events.</p>
+     * <p>All currently rolled over shapes are checked if any of them is available for
+     * "direct dragging", which is usually the case when a point move is executed rather
+     * than a "whole shape" move. If no direct dragging is possible, shapes that signal
+     * a "deferred dragging" (which is executed only when the user has dragged the shape
+     * over a certain distance, as defined by the {@link #tolerance} property.</p>
+     * @param {Event} event The mouse event
+     */
+    onMouseUp: function(event) {
+        if (!this.zoomedImageSize) {
+            return;
+        }
+        var coords = this.calculateTransformedCoords(event);
+        var calcCoords = coords.unzoomedUnclipped;
+        var isDragEnded = false;
+        if ((this.directDragShapes != null) || (this.deferredDragShapes != null)) {
+            if (this.directDragShapes != null) {
+                isDragEnded = true;
+                var xOffs = calcCoords.x - this.draggingBaseCoords.unzoomedUnclipped.x;
+                var yOffs = calcCoords.y - this.draggingBaseCoords.unzoomedUnclipped.y;
+                this.fireMove(xOffs, yOffs, coords);
+                this.fireDragEnd(coords);
+                this.fireEvent("dragchange", this.directDragShapes, true);
+                this.fireEvent("smartimage.dragchange", this.directDragShapes, true); // deprecated since 5.3
+                this.directDragShapes = null;
+            }
+            this.deferredDragShapes = null;
+            this.draggingBaseCoords = null;
+        }
+        if (!isDragEnded) {
+            this.selectRollovers();
+        } else {
+            this.onMouseMove(event);
+        }
+        if (!CQ.Ext.isIE) {
+            event.stopPropagation();
+        }
+        this.removeTemporaryHandlers();
+    },
+
+    /**
+     * Fires a "move" event to all shapes that are affected by a drag operation.
+     * @param {Number} xOffs The horizontal move offset
+     * @param {Number} yOffs The vertical move offset
+     * @param {Object} coords The actual coordinates (properties: x, y)
+     */
+    fireMove: function(xOffs, yOffs, coords) {
+        var requestRepaint = false;
+        var shapeCnt = this.directDragShapes.length;
+        for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+            var shapeToNotify = this.directDragShapes[shapeIndex];
+            if (shapeToNotify.moveShapeBy(xOffs, yOffs, coords)) {
+                requestRepaint = true;
+            }
+        }
+        if (requestRepaint) {
+            this.drawImage();
+        }
+    },
+
+    /**
+     * Fires an event that signals the begin of a drag operation to all affected
+     * shapes.
+     * @param {Object} coords Coordinates where the dragging begins
+     */
+    fireDragStart: function(coords) {
+        var requestRepaint = false;
+        var shapeCnt = this.directDragShapes.length;
+        for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+            var shapeToNotify = this.directDragShapes[shapeIndex];
+            if (shapeToNotify.onDragStart(coords, this.zoomedTolerance)) {
+                requestRepaint = true;
+            }
+        }
+        if (requestRepaint) {
+            this.drawImage();
+        }
+    },
+
+    /**
+     * Fires an event that signals the end of a drag operation to all affected
+     * shapes.
+     * @param {Object} coords Coordinates where the dragging ends (properties: x, y)
+     */
+    fireDragEnd: function(coords) {
+        var requestRepaint = false;
+        var shapeCnt = this.directDragShapes.length;
+        for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+            var shapeToNotify = this.directDragShapes[shapeIndex];
+            if (shapeToNotify.onDragEnd(coords, this.zoomedTolerance)) {
+                requestRepaint = true;
+            }
+        }
+        if (requestRepaint) {
+            this.drawImage();
+        }
+    },
+
+    /**
+     * <p>Adds a temporary handler to the specified {@link CQ.Ext.Element}.</p>
+     * <p>Temporary handler can be removed at once using {@link #removeTemporaryHandlers}.
+     * </p>
+     * @param {CQ.Ext.Element} el The element the handler is added to
+     * @param {String} handlerName Name of the event ("mouseup", "mousedown", etc.)
+     * @param {Function} fn Handler function
+     * @param {Object} scope (optional) The scope the handler is executed in
+     */
+    addTemporaryHandler: function(el, handlerName, fn, scope) {
+        if (this.temporaryHandlers == null) {
+            this.temporaryHandlers = [ ];
+        }
+        var handlerDef = {
+            "el": el,
+            "handlerName": handlerName,
+            "fn": fn,
+            "scope": scope
+        };
+        this.temporaryHandlers.push(handlerDef);
+        el.on(handlerName, fn, scope);
+    },
+
+    /**
+     * Removes all temporary handlers at once.
+     */
+    removeTemporaryHandlers: function() {
+        if (this.temporaryHandlers != null) {
+            var removeCnt = this.temporaryHandlers.length;
+            for (var removeIndex = 0; removeIndex < removeCnt; removeIndex++) {
+                var handlerToRemove = this.temporaryHandlers[removeIndex];
+                handlerToRemove.el.un(handlerToRemove.handlerName, handlerToRemove.fn,
+                        handlerToRemove.scope);
+            }
+            this.temporaryHandlers = null;
+        }
+    },
+
+
+    // Rollover handling -------------------------------------------------------------------
+
+    /**
+     * <p>Blocks rollover handling.</p>
+     * <p>All necessary events are sent accordingly.</p>
+     */
+    blockRollOver: function() {
+        this.isRollOverHandlingBlocked = true;
+        var removeCnt = this.rolledOverShapes.length;
+        for (var removeIndex = removeCnt - 1; removeIndex >= 0; removeIndex--) {
+            this.removeShapeFromRollovers(this.rolledOverShapes[removeIndex]);
+        }
+        this.drawImage();
+        this.fireEvent("rollover", this.rolledOverShapes);
+        this.fireEvent("smartimage.rollover", this.rolledOverShapes); // deprecated as of 5.3
+    },
+
+    /**
+     * Unblocks rollover handling.
+     */
+    unblockRollOver: function() {
+        this.isRollOverHandlingBlocked = false;
+    },
+
+    /**
+     * <p>Adds a shape to the list of currently rolled over shapes.</p>
+     * <p>A onRollOver event is sent accordingly. Note that the system event
+     * "smartimage.rollover" has to be sent explicitly.</p>
+     * @param {CQ.form.SmartImage.Shape} shapeToAdd The shape to add
+     * @param {Object} coords Coordinates of the rollover
+     */
+    addShapeToRollovers: function(shapeToAdd, coords) {
+        this.rolledOverShapes.push(shapeToAdd);
+        if (shapeToAdd.onRollOver(coords)) {
+            this.drawImage();
+        }
+    },
+
+    /**
+     * <p>Removes a shape from the list of currently rolled over shapes.</p>
+     * <p>A onRollOut event is sent accordingly. Note that the system event
+     * "smartimage.rollover" has to be sent explicitly.</p>
+     * @param {CQ.form.SmartImage.Shape} shapeToRemove The shape to remove
+     * @param {Object} coords Coordinates of the rollover
+     * @param {Boolean} blockRedraw (optional) True if redrawing the image should be blocked
+     */
+    removeShapeFromRollovers: function(shapeToRemove, coords, blockRedraw) {
+        var index = this.rolledOverShapes.indexOf(shapeToRemove);
+        if (index >= 0) {
+            this.rolledOverShapes.splice(index, 1);
+            if (shapeToRemove.onRollOut(coords) && !blockRedraw) {
+                this.drawImage();
+            }
+        }
+    },
+
+    /**
+     * Returns a snapshot of the currently rolled over shapes.
+     * @return {CQ.form.SmartImage.Shape[]} Array of currently rolled over shapes
+     */
+    getRolledOverShapes: function() {
+        var rolledOverShapes = [ ];
+        var shapeCnt = this.rolledOverShapes.length;
+        for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+            rolledOverShapes.push(this.rolledOverShapes[shapeIndex]);
+        }
+        return rolledOverShapes;
+    },
+
+
+    // Selection handling ------------------------------------------------------------------
+
+    /**
+     * <p>Selects the currently rolled over shape(s).</p>
+     * <p>Internal events (select/unselect) are relayed to all shapes that are affected.
+     * Additionally, a "smartimage.selchanged" system event is fired.</p>
+     * @return {Boolean} True if something has actually been selected or unselected
+     */
+    selectRollovers: function() {
+        var hasChangedAnything = false;
+        var requiresRedraw = false;
+        var shapeIndex;
+        var unselectShapeCnt = this.selectedShapes.length;
+        for (shapeIndex = 0; shapeIndex < unselectShapeCnt; shapeIndex++) {
+            var shapeToUnselect = this.selectedShapes[shapeIndex];
+            if (this.rolledOverShapes.indexOf(shapeToUnselect) < 0) {
+                hasChangedAnything = true;
+                if (shapeToUnselect.onUnSelect()) {
+                    requiresRedraw = true;
+                }
+            }
+        }
+        var selectedShapes = [ ];
+        var selectShapeCnt = this.rolledOverShapes.length;
+        for (shapeIndex = 0; shapeIndex < selectShapeCnt; shapeIndex++) {
+            hasChangedAnything = true;
+            var clickedShape = this.rolledOverShapes[shapeIndex];
+            selectedShapes.push(clickedShape);
+            if (this.selectedShapes.indexOf(clickedShape) < 0) {
+                if (clickedShape.onSelect()) {
+                    requiresRedraw = true;
+                }
+            }
+            if (clickedShape.onClick()) {
+                requiresRedraw = true;
+            }
+        }
+        this.selectedShapes = selectedShapes;
+        if (requiresRedraw) {
+            this.drawImage();
+        }
+        CQ.Log.debug("Firing selection change event.");
+        this.fireEvent("selectionchange", selectedShapes);
+        this.fireEvent("smartimage.selchanged", selectedShapes); // deprecated as of 5.3
+        return hasChangedAnything;
+    },
+
+    /**
+     * <p>Clears the current selection.</p>
+     * <p>Internal events (unselect) are relayed to all shapes that are affected.
+     * Additionally, a "smartimage.selchanged" event is fired.</p>
+     * @return {CQ.form.SmartImage.Shape[]} Array of shapes that were unselected
+     */
+    clearSelection: function() {
+        var requiresRedraw = false;
+        var unselectShapeCnt = this.selectedShapes.length;
+        for (var shapeIndex = 0; shapeIndex < unselectShapeCnt; shapeIndex++) {
+            var shapeToUnselect = this.selectedShapes[shapeIndex];
+            if (shapeToUnselect.onUnSelect()) {
+                requiresRedraw = true;
+            }
+        }
+        var unselectedShapes = this.selectedShapes;
+        this.selectedShapes = [ ];
+        this.fireEvent("selectionchange", this.selectedShapes);
+        this.fireEvent("smartimage.selchanged", this.selectedShapes); // deprecated as of 5.3
+        return unselectedShapes;
+    },
+
+    /**
+     * <p>Deletes all currently selected shapes.</p>
+     * <p>A "smartimage.selchanged" event is fired and a redraw is executed.</p>
+     */
+    deleteSelectedShapes: function() {
+        var selectionCnt = this.selectedShapes.length;
+        if (selectionCnt > 0) {
+            for (var selectionIndex = 0; selectionIndex < selectionCnt; selectionIndex++) {
+                var shapeToRemove = this.selectedShapes[selectionIndex];
+                var shapeSet = this.getSuitableShapeSet(shapeToRemove);
+                shapeSet.removeShape(shapeToRemove);
+            }
+            this.drawImage();
+            this.selectedShapes.length = 0;
+            this.fireEvent("selectionchange", this.selectedShapes);
+            this.fireEvent("smartimage.selchanged", this.selectedShapes); // deprecated as of 5.3
+        }
+    },
+
+    /**
+     * Returns a snapshot of the currently selected shapes.
+     * @return {CQ.form.SmartImage.Shape[]} Array with currently selected shapes
+     */
+    getSelectedShapes: function() {
+        var selectedShapes = [ ];
+        var selectedCnt = this.selectedShapes.length;
+        for (var selectedIndex = 0; selectedIndex < selectedCnt; selectedIndex++) {
+            selectedShapes.push(this.selectedShapes[selectedIndex]);
+        }
+        return selectedShapes;
+    },
+
+    /**
+     * <p>Selects the specified shape.</p>
+     * <p>All required events are fired accordingly.</p>
+     * @param {CQ.form.SmartImage.Shape} shapeToSelect The shape to add to the current
+     *        selection
+     * @param {Boolean} clearSelection (optional) True if the current selection has to be
+     *        cleared before adding the specified shape
+     */
+    selectShape: function(shapeToSelect, clearSelection) {
+        if (clearSelection === true) {
+            var selectionCnt = this.selectedShapes.length;
+            for (var selectionIndex = 0; selectionIndex < selectionCnt; selectionIndex++) {
+                var shapeToRemove = this.selectedShapes[selectionIndex];
+                var shapeSet = this.getSuitableShapeSet(shapeToRemove);
+                shapeSet.removeShape(shapeToRemove);
+            }
+            this.selectedShapes.length = 0;
+        }
+        shapeToSelect.onSelect();
+        this.selectedShapes.push(shapeToSelect);
+        this.fireEvent("selectionchange", this.selectedShapes);
+        this.fireEvent("smartimage.selchanged", this.selectedShapes); // deprecated as of 5.3
+    },
+
+
+    // Access to component's state ---------------------------------------------------------
+
+    /**
+     * <p>Gets the absolute tolerance distance.</p>
+     * <p>This value will change when the zoom is changed, so the value should not be stored
+     * by the caller.</p>
+     * @return {Number} The absolute tolerance distance (in pixels)
+     */
+    getTolerance: function() {
+        return this.zoomedTolerance;
+    },
+
+
+    // Calculating sizes -------------------------------------------------------------------
+
+    /**
+     * Calculates the current "basic size" (that is the working area including scrollbars,
+     * provided by the body area of the basic panel) to the data model
+     * ({@link #basicSize}).
+     * @private
+     */
+    calculateBasicSize: function() {
+        this.basicSize = {
+            "width": this.body.dom.clientWidth,
+            "height": this.body.dom.clientHeight
+        };
+    },
+
+    /**
+     * <p>Calculates the current working area (= the currently visible part of the zoomed
+     * image) to the data model ({@link #workingAreaSize}).</p>
+     * <p>The {@link #scrollerDiv} property must be available when calling this method.</p>
+     * @private
+     */
+    calculateWorkingAreaSize: function() {
+        this.workingAreaSize = {
+            "width": this.scrollerDiv.clientWidth,
+            "height": this.scrollerDiv.clientHeight
+        };
+    },
+
+    /**
+     * <p>Caclulates the original (= without any zooming applied) size of the current image
+     * to the data model ({@link #originalImageSize}).
+     * <p>The {@link #imageToDisplay} must have been loaded completely before calling this
+     * method.</p>
+     * @private
+     */
+    calculateOriginalImageSize: function() {
+        this.originalImageSize = {
+            "width": this.imageToDisplay.width,
+            "height": this.imageToDisplay.height,
+            "ratio": (this.imageToDisplay.width / this.imageToDisplay.height)
+        };
+    },
+
+    /**
+     * Calculates zoomed sizes/coordinates from the specified size/position object.
+     * @param {Number} zoom Zoom factor
+     * @param {Object} obj Size (properties: width, height) or coordinates (properties:
+     *        x, y) object to be zoomed
+     * @return {Object} The zoomed size/position; properties: width, height (size) or
+     *         x, y (coordinates)
+     */
+    calculateZoom: function(zoom, obj) {
+        if (obj.width !== undefined) {
+            return {
+                "width": Math.round((zoom + 1) * obj.width),
+                "height": Math.round((zoom + 1) * obj.height)
+            };
+        } else if (obj.x !== undefined) {
+            return {
+                "x": Math.round((zoom + 1) * obj.x),
+                "y": Math.round((zoom + 1) * obj.y)
+            };
+        }
+        return null;
+    },
+
+    /**
+     * Calculates the absolute zoom factor, i.e. the zoom factor regarding the original
+     * image, not the (probably already zoomed) basic image.
+     * @private
+     * @return {Number} The absolute zoom factor
+     */
+    calculateAbsoluteZoom: function() {
+        return ((this.zoom + 1) * this.basicImageSize.baseZoom) - 1;
+    },
+
+    /**
+     * Calculates inverse zoomed sizes/coordinates from the specified size/coordinates
+     * object (i.e. calculates the original size/position from a zoomed size/position).
+     * @param {Number} zoom The zoom factor
+     * @param {Object} zoomedObj Zoomed size (properties: width, height) or coordinates
+     *        (properties: x, y) object
+     * @return {Object} The original size/position; properties: width, height (size) or
+     *         x, y (coordinates)
+     */
+    calculateInverseZoom: function(zoom, zoomedObj) {
+        if (zoomedObj.width !== undefined) {
+            return {
+                "width": Math.round(zoomedObj.width / (zoom + 1)),
+                "height": Math.round(zoomedObj.height / (zoom + 1))
+            };
+        } else if (zoomedObj.x !== undefined) {
+            return {
+                "x": Math.round(zoomedObj.x / (zoom + 1)),
+                "y": Math.round(zoomedObj.y / (zoom + 1))
+            };
+        }
+        return null;
+    },
+
+    /**
+     * <p>Calculates the basic image size for the specified rotation angle.</p>
+     * <p>The basic image size is the size used for "zoom factor 1" and is either the
+     * original image size or a scaled down size that fits completely to the current
+     * working area.</p>
+     * <p>{@link #workingArea} and {@link #originalImageSize} must have been calculated
+     * beforehand.</p>
+     * @param {Number} angle The rotation angle (0, 90, 180, 270) to calculate the basic
+     *        image size for
+     * @return {Object} The zoomed image size for the specified angle; properties: width,
+     *         height, displayWidth (width + padding; see {@link #internalPadding}),
+     *         displayHeight (height + padding; see {@link #internalPadding}), baseZoom
+     *         (basic zoom factor; to be used if the zoom slider is in its leftmost
+     *         position)
+     */
+    calculateBasicImageSizeForAngle: function(angle) {
+        while (angle < 0) {
+            angle += 360;
+        }
+        angle = angle % 360;
+        var width = this.originalImageSize.width;
+        var height = this.originalImageSize.height;
+        var ratio = this.originalImageSize.ratio;
+        if ((angle == 90) || (angle == 270)) {
+            var temp = width;
+            width = height;
+            height = temp;
+            ratio = 1 / ratio;
+        }
+        var originalWidth = width;
+        var displayWidth = width + (this.internalPadding.width * 2);
+        var displayHeight = height + (this.internalPadding.height * 2);
+        var availWidth = this.workingAreaSize.width;
+        var availHeight = this.workingAreaSize.height;
+        if (displayWidth > availWidth) {
+            displayWidth = availWidth;
+            width = displayWidth - this.internalPadding.width * 2;
+            height = Math.round(width / ratio);
+            displayHeight = height + this.internalPadding.height * 2;
+        }
+        if (displayHeight > availHeight) {
+            displayHeight = availHeight;
+            height = displayHeight - this.internalPadding.height * 2;
+            width = Math.round(height * ratio);
+            displayWidth = width + this.internalPadding.width * 2;
+        }
+        if (width < 1) {
+            width = 1;
+        }
+        if (height < 1) {
+            height = 1;
+        }
+        return {
+            "width": width,
+            "height": height,
+            "displayWidth": displayWidth,
+            "displayHeight": displayHeight,
+            "baseZoom": (width / originalWidth)
+        };
+    },
+
+    /**
+     * <p>Calculates the current basic image size to the data model. The current rotation
+     * settings are handled accordingly.</p>
+     * <p>The basic image size is the size used for "zoom factor 1" and is either the
+     * original image size or a scaled down size that fits in the current working area.</p>
+     * <p>{@link #workingArea} and {@link #originalImageSize} must have been calculated
+     * beforehand.</p>
+     */
+    calculateBasicImageSize: function() {
+        this.basicImageSize =
+                this.calculateBasicImageSizeForAngle(this.getActualRotation());
+    },
+
+    /**
+     * Calculates the zoomed image size using the currently set zoom factor and the basic
+     * image size, which must have been calculated before using
+     * {@link #calculateBasicImageSize}, and propagates it to the data model.
+     */
+    calculateZoomedImageSize: function() {
+        this.zoomedImageSize = this.calculateZoom(this.zoom, this.basicImageSize);
+        this.zoomedTolerance = this.tolerance / (this.calculateAbsoluteZoom() + 1);
+        this.zoomedImageSize.displayWidth =
+            this.zoomedImageSize.width + (this.internalPadding.width * 2);
+        this.zoomedImageSize.displayHeight =
+            this.zoomedImageSize.height + (this.internalPadding.height * 2);
+    },
+
+    /**
+     * Precalculates the zoomed image size using the currently set zoom factor and the
+     * specified rotation angle.
+     * @param {Number} angle The angle to calculate the zoomed size for
+     * @return {Object} The zoomed size for the specified angle; properties: width, height,
+     *         displayWidth (width + padding; see {@link #internalPadding}), displayHeight
+     *         (height + padding; see {@link #internalPadding})
+     */
+    precalculateRotatedSize: function(angle) {
+        var basicImageSize = this.calculateBasicImageSizeForAngle(angle);
+        var zoomedImageSize = this.calculateZoom(this.zoom, basicImageSize);
+        zoomedImageSize.displayWidth =
+            zoomedImageSize.width + (this.internalPadding.width * 2);
+        zoomedImageSize.displayHeight =
+            zoomedImageSize.height + (this.internalPadding.height * 2);
+        return zoomedImageSize;
+    },
+
+    /**
+     * <p>Calculates the size of the "spacer" image.</p>
+     * <p>The spacer image reflects the overall size of the image in its current zoomed
+     * state, but it covers at least the working area currently available. If no zoomed
+     * image size is calculated (using {@link #propagateZoomedImageSize}, the working
+     * area size is used instead.</p>
+     * @return {Object} The spacer image's size; properties: width, height
+     */
+    calculateSpacerSize: function() {
+        var width = this.workingAreaSize.width;
+        var height = this.workingAreaSize.height;
+        if (this.zoomedImageSize) {
+            if (this.zoomedImageSize.displayWidth > width) {
+                width = this.zoomedImageSize.displayWidth;
+            }
+            if (this.zoomedImageSize.height > height) {
+                height = this.zoomedImageSize.displayHeight;
+            }
+        }
+        return {
+            "width": width,
+            "height": height
+        };
+    },
+
+
+    // Calculating coordinates -------------------------------------------------------------
+
+    /**
+     * <p>Calculates several coordinate views of the mouse pointer's current position.</p>
+     * <p>The following coordinate views are available:</p>
+     * <ol>
+     * <li>"screen"- for the zoomed, rotated image (= what is actually seen on the screen)
+     *     </li>
+     * <li>"unzoomed" - for the unzoomed, but rotated image (= usually the coordinates
+     *     that will be stored in the repository)</li>
+     * <li>"unzoomedUnclipped" - for the unzoomed, but rotated image; contrary to
+     *     "unzoomed", the coordinate may be outside the actual image</li>
+     * <li>"original" - for the unzoomed, unrotated image</li>
+     * </ul>
+     * @private
+     * @param {Event} event The mouse event
+     * @return {Object} Views of the current position as described above
+     */
+    calculateTransformedCoords: function(event) {
+        var compCoords = this.calcCompFromMouseCoords(event);
+        // adjust to image offsets (if the image does not cover the whole working area at
+        // the moment
+        if (this.imageOffsets) {
+            compCoords.x -= this.imageOffsets.x;
+            compCoords.y -= this.imageOffsets.y;
+        }
+        // limit valid coordinates to zoomed image size only
+        var maxX = this.zoomedImageSize.width;
+        var maxY = this.zoomedImageSize.height;
+        compCoords.isVirtual = (compCoords.x < 0) || (compCoords.x >= maxX)
+            || (compCoords.y < 0) || (compCoords.y >= maxY);
+        // CQ.Log.debug("CQ.form.SmartImage.Image#onMouseMove: Coordinates (zoomed image): " + compCoords.x + "/" + compCoords.y);
+        var absZoomFactor = this.calculateAbsoluteZoom();
+        var unzoomedCoords = this.calculateInverseZoom(absZoomFactor, compCoords);
+        var actualRotation = this.getActualRotation();
+        var isVertical = (actualRotation == 90) || (actualRotation == 270);
+        unzoomedCoords.zoom = this.zoom;
+        unzoomedCoords.absoluteZoom = absZoomFactor;
+        unzoomedCoords.imageSize = this.originalImageSize;
+        unzoomedCoords.rotatedImageSize = {
+            "width": (isVertical
+                    ? this.originalImageSize.height : this.originalImageSize.width),
+            "height": (isVertical
+                    ? this.originalImageSize.width : this.originalImageSize.height)
+        };
+        var unzoomedUnclippedCoords = {
+            "x": unzoomedCoords.x,
+            "y": unzoomedCoords.y,
+            "zoom": unzoomedCoords.zoom,
+            "absoluteZoom": unzoomedCoords.absoluteZoom,
+            "imageSize": unzoomedCoords.imageSize,
+            "rotatedImageSize": unzoomedCoords.rotatedImageSize
+        };
+        // suppress rounding errors and do clipping
+        if (unzoomedCoords.x < 0) {
+            unzoomedCoords.x = 0;
+        }
+        if (unzoomedCoords.y < 0) {
+            unzoomedCoords.y = 0;
+        }
+        if (isVertical) {
+            if (unzoomedCoords.y >= this.originalImageSize.width) {
+                unzoomedCoords.y = this.originalImageSize.width - 1;
+            }
+            if (unzoomedCoords.x >= this.originalImageSize.height) {
+                unzoomedCoords.x = this.originalImageSize.height - 1;
+            }
+        } else {
+            if (unzoomedCoords.x >= this.originalImageSize.width) {
+                unzoomedCoords.x = this.originalImageSize.width - 1;
+            }
+            if (unzoomedCoords.y >= this.originalImageSize.height) {
+                unzoomedCoords.y = this.originalImageSize.height - 1;
+            }
+        }
+        // CQ.Log.debug("CQ.form.SmartImage.Image#onMouseMove: Coordinates (unzoomed image): " + unzoomedCoords.x + "/" + unzoomedCoords.y);
+        var unrotatedCoords;
+        switch (actualRotation) {
+             case 0:
+                unrotatedCoords = {
+                    "x": unzoomedCoords.x,
+                    "y": unzoomedCoords.y
+                };
+                break;
+            case 90:
+                unrotatedCoords = {
+                    "x": unzoomedCoords.y,
+                    "y": this.originalImageSize.height - unzoomedCoords.x
+                };
+                break;
+            case 180:
+                unrotatedCoords = {
+                    "x": this.originalImageSize.width - unzoomedCoords.x,
+                    "y": this.originalImageSize.height - unzoomedCoords.y
+                };
+                break;
+            case 270:
+                unrotatedCoords = {
+                    "x": this.originalImageSize.width - unzoomedCoords.y,
+                    "y": unzoomedCoords.x
+                };
+                break;
+        }
+        // CQ.Log.debug("CQ.form.SmartImage.Image#onMouseMove: Coordinates (unrotated image): " + unrotatedCoords.x + "/" + unrotatedCoords.y);
+        return {
+            "screen": compCoords,
+            "unzoomed": unzoomedCoords,
+            "unzoomedUnclipped": unzoomedUnclippedCoords,
+            "unrotated": unrotatedCoords
+        };
+    },
+
+    /**
+     * <p>Calculate component relative coordinates from the mouse coordinates defined
+     * by the specified event.</p>
+     * @param {Event} event The event to calculate coordinates from
+     * @return {Object} Object with relative coordinates; properties: x, y
+     */
+    calcCompFromMouseCoords: function(event) {
+        var compCoords = new Object();
+        // calculare coordinates
+        var coords = CQ.Ext.get(this.canvasDiv).getXY();
+        var canvasOffset = {
+            hOffset: coords[0],
+            vOffset: coords[1]
+        };
+        compCoords.x = event.getPageX();
+        compCoords.y = event.getPageY();
+        compCoords.x -= canvasOffset.hOffset;
+        compCoords.y -= canvasOffset.vOffset;
+        // respect scroll offsets
+        compCoords.x += this.scrollerDiv.scrollLeft;
+        compCoords.y += this.scrollerDiv.scrollTop;
+        event.preventDefault();
+        // consider internal padding if applicable
+        if (this.scrollerDiv.clientWidth < this.scrollerDiv.scrollWidth) {
+            compCoords.x -= this.internalPadding.width;
+        }
+        if (this.scrollerDiv.clientHeight < this.scrollerDiv.scrollHeight) {
+            compCoords.y -= this.internalPadding.height;
+        }
+        return compCoords;
+    },
+
+
+    // Propagation stuff (model to view) ---------------------------------------------------
+
+    /**
+     * Propagates the current image state to the view.
+     * @private
+     */
+    propagateImage: function() {
+        this.blockRedraw = true;
+        this.calculateInternalOffset();
+        // adjust scrollbars to new situation
+        var availWidth = this.workingAreaSize.width;
+        var availHeight = this.workingAreaSize.height;
+        var imgWidth = this.zoomedImageSize.displayWidth;
+        var imgHeight = this.zoomedImageSize.displayHeight;
+        if ((this.internalOffset.x + availWidth) > imgWidth) {
+            this.internalOffset.x = imgWidth - availWidth;
+        }
+        if ((this.internalOffset.y + availHeight) > imgHeight) {
+            this.internalOffset.y = imgHeight - availHeight;
+        }
+        if (this.internalOffset.x < 0) {
+            this.internalOffset.x = 0;
+        } else if (this.internalOffset.y < 0) {
+            this.internalOffset.y = 0;
+        }
+        var isScrollX = (this.internalOffset.x != this.scrollerDiv.scrollLeft);
+        var isScrollY = (this.internalOffset.y != this.scrollerDiv.scrollTop);
+        if  (isScrollY) {
+            this.scrollerDiv.scrollTop = this.internalOffset.y;
+        }
+        if  (isScrollX) {
+            this.scrollerDiv.scrollLeft = this.internalOffset.x;
+        }
+        this.drawImage();
+        this.blockRedraw = false;
+    },
+
+    /**
+     * <p>Propagates the current state of the working area's data model to the view.</p>
+     * <p>Note that this method has an asynchronous part due to browser limitations, so
+     * the caller should pass in the code that should be executed after the method has
+     * been completed as a callback function rather than continue directly.</p>
+     * @param {Function} callback The function to be called after the working area's view
+     *        has been adjusted completely
+     * @private
+     */
+    propagateWorkingArea: function(callback) {
+        this.setCSSSize(this.positioningContainer, this.basicSize);
+        this.setCSSSize(this.scrollerDiv, this.basicSize);
+        var fn = this.propagateWorkingAreaAsync.createDelegate(this, [ callback ]);
+        fn.defer(1);
+    },
+
+    /**
+     * This is the asynchronous part of {@link #propagateWorkingArea}. This is required
+     * as a workaround to give the browser the time required to adjust internally to some
+     * changes made earlier.
+     * @param {Function} callback The function to be called after the working area's view
+     *        has been adjusted completely
+     * @private
+     */
+    propagateWorkingAreaAsync: function(callback) {
+        this.calculateWorkingAreaSize();
+        this.adjustSpacerImage();
+        this.setCanvasSize(this.imageCanvas, this.workingAreaSize);
+        if (callback) {
+            callback();
+        }
+    },
+
+
+    // Zooming -----------------------------------------------------------------------------
+
+    /**
+     * <p>Sets the current zoom factor.</p>
+     * <p>The change is propagated to the view appropriately.</p>
+     * @param {Number} zoom New zoom factor (where 0 means unzoomed, 0.1 will scale up to
+     *        1.1-times the basic size, and so on)
+     */
+    setZoom: function(zoom) {
+        this.calculateCenterPoint();
+        this.zoom = zoom;
+        this.calculateZoomedImageSize();
+        this.adjustSpacerImage();
+        this.propagateImage();
+    },
+
+    /**
+     * <p>Calculates the center point of the current working area to the model
+     * {@link #centerPoint}.</p>
+     * <p>The center point is used for focusing when zooming.</p>
+     * @private
+     */
+    calculateCenterPoint: function() {
+        var availWidth = this.workingAreaSize.width;
+        var availHeight = this.workingAreaSize.height;
+        var scrollX = this.scrollerDiv.scrollLeft;
+        var scrollY = this.scrollerDiv.scrollTop;
+        var zoomedCenterPoint = {
+            "x": scrollX + (availWidth / 2) - this.internalPadding.width,
+            "y": scrollY + (availHeight / 2) - this.internalPadding.height
+        };
+        if (zoomedCenterPoint.x < 0) {
+            zoomedCenterPoint = 0;
+        }
+        if (zoomedCenterPoint.y < 0) {
+            zoomedCenterPoint = 0;
+        }
+        var zoom = this.calculateAbsoluteZoom();
+        this.centerPoint = this.calculateInverseZoom(zoom, zoomedCenterPoint);
+    },
+
+    /**
+     * <p>Calculates the internal offset for displaying the current image fragment
+     * (see {@link #internalOffset}), considering the current center point (if one is
+     * set).</p>
+     * <p>The internal offset is also used for correctly setting the scrollbar offsets.</p>
+     * @private
+     */
+    calculateInternalOffset: function() {
+        var availWidth = this.workingAreaSize.width;
+        var availHeight = this.workingAreaSize.height;
+        if (this.centerPoint) {
+            var absZoom = this.calculateAbsoluteZoom();
+            var zoomedOffsets = this.calculateZoom(absZoom, this.centerPoint);
+            var scrollX = Math.round(
+                    zoomedOffsets.x + this.internalPadding.width - (availWidth / 2));
+            var scrollY = Math.round(
+                    zoomedOffsets.y + this.internalPadding.height - (availHeight / 2));
+            if (scrollX < 0) {
+                scrollX = 0;
+            }
+            if (scrollY < 0) {
+                scrollY = 0;
+            }
+            this.internalOffset.x = scrollX;
+            this.internalOffset.y = scrollY;
+        } else {
+            this.internalOffset.x = 0;
+            this.internalOffset.y = 0;
+        }
+    },
+
+    /**
+     * <p>Handler for scrolling.</p>
+     * <p>A new appropriate center point is calculated and a suitable image fragment is
+     * displayed.</p>
+     * @private
+     */
+    handleScroll: function() {
+        if (!this.blockRedraw) {
+            var scrollX = this.scrollerDiv.scrollLeft;
+            var scrollY = this.scrollerDiv.scrollTop;
+            var isChanged =
+                (this.internalOffset.x != scrollX) || (this.internalOffset.y != scrollY);
+            if (isChanged) {
+                this.internalOffset.x = scrollX;
+                this.internalOffset.y = scrollY;
+                this.calculateCenterPoint();
+                this.drawImage();
+            }
+        }
+    },
+
+
+    // Rotation ----------------------------------------------------------------------------
+
+    /**
+     * <p>Sets the current rotation.</p>
+     * <p>The change is propagated to the view appropriately.</p>
+     * @param {Number} rotation New rotation (in degrees; only values of 0, 90, 180, 270 are
+     *        allowed)
+     */
+    setRotation: function(rotation) {
+        this.calculateCenterPoint();
+        this.rotation = rotation;
+        this.calculateBasicImageSize();
+        this.calculateZoomedImageSize();
+        this.adjustSpacerImage();
+        this.propagateImage();
+    },
+
+    /**
+     * Gets the actual rotation (considering the {@link #ignoreRotation} setting).
+     * @return {Number} The actual rotation (0, 90, 180, 270)
+     */
+    getActualRotation: function() {
+        return (this.ignoreRotation ? 0 : this.rotation);
+    },
+
+
+    // Helpers -----------------------------------------------------------------------------
+
+    /**
+     * <p>Sets the size of an image.</p>
+     * <p>The size is set through the width and height DOM attributes and the correspondent
+     * CSS attributes to avoid compatibility problems with surrounding CSS classes.</p>
+     * @param {Image} img The image
+     * @param {Object} size The size to set; properties: width, height
+     * @private
+     */
+    setImageSize: function(img, size) {
+        img.width = size.width;
+        img.height = size.height;
+        img.style.width = size.width + "px";
+        img.style.height = size.height + "px";
+    },
+
+    /**
+     * Sets the size of a DOM object using the corresponding CSS attributes.
+     * @param {HTMLElement} dom The DOM object
+     * @param {Object} size The size to set; properties: width, height
+     * @private
+     */
+    setCSSSize: function(dom, size) {
+        dom.style.width = size.width + "px";
+        dom.style.height = size.height + "px";
+    },
+
+    /**
+     * <p>Sets the size of the canvas.</p>
+     * <p>This is done using the width and height DOM attributes.</p>
+     * @param {HTMLElement} dom The canvas DOM object
+     * @param {Object} size The size to set; properties: width, height
+     */
+    setCanvasSize: function(dom, size) {
+        dom.width = size.width;
+        dom.height = size.height;
+    },
+
+    /**
+     * Calculates the distance between the two coordinates specified.
+     * @param {Object} coord1 First coordinates; properties: x, y
+     * @param {Object} coord2 Second coordinates; properties: x, y
+     * @return {Number} The distance between the two coordinates
+     */
+    calculateDistance: function(coord1, coord2) {
+        return Math.sqrt(Math.pow(coord1.x - coord2.x, 2)
+                + Math.pow(coord1.y - coord2.y, 2));
+    },
+
+    /**
+     * Handles all calculation &amp; propagation stuff when a new image has finished
+     * loading.
+     */
+    handleImageLoaded: function() {
+        this.zoom = 0;
+        this.internalOffset.x = 0;
+        this.internalOffset.y = 0;
+        this.centerPoint = null;
+        this.calculateOriginalImageSize();
+        if (this.isInitialized) {
+            this.calculateBasicImageSize();
+            this.calculateZoomedImageSize();
+            this.adjustSpacerImage();
+            this.propagateImage();
+        }
+    },
+
+    /**
+     * <p>Adjusts the size of the spacer image that determines the extension of the
+     * scrollbars.</p>
+     * <p>This method must be called whenever the zoomed size of the image changes.</p>
+     */
+    adjustSpacerImage: function() {
+        this.setImageSize(this.spacerImage, this.calculateSpacerSize());
+    },
+
+
+    // Shape sets --------------------------------------------------------------------------
+
+    /**
+     * <p>Adds a shape set.</p>
+     * <p>The view will be adjusted accordingly.</p>
+     * @param {CQ.form.SmartImage.ShapeSet} setToAdd shape set to add
+     */
+    addShapeSet: function(setToAdd) {
+        this.shapeSets[setToAdd.id] = setToAdd;
+        setToAdd.imageComponent = this;
+        var shapeCnt = setToAdd.getShapeCount();
+        for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+            this.addShapeToDOM(setToAdd.getShapeAt(shapeIndex));
+        }
+        if (setToAdd.isVisible) {
+            this.drawImage();
+        }
+    },
+
+    /**
+     * Draws all currently visible shape sets.
+     * @param {CanvasRenderingContext2D} ctx The canvas context
+     * @param {Object} offsets offsets; properties: srcX, srcY, destX, destY, imageSize,
+     *        zoomedSize - todo document these properties!
+     */
+    drawShapeSets: function(ctx, offsets) {
+        var absoluteZoom = this.calculateAbsoluteZoom() + 1;
+        for (var setId in this.shapeSets) {
+            if (this.shapeSets.hasOwnProperty(setId)) {
+                var setToDraw = this.shapeSets[setId];
+                if (setToDraw.isVisible) {
+                    setToDraw.drawShapes(ctx, absoluteZoom, offsets);
+                }
+            }
+        }
+    },
+
+    /**
+     * Executes the specified function for each shape in each shapeset.
+     * @param {Function} fnToExecute The function to execute
+     * @param {Boolean} visibleOnly True if the function should only be executed on visible
+     *        shape sets
+     */
+    executeFnOnShapes: function(fnToExecute, visibleOnly) {
+        for (var setId in this.shapeSets) {
+            if (this.shapeSets.hasOwnProperty(setId)) {
+                var setToExecute = this.shapeSets[setId];
+                if (setToExecute.isVisible || !visibleOnly) {
+                    setToExecute.executeFnOnShapes(fnToExecute);
+                }
+            }
+        }
+    },
+
+    /**
+     * Gets a shape set from its ID.
+     * @param {String} shapeSetId ID of the shape set
+     * @return {CQ.form.SmartImage.ShapeSet} The shape set; null if no shape set is defined
+     *         for the specified ID
+     */
+    getShapeSet: function(shapeSetId) {
+        if (this.shapeSets.hasOwnProperty(shapeSetId)) {
+            return this.shapeSets[shapeSetId];
+        }
+        return null;
+    },
+
+    /**
+     * Gets the shape set that contains the specified shape
+     * @param {CQ.form.SmartImage.Shape} shape The shape for which the containing shape set
+     *         should be retrieved
+     * @return {CQ.form.SmartImage.ShapeSet} The shape set that is containing the specified
+     *         shape; null if no suitable shape set has been found
+     */
+    getSuitableShapeSet: function(shape) {
+        for (var shapeSetToCheck in this.shapeSets) {
+            if (this.shapeSets.hasOwnProperty(shapeSetToCheck)) {
+                var shapeSet = this.shapeSets[shapeSetToCheck];
+                var shapeCnt = shapeSet.getShapeCount();
+                for (var shapeIndex = 0; shapeIndex < shapeCnt; shapeIndex++) {
+                    var shapeToCheck = shapeSet.getShapeAt(shapeIndex);
+                    if (shapeToCheck == shape) {
+                        return shapeSet;
+                    }
+                }
+            }
+        }
+        return null;
+    },
+
+    /**
+     * <p>Sets the visibility of a shape set as a whole.</p>
+     * <p>Internal onUnselect/onRollOut events are sent accordingly. No system events are
+     * fired.</p>
+     * <p>Note that this setting affects the shape set as a whole. If a shape set that
+     * contains hidden shapes is shown using this method, these hidden shapes are still
+     * hidden.</p>
+     * @param {String} shapeSetId ID of shape set
+     * @param {Boolean} isVisible True if the shape set has to be made visible
+     * @param {Boolean} requestRedraw True if a redraw should be issued
+     */
+    setShapeSetVisible: function(shapeSetId, isVisible, requestRedraw) {
+        var shapeSet = this.shapeSets[shapeSetId];
+        if (shapeSet) {
+            shapeSet.executeFnOnShapes(function(shape) {
+                // fire rollover/selection events on hide
+                if (!isVisible) {
+                    var isRollover = (this.rolledOverShapes.indexOf(shape) >= 0);
+                    var selectedIndex = (this.selectedShapes.indexOf(shape) >= 0);
+                    if (isRollover) {
+                        this.removeShapeFromRollovers(shape, null, true);
+                    }
+                    if (selectedIndex >= 0) {
+                        shape.onUnSelect();
+                        this.selectedShapes.splice(selectedIndex, 1);
+                    }
+                }
+            }.createDelegate(this), true);
+            shapeSet.setVisible(isVisible);
+            if (requestRedraw) {
+                this.drawImage();
+            }
+        }
+        // todo it's probably a bug that no system events are fired here!
+    },
+
+    /**
+     * <p>Hides all currently visible shape sets.</p>
+     * <p>Internal onUnselect/onRollOut events are sent accordingly. No system events are
+     * fired.</p>
+     * <p>Note that this setting affects each shape set as a whole. If a shape set that
+     * contains hidden shapes is shown using this method, these hidden shapes are still
+     * hidden.</p>
+     * @param {Boolean} requestRedraw True if a redraw should be issued
+     */
+    hideAllShapeSets: function(requestRedraw) {
+        for (var shapeSetId in this.shapeSets) {
+            var shapeSetToHide = this.shapeSets[shapeSetId];
+            if (shapeSetToHide.isVisible) {
+                this.setShapeSetVisible(shapeSetId, false, false);
+            }
+        }
+        if (requestRedraw) {
+            this.drawImage();
+        }
+    },
+
+    /**
+     * <p>Schedules a shape for dragging.</p>
+     * <p>Should only be used when progessing the "add request" event.</p>
+     * @param {CQ.form.SmartImage.Shape} shapeToSchedule The shape to schedule
+     */
+    scheduleForDragging: function(shapeToSchedule) {
+        this.scheduledDragShapes.push(shapeToSchedule);
+    },
+
+
+    // Canvas implementation and abstraction -----------------------------------------------
+
+    /**
+     * <p>Creates a canvas DOM object that is suitable for the current browser.</p>
+     * <p>The size is taken from properties width/height (compliant browsers) resp.
+     * displayWidth/displayHeight (Internet Explorer).</p>
+     * @param {HTMLElement} parentDom The DOM element the canvas will be appended to
+     * @return {CQ.Ext.Element} A suitable Canvas Ext-Element
+     */
+    createCanvas: function(parentDom, width, height) {
+        var theCanvas;
+        CQ.Log.debug("SmartImage.Image#createCanvas: Started.");
+        // the Ext way of creating elements doesn't work here
+        theCanvas = document.createElement("canvas");
+        parentDom.appendChild(theCanvas);
+        if (theCanvas) {
+            if (width) {
+                theCanvas.width = width;
+            }
+            if (height) {
+                theCanvas.height = height;
+            }
+            if (CQ.Ext.isIE6 || CQ.Ext.isIE7 || CQ.Ext.isIE8) {
+                try {
+                    theCanvas = G_vmlCanvasManager.initElement(theCanvas);
+                } catch (e) {
+                    theCanvas = null;
+                }
+                if (!theCanvas) {
+                    CQ.Log.fatal("SmartImage.Image#createCanvas: Could not create Canvas emulation for Internet Explorer.");
+                }
+            }
+        }
+        CQ.Log.debug("SmartImage.Image#createCanvas:Finished; creating canvas " + (theCanvas ? "was successful" : "failed") + ".");
+        return theCanvas;
+    },
+
+    disablePanelTemporaryily: function() {
+        if (!this.workingAreaSize && this.scrollerDiv) {
+            this.calculateWorkingAreaSize();
+        }
+        if (this.imageCanvas && this.workingAreaSize) {
+            var ctx = this.imageCanvas.getContext("2d");
+            ctx.save();
+            ctx.globalCompositeOperation = "source-over";
+            var availWidth = this.workingAreaSize.width;
+            var availHeight = this.workingAreaSize.height;
+            if (CQ.Ext.isIE6 || CQ.Ext.isIE7 || CQ.Ext.isIE8) {
+                ctx.clearRect();
+            } else {
+                ctx.clearRect(0, 0, availWidth, availHeight);
+            }
+            ctx.restore();
+        }
+    },
+
+    /**
+     * Draws the current image fragment, considering all settings.
+     */
+    drawImage: function() {
+        var actualRotation = this.getActualRotation();
+        // todo probably using trigonometry here would make this more maintainable
+        var ctx = this.imageCanvas.getContext("2d");
+        ctx.save();
+        ctx.globalCompositeOperation = "source-over";
+        var availWidth = this.workingAreaSize.width;
+        var availHeight = this.workingAreaSize.height;
+        // translate canvas to its center and rotate it
+        var transX = Math.floor(availWidth / 2);
+        var transY = Math.floor(availHeight / 2);
+        ctx.translate(transX, transY);
+        ctx.rotate((actualRotation * Math.PI) / 180);
+        // calculate offsets in destination image
+        var xOffs = 0, yOffs = 0;
+        var padXStart = 0, padXEnd = 0;
+        var padYStart = 0, padYEnd = 0;
+        var displayWidth = availWidth;
+        var xOffsImgEnd = this.zoomedImageSize.displayWidth
+                - availWidth - this.internalPadding.width;
+        var yOffsImgEnd = this.zoomedImageSize.displayHeight
+                - availHeight - this.internalPadding.height;
+        if (availWidth >= this.zoomedImageSize.displayWidth) {
+            displayWidth = this.zoomedImageSize.width;
+            xOffs = Math.round((availWidth - displayWidth) / 2);
+        } else {
+            padXStart = (this.internalOffset.x < this.internalPadding.width
+                    ? this.internalPadding.width - this.internalOffset.x : 0);
+            if (this.internalOffset.x > xOffsImgEnd) {
+                padXEnd = this.internalOffset.x - xOffsImgEnd;
+            }
+            displayWidth -= padXStart + padXEnd;
+        }
+        var displayHeight = availHeight;
+        if (availHeight >= this.zoomedImageSize.displayHeight) {
+            displayHeight = this.zoomedImageSize.height;
+            yOffs = Math.round((availHeight - displayHeight) / 2);
+        } else {
+            padYStart = (this.internalOffset.y < this.internalPadding.height
+                    ? this.internalPadding.height - this.internalOffset.y : 0);
+            if (this.internalOffset.y > yOffsImgEnd) {
+                padYEnd = this.internalOffset.y - yOffsImgEnd;
+            }
+            displayHeight -= padYStart + padYEnd;
+        }
+        /*
+        CQ.Log.debug("Avail: " + availWidth + "/" + availHeight);
+        CQ.Log.debug("Display: " + xOffs + "/" + yOffs + " --- " + displayWidth + "/" + displayHeight);
+        CQ.Log.debug("Padding: XS:" + padXStart + " XE:" + padXEnd + " YS:" + padYStart + " YE:" + padYEnd);
+        */
+        this.imageOffsets = {
+            "x": xOffs,
+            "y": yOffs
+        };
+        var x0 = -transX;
+        var y0 = -transY;
+        // determine if the image is vertical (90/270 deg rotation)
+        var isVertical = (actualRotation == 90) || (actualRotation == 270);
+        // clear background
+        if (CQ.Ext.isIE6 || CQ.Ext.isIE7 || CQ.Ext.isIE8) {
+            // clear everything
+            ctx.clearRect();
+        } else {
+            if (isVertical) {
+                ctx.clearRect(y0, x0, availHeight, availWidth);
+            } else {
+                ctx.clearRect(x0, y0, availWidth, availHeight);
+            }
+        }
+        // calculate original, unzoomed source sizes and positions
+        var sourcePos = {
+            "x": 0,
+            "y": 0
+        };
+        var sourceZoom = this.calculateAbsoluteZoom();
+        var posCalc = {
+            "x": this.internalOffset.x - this.internalPadding.width,
+            "y": this.internalOffset.y - this.internalPadding.height
+        };
+        if (posCalc.x < 0) {
+            posCalc.x = 0;
+        }
+        if (posCalc.y < 0) {
+            posCalc.y = 0;
+        }
+        var shapeSourcePos = this.calculateInverseZoom(sourceZoom, posCalc);
+        switch (actualRotation) {
+            case 90:
+                posCalc.x = this.zoomedImageSize.width - posCalc.x - displayWidth;
+                break;
+            case 180:
+                posCalc.x = this.zoomedImageSize.width - posCalc.x - displayWidth;
+                posCalc.y = this.zoomedImageSize.height - posCalc.y - displayHeight;
+                break;
+            case 270:
+                posCalc.y = this.zoomedImageSize.height - posCalc.y - displayHeight;
+                break;
+        }
+        sourcePos = this.calculateInverseZoom(sourceZoom, posCalc);
+        var sourceSize = this.calculateInverseZoom(sourceZoom, {
+                "width": displayWidth,
+                "height": displayHeight
+            });
+        // respect rotation, as the original image is unrotated, while coordinate
+        // calculation so far has run on rotated coordinates
+        var srcX = (isVertical ? sourcePos.y : sourcePos.x);
+        var srcY = (isVertical ? sourcePos.x : sourcePos.y);
+        if (srcX < 0) {
+            srcX = 0;
+        }
+        if (srcY < 0) {
+            srcY = 0;
+        }
+        var srcWidth = (isVertical ? sourceSize.height : sourceSize.width);
+        var srcHeight = (isVertical ? sourceSize.width : sourceSize.height);
+        if (srcWidth > this.originalImageSize.width) {
+            srcWidth = this.originalImageSize.width;
+        }
+        if (srcHeight > this.originalImageSize.height) {
+            srcHeight = this.originalImageSize.height;
+        }
+        // convert destination coordinates
+        var destX, destY, destWidth, destHeight;
+        switch (actualRotation) {
+            case 0:
+                destX = x0 + xOffs + padXStart;
+                destY = y0 + yOffs + padYStart;
+                destWidth = displayWidth;
+                destHeight = displayHeight;
+                break;
+            case 90:
+                destX = y0 + yOffs + padYStart;
+                destY = x0 + xOffs + padXEnd;
+                destWidth = displayHeight;
+                destHeight = displayWidth;
+                break;
+            case 180:
+                destX = x0 + xOffs + padXEnd;
+                destY = y0 + yOffs + padYEnd;
+                destWidth = displayWidth;
+                destHeight = displayHeight;
+                break;
+            case 270:
+                destX = y0 + yOffs + padYEnd;
+                destY = x0 + xOffs + padXStart;
+                destWidth = displayHeight;
+                destHeight = displayWidth;
+                break;
+        }
+        // draw
+        var isException = false;
+        try {
+            ctx.drawImage(this.imageToDisplay.image,
+                    srcX, srcY, srcWidth, srcHeight, destX, destY, destWidth, destHeight);
+        } catch (e) {
+            window.setTimeout(this.drawImage.createDelegate(this), 1);
+            isException = true;
+        }
+        ctx.restore();
+        if (!isException) {
+            // draw shapes
+            this.drawShapeSets(ctx, {
+                "destX": xOffs + padXStart,
+                "destY": yOffs + padYStart,
+                "srcX": shapeSourcePos.x,
+                "srcY": shapeSourcePos.y,
+                "imageSize": this.originalImageSize,
+                "zoomedSize": this.zoomedImageSize
+            });
+        }
+    },
+
+    /**
+     * <p>Creates the additional DOM objects for the specified
+     * {@link CQ.form.SmatImage.Shape} which are required for accelerating display speed
+     * on Internet Explorer.</p>
+     * <p>The method will do nothing if invoked for other browsers.</p>
+     * @param {CQ.form.SmartImage.Shape} shape The shape for which the additional DOM
+     *        objects should be created
+     */
+    addShapeToDOM: function(shape) {
+        if (CQ.Ext.isIE) {
+            var container = CQ.Ext.DomHelper.insertBefore(this.scrollerDiv, {
+                tag: "div"
+            }, false);
+            container.style.position = "absolute";
+            container.style.top = "0";
+            container.style.left = "0";
+            var canvas = this.createCanvas(
+                    container, this.workingAreaSize.width, this.workingAreaSize.height);
+            var shapeDef = {
+                "container": container,
+                "canvas": canvas,
+                "shape": shape
+            };
+            if (!this.shapeDefs) {
+                this.shapeDefs = new Array();
+            }
+            this.shapeDefs.push(shapeDef);
+            shape.shapeDef = shapeDef;
+        }
+    },
+
+    /**
+     * <p>Removes the IE specific DOM objects that were added by {@link #addShapeToDom}
+     * for the specified {@link CQ.form.SmartImage.Shape}.</p>
+     * <p>The method will do nothing if invoked for other browsers.</p>
+     * @param {CQ.form.SmartImage.Shape} shape The shape for which additional DOM objects
+     *        will be removed
+     */
+    removeShapeFromDOM: function(shape) {
+        if (CQ.Ext.isIE) {
+            var shapeDef = shape.shapeDef;
+            var canvasElement = CQ.Ext.get(shapeDef.canvas);
+            var divElement = CQ.Ext.get(shapeDef.container);
+            canvasElement.remove();
+            divElement.remove();
+        }
+    },
+
+    /**
+     * <p>Gets a canvas context for directly accessing the basic image.</p>
+     * <p>This should only be used for animation purposes.</p>
+     * @return {CanvasRenderingContext2D} Canvas context for directly accessing the basic
+     *         image
+     */
+    getCanvasContext: function() {
+        return this.imageCanvas.getContext("2d");
+    }
+
+});

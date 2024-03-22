@@ -1,0 +1,1771 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2015 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(window, document, Granite, jquery, Coral, URITemplate) {
+    "use strict";
+
+    /**
+     * It describes the current state of masonry.
+     * @typedef {Object} State
+     * @property {HTMLElement} collectionEl masonry HTML element
+     * @property {JQuery} collection masonry jquery element
+     * @property {Config} config configuration of masonry
+     * @property {String} mode current mode
+     * @property {Paginator} paginator
+     * @property {LazyLoader} lazyLoader
+     * @property {Array<Function>} stack
+     */
+
+    /**
+     *  @typedef {Object} Mode
+     *  @property {String} SELECTION corresponds to "selection" mode
+     *  @property {String} DEFAULT corresponds to "default" mode
+     */
+
+    /**
+     * @typedef {Object} Config
+     * @property {Boolean} selectionMode
+     * @property {Number} limit
+     * @property {Number} size
+     * @property {String} itemReorderAction
+     * @property {Boolean} autoDefaultMode
+     * @property {String} trackingFeature
+     * @property {String} trackingElement
+     * @property {String} scrollSrc
+     */
+
+    /**
+     * @typedef {Object} SortConfig
+     * @property {String} sortBy
+     * @property {String} sortOrder
+     */
+
+    /** @type {JQueryStatic} */
+    var $ = jquery;
+
+    /** @type {Mode} */
+    var Mode = {
+        SELECTION: "selection",
+        DEFAULT: "default"
+    };
+
+    var stateMap = new WeakMap();
+    var registry = $(window).adaptTo("foundation-registry");
+
+    /**
+     * check whether the item is in removing state or not
+     * @todo avoid <code>_removing</code> usage, coral private
+     *
+     * @param {HTMLElement} item masonryItem
+     * @returns {Boolean} <code>true</code> when item is in removing state
+     * @private
+     */
+    function isRemovingOrRemovedItem(item) {
+        return item.removing || item.hasAttribute("_removing") ||
+            item.classList.contains("is-removing") || !item.parentNode;
+    }
+
+    /**
+     * check whether the item is lazy placeholder or pending to be loaded.
+     *
+     * @param {HTMLElement} item masonryItem
+     * @returns {Boolean} <code>true</code> when item is lazy placeholder or pending
+     * @private
+     */
+    function isLazyPendingItem(item) {
+        return item.matches(".foundation-collection-item.is-lazyLoaded, .foundation-collection-item.is-pending");
+    }
+
+    /**
+     * checks whether item is a collection item or not.
+     *
+     * @param {HTMLElement} item collection item element
+     * @returns {Boolean} <code>true</code> when item is a a valid foundation child
+     * @private
+     */
+    function isValidItem(item) {
+        return item.classList.contains("foundation-collection-item");
+    }
+
+    /**
+     * checks whether passed element is a valid foundation collection.
+     *
+     * @param {HTMLElement} collectionEl collection element
+     * @returns {Boolean} <code>true</code> when collection is a foundation collection
+     **/
+    function isValidCollection(collectionEl) {
+        return collectionEl.classList.contains("foundation-collection");
+    }
+
+    /**
+     * checks whether all collections items needs to selected.
+     *
+     * @param {HTMLElement} collectionEl collection element
+     * @returns {Boolean} <code>true</code> when collection in selectall mode
+     * @private
+     */
+    function isSelectAllModeEnabled(collectionEl) {
+        return collectionEl.dataset.foundationSelectionsSelectallMode === "true";
+    }
+
+    /**
+     * checks whether mode is valid  or not.
+     *
+     * @param {String} mode current collection mode.
+     * @returns {Boolean} <code>true</code> when mode is a valid mode
+     * @private
+     */
+    function isValidMode(mode) {
+        if (mode === Mode.SELECTION || mode === Mode.DEFAULT) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * checks whether passed mode corresponds to selection mode
+     *
+     * @param {String} mode collection mode.
+     * @returns {Boolean} <code>true</code> when mode is selectionMode.
+     * @private
+     */
+    function isSelectionMode(mode) {
+        if (mode === Mode.SELECTION) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * filters out removing items.
+     *
+     * @param {Array<HTMLElement>} itemEls items from which removing items needs to be filtered.
+     * @returns {Array<HTMLElement>} array of non removing items
+     * @private
+     */
+    function filterRemovingItems(itemEls) {
+        return Array.prototype.filter.call(itemEls, function(item) {
+            return !isRemovingOrRemovedItem(item);
+        });
+    }
+
+    /**
+     * Returns all the items of masonry collection, filter removing items
+     *
+     * @param {HTMLElement} collectionEl masonry collection element
+     * @returns {Array<HTMLElement>} masonry items array.
+     * @private
+     */
+    function getItems(collectionEl) {
+        var items = collectionEl.querySelectorAll(".foundation-collection > .foundation-collection-item");
+        return filterRemovingItems(items);
+    }
+
+    /**
+     * Returns all the selected items, filter out removing items
+     *
+     * @param {HTMLElement} collectionEl masonry collection element
+     * @returns {Array<HTMLElement>} selectedItems array
+     * @private
+     */
+    function getSelectedItems(collectionEl) {
+        var items = getItems(collectionEl);
+        var selectedItems = items.filter(function(item) {
+            return item.matches(".foundation-selections-item");
+        });
+        return selectedItems;
+    }
+
+    /**
+     * Returns all the unselected items. This may include lazy or pending items as well.
+     * To get only loaded unselected item use <code>getUnselectedLoadedItems</code>
+     * filter out removing items
+     *
+     * @param {HTMLElement} collectionEl masonry collection element
+     * @returns {Array<HTMLElement>} unselectedItems array(will include lazy or pending Items).
+     * @private
+     */
+    function getUnselectedItems(collectionEl) {
+        var items = getItems(collectionEl);
+        var unselectedItems = items.filter(function(item) {
+            return item.matches(":not(.foundation-selections-item)");
+        });
+        return unselectedItems;
+    }
+
+    /**
+     * Returns all the unselected loaded items, this will not contain lazy or pending item.
+     * To get all unselected item including lazy or pending items use <code>getUnselectedItems</code>
+     * filter out removing items
+     *
+     * @param {HTMLElement} collectionEl masonry collection element
+     * @returns {Array<HTMLElement>} unselectedItems array(does not include lazy or pending Items).
+     * @private
+     */
+    function getUnselectedLoadedItems(collectionEl) {
+        var unselectedItems = getUnselectedItems(collectionEl);
+        var unselectedLoadedItems = unselectedItems.filter(function(item) {
+            return !isLazyPendingItem(item);
+        });
+        return unselectedLoadedItems;
+    }
+
+    /**
+     * Returns all the lazy or pending items present in masonry, filter out removing items
+     *
+     * @param {HTMLElement} collectionEl masonry collection element
+     * @returns {Array<HTMLElement>} lazy/pending masonry items array
+     * @private
+     */
+    function getLazyOrPendingItems(collectionEl) {
+        var items = getItems(collectionEl);
+        var lazyPendingItems = items.filter(function(item) {
+            return item.matches(".is-lazyLoaded, .is-pending");
+        });
+        return lazyPendingItems;
+    }
+
+    /**
+     * select all loaded items of masonry. This will not select the lazy/pending items.
+     *
+     * @param {HTMLElement} collectionEl collection element
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @private
+     */
+    function selectAllLoadedItems(collectionEl, silent) {
+        var unselectedLoadedItems = getUnselectedLoadedItems(collectionEl);
+        selectBulkItems(unselectedLoadedItems, silent);
+    }
+
+    /**
+     * select all items of masonry. This will load lazy items and select them.
+     *
+     * @param {HTMLElement} collectionEl masonry collection element
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @returns {JQueryPromise} returns a promise will resolved after all items has been selected.
+     * @private
+     */
+    function selectAllItems(collectionEl, silent) {
+        var lazyPendingItems = getLazyOrPendingItems(collectionEl);
+
+        if (lazyPendingItems.length) {
+            // `ui.wait()` cannot be used here.
+            // Lazy loading a large number of items will block the UI thread, freezing the wait animation.
+            // So, just use a plain back drop without animation.
+            var mask = $(document.createElement("div"))
+                .addClass("foundation-ui-mask")
+                .append('<coral-wait size="L" centered></coral-wait>')
+                .appendTo(document.body);
+
+            var promise = forceLoadLazyItems(collectionEl, lazyPendingItems).then(function(newLoadedItems) {
+                selectBulkItems(newLoadedItems, silent);
+            }).always(function() {
+                mask.remove();
+            });
+
+            selectAllLoadedItems(collectionEl, silent);
+            return promise;
+        } else {
+            selectAllLoadedItems(collectionEl, silent);
+            return $.Deferred().resolve().promise();
+        }
+    }
+
+    /**
+     * unselect all items of masonry
+     *
+     * @param {HTMLElement} collectionEl collection element
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @private
+     */
+    function unselectAllItems(collectionEl, silent) {
+        var selectedItems = getSelectedItems(collectionEl);
+        unselectBulkItems(selectedItems, silent);
+    }
+
+    /**
+     * select bulk quantity of items.
+     *
+     * @param {Array<HTMLElement>|NodeList} unselectedItems items needs to be selected
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @private
+     */
+    function selectBulkItems(unselectedItems, silent) {
+        if (unselectedItems.length === 0) {
+            return;
+        }
+
+        Array.prototype.forEach.call(unselectedItems, function(itemEl, index, arr) {
+            if (index !== arr.length - 1 || silent) {
+                // silently update selected property
+                itemEl.set("selected", true, true);
+            } else {
+                // trigger change event when updating last one.
+                itemEl.selected = true;
+            }
+            itemEl.classList.add("foundation-selections-item");
+        });
+    }
+
+    /**
+     * unselect bulk quantity of items.
+     *
+     * @param {Array<HTMLElement>|NodeList} selectedItems items needs to be unselected
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @private
+     */
+    function unselectBulkItems(selectedItems, silent) {
+        if (selectedItems.length === 0) {
+            return;
+        }
+
+        Array.prototype.forEach.call(selectedItems, function(itemEl, index, arr) {
+            if (index !== arr.length - 1 || silent) {
+                // silently update selected property
+                itemEl.set("selected", false, true);
+            } else {
+                // trigger change event for last
+                itemEl.selected = false;
+            }
+            itemEl.classList.remove("foundation-selections-item");
+        });
+    }
+
+    /**
+     * LazyLoaded items are loaded when user scroll to them.
+     * This will force the passed lazy items to be get loaded.
+     *
+     * @param {HTMLElement} collectionEl masonry collection element
+     * @param {Array<HTMLElement>} itemEls lazy items to be loaded.
+     * @returns {JQueryPromise<Array<HTMLElement>>} promise to be resolved with loadedItems.
+     * @private
+     */
+    function forceLoadLazyItems(collectionEl, itemEls) {
+        var state = stateMap.get(collectionEl);
+        var lazyLoader = state && state.lazyLoader ? state.lazyLoader : null;
+
+        if (!lazyLoader) {
+            return $.Deferred().resolve().promise();
+        }
+
+        return lazyLoader.loadItems(itemEls);
+    }
+
+    /**
+     * remove the unnecessary element from received server response.
+     * This is done to avoid initialization of unnecesarry element.
+     *
+     * @param {String} html response received from server.
+     * @param {Boolean} removeLazyItems <code>true</code> to remove lazy items from response html
+     * @returns {String} clean html with required items.
+     */
+    function cleanHTML(html, removeLazyItems) {
+        var domParser = new DOMParser();
+        var doc = domParser.parseFromString(html, "text/html");
+
+        var collectionEl = doc.body.querySelector(".foundation-layout-masonry.foundation-collection");
+
+        if (collectionEl) {
+            if (removeLazyItems) {
+                var items = getItems(collectionEl);
+
+                var loadedItems = items.filter(function(item) {
+                    return !isLazyPendingItem(item);
+                });
+
+                var innerHTML = loadedItems.reduce(function(outerHTML, item) {
+                    return outerHTML + item.outerHTML;
+                }, "");
+
+                collectionEl.innerHTML = innerHTML;
+                html = doc.head.innerHTML + doc.body.innerHTML;
+            }
+        }
+        return html;
+    }
+
+    /**
+     * Used to track the event performed by user.
+     * This function tracks interactions with masonry layout
+     * OMEGA Implementation
+     *
+     * @param {String} trackAction action performed by user
+     * @param {JQuery} collection masonry collection
+     * @param {Object} config masonry collection
+     * @param {HTMLElement} collectionItem masonry child item with which user interacted
+     * @param {Object} attributes optional extra information that needs to be sent
+     * @private
+     */
+    function trackEvent(trackAction, collection, config, collectionItem, attributes) {
+        var trackType = trackAction === "change" ? "masonry-item" : "masonry";
+        var trackElement = config.trackingElement;
+
+        if (collectionItem && collectionItem.dataset.foundationCollectionItemId) {
+            trackElement = config.trackingElement || collectionItem.dataset.foundationCollectionItemId;
+        }
+
+        var trackData = {
+            element: trackElement || "No element defined",
+            type: trackType,
+            action: trackAction,
+            widget: {
+                name: config.trackingElement || config.name || "foundation-layout-masonry",
+                type: "masonry"
+            },
+            feature: config.trackingFeature || "No feature defined",
+            attributes: attributes || {}
+        };
+
+        $(window).adaptTo("foundation-tracker").trackEvent(trackData);
+    }
+
+    /**
+     * Handles the mode change.
+     *
+     * @param {State} state current state of masonry
+     * @returns {Function} callback function which removes the added event handler
+     * @private
+     */
+    function handleMode(state) {
+        var modeChangeHandler = function(e, mode, group) {
+            if (e._foundationLayoutMasonry) {
+                return;
+            }
+            if (!isValidMode(mode)) {
+                return;
+            }
+            if (state.collectionEl.dataset.foundationModeGroup !== group) {
+                return;
+            }
+            changeMode(state, mode);
+        };
+
+        $(document).on("foundation-mode-change", modeChangeHandler);
+
+        return function() {
+            $(document).off("foundation-mode-change", modeChangeHandler);
+        };
+    }
+
+    /**
+     * Handles the ordering logic.
+     *
+     * @param {State} state current state of masonry
+     * @returns {Function} callback function which removes the added event handler
+     * @private
+     */
+    function handleOrderingRequest(state) {
+        var collection = state.collection;
+
+        var orderChanged = function(e) {
+            var detail = e.originalEvent.detail;
+
+            var dragItem = detail.item;
+            var dragAction = dragItem.dragAction;
+
+            var dropZone = dragAction.dropZone;
+
+            var before = detail.before;
+            var oldBefore = detail.oldBefore;
+
+            var action = state.config.itemReorderAction;
+
+            if (!action) {
+                return;
+            }
+
+            var beforeId = before ? before.dataset.foundationCollectionItemId : undefined;
+            var beforeName = beforeId ? beforeId.substring(beforeId.lastIndexOf("/") + 1) : undefined;
+
+            var rawURL = URITemplate.expand(action, {
+                item: dragItem.dataset.foundationCollectionItemId,
+                before: beforeId,
+                beforeName: beforeName
+            });
+
+            var url = rawURL;
+            var data;
+
+            var index = rawURL.indexOf("?");
+            if (index >= 0) {
+                url = rawURL.substring(0, index);
+                data = rawURL.substring(index + 1);
+            }
+
+            var ui = $(window).adaptTo("foundation-ui");
+
+            ui.wait();
+
+            $.ajax({
+                url: url,
+                method: "POST",
+                data: data
+            }).always(function() {
+                ui.clearWait();
+                trackEvent("order", collection, state.config, dragItem, { before: beforeId });
+            }).fail(function(jqXHR, textStatus, errorThrown) {
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Fail to reorder.");
+
+                trackEvent("order-error", collection, state.config, dragItem, {
+                    before: beforeId, errorMsg: errorThrown
+                });
+
+                ui.alert(title, message, "error");
+
+                if (oldBefore) {
+                    $(dragItem).insertBefore(oldBefore.nextSibling);
+                } else {
+                    $(dragItem).insertBefore(dropZone.firstChild);
+                }
+            });
+        };
+
+        collection.on("coral-masonry:order", orderChanged);
+
+        return function() {
+            collection.off("coral-masonry:order", orderChanged);
+        };
+    }
+
+    /**
+     * Handles the dragging logic.
+     *
+     * @param {State} state current state of masonry
+     * @returns {Function} callback function which removes the added event handler
+     * @private
+     */
+    function handleDragging(state) {
+        var collectionEl = state.collectionEl;
+        var drag = function(e) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        };
+
+        collectionEl.addEventListener("coral-dragaction:dragend", drag, true);
+
+        return function() {
+            collectionEl.removeEventListener("coral-dragaction:dragend", drag, true);
+        };
+    }
+
+    /**
+     * Handles the selection logic.
+     *
+     * @param {State} state current state of masonry
+     * @returns {Function} callback function which removes the added event handler
+     * @private
+     */
+    function handleSelection(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var LongPress = $(window).adaptTo("foundation-util-gesture-longpress");
+
+        var perform = function(item) {
+            var itemEl = item[0];
+            var toBeSelected = !item.hasClass("foundation-selections-item");
+            var api = collection.adaptTo("foundation-selections");
+
+            if (toBeSelected) {
+                var selectionMode = collectionEl.dataset.foundationSelectionsMode;
+
+                if (selectionMode === "single") {
+                    unselectAllItems(collectionEl);
+                }
+
+                api.select(itemEl);
+            } else {
+                api.deselect(itemEl);
+            }
+        };
+
+        var click = function(e) {
+            var item = $(e.target).closest(".foundation-collection, .foundation-collection-item, coral-quickactions");
+
+            if (!item.hasClass("foundation-collection-item")) {
+                return;
+            }
+
+            if (!isSelectionMode(state.mode)) {
+                return;
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (item.data("foundation-layout-collection-item.internal.avoidSelection")) {
+                item.removeData("foundation-layout-collection-item.internal.avoidSelection");
+                return;
+            }
+
+            perform(item);
+        };
+
+        var keydown = function(e) {
+            var SPACE = Coral.Keys.keyToCode("space");
+
+            if (e.keyCode !== SPACE) {
+                return;
+            }
+
+            var item = $(e.target);
+
+            if (!item.is("coral-masonry-item")) {
+                return;
+            }
+
+            e.preventDefault(); // prevent default UA behaviour such as scrolling
+
+            perform(item);
+        };
+
+        var escape = function() {
+            if (document.activeElement === collectionEl || collectionEl.contains(document.activeElement)) {
+                collection.adaptTo("foundation-selections").clear();
+            }
+        };
+
+        var longPress = new LongPress({
+            el: collectionEl,
+            selector: "coral-masonry-item",
+            validate: function() {
+                return !isSelectionMode(state.mode);
+            },
+            perform: function(itemEl) {
+                var api = collection.adaptTo("foundation-selections");
+                api.select(itemEl);
+                $(itemEl).data("foundation-layout-collection-item.internal.avoidSelection", true);
+            }
+        });
+
+        collectionEl.addEventListener("click", click, true);
+        collection.on("keydown", "coral-masonry-item.foundation-collection-item", keydown);
+        Coral.keys.on("escape", escape);
+        longPress.start();
+
+        return function() {
+            collectionEl.removeEventListener("click", click, true);
+            collection.off("keydown", "coral-masonry-item.foundation-collection-item", keydown);
+            Coral.keys.off("escape", escape);
+            longPress.destroy();
+        };
+    }
+
+    /**
+     * Changes the mode.
+     *
+     * @param {State} state current state of masonry
+     * @param {Mode} mode the new mode
+     * @param {Boolean} initiator `true` if we initiate the mode change
+     * @private
+     */
+    function changeMode(state, mode, initiator) {
+        var collection = state.collection;
+        var isSelection = isSelectionMode(mode);
+
+        if (state.mode === mode) {
+            return;
+        }
+
+        if (!initiator && !isSelection) {
+            collection.children(".foundation-selections-item")
+                .removeClass("foundation-selections-item")
+                .prop("selected", false);
+        }
+
+        state.mode = mode;
+
+        // Configure masonry (parent) with class to indicate that masonry-items are selectable
+        if (mode === Mode.SELECTION) {
+            collection.addClass("is-selectable");
+        } else {
+            collection.removeClass("is-selectable");
+        }
+
+        // Parent element of coral-masonry should have aria-multiselectable,
+        // even when coral-masonry selectionMode === 'none'.
+        Coral.commons.nextFrame(function() {
+            collection
+                .parent("[role='grid']")
+                .attr("aria-multiselectable", collection.context.selectionMode === "multiple");
+        });
+
+        if (initiator) {
+            var group = state.collectionEl.dataset.foundationModeGroup;
+
+            if (!group) {
+                return;
+            }
+
+            var event = $.Event("foundation-mode-change");
+            // Mark the event so that our own handler can detect if it is triggered by us or not.
+            event._foundationLayoutMasonry = true;
+
+            collection.trigger(event, [ mode, group ]);
+        }
+    }
+
+    /**
+     * Handles the pagination logic.
+     *
+     * @param {State} state current state of masonry
+     * @returns {Function} callback function which destroy the paginator objects
+     * @private
+     */
+    function handlePagination(state) {
+        var performSelection;
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+
+        if (!src) {
+            return;
+        }
+
+        var offset = getItems(collectionEl).length;
+        // hasMore is true by default, hence we need to check using "false"
+        var hasMore = collectionEl.dataset.foundationLayoutMasonryHasmore !== "false";
+        var scrollContainer = state.config.scrollSrc ? collection.closest(state.config.scrollSrc) : collection.parent();
+        var Paginator = $(window).adaptTo("foundation-util-paginator");
+
+        var paginator = state.paginator = new Paginator({
+            el: scrollContainer[0],
+            limit: state.config.limit || 20,
+            size: state.config.size,
+
+            wait: function() {
+                collectionEl.dataset.graniteCollectionIsLoading = "true";
+                return {
+                    clear: function() {
+                        if (!paginator.isLoading) {
+                            collectionEl.dataset.graniteCollectionIsLoading = "false";
+                        }
+                    }
+                };
+            },
+            resolveURL: function(paginator) {
+                var sortAPI = collection.adaptTo("foundation-collection-sort");
+                var sortValues = sortAPI.getSortValues();
+                var size = isSelectAllModeEnabled(collectionEl) ? paginator.limit : paginator.size;
+                var id = collectionEl.dataset.foundationCollectionId;
+
+                return URITemplate.expand(src, {
+                    offset: paginator.offset,
+                    limit: paginator.limit,
+                    size: size,
+                    id: id,
+                    sortName: sortValues["sortBy"],
+                    sortDir: sortValues["sortOrder"]
+                });
+            },
+            processResponse: function(paginator, html) {
+                var deferred = $.Deferred();
+                var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+                parser.parse(html).then(function(fragment) {
+                    var newCollectionEl = fragment.querySelector(".foundation-collection");
+
+                    if (!newCollectionEl) {
+                        return;
+                    }
+
+                    var newItemEls = getItems(newCollectionEl);
+
+                    performSelection = $.Deferred();
+
+                    appendItems(state, newItemEls, performSelection.promise());
+
+                    var hasMore = newCollectionEl.dataset.foundationLayoutMasonryHasmore;
+                    if (hasMore === "true") {
+                        hasMore = true;
+                    } else if (hasMore === "false") {
+                        hasMore = false;
+                    } else {
+                        hasMore = newItemEls.length >= paginator.limit;
+                    }
+
+                    collectionEl.dataset.graniteCollectionIsLoading = "false";
+
+                    deferred.resolve({
+                        length: newItemEls.length,
+                        hasNext: hasMore
+                    });
+                });
+
+                return deferred.promise();
+            },
+            onNewPage: function() {
+                collection.trigger("foundation-collection-newpage");
+                trackEvent("newpage", collection, state.config);
+
+                performSelection.resolve();
+            }
+        });
+
+        collectionEl.scrollContainer = scrollContainer[0];
+        paginator.start(offset, hasMore, false, 500);
+
+        return function() {
+            paginator.destroy();
+        };
+    }
+
+    /**
+     * Handles the LazyLoading logic.
+     *
+     * @param {State} state current state of masonry
+     * @returns {Function} callback function which destroy the lazyloader objects
+     * @private
+     */
+    function handleLazyLoading(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+
+        if (!src) {
+            return;
+        }
+
+        var LazyLoader = $(window).adaptTo("foundation-collection-lazyloader");
+        var scrollContainer = state.config.scrollSrc ? collection.closest(state.config.scrollSrc) : collection.parent();
+
+        var lazyLoader = state.lazyLoader = new LazyLoader({
+            scrollSrc: scrollContainer[0],
+            getItems: function() {
+                return getItems(collectionEl);
+            },
+            load: function(lazyLoader, config) {
+                var sortAPI = collection.adaptTo("foundation-collection-sort");
+                var sortValues = sortAPI.getSortValues();
+
+                var url = URITemplate.expand(src, {
+                    offset: config.offset,
+                    limit: config.limit,
+                    size: config.size,
+                    id: collectionEl.dataset.foundationCollectionId,
+                    sortName: sortValues["sortBy"],
+                    sortDir: sortValues["sortOrder"]
+                });
+
+                return $.ajax(url).then(function(html) {
+                    var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+                    return parser.parse(cleanHTML(html, true)).then(function(fragment) {
+                        var newCollectionEl = fragment.querySelector(".foundation-collection");
+
+                        if (!newCollectionEl) {
+                            return;
+                        }
+
+                        return getItems(newCollectionEl);
+                    });
+                });
+            },
+            onReplace: function() {
+                convertCard(collection);
+                collection.trigger("foundation-contentloaded");
+            },
+            isItemAbove: function(lazyLoader, itemEl, position) {
+                if (!itemEl._layoutData) {
+                    return false;
+                }
+                return itemEl._layoutData.top + itemEl._layoutData.height < position;
+            },
+            isItemBelow: function(lazyLoader, itemEl, position) {
+                if (!itemEl._layoutData) {
+                    return true;
+                }
+                return itemEl._layoutData.top > position;
+            },
+            setupListeners: function(lazyLoader, perform) {
+                var onTransitionEnd = function(e) {
+                    if ($(e.target).is(".foundation-collection-item.is-lazyLoaded")) {
+                        perform();
+                    }
+                };
+                collectionEl.addEventListener("transitionend", onTransitionEnd);
+                collection.on("foundation-collection-navigate", perform);
+
+                return function() {
+                    collectionEl.removeEventListener("transitionend", onTransitionEnd);
+                    collection.off("foundation-collection-navigate", perform);
+                };
+            }
+        });
+
+        collectionEl.scrollContainer = collectionEl.scrollContainer || scrollContainer[0];
+        lazyLoader.start();
+
+        return function() {
+            lazyLoader.destroy();
+        };
+    }
+
+    /**
+     * Appends the given masonry items to masonry.
+     *
+     * @param {State} state current state of masonry
+     * @param {Array<HTMLElement>} itemEls masonry item elements
+     * @param {JQueryPromise<Object>} performSelection jQuery promise object
+     * @private
+     */
+    function appendItems(state, itemEls, performSelection) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        collection.append(itemEls);
+
+        // Automatically select all the new items when in selectall mode
+        if (isSelectAllModeEnabled(collectionEl)) {
+            var promise = selectAllItems(collectionEl).then(function() {
+                convertCard(collection);
+            });
+
+            $.when(promise, performSelection).then(function() {
+                collection.trigger("foundation-selections-change");
+                trackEvent("change", collection, state.config, null, { method: "append" });
+            });
+        }
+        convertCard(collection);
+        collection.trigger("foundation-contentloaded");
+    }
+
+    /**
+     * Handles the navigation logic.
+     *
+     * @param {State} state current state of masonry
+     * @returns {Function} callback function which removes the added event handler
+     * @private
+     */
+    function handleNavigation(state) {
+        var collection = state.collection;
+
+        var navigate = function(itemEl) {
+            collection.adaptTo("foundation-collection-item-action").execute(itemEl);
+        };
+
+        var click = function(e) {
+            // Clicking the item means navigate.
+            var item = $(e.target).closest("button, a, coral-quickactions-item, .foundation-collection-item");
+
+            if (item.hasClass("foundation-layout-masonry-cardwrapper")) {
+                if (e.which === 1 && !e.metaKey && !e.shiftKey && !e.altKey) {
+                    e.preventDefault();
+                    navigate(item.closest(".foundation-collection-item")[0]);
+                }
+                return;
+            }
+
+            if (item.hasClass("foundation-collection-item")) {
+                e.preventDefault();
+                navigate(item[0]);
+            }
+        };
+
+        var keydown = function(e) {
+            var ENTER = Coral.Keys.keyToCode("enter");
+
+            if (e.keyCode !== ENTER || !$(e.target).is("coral-masonry-item")) {
+                return;
+            }
+
+            if (!isSelectionMode(state.mode)) {
+                navigate(e.target);
+            }
+        };
+
+        collection.on("click", ".foundation-collection-item", click);
+        collection.on("keydown", "coral-masonry-item", keydown);
+
+        return function() {
+            collection.off("click", ".foundation-collection-item", click);
+            collection.off("keydown", "coral-masonry-item", keydown);
+        };
+    }
+
+    /**
+     * Sort the collection based on passed on sortConfig
+     *
+     * @param {State} state current state of masonry
+     * @param {SortConfig} sortConfig sorting configuration
+     * @returns {JQueryPromise} jQuery promise object, resolves when sorting completes
+     */
+    function sort(state, sortConfig) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var config = state.config;
+
+        var sortBy = sortConfig.sortBy;
+        var sortOrder = sortConfig.sortOrder;
+
+        var src = collectionEl.dataset.foundationCollectionSrc;
+        var url = URITemplate.expand(src, {
+            offset: 0,
+            limit: config.limit,
+            size: isSelectAllModeEnabled(collectionEl) ? config.limit : config.size,
+            id: collectionEl.dataset.foundationCollectionId,
+            sortName: sortBy,
+            sortDir: sortOrder
+        });
+
+        var ui = $(window).adaptTo("foundation-ui");
+
+        ui.wait();
+
+        trackEvent("sort", collection, state.config, null, { sortBy: sortBy, sortOrder: sortOrder });
+
+        return $.ajax({
+            url: url,
+            cache: false
+        }).then(function(html) {
+            var parser = $(window).adaptTo("foundation-util-htmlparser");
+            parser.parse(html).then(function(fragment) {
+                var newCollectionEl = fragment.querySelector(".foundation-collection");
+                if (!newCollectionEl) {
+                    return;
+                }
+
+                var paginator = state.paginator;
+                var newItemEls = getItems(newCollectionEl);
+                var collectionAPI = collection.adaptTo("foundation-collection");
+                var hasMore = newCollectionEl.dataset.foundationLayoutMasonryHasmore;
+
+                collectionAPI.clear();
+                collectionAPI.append(newItemEls);
+
+                if (hasMore === "true") {
+                    hasMore = true;
+                } else if (hasMore === "false") {
+                    hasMore = false;
+                } else {
+                    hasMore = newItemEls.length >= paginator.limit;
+                }
+
+                paginator.restart(newItemEls.length, hasMore);
+            });
+        }, function() {
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Fail to load data.");
+            ui.alert(title, message, "error");
+        }).always(function() {
+            ui.clearWait();
+        });
+    }
+
+    /**
+     * Handles the quickaction logic.
+     *
+     * @param {State} state current state of masonry
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleQuickactions(state) {
+        var collectionEl = state.collectionEl;
+        var collection = state.collection;
+
+        var overlay = function(e) {
+            if (isSelectionMode(state.mode)) {
+                e.preventDefault();
+            }
+            e.target.setAttribute("role", "menubar");
+            e.target.returnFocusTo(e.target.closest(".foundation-collection-item"));
+        };
+
+        var quickaction = function(e) {
+            var target = e.explicitOriginalTarget;
+            // For ff we need explicitly stop it.
+            if (target.parentNode.nodeName === "CORAL-QUICKACTIONS" &&
+                (target.matches("button[is='coral-button']") || target.matches("a[is='coral-anchorbutton']"))) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+            }
+
+            var item = $(e.target).closest(".foundation-collection-item");
+
+            var quickactions = item.find("coral-quickactions");
+            if (quickactions.length) {
+                quickactions[0].open = !quickactions[0].open;
+            }
+        };
+
+        // calls _onTargetKeyDown event handler on QuickActions to prevent default context menu
+        var handleQuickActionsTargetKeyDown = function(e) {
+            // shift + F10 or ctrl + space (http://www.w3.org/WAI/PF/aria-practices/#popupmenu)
+            if (e.shiftKey && e.keyCode === 121 || e.ctrlKey && e.keyCode === 32) {
+                // Prevent default context menu show or page scroll behaviour
+                e.preventDefault();
+            }
+        };
+
+        var handleQuickActionsClose = function(e) {
+            var currentTarget = e.currentTarget;
+            var quickActions = currentTarget.querySelector("coral-quickactions");
+            currentTarget.removeEventListener("coral-overlay:close", handleQuickActionsClose, true);
+
+            // Return the trapFocus and returnFocus properties to their state before open.
+            // Handles the keyboard launch and interaction enabled case, which implies focus trap and focus return.
+            // Wait a frame as this is called before the 'open' property sync.
+            // Otherwise, returnFocus is set prematurely.
+            Coral.commons.nextFrame(function() {
+                if (quickActions.dataset.previousTrapFocus) {
+                    quickActions.trapFocus = quickActions.dataset.previousTrapFocus;
+                    if (quickActions.trapFocus !== "on") {
+                        quickActions.removeAttribute("tabindex");
+                    }
+                    delete quickActions.dataset.previousTrapFocus;
+                }
+
+                if (quickActions.dataset.previousReturnFocus) {
+                    quickActions.returnFocus = quickActions.dataset.previousReturnFocus;
+                    delete quickActions.dataset.previousReturnFocus;
+                }
+
+                if (quickActions.dataset.previousFocusOnShow) {
+                    quickActions.focusOnShow = quickActions.dataset.previousFocusOnShow;
+                    delete quickActions.dataset.previousFocusOnShow;
+                }
+            });
+        };
+
+        // calls _onTargetKeyUp event handler on QuickActions to reopen menu
+        var handleQuickActionsTargetKeyUp = function(e) {
+            var currentTarget = e.currentTarget;
+            var quickActions = currentTarget.querySelector("coral-quickactions");
+
+            // shift + F10 or ctrl + space (http://www.w3.org/WAI/PF/aria-practices/#popupmenu)
+            if (e.shiftKey && e.keyCode === 121 || e.ctrlKey && e.keyCode === 32) {
+                if (!quickActions.open) {
+                    if (quickActions.interaction === "on") {
+                        // Launched via keyboard and interaction enabled implies a focus trap and return focus.
+                        // Remember the relevant properties and return their values on hide.
+                        quickActions.dataset.previousTrapFocus = quickActions.trapFocus;
+                        quickActions.dataset.previousReturnFocus = quickActions.returnFocus;
+                        quickActions.dataset.previousFocusOnShow = quickActions.focusOnShow;
+                        quickActions.trapFocus = "on";
+                        quickActions.returnFocus = "on";
+                        quickActions.focusOnShow = "on";
+                        currentTarget.addEventListener(
+                            "coral-overlay:close",
+                            handleQuickActionsClose,
+                            true);
+                    }
+
+                    quickActions.show();
+                }
+            }
+        };
+
+        // flags when quickactions were just closed, so that we don't reopen them when focus is restored to the target
+        var handleQuickActionsBeforeClose = function(e) {
+            var currentTarget = e.currentTarget;
+            var quickActions = currentTarget.querySelector("coral-quickactions");
+            quickActions.returnFocusTo(currentTarget);
+            if (quickActions.contains(document.activeElement) && e.target === quickActions) {
+                currentTarget.removeEventListener("coral-overlay:beforeclose", handleQuickActionsBeforeClose, true);
+                currentTarget.dataset.justClosed = true;
+                window.requestAnimationFrame(function() {
+                    currentTarget.focus();
+                });
+            }
+        };
+
+        var quickactionsTimeout;
+
+        // closes descendant coral-quickactions on focus outside of parent element
+        var handleQuickActionsTargetBlur = function(e) {
+            var currentTarget = e.currentTarget;
+            var quickActions = currentTarget.querySelector("coral-quickactions");
+
+            if (quickactionsTimeout) {
+                clearTimeout(quickactionsTimeout);
+            }
+
+            // stop listening for shift+F10 or ctrl + space to reopen menu
+            currentTarget.removeEventListener("keydown", handleQuickActionsTargetKeyDown);
+            currentTarget.removeEventListener("keyup", handleQuickActionsTargetKeyUp);
+            Coral.commons.nextFrame(function() {
+                if (quickActions.open &&
+                    // Don't hide quickactions if focus is within the currentTarget
+                    // or within the "more actions" overlay menu.
+                    !currentTarget.contains(document.activeElement) &&
+                    !quickActions.overlay.contains(document.activeElement)) {
+                    quickActions.open = false;
+                    currentTarget.removeEventListener("blur", handleQuickActionsTargetBlur, true);
+                    currentTarget.removeEventListener("coral-overlay:beforeclose", handleQuickActionsBeforeClose, true);
+
+                    delete currentTarget.dataset.justClosed;
+                }
+            });
+        };
+
+        // opens descendant coral-quickactions when parent element receives focus
+        var handleQuickActionsTargetFocus = function(e) {
+            if (!e.target.matches(".foundation-collection-item")) {
+                return;
+            }
+            var currentTarget = e.target;
+            var quickActions = currentTarget.querySelector("coral-quickactions");
+            if (quickActions) {
+                if (quickactionsTimeout) {
+                    clearTimeout(quickactionsTimeout);
+                }
+                if (!quickActions.open && !currentTarget.dataset.justClosed) {
+                    quickactionsTimeout = setTimeout(
+                        function() {
+                            quickActions.open = true;
+                        },
+                        300
+                    );
+                    currentTarget.addEventListener("blur", handleQuickActionsTargetBlur, true);
+                    currentTarget.addEventListener("coral-overlay:beforeclose", handleQuickActionsBeforeClose, true);
+                } else {
+                    delete currentTarget.dataset.justClosed;
+                }
+
+                // listen for shift+F10 or ctrl + space to reopen menu
+                currentTarget.addEventListener("keydown", handleQuickActionsTargetKeyDown);
+                currentTarget.addEventListener("keyup", handleQuickActionsTargetKeyUp);
+            }
+        };
+
+        collection.on("coral-overlay:beforeopen", "coral-quickactions", overlay);
+        collectionEl.addEventListener("focus", handleQuickActionsTargetFocus, true);
+        collectionEl.addEventListener("coral-dragaction:dragstart", quickaction, true);
+        collectionEl.addEventListener("coral-dragaction:dragend", quickaction, true);
+        return function() {
+            collection.off("coral-overlay:beforeopen", "coral-quickactions", overlay);
+            collectionEl.removeEventListener("focus", handleQuickActionsTargetFocus, true);
+            collectionEl.removeEventListener("coral-dragaction:dragstart", quickaction, true);
+            collectionEl.removeEventListener("coral-dragaction:dragend", quickaction, true);
+        };
+    }
+
+    /**
+     * Temporary solution to make wrap the card in a <a>.
+     * This is done so that the user can leverage the native <a> behaviour,
+     * such as opening the card/item in a new browser tab.
+     *
+     * This is temporary solution because the concept of wrapping the rich widget like card
+     * in an <a> may not be a11y prove.
+     * So once we review a11y, it may revamp the card itself.
+     *
+     * @param {JQuery} collection a jQuery collection object
+     */
+    function convertCard(collection) {
+        /** @type {HTMLElement} */
+        var titleEl = document.querySelector(".granite-collection-pagetitle");
+
+        collection.find("coral-card.foundation-collection-navigator").wrap(function() {
+            var navigator = $(this);
+
+            if (navigator.parent("a").length) {
+                return;
+            }
+
+            var el = document.createElement("a");
+            el.className = "foundation-layout-masonry-cardwrapper";
+            // Make the <a> unfocusable as coral-masonry-item has the focus already.
+            // Otherwise the behaviour is confusing.
+            el.tabIndex = -1;
+
+            var href = navigator[0].dataset.foundationCollectionNavigatorHref;
+
+            if (href) {
+                el.target = navigator[0].dataset.foundationCollectionNavigatorTarget;
+            } else {
+                if (!titleEl) {
+                    return;
+                }
+                if (!collection.is(titleEl.dataset.graniteCollectionPagetitleTarget)) {
+                    return;
+                }
+                href = URITemplate.expand(titleEl.dataset.graniteCollectionPagetitleSrc, {
+                    id: navigator.closest(".foundation-collection-item")[0].dataset.foundationCollectionItemId
+                });
+            }
+
+            el.href = href;
+
+            return $(el);
+        });
+    }
+
+    /**
+     * loads the corresponding id items into masonry, to reload pass the current layout id.
+     *
+     * @param {State} state of masonry layout
+     * @param {String} id whose items needs to be loaded
+     * @param {Integer} limit number of items needs to loaded. Useful while reloading
+     * @param {Boolean} restoreSelection <code>true</code> in case selections needs to be restored
+     * @returns {JQueryPromise<HTMLElement>} jQuery promise object, resolves with new loaded collection
+     */
+    function load(state, id, limit, restoreSelection) {
+        var config = state.config;
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+        var isReload = id === collectionEl.dataset.foundationCollectionId;
+
+        if (!src) {
+            return $.Deferred().reject().promise();
+        }
+
+        limit = limit ? limit : config.limit || 20;
+
+        var sortValues = collection.adaptTo("foundation-collection-sort").getSortValues();
+
+        var url = URITemplate.expand(src, {
+            offset: 0,
+            limit: limit,
+            size: config.size,
+            id: id,
+            sortName: sortValues["sortBy"],
+            sortDir: sortValues["sortOrder"]
+        });
+
+        state._lastLoadRequest && state._lastLoadRequest.abort();
+
+        state._lastLoadRequest = $.ajax({
+            url: url,
+            cache: false
+        });
+
+        return state._lastLoadRequest.then(function(html) {
+            var deferred = $.Deferred();
+
+            var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+            parser.parse(html).then(function(fragment) {
+                var newCollection = $(fragment).children();
+                var newCollectionEl = fragment.querySelector(".foundation-collection");
+
+                if (!newCollectionEl) {
+                    deferred.reject(new Error("Invalid content"));
+                    return;
+                }
+
+                if (restoreSelection) {
+                    var selectionIds = collection.children(".foundation-selections-item").map(function() {
+                        return this.dataset.foundationCollectionItemId;
+                    }).toArray();
+
+                    // Temporary solution to restore selection without triggering
+                    // "foundation-selections-change" twice
+                    newCollection.data(
+                        "foundation-layout-collection-switcher.internal.selectionIds",
+                        selectionIds
+                    );
+                }
+
+                if (isReload) {
+                    collection.trigger("foundation-collection-reload");
+                    trackEvent("reload", collection, config);
+                }
+
+                Granite.UI.Foundation.Layouts.cleanAll(collectionEl);
+
+                // @todo reuse the collection element, instead of creating a new one.
+                newCollection.replaceAll(collection);
+
+                // trigger collection event after Coral upgrade
+                requestAnimationFrame(function() {
+                    newCollection.trigger("foundation-collection-navigate");
+                    trackEvent("navigate", collection, config);
+                });
+
+                newCollection.trigger("foundation-contentloaded");
+
+                if (restoreSelection) {
+                    newCollection.removeData("foundation-layout-collection-switcher.internal.selectionIds");
+                }
+
+                deferred.resolve(newCollection[0]);
+            });
+
+            return deferred.promise();
+        }, function(request, status) {
+            // show error alert when call failed
+            // and not aborted by us.
+            if (status !== "abort") {
+                var ui = $(window).adaptTo("foundation-ui");
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Fail to load data.");
+
+                ui.alert(title, message, "error");
+            }
+        });
+    }
+
+    /**
+     * Register the `foundation-layout-masonry` layout
+     */
+    registry.register("foundation.layouts", {
+        name: "foundation-layout-masonry",
+        doLayout: function(collectionEl, cfg) {
+            var collection = $(collectionEl);
+
+            /** @type {Config} */
+            var config = cfg;
+
+            // foundation-layout-masonry is exclusive to manage the layout of foundation-collection only
+            if (!isValidCollection(collectionEl) || stateMap.has(collectionEl)) {
+                return;
+            }
+
+            var state = {
+                collectionEl: collectionEl,
+                collection: collection,
+                config: config,
+                stack: []
+            };
+
+            stateMap.set(collectionEl, state);
+
+            trackEvent("init", collection, config);
+
+            state.stack.push(handleMode(state));
+            state.stack.push(handleSelection(state));
+            state.stack.push(handlePagination(state));
+            state.stack.push(handleLazyLoading(state));
+            state.stack.push(handleNavigation(state));
+            state.stack.push(handleQuickactions(state));
+            state.stack.push(handleDragging(state));
+            state.stack.push(handleOrderingRequest(state));
+
+            // coral-masonry should have ariaGrid="on" for screen reader navigation.
+            // Include role="row" to ensure that when replacing the coral-masonry instance,
+            // the new instance has the appropriate role.
+            collection.attr("role", "row").attr("ariaGrid", "on");
+
+            convertCard(collection);
+
+            var selectionIds = collection.data("foundation-layout-collection-switcher.internal.selectionIds");
+            var selections = $();
+
+            if (selectionIds) {
+                selections = collection.children(".foundation-collection-item").filter(function() {
+                    return selectionIds.indexOf(this.dataset.foundationCollectionItemId) >= 0;
+                });
+
+                selections.each(function() {
+                    $(this).attr("selected", "").addClass("foundation-selections-item");
+                });
+            }
+
+            var mode = (config.selectionMode || selections.length) ? Mode.SELECTION : Mode.DEFAULT;
+
+            requestAnimationFrame(function() {
+                changeMode(state, mode, true);
+                collection.trigger("foundation-collection-newpage");
+                trackEvent("newpage", collection, config);
+                collection.trigger("foundation-selections-change");
+                trackEvent("change", collection, config, null, { method: "init" });
+                collection.trigger("foundation-collection-sort:changed");
+            });
+        },
+        clearItems: function(collectionEl) {
+            $(collectionEl).adaptTo("foundation-collection").clear();
+            collectionEl.layoutInstance.layout();
+        },
+        clean: function(collectionEl, config) {
+            var collection = $(collectionEl);
+            collection.siblings(".granite-collection-loading-title-wrapper").remove();
+
+            var state = stateMap.get(collectionEl);
+
+            if (state) {
+                stateMap.delete(collectionEl);
+
+                Granite.UI.Foundation.Utils.everyReverse(state.stack, function(v) {
+                    if (v) {
+                        v();
+                    }
+                    return true;
+                });
+            }
+
+            Granite.UI.Foundation.Layouts.clean(collectionEl);
+        }
+    });
+
+    /**
+     * Register the `foundation-collection` adapter for masonry layout
+     */
+    registry.register("foundation.adapters", {
+        type: "foundation-collection",
+        selector: ".foundation-layout-masonry.foundation-collection",
+        adapter: function(collectionEl) {
+            var state = stateMap.get(collectionEl);
+            var collection = state.collection;
+
+            return {
+                append: function(items) {
+                    appendItems(state, items);
+                },
+                clear: function() {
+                    var items = getItems(collectionEl);
+                    items.forEach(function(item) {
+                        item.showRemoveTransition = false;
+                        item.remove();
+                    });
+                    collectionEl.layoutInstance.layout();
+                },
+                getPagination: function() {
+                    var paginator = state.paginator;
+
+                    if (!paginator) {
+                        return null;
+                    }
+
+                    var guessTotal = parseInt(collection.attr("data-foundation-layout-masonry-guesstotal") || "-1", 10);
+
+                    var hasNext;
+                    if (guessTotal === -1) {
+                        hasNext = paginator.hasNext;
+                    } else if (paginator.offset >= guessTotal ||
+                        (Granite.Toggles.isEnabled("CT_GRANITE-46012")
+                            ? ((paginator.offset < guessTotal) && paginator.hasNext) : false) ||
+                        guessTotal >= 1000) {
+                        hasNext = paginator.hasNext;
+                    } else {
+                        hasNext = null;
+                    }
+
+                    return {
+                        offset: paginator.offset,
+                        limit: paginator.limit,
+                        guessTotal: guessTotal === -1 ? guessTotal : Math.max(paginator.offset, guessTotal),
+                        hasNext: hasNext
+                    };
+                },
+                isAllLoaded: function() {
+                    var pagination = this.getPagination();
+
+                    if (!pagination) {
+                        return true;
+                    }
+
+                    var lazyPendingItems = getLazyOrPendingItems(collectionEl);
+
+                    if (lazyPendingItems.length > 0) {
+                        return false;
+                    }
+
+                    if (pagination.hasNext === null && pagination.guessTotal !== -1) {
+                        var items = getItems(collectionEl);
+                        return !(pagination.guessTotal > items.length);
+                    } else {
+                        return pagination.hasNext === false;
+                    }
+                },
+                load: function(id) {
+                    return load(state, id);
+                },
+                reload: function() {
+                    var pagination = this.getPagination();
+                    var limit = pagination ? pagination.offset : null;
+                    var id = collectionEl.dataset.foundationCollectionId;
+
+                    return load(state, id, limit, true);
+                }
+            };
+        }
+    });
+
+    /**
+     * Register the `foundation-collection-meta` adapter for masonry layout
+     */
+    registry.register("foundation.adapters", {
+        type: "foundation-collection-meta",
+        selector: ".foundation-layout-masonry.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+            var meta = collection.children(".foundation-collection-meta");
+            var metaEl = meta[0];
+
+            if (!metaEl) {
+                return null;
+            }
+
+            return {
+                getElement: function() {
+                    return metaEl;
+                },
+                getTitle: function() {
+                    return metaEl.dataset.foundationCollectionMetaTitle;
+                },
+                getThumbnail: function() {
+                    return meta.children(".foundation-collection-meta-thumbnail")[0];
+                },
+                isFolder: function() {
+                    return metaEl.dataset.foundationCollectionMetaFolder === "true";
+                },
+                getRelationship: function() {
+                    return metaEl.dataset.foundationCollectionMetaRel;
+                }
+            };
+        }
+    });
+
+    /**
+     * Register the `foundation-selections` adapter for masonry layout
+     */
+    registry.register("foundation.adapters", {
+        type: "foundation-selections",
+        selector: ".foundation-layout-masonry.foundation-collection",
+        adapter: function(collectionEl) {
+            var state = stateMap.get(collectionEl);
+            var collection = state.collection;
+            var config = state.config;
+
+            return {
+                count: function() {
+                    if (isSelectAllModeEnabled(collectionEl)) {
+                        var pagination = collection.adaptTo("foundation-collection").getPagination();
+                        if (pagination && pagination.guessTotal !== -1) {
+                            var unselectedItems = getUnselectedItems(collectionEl);
+                            return pagination.guessTotal - unselectedItems.length;
+                        }
+                    }
+                    return getSelectedItems(collectionEl).length;
+                },
+                selectAll: function(suppressEvent) {
+                    var triggerSelectAllEvent = function() {
+                        if (!suppressEvent) {
+                            collection.trigger("foundation-selections-change");
+                            trackEvent("change", collection, config, null, { method: "selectAll" });
+                        }
+                    };
+
+                    selectAllItems(collectionEl).then(function() {
+                        triggerSelectAllEvent();
+                    });
+
+                    changeMode(state, Mode.SELECTION, true);
+                },
+                clear: function(suppressEvent) {
+                    unselectAllItems(collectionEl);
+
+                    if (!suppressEvent) {
+                        collection.trigger("foundation-selections-change");
+                        trackEvent("change", collection, config, null, { method: "clear" });
+                    }
+
+                    if (config.autoDefaultMode) {
+                        changeMode(state, Mode.DEFAULT, true);
+                    }
+                },
+                select: function(item) {
+                    if (isValidItem(item)) {
+                        changeMode(state, Mode.SELECTION, true);
+
+                        item.selected = true;
+                        item.classList.toggle("foundation-selections-item", true);
+
+                        collection.trigger("foundation-selections-change");
+                        trackEvent("change", collection, config, item, { method: "select" });
+                    }
+                },
+                deselect: function(item) {
+                    if (isValidItem(item)) {
+                        item.selected = false;
+                        item.classList.toggle("foundation-selections-item", false);
+
+                        collection.trigger("foundation-selections-change");
+
+                        if (config.autoDefaultMode && !getSelectedItems(collectionEl).length) {
+                            changeMode(state, Mode.DEFAULT, true);
+                        }
+
+                        trackEvent("change", collection, config, item, { method: "deselect" });
+                    }
+                },
+                isAllSelected: function() {
+                    var itemsCount = getItems(collectionEl).length;
+                    var selectedItemsCount = getSelectedItems(collectionEl).length;
+                    if (itemsCount > 0) {
+                        // when everything loaded in the UI is selected
+                        if (itemsCount === selectedItemsCount) {
+                            var pagination = collection.adaptTo("foundation-collection").getPagination();
+                            var hasItemsToLoad = pagination ? pagination.hasNext : false;
+                            // in select all mode everything is or will be selected
+                            return isSelectAllModeEnabled(collectionEl) ? true : !hasItemsToLoad;
+                        }
+                    }
+                    return false;
+                }
+            };
+        }
+    });
+
+    /**
+     * Register the `foundation-collection-sort` adapter for masonry layout
+     */
+    registry.register("foundation.adapters", {
+        type: "foundation-collection-sort",
+        selector: ".foundation-layout-masonry.foundation-collection",
+        adapter: function(collectionEl) {
+            var collection = $(collectionEl);
+            var state = stateMap.get(collectionEl);
+
+            return {
+                isSorted: function(sortBy, sortOrder) {
+                    var currentSortValues = this.getSortValues();
+                    if (currentSortValues["sortBy"] === sortBy &&
+                        currentSortValues["sortOrder"] === sortOrder) {
+                        return true;
+                    }
+                    return false;
+                },
+                getSortValues: function() {
+                    return {
+                        sortBy: collectionEl.dataset.foundationCollectionSortby || null,
+                        sortOrder: collectionEl.dataset.foundationCollectionSortorder || null
+                    };
+                },
+                doSort: function(sortBy, sortOrder) {
+                    if (!sortBy || !sortOrder) {
+                        sortBy = sortOrder = null;
+                    }
+
+                    if (!this.isSorted(sortBy, sortOrder)) {
+                        if (sortBy === null && sortOrder === null) {
+                            delete collectionEl.dataset.foundationCollectionSortby;
+                            delete collectionEl.dataset.foundationCollectionSortorder;
+                        } else {
+                            collectionEl.dataset.foundationCollectionSortby = sortBy;
+                            collectionEl.dataset.foundationCollectionSortorder = sortOrder;
+                        }
+
+                        var beforeEvent = $.Event("foundation-collection-sort:beforeChange", {
+                            sortName: sortBy,
+                            sortDir: sortOrder
+                        });
+
+                        collection.trigger(beforeEvent);
+
+                        sort(state, {
+                            sortBy: sortBy,
+                            sortOrder: sortOrder
+                        }).then(function() {
+                            collection.trigger("foundation-collection-sort:changed");
+                        });
+                        return true;
+                    }
+                    return false;
+                }
+            };
+        }
+    });
+})(window, document, Granite, Granite.$, Coral, Granite.URITemplate);

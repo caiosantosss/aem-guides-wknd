@@ -1,0 +1,1715 @@
+/*
+		 * ADOBE CONFIDENTIAL
+		 *
+		 * Copyright 2012 Adobe Systems Incorporated
+		 * All Rights Reserved.
+		 *
+		 * NOTICE:  All information contained herein is, and remains
+		 * the property of Adobe Systems Incorporated and its suppliers,
+		 * if any.  The intellectual and technical concepts contained
+		 * herein are proprietary to Adobe Systems Incorporated and its
+		 * suppliers and may be covered by U.S. and Foreign Patents,
+		 * patents in process, and are protected by trade secret or copyright law.
+		 * is strictly forbidden unless prior written permission is obtained
+		 * from Adobe Systems Incorporated.
+		 */
+	
+		(function(document, $) {
+		    "use strict";
+		    var rel = "#hotspoteditor-wizard";
+		    
+		    var BASE_URL = '/assets.html',
+		    	HTTP_PROTOCOL = 'http://',
+		    	HTTPS_PROTOCOL = 'https://';
+		    
+		    $(document).one('foundation-contentloaded', function() {
+
+		    	$('#hotspot-editor').data('hsCounter', 0);
+		    	$('#hotspot-editor').data('drawingStarted', false);
+		    	
+		    	//set default editor mode
+		    	$('#hotspot-editor').data('mode', "default");
+		    	
+			    $('#hotspot-editor').data('HOTSPOT_SIZE', 36);
+			    $('#hotspot-editor').data('VAR_LABEL', Granite.I18n.get('Generic variable'));
+			    $('#hotspot-editor').data('VAR_INSTRUCTION_TEXT', Granite.I18n.get('Add Variable (i.e. var1=true)'));
+			    
+			    $('#hotspot-editor').data('hotspots', []);
+			    $('#hotspot-editor').data('stepsContainer', [[]]);
+			    
+		    	$('#hotspot-editor').data('zooming', false);
+		    	$('#hotspot-editor').data('panning', false);
+		    	$('#hotspot-editor').data('assetModified', false);
+
+		    	//set start x and y properties for panning..
+		    	$('#hotspot-editor').data('dragstartX', 0);
+		    	$('#hotspot-editor').data('dragstartY', 0);
+		    	$('#hotspot-editor').data('dragendX', 0);
+		    	$('#hotspot-editor').data('dragendY', 0);
+		    	$('#hotspot-editor').data('originalHeight', 0);
+		    	$('#hotspot-editor').data('originalWidth', 0);
+		    	$('#hotspot-editor').data('currentStep', 0);
+		    	
+		    	$('#hotspot-editor').data('activeHotspot','');
+		    	$('#hotspot-editor').data('retUrl',Granite.HTTP.externalize(BASE_URL) + getParentFolder());
+		    	
+		    	//set href for form cancel (this will navigate the detail page of active asset
+		    	$('.foundation-wizard-control[data-foundation-wizard-control-action=cancel]').attr('href',$('#hotspot-editor').data('retUrl'));
+		        
+		    	//data for drawing hotspots
+		    	$('#hotspot-editor').data('isDrawing', false);
+		    	
+		    	//
+		    	$('#btn-delete-hotspot').addClass('is-disabled');
+
+                // more data
+                var isTenant = $(".dataHolder").data("isTenant");
+
+		        var areAllMembersProducts;
+                // toggle UI based on the tenant or non-tenant user
+                adjustTenantUI(isTenant);
+                
+                //BB These buttons do not get disabled in FF if there is no delay.
+                setTimeout(function(){
+                	$('#btn-redo').addClass('is-disabled');
+                	$('#btn-undo').addClass('is-disabled');
+                }, 1000);
+            	
+		    	
+		    	$(document).on('map-editor-ready', function(e) {
+		    		
+		    		if($('input[value=quickview]').is(':checked')) {
+	    				$('input[value=quickview]').trigger('change');
+	    			}
+		    		
+		    		//load hot spots if applicable
+			    	loadImageHotspots();
+		    	});
+		    	
+		    	$(document).on('map-select', function(e) {
+		    		
+		    		if($('#hotspot-editor').data('activeHotspot') === e.mapId) {
+						return;
+					}
+		    		
+		    		//check for changes in UI, if there are changes persist them before changing hotspots
+		    		syncUntrackedUpdates();
+		    		
+		    		//set map id
+		    		$('#hotspot-editor').data('activeHotspot', e.mapId);
+		    		
+		    		selectActiveHotspotForCurrentStep(e.mapId);
+		    	});
+		    	
+		    	$(document).on('map-update', function(e) {
+		    		
+		    		var hotspot = getHotspotDataById(e.mapId);
+		    		
+		    		if($('#hotspot-name').val().length > 0) {
+		    			hotspot.name = $('#hotspot-name').val();
+		    		}
+		    		
+		    		$.each(e.map, function(key, val) {
+		    			if(key.toLowerCase().split('draggable').length<2) {
+		    				hotspot[key] = val;
+		    			}
+		    		});
+		    		addStep();
+		    		
+		    		selectActiveHotspotForCurrentStep(e.mapId);
+		    		$('#btn-delete-hotspot').removeClass('is-disabled');
+
+		    	});
+		    	
+		    	//create viewer
+		    	var mod = {'singleclick':'none'};
+		    	var zoomView;
+				var zoomViewer = new s7viewers.ZoomViewer();
+	            zoomViewer.setContainerId("s7viewer");
+	            zoomViewer.setParam("serverurl", Granite.HTTP.externalize('/is/image/'));
+	            zoomViewer.setParam("setModifier", mod);
+	            
+	            //set asset to remote if it is a s7asset
+	            if(typeof $('#asset-info').data('filepath') != 'undefined' && $('#asset-info').data('filepath').length > 0) {
+	            	zoomViewer.setAsset($('#asset-info').data('filepath'));
+	            }
+	            else {
+	            	zoomViewer.setAsset($('#asset-info').data('path'));
+	            }
+	            
+	            //map drawing tool
+	            var mapUtil = new ImageMapUtil();
+	
+	            zoomViewer.setHandlers({
+	                "initComplete":function() {
+	                	
+	                	zoomView = zoomViewer.getComponent("zoomView");
+	                	
+	                	//hide viewer zoom controls
+	    		    	$('.s7button').hide();
+	                	
+	                	//create mapping util for drawing maps
+	                	var mapOpts = {
+	                			viewerId: "s7viewer",
+	                			canvasId: "hotspotCanvas", 
+	                			backgroundColor: "#FFFFFF", 
+	                			borderColor: 'blue', 
+	                			viewerComponent:zoomView,
+	                			viewerContainer:zoomViewer.getComponent("container")
+	                			};
+				mapUtil._init(mapOpts);
+	    			    
+				$('#btn-zoom-in').on('click', function() {
+	    			    	$('#s7viewer_zoomInButton').trigger('click');
+				});
+				$('#btn-zoom-out').on('click', function() {
+	    			    	$('#s7viewer_zoomOutButton').trigger('click');
+				});
+				$('#btn-reset').on('click', function() {
+	    			    	$('#s7viewer_zoomResetButton').trigger('click');
+				});
+
+                        function updateZoomButtonsState(state) {
+	                        if (state.hasCapability(s7sdk.ZoomCapabilityState.ZOOM_IN)) {
+    	                        	$('#btn-zoom-in')[0].removeAttribute("disabled"); 
+        	                } else {
+            	                	$('#btn-zoom-in')[0].setAttribute("disabled");
+                	        }
+
+                    	    	if (state.hasCapability(s7sdk.ZoomCapabilityState.ZOOM_OUT)) {
+                        	    	$('#btn-zoom-out')[0].removeAttribute("disabled");
+                        	} else {
+                            		$('#btn-zoom-out')[0].setAttribute("disabled");
+                        	}
+
+                        	if (state.hasCapability(s7sdk.ZoomCapabilityState.ZOOM_RESET)) {
+                            		$('#btn-reset')[0].removeAttribute("disabled"); 
+                        	} else {
+                            		$('#btn-reset')[0].setAttribute("disabled");
+                        	}
+                        }
+
+			var zState = zoomView.getCapabilityState();     
+                        updateZoomButtonsState(zState);
+			zoomView.addEventListener(s7sdk.event.CapabilityStateEvent.NOTF_ZOOM_CAPABILITY_STATE,function(stateEvent) {
+                        	updateZoomButtonsState(stateEvent.s7event.state);
+               		});
+                        
+	                }
+	            });
+	            zoomViewer.init();
+	        	
+			   $('#href-wrapper').hide();
+	            
+			   
+			   
+			   function syncUntrackedUpdates() {
+				   
+				   var h1 = getHotspotDataById($('#hotspot-id').val());
+				   var h2 = h1;
+				   h2.name = $('#hotspot-name').val();
+				   
+				   //get sku if applicable
+				   if($('.search-product-sku').is(':visible')) {
+					   h2.sku = $('.search-product-sku').val();
+					   
+					   //get product variables append to existing variables to prevent product data from being deleted
+					   h2.variables = extractReservedProductVariables().concat(getHotspotVariablesFromUI());
+				   }
+				   else {
+					   var pathVal = $('.sb-with-wcm-href input[is="coral-textfield"]').val();
+					   h2.url = (pathVal.toLowerCase() === HTTP_PROTOCOL)? '' : pathVal;
+				   }
+				   
+				   var h1str = JSON.stringify(h1);
+				   var h2str = JSON.stringify(h2);
+	    			
+				   //if there was an update update map
+	    			if(h1str !== h2str) {
+	    				h1 = h2;
+	    				addStep();
+	    			}
+			   }
+	
+	            $('#btn-cancel').on('click', function() {
+	            	
+	            	//show save prompt
+	            	if($('#hotspot-editor').data('stepsContainer').length > 1 && $('#hotspot-editor').data('assetModified')) {
+	            		
+	            		//show delete warning modal
+	    	    		$('#dialog-save-confirm').get(0).show();
+	    	    		
+	    	    		//modal save cancel
+	    	    		$('#dialog-save-confirm').find('#save-cancel').click(function() {
+	    	    			window.location.assign($('#hotspot-editor').data('retUrl'));
+	    	    		});
+	    	    		
+	    	    		//modal save confirm
+	    	    		$('#dialog-save-confirm').find('#save-confirm').click(function() {
+	    	    			saveHotspots();
+	    	    		});
+	            		return;
+	            	}
+	            	window.location.assign($('#hotspot-editor').data('retUrl'));
+	        	});
+	            
+	            $('#btn-save').on('click', function() {
+                    if (!validMixedQuickviewData()){
+                        var ui = $(window).adaptTo("foundation-ui");
+                        if (ui != undefined) {
+                            var msg = "You have associated thumbnail images with SKUs using two methods: some SKU values are associated with AEM products and others are not. Before you save, you must only use one of the two methods to add all SKUs.";
+                            ui.alert(Granite.I18n.get("Mixed Swatches Error"), Granite.I18n.get(msg), "error");
+                        }
+                        return;
+                    }                    
+	            	saveHotspots();
+	            });
+	
+		    	$('#btn-delete-hotspot').on('click', function(e) {
+		    		
+		    		//if the button is disabled ignore click event
+		    		if($(this).hasClass('is-disabled') ){
+	    				return;
+	    			}
+		    		
+		    		var id = $('#hotspot-id').val();
+		    		
+		    		//show delete warning modal
+		    		$('#dialog-delete-confirm').get(0).show();
+		    		
+		    		//modal delete cancel
+		    		$('#dialog-delete-confirm').find('#delete-cancel').click(function() {
+		    			$('#dialog-delete-confirm').get(0).hide();
+		    		});
+		    		
+		    		//modal delete save
+		    		$('#delete-ok').click(function() {
+		    			if(this.id == "delete-cancel") {
+							$('#delete-ok').off();
+							return;
+						}
+		    			//remove hotspot
+		        		removeHotspotDataById(id);
+		        		
+		        		//reflow names
+		        		//bb using set timout to make component work with IE11.  Select component bug: CQ-95224
+		        		setTimeout(function() {
+		        			recycleHotspotNames();
+		        		},0);
+		        		
+		        		
+		        		if( $('#hotspot-editor').data('hotspots').length<1) {
+		        			
+		        			//disable delete button
+		        	        $('#btn-delete-hotspot').addClass('is-disabled');
+		        	        
+		        	        //disable controls
+		        	        disableControls();
+		        		}
+		        		
+		        		//record action
+		    			addStep();
+		    			
+		    			//remove click handler from button
+		    			$('#delete-ok').off();
+		    			
+		    			$('#dialog-delete-confirm').get(0).hide();
+		    		});
+		    	});
+		    	
+		    	$('#btn-undo').on('click', function(e) {
+		    		
+		    		if($('#hotspot-editor').data('currentStep')<1) {
+		    			return;
+		    		}
+		    		undoStep();
+		    		
+		    		//trigger resize event to reposition hotspots
+	        		$(document).trigger('resize');
+		    	});
+		    	
+		    	$('#btn-redo').on('click', function(e) {
+		    		
+		    		if($(this).hasClass('is-disabled')) {
+		    			return;
+		    		}
+		    		
+		    		redoStep();
+		    		
+		    		//trigger resize event to reposition hotspots
+	        		$(document).trigger('resize');
+		    	});
+		    	
+		    	$('.actionRadioGroup').on('change', function(e) {
+		    		
+		    		//get hot spot
+	    			var hs = getHotspotDataById($('#hotspot-id').val());
+	    			
+	    			if(hs == undefined) {
+	    				return;
+	    			}
+	    			
+		    		if($(e.target).val() === 'quickview' || $(e.target).val() === 'fragment') {
+		    			
+		    			//hs.url = '';
+		    			hs.actionType = $(e.target).val();// 'quickview';
+		    			//$('#href').val('');
+		    			setHrefValue("");
+		    			hs.variables = [];
+		    			hs.fragment='';
+		    			$('#href-wrapper').hide();
+		    			if($(e.target).val() === 'quickview') {
+		    				$('#size-line').hide();
+			    			$('#btn-add-variable').show();
+			    			$('#generic-variables-container').show();
+		    				$('#svfragmentPicker').closest(".coral-Form-fieldwrapper").hide();
+			    			$('#svproductPicker').closest(".coral-Form-fieldwrapper").show();
+		    			} else {
+		    				$('#size-line').show();
+			    			$('#btn-add-variable').hide();
+			    			$('#generic-variables-container').hide();
+		    				$('#svproductPicker').closest(".coral-Form-fieldwrapper").hide();
+			    			$('#svfragmentPicker').closest(".coral-Form-fieldwrapper").show();
+
+			    			$('#fragment-dialog-wid').val('400');
+					        $('#fragment-dialog-hei').val('300');
+			    			$('#size-line').trigger('change');
+		    			}
+		    			
+		    			$('#quickview-wrapper').show();
+		    			
+		    		} else {
+		    			hs.actionType = 'href';
+		    			
+		    			var urlVal = (hs.url === '')? HTTP_PROTOCOL : hs.url;
+		    			//$('#href').val(urlVal);
+                        setHrefValue(urlVal);
+		    			$('#href-wrapper').show();
+		    			
+		    			$('#quickview-wrapper').hide();
+		    		}
+		    		
+		    		//record action
+		    		addStep();
+		    	});
+		    	
+		    	$('.shoppableCreateButton').on('click', function(e) {
+		    		
+		    		//Determine if map create is in progress.
+		    		//This checks to see if there is a value in the select control If show it check the DOM to see if the hotpsot exists
+		    		//If the hotspot does not exist map creation is in progress..
+		    		var mapCreateInProgress = $('#hotspot-id').val() != null && $('#hotspot-id').val() !== '' && $('#'+$('#hotspot-id').val()).length < 1;
+		    		var mapType = this.id.replace('btn-', '');
+		    		
+		    		if(mapCreateInProgress && mapType === mapUtil._getMapType()) {
+		    			//show warning
+		    			$('#dialog-add-hotspot').get(0).show();
+		    		}
+		    		else {
+		    			
+		    			//create if does not exist
+		    			if(!mapCreateInProgress) {
+		    				
+		    				var hotspot = createHotSpot();
+			    			
+			    			if($('input[value=href]').is(':checked')) {
+			    				$('input[value=href]').trigger('change');
+			    			}
+		    			}
+		    			
+		    			//set map type
+		    			mapUtil._setMapType(mapType);
+		    			//set mode to create
+		    			mapUtil._setMode('create', hotspot.id);
+		    		}
+		    	});
+
+		    	$('.shoppableCreateButton').on('keydown', function(e) {
+                    if (e.which === 32 || e.which === 13){
+          				e.preventDefault();
+                        this.click();
+                		var canvasX = mapUtil.$mapCanvas.offset().left;
+                		var canvasY = mapUtil.$mapCanvas.offset().top;
+						var center = new s7viewers.s7sdk.Point2D(canvasX + mapUtil.$mapCanvas.width()/2, canvasY + mapUtil.$mapCanvas.height()/2);
+						mapUtil._create_and_fire_MouseEvent(mapUtil.$mapCanvas[0],"mouseup",center.x, center.y);
+                    } else {
+          				e.stopPropagation();
+                    }
+		    	});
+	    	
+		    	$('#btn-add-variable').on('click', function(e) {
+		    		//add variable
+		    		addGenericVariable();
+		    	});
+		    	
+		    	//restrict keyboard input
+		    	$('#hotspot-name').bind('keydown', function () {
+		    	    
+		    	    switch (event.keyCode) {
+			            case 8:  // Backspace
+			            case 9:  // Tab
+			            case 13: // Enter
+			            case 37: // Left
+			            case 38: // Up
+			            case 39: // Right
+			            case 40: // Down
+			            break;
+			            default:
+			            var regex = new RegExp("^[a-zA-Z0-9 ]+$");
+			            var key = event.key;
+			            if (!regex.test(key)) {
+			                event.preventDefault();
+			                return false;
+			            }
+			            break;
+			        }
+		    	});
+		    	
+		    	$('#hotspot-name').on('input', function() {
+		    		
+                    var idx = getSelectedHotspotIndex($('#hotspot-id').val());
+		    		var hs = getHotspotDataById($('#hotspot-id').val());
+		    		hs.name = $('#hotspot-name').val();
+		    		
+		    		//remove white space from id
+		    		var newId = hs.name.replace(/ /g,'');
+		    		
+		    		//update hot spot in DOM with the "new" id
+		    		var $hs = $('.hotspot[id="'+hs.id+'"]');
+		    		$hs.attr('id', newId);
+		    		//update hotspot data property to reflect new id
+		    		$hs.data('id', newId);
+		    		
+		    		//set new id
+		    		hs.id = newId;
+		    		
+		    		//update select control to reflect new hot spot name
+	                populateComboBox($('#hotspot-editor').data('hotspots'), 'hotspot-id', idx);
+	                
+	                //select new hot spot
+	                $('#hotspot-id').val(hs.id);
+
+	                //Change active hotspot data
+                    $('#hotspot-editor').data('activeHotspot', hs.id);
+		    		
+		    		//record action
+	    			addStep();
+		    	});
+
+				$('.search-product-sku').on('keyup', function(){
+					// When "SKU" is manully set, its "product" info that was automatially set needs to be wiped out.
+					$('.search-product-sku').data("path", "");
+					$('.search-product-sku').data("skuThumbnail", "");
+
+					// hide the SKU thumbnail
+					$(".skuThumbnail").parent().css("display", "none");
+				});		    	
+				
+				$('.search-product-sku').on('change', function() {
+		    		var hspot = getHotspotDataById($('#hotspot-id').val());
+                    var sku = $('.search-product-sku').val();
+		    		//
+					
+					var val_productpath = buildVar("reservedVal_productPath", $('.search-product-sku').data("path"));
+					clearVars(hspot.variables, "reservedVal_productPath");
+					
+					//make sure there is a product path before saving it
+					if($('.search-product-sku').data("path").length > 0) {
+						hspot.variables.push(val_productpath);
+					}
+					
+					if ($(".sv-with-wcm-productPicker").length !== 0 ) {
+						var val_productThumbnail = buildVar("reservedVal_productThumbnail", Granite.HTTP.internalize($('.search-product-sku').data("skuThumbnail")));
+						clearVars(hspot.variables, "reservedVal_productThumbnail");
+						
+						//make sure there is a product sku before saving it
+						if($('.search-product-sku').data("skuThumbnail").length > 0) {
+							hspot.variables.push(val_productThumbnail);
+						}
+					}					
+					hspot.sku = sku;
+					hspot.fragment = '';
+				
+		    		//record action
+	    			addStep();
+					//valid mixed quickview data
+                    if (!validMixedQuickviewData()){
+                        var ui = $(window).adaptTo("foundation-ui");
+                        if (ui != undefined) {
+                            var msg = "You have associated thumbnail images with SKUs using two methods: some SKU values are associated with AEM products and others are not. You must only use one of the two methods to add all SKUs.";
+                            ui.alert(Granite.I18n.get("Mixed Swatches Warning"), Granite.I18n.get(msg), "notice");
+                        }
+                    }
+		    	});
+
+				$.updateFragmentUIfn = function () {
+					$('.search-fragment').on('keyup', function(){
+						// When "fragment" is manully set, its "fragment" info that was automatially set needs to be wiped out.
+						$('.search-fragment').data("path", "");
+					});
+
+					$('.search-fragment').on('change', function() {
+
+						var hspot = getHotspotDataById($('#hotspot-id').val());
+						var fragment = $('.search-fragment').data('fragmentlabel');// .val();
+						if(!$('.search-fragment').val()) {
+							$('#btn-preview-fragment').addClass('is-disabled');
+						} else {
+							$('#btn-preview-fragment').removeClass('is-disabled');
+						}
+
+						var val_productpath = buildVar("reservedVal_productPath", $('.search-fragment').data("path"));
+						clearVars(hspot.variables, "reservedVal_productPath");
+
+						//make sure there is a product path before saving it
+						if($('.search-fragment').data("path").length > 0) {
+							hspot.variables.push(val_productpath);
+						}
+
+						hspot.fragment = fragment;
+						hspot.sku = '';
+
+						//record action
+						addStep();
+						//valid mixed quickview data
+						if (!validMixedQuickviewData()){
+							var ui = $(window).adaptTo("foundation-ui");
+							if (ui != undefined) {
+								var msg = "You have associated thumbnail images with SKUs using two methods: some SKU values are associated with AEM products and others are not. You must only use one of the two methods to add all SKUs.";
+								ui.alert(Granite.I18n.get("Mixed Swatches Warning"), Granite.I18n.get(msg), "notice");
+							}
+						}
+					});
+
+				}
+
+			    function reviseHref(value){
+	                var contextPath = Granite.HTTP.getContextPath();
+		    		//add context path if applicable and if it has not been added already
+		    		if (value !== ''  
+		    				&& (contextPath.length != 0 ? value.substring(0, contextPath.length) !== contextPath : true)
+		    				&& value.substring(0, HTTP_PROTOCOL.length) !== HTTP_PROTOCOL
+		    				&& value.substring(0, HTTPS_PROTOCOL.length) !== HTTPS_PROTOCOL
+                			&& value.substring(0, 'www'.length) !== 'www') {
+
+		    			if(value.startsWith('/')) {
+			                if(contextPath !== "" && value.indexOf(contextPath) != 0){
+			                	value = contextPath + value;
+			                }
+			            	if(!value.endsWith(".html") && !(/\.([^\/\.]+)$/.test(value))){
+			            		value += '.html';
+			                }
+				            setHrefValue(value);
+			        	}
+			        }
+		    		return value;
+			    }
+			    
+		    	$('#href').on('change', function(e) {
+		    		var selectedValue = e.target.value;
+		    		var hspot = getHotspotDataById($('#hotspot-id').val());
+		    		hspot.actionType = 'href';
+		    		hspot.url = reviseHref(selectedValue);
+
+		    		if(hspot.url === HTTP_PROTOCOL || hspot.url === '') {
+		    			hspot.actionType = 'quickview';
+		    		}
+		    		//record action
+		    		addStep();
+		    	});
+  	
+		    	function removeAllSteps() {
+		    		
+		    		//sync hotspot array with current step
+					syncHotspotsWithCurrentStep();
+					
+					//delete all other steps
+					$('#hotspot-editor').data('stepsContainer', []);
+					$('#hotspot-editor').data('currentStep', -1);
+					
+					//add hotspot array to current step
+					addStep();
+					
+					if(!$('#btn-undo').hasClass('is-disabled')) {
+						$('#btn-undo').addClass('is-disabled');
+					}
+					
+					if(!$('#btn-redo').hasClass('is-disabled')) {
+						$('#btn-redo').addClass('is-disabled');
+					}
+		    	}
+		    	
+		    	//listener for enter key press in textfields
+		    	$('input[type=text]').on('keyup keydown', function(e) {
+	    			if(e.keyCode == 13) {
+	    				e.preventDefault();
+	    			}
+	    		});
+		    	
+		    	$('.winTargetRadio').on('change', function(e) {
+	        		
+		    		//update target
+	        		var hspot = getHotspotDataById($('#hotspot-id').val());
+		    		hspot.target = $(e.target).val();
+		    		
+		    		//record action
+		    		addStep();
+	        	});
+		        
+		        //global listener
+				$('#hotspot-id').on('change', function(e) {
+					
+					var $el = $('#hotspot-id');
+				//	if($el.parent().attr('id') === 'hotspot-id') {
+						
+						if($('#hotspot-editor').data('activeHotspot') === $el.val()) {
+							return;
+						}
+						
+						loadSelectedHotspot($el.val());
+						
+						//select map
+						mapUtil._selectMap($el.val());
+						
+						$('#hotspot-editor').data('activeHotspot', $el.val());
+//					}
+				});
+				
+				//disable controls for now
+				disableControls();				
+	            
+	            function disableControls() {
+	                //disable select control
+	                //$('#hotspot-id-wrapper').find('button').addClass('is-disabled');
+	            	$('#hotspot-id-wrapper').parent().hide();
+	                $('#controls-container').hide();
+	                $('#instructions-container').show();
+	            }
+	            
+	            function enableControls() {
+	                //enable select control
+	               // $('#hotspot-id-wrapper').find('button').removeClass('is-disabled');
+	            	$('#hotspot-id-wrapper').parent().show();
+	                $('#controls-container').show();
+	                $('#instructions-container').hide();
+	            }
+	            
+	            function loadImageHotspots() {
+	            	
+	            	var metadataPath = $('#asset-info').data('path') + '/_jcr_content/metadata.json?ts=' + new Date().getTime();
+
+					$.get( metadataPath, function(data) {
+						
+						var delimiter = data['dam:sha1'];
+						var mapData = data['imageMap'];
+						areAllMembersProducts = data['areAllMembersProducts'];
+						//set asset dimesions
+						mapUtil.setAssetDimensions(data['tiff:ImageWidth'], data['tiff:ImageLength']);
+						
+						$('#hotspot-editor').data('originalHeight', data['tiff:ImageLength']);
+						$('#hotspot-editor').data('originalWidth', data['tiff:ImageWidth']);
+						
+						var mapArray = [];
+						
+						if(mapData == undefined) {
+							$('#href-wrapper').hide();
+							return;
+						}
+						
+						var mapDataArray = mapData.split('\]');
+						var isHotspot = false;
+						var i;
+						var len = mapDataArray.length;
+						var mapType = '';
+						
+						for(i=0;i<len;i++) {
+							
+							if(mapDataArray[i] == undefined || mapDataArray[i].length<1) {
+								continue;
+							}
+							
+							//set flag for type
+							isHotspot = mapDataArray[i].substring(0, '[poly('.length) === '[poly(';
+							
+							mapType = (isHotspot)? 'poly' : 'rect';
+							
+	                    	var coordinatesArr 	= mapDataArray[i].split(mapType+'(')[1].split(',');
+							var metadatStr 		= mapDataArray[i].split(mapType+'(')[1].split(')')[1].replace(new RegExp('"', 'g'), '').replace(new RegExp(']', 'g'), '');
+							var actionType		= metadatStr;
+							var metaArray		= metadatStr.split('|');
+							var name			= metaArray[2];
+							var isFragment		= metaArray[0].indexOf('fragment=') != -1;
+							var varDataArr		= metaArray[0].split(isFragment ? 'fragment=' : 'sku=');
+							varDataArr			= (varDataArr[1] != undefined)? varDataArr[1].split("&") : [];
+							var sku				= isFragment ? "" : varDataArr[0];
+							var fragment		= isFragment && (varDataArr[0] != '-') ? varDataArr[0] : '';
+								
+							var hotspotVars		= [];
+							for(var j=1;j<varDataArr.length;j++) {
+								
+								var valueArr = varDataArr[j].split('=');
+								
+								if(valueArr.length>1) {
+									var obj = {};
+									obj.name = valueArr[0];
+									obj.value = valueArr[1];
+									hotspotVars.push(obj);
+								}
+							}
+	
+							var hotSpotObj 	= {};
+							hotSpotObj.id	= name.replace(new RegExp(' ', 'g'), '');
+		                    hotSpotObj.name = name;
+		                    hotSpotObj.coord = coordinatesArr.toLocaleString().replace(')',',').split(')')[0];
+		                    hotSpotObj.sku	= sku;
+		                    hotSpotObj.fragment	= fragment;
+		                    hotSpotObj.actionType	= (metaArray[0].substring(0, 'quickview:'.length) === 'quickview:' ) ? (isFragment ? 'fragment' : 'quickview') : 'href';
+                            hotSpotObj.target = (metaArray[1].length < 1)?'_blank' : metaArray[1];
+		                    hotSpotObj.url = (hotSpotObj.actionType === 'href')? metaArray[0] : '';
+		                    hotSpotObj.variables = hotspotVars;
+		                    
+		                    //create hotspot
+							var hotspot = createHotSpot(hotSpotObj);
+							var mapData;
+							var coordArr;
+							
+							//add hotspot
+							if(isHotspot) {
+								coordArr = hotSpotObj.coord.split(',').splice(0,2);
+								hotspot.coord = coordArr.toLocaleString();
+								//set data
+								mapData = {x:parseInt(coordArr[0]), y:parseInt(coordArr[1])};
+								
+								//add hotspot
+								mapUtil._addHotspot(hotSpotObj.id, mapData);
+							}
+							//if there are hotspots populate fields with data from the last hotspot added
+							populateFields(hotSpotObj);
+						}
+						
+						if( $('#hotspot-editor').data('hotspots').length > 0) {
+							addStep();
+						}
+						
+						//bb using set timout to make component work with IE11.  Select component bug: CQ-95224
+						setTimeout(function() {
+							$('#hotspot-id').trigger('change');
+							selectActiveHotspotForCurrentStep();
+						},0);
+					})
+		           	.fail(function() {
+		           		$('#dialog-hotspot-load-fail').get(0).show();
+		           	});
+	            }
+	            
+		        //global listener
+	            function updateFragmentSize(e) {
+					if(!$('.search-fragment').val()) {
+						$('#btn-preview-fragment').addClass('is-disabled');
+					} else {
+						$('#btn-preview-fragment').removeClass('is-disabled');
+					}
+					var size = $('#fragment-dialog-wid').val() + "," + $('#fragment-dialog-hei').val();
+	            	var hspot = getHotspotDataById($('#hotspot-id').val());
+	            	clearVars(hspot.variables, "size");
+	            	hspot.variables.push(buildVar("size", size));
+				}
+				
+				$('#fragment-dialog-wid').on('change', updateFragmentSize);
+		    	$('#fragment-dialog-hei').on('change', updateFragmentSize);
+				$('#size-line').on('change', updateFragmentSize);
+	            
+	            $('#btn-preview-fragment').on('click', function(e) {
+	            	var hspot = getHotspotDataById($('#hotspot-id').val());
+	            	var inData = {};
+	            	for(var i=0; i <  hspot.variables.length; i++) {
+	            		var cur = hspot.variables[i];
+		            	inData[cur.name] = cur.value;
+	            	}
+	            	inData.div = '#hotspot-editor';
+	            	s7dmQuickviewFragment.callCommercePlugin(inData);
+	            });
+	            
+	            function loadSelectedHotspot(id) {
+	                
+	                 var hotSpotData = getHotspotDataById(id);
+	                 
+	                if(hotSpotData == undefined) {
+	                    return;
+	                }
+	                
+	                //if there are no coordinates return
+	                if(hotSpotData.coord == undefined) {
+	                    return;
+	                }
+	
+					//if there are hotspots populate fields with data from the last hotspot added
+					populateFields(hotSpotData);
+	            }
+	            
+	            
+	            function getHotspotDataById(id) {
+	            	var arr = getHotspotsArray();
+	                var i;
+	                
+	                arr = $('#hotspot-editor').data('hotspots');
+	                
+	                for(i=0;i<arr.length;i++) {
+	                	
+	                	if(id === arr[i].id) {
+	                		return arr[i];
+	                	}
+	                }
+	                return undefined;
+	            }
+		    
+	            function removeHotspotDataById(id) {
+	            	
+	                mapUtil._removeByID(id);
+	                
+	                var hotspots = $('#hotspot-editor').data('hotspots');
+	                var currentStep = $('#hotspot-editor').data('currentStep');
+	                var stepsContainer = $('#hotspot-editor').data('stepsContainer');
+	                var i;
+	                for(i=0;i<hotspots.length;i++) {
+	                    if(id === hotspots[i].id) {
+	                        hotspots.splice(i,1);
+	                        break;
+	                    }
+	                }
+	                
+	                i--;
+	                
+	                //update select control
+	                populateComboBox(hotspots, 'hotspot-id', i);
+	                
+	                //disable controls
+	                if(hotspots.length < 1) {
+	                    disableControls();
+	                }
+	                else {
+	                	//select item in control
+	                	//bb using set timout to make component work with IE11.  Select component bug: CQ-95224
+	                	setTimeout(function() {
+	                		$('#hotspot-id').trigger('change');
+	                	},0);
+	                }
+	            }
+	            
+	            function isHrefValid(val) {
+		    		if($('.sb-with-wcm-href').length !== 0 || ($('.sb-no-wcm-href').length !== 0 && (val.substring(0, HTTP_PROTOCOL.length) === HTTP_PROTOCOL || val.substring(0, HTTPS_PROTOCOL.length) === HTTPS_PROTOCOL))) {
+	    				return true;
+	    			}
+		    		return false;
+		    	}
+		    
+	            function createHotSpot(hotspotData) {
+	            	
+	            	//make sure we don't end up with duplicate auto generated IDs (i.e. two "Hotspot1")
+	            	recycleHotspotNames();
+	            	
+	            	var hotspots = $('#hotspot-editor').data('hotspots');
+	                var len = hotspots.length;
+	                var hasHotspots = len > 0;
+	                var index = len + 1;
+	                var id 	= 'Hotspot' + index;
+	                var name = 'Hotspot ' + index;
+	                //hot spot object
+	                var hotSpotObj = {};
+	                
+	                if(hotspotData == undefined) {
+	                	
+	                	var hotSpotObj 	= {};
+						//hotSpotObj.coord= '';
+						hotSpotObj.id	= id;
+	                    hotSpotObj.name = name;
+	                    hotSpotObj.sku	= '';
+	                    hotSpotObj.target	= '_blank';
+	                    hotSpotObj.url	= HTTP_PROTOCOL;
+	                    hotSpotObj.actionType	= 'quickview';
+	                    hotSpotObj.variables	= [];
+	                }
+	                else {
+	                	hotSpotObj = hotspotData;
+	                }
+	                
+	                //add to array
+	                hotspots.push(hotSpotObj);
+	                
+	                //update hotspots
+	                $('#hotspot-editor').data('hotspots', hotspots);
+	                
+	                //clear fields
+	               	$('.search-product-sku').val('');
+	               	$('.search-fragment').val('');
+			        $(".skuThumbnail").parent().css("display", "none");
+	                $('#hotspot-name').val('');
+			        $('#generic-variables-container').empty();
+					
+			        $('#fragment-dialog-wid').val('400');
+			        $('#fragment-dialog-hei').val('300');
+	                //update select control
+	                populateComboBox($('#hotspot-editor').data('hotspots'), 'hotspot-id', len);
+	                
+	                //select newly created hotspot
+	                $('#hotspot-id').val(hotSpotObj.id);
+	                
+	                //enable controls if applicable
+	                if($('#hotspot-editor').data('hotspots').length > 0) {
+	                	populateFields(hotSpotObj);
+	                    enableControls();
+	                }
+	                
+	                return hotSpotObj;
+	            }
+	            
+	            function saveHotspots() {
+	            	
+	            	if($('#hotspot-id').val() !== '' && $('#'+$('#hotspot-id').val()).length < 1) {
+		    			//show warning
+		    			$('#dialog-add-hotspot').get(0).show();
+			    		return;
+		    		}
+	            	
+	            	//validate urls
+	            	var arr = $('#hotspot-editor').data('stepsContainer')[$('#hotspot-editor').data('currentStep')];
+	    	    	var hasInvailidUrls = false;
+	    	    	var hotspotListMarkup = '';
+	    	    	var len = arr.length;
+	    	    	var malformedUrls = [];
+	    	    	
+	    	    	for(var i=0;i<len;i++) {
+	    	    		var h = arr[i];
+	    	    		if(h.actionType === 'href' && h.url !== '') {
+	    	    			if(isHrefValid(h.url)) {
+	    	    				continue;
+	    	    			}
+	    	    			hasInvailidUrls = true;
+	    	    			hotspotListMarkup += '<li>'+h.name+': '+h.url+'</li>';
+	    	    		}
+	    	    	}
+	    	    	if(hasInvailidUrls) {
+	    	    		//remove markup if it is still there
+	    	    		$('#href-error-body').find('ul').empty();
+	    	    		//append error list
+	    	    		//$('#href-error-body').append(hotspotListMarkup);
+	    	    		//show error
+	    	    		$('#dialog-hrefs-invalid').get(0).show();
+	    	    		return;
+	    	    	}
+	            	
+	            	//disable save button
+	            	$('#btn-save').attr('disabled');
+	            	
+	            	var postUrl = Granite.HTTP.externalize('/libs/dam/gui/content/s7dam/shoppablemedia/hotspoteditor.hotspots.html');
+	            	
+	            	//params
+	            	var params = {};
+	            	params[':operation'] 		= 'save';
+	            	params['asset'] 			= $('#asset-info').data('path');
+	            	params['hotspots'] 			= getHotspotsDataString();
+                    params['areAllMembersProducts'] = areAllMembersProducts;
+	            	params['_charset_=UTF-8'] 	= '';
+	            	
+	            	$.post(postUrl, params, function(args) {
+	            		window.location.assign($('#hotspot-editor').data('retUrl'));
+	            	})
+	            	.fail(function(args) {
+	            		//show save fail popup
+	                	$('#dialog-save-fail').get(0).show();
+	                	
+	                });
+	            }
+	            
+	            function syncHotspotsWithCurrentStep() {
+	            	
+	            	//sync hotspots array with current step
+	        		var hotspots = [];
+	        		var currentStep = $('#hotspot-editor').data('currentStep');
+	        		var i;
+	        		var stepsContainer = $('#hotspot-editor').data('stepsContainer');
+	            	var len = stepsContainer[currentStep].length;
+					for(i=0;i<len;i++) {
+						var obj = {};
+						var hotspotObj = stepsContainer[currentStep][i];
+						
+						$.each(hotspotObj, function(key, val) {
+							obj[key] = val;
+			    		});
+						
+						//add obj
+						hotspots.push(obj);
+					}
+					
+					$('#hotspot-editor').data('hotspots', hotspots);
+	            }
+	            
+	            function undoStep() {
+	            	
+	            	var currentStep = $('#hotspot-editor').data('currentStep');
+	            	
+	            	if(currentStep>0) {
+	            		
+	            		//remove maps/hotspots
+		            	mapUtil._emptyCanvas();
+	            		
+	            		currentStep--;
+	            		$('#hotspot-editor').data('currentStep', currentStep);
+	            		
+	            		//sync
+	            		syncHotspotsWithCurrentStep();
+	            		
+	            		//update ui with hotspots/maps for the current step
+		        		refreshUI();
+	                	
+	                	//update select control
+	                    selectActiveHotspotForCurrentStep();
+	                    
+	                	if(currentStep < ($('#hotspot-editor').data('stepsContainer').length-1)) {
+	                		$('#btn-redo').removeAttr('disabled');
+	                		$('#btn-redo').removeClass('is-disabled');
+	                	}
+	                	
+	                	if(currentStep < 1) {
+	                    	$('#btn-undo').addClass('is-disabled');
+	                    }
+	            	}
+	            	
+	            	//if there are no hotspots left after undo hide controls and disable delete button
+	            	if( $('#hotspot-editor').data('hotspots').length<1) {
+	            		//disable delete button
+	        	        $('#btn-delete-hotspot').addClass('is-disabled');
+	        	        //disable controls
+	        	        disableControls();
+	        		}
+	            	else {
+	            		enableControls()
+	            	}
+	            }
+	            
+	            function redoStep() {
+	            	
+	            	var currentStep = $('#hotspot-editor').data('currentStep');
+	            		
+	            	//remove maps/hotspots
+	            	mapUtil._emptyCanvas();
+	            	
+	            	currentStep++;
+	            	$('#hotspot-editor').data('currentStep', currentStep);
+	        		
+	        		//sync
+	        		syncHotspotsWithCurrentStep();
+	        		
+	        		//update ui with hotspots/maps for the current step
+	        		refreshUI();
+	        		
+	        		//update select control
+                    selectActiveHotspotForCurrentStep();
+	        		
+	        		//update steps index
+	                if($('#hotspot-editor').data('currentStep') == ($('#hotspot-editor').data('stepsContainer').length-1)) {
+	                	$('#btn-redo').addClass('is-disabled');
+	                }
+	            	
+	            	//activte undo button
+	                $('#btn-undo').removeAttr('disabled');
+	            	$('#btn-undo').removeClass('is-disabled');
+	            	
+	            	//if there are hotspots after redo show controls
+	            	if( $('#hotspot-editor').data('hotspots').length > 0) {
+	        	        //enable controls
+	        	        enableControls();
+	        		}
+	            	else {
+	            		//disable delete button
+	        	        $('#btn-delete-hotspot').addClass('is-disabled');
+	        	        //disable controls
+	        	        disableControls();
+	        		}
+	            }
+	            
+	            function refreshUI() {
+	            	
+	            	//refresh ui
+	                var hotspots = $('#hotspot-editor').data('hotspots');
+	        		var i;
+	        		var len = hotspots.length;
+	            	
+	            	for(i=0;i<len;i++) {
+	            		var hs = hotspots[i];
+	            		
+	            		if(hs.id === $('#hotspot-id').val()) {
+	        				populateFields(hs);
+	                    }
+            			
+	            		//add hotspotToCanvas(hs);
+            			var coordArr = hs.coord.split(',');
+            			
+            			var x1 = parseInt(coordArr[0]);
+            			var y1 = parseInt(coordArr[1]);
+            			var x2 = parseInt(coordArr[2]);
+            			var y2 = parseInt(coordArr[3]);
+            			
+            			var mapData;
+            			
+            			if(coordArr.length == 2) {
+            				mapData = {x:x1, y:y1};
+            				mapUtil._addHotspot(hs.id, mapData);
+            			}
+	            	}
+	            	
+	            	if($('#hotspot-editor').data('activeHotspot') === $('#hotspot-id').val()) {
+	            		//select map
+						mapUtil._selectMap($('#hotspot-id').val());
+	            	}
+	            	else {
+	            		//trigger change
+		        		$('#hotspot-id').trigger('change');
+	            	}
+	            }
+	            
+	            function selectActiveHotspotForCurrentStep(hotspotId) {
+	            	var id = (hotspotId == undefined)? $('#hotspot-id').val() : hotspotId;
+					
+	            	if(id == null) {
+	            		return;
+	            	}
+	            	
+	            	populateComboBox($('#hotspot-editor').data('hotspots'), 'hotspot-id', getSelectedHotspotIndex(id));
+					
+	            	//bb using set timout to make component work with IE11.  Select component bug: CQ-95224
+					setTimeout(function() {
+						
+						var hotspotData = getHotspotDataById($('#hotspot-id').val());
+					
+						//populate controls
+						populateFields(hotspotData);
+					
+						//activate delete button
+						if(hotspotData != undefined) {
+							$('#btn-delete-hotspot').removeClass('is-disabled');
+							mapUtil._selectMap(hotspotData.id);
+						}
+						
+						//trigger change
+						$('#hotspot-id').trigger('change');
+					}, 0);
+	            }
+	            
+	            function getSelectedHotspotIndex(id) {
+	            	var hotspots = $('#hotspot-editor').data('hotspots');
+	            	var i;
+	        		var len = hotspots.length;
+	            	for(i=0;i<len;i++) {
+	            		if(hotspots[i].id === id) {
+	            			return i;
+	            		}
+	            	}            	
+	            	return -1;
+	            }
+	            
+	            function removeSubsquentSteps() {
+	            	//remove addition steps
+					$('#hotspot-editor').data('stepsContainer').splice(($('#hotspot-editor').data('currentStep')+1), $('#hotspot-editor').data('stepsContainer').length-1);
+					$('#btn-redo').addClass('is-disabled');
+	            }
+	            
+	            function addStep() {
+	            	var currentStep = $('#hotspot-editor').data('currentStep');
+	            	//if user is not at the last step.  Update the current step and remove subsequent steps
+					if(currentStep > -1 && (currentStep < $('#hotspot-editor').data('stepsContainer').length - 1)) {
+						removeSubsquentSteps();
+					}
+	            	
+					var hotspots = $('#hotspot-editor').data('hotspots');
+					var i;
+	            	var len = hotspots.length;
+	            	var hotspotsArray = [];
+					for(i=0;i<len;i++) {
+						
+						var obj = {};
+						var hotspotObj = hotspots[i];
+						$.each(hotspotObj, function(key, val) {
+							obj[key] = val;
+			    		});
+						
+						//add obj
+						hotspotsArray.push(obj);
+					}
+					
+					//add step
+	                $('#hotspot-editor').data('stepsContainer').push(hotspotsArray);
+	                
+	                //update steps index
+	                if(currentStep < $('#hotspot-editor').data('stepsContainer').length) {
+	                	currentStep++;
+	                	$('#hotspot-editor').data('currentStep', currentStep);
+	                }
+	                
+	                if($('#hotspot-editor').data('stepsContainer').length>0) {
+	                	$('#btn-undo').removeAttr('disabled');
+	                	$('#btn-undo').removeClass('is-disabled');
+	                }
+	                
+	                $('#hotspot-editor').data('assetModified', true);
+	            }
+	            
+	            function getHotspotsArray() {
+	            	return ($('#hotspot-editor').data('stepsContainer')[$('#hotspot-editor').data('currentStep')] == undefined)? $('#hotspot-editor').data('hotspots') : $('#hotspot-editor').data('stepsContainer')[$('#hotspot-editor').data('currentStep')];
+	            }
+	            
+	            function getHotspotsDataString() {
+	            	
+	            	syncHotspotsWithCurrentStep();
+	            	
+	            	var hotspots = $('#hotspot-editor').data('hotspots');
+	            	var i;
+	            	var len = hotspots.length;
+	            	var hotspotsArray = [];
+	            	var ret;
+	            	
+	            	 ret = '';
+	
+					for(i=0;i<len;i++) {
+						
+	            		var hotspot = hotspots[i];
+	            		var coordinateArray = hotspot.coord.split(',');
+	            		var x 	= parseInt(coordinateArray[0]);
+	            		var y 	= parseInt(coordinateArray[1]);
+	            		
+	            		var hotspotStr ='';
+	            		hotspotStr	+= 'name='+ hotspot.name +'|';
+	            		hotspotStr	+= 'x='+x+'|';
+	            		hotspotStr	+= 'y='+y+'|';
+	            		
+	            		//add additional params for rect map if applicable
+	            		if(coordinateArray.length == 4) {
+	            			hotspotStr	+= 'x2='+parseInt(coordinateArray[2])+'|';
+		            		hotspotStr	+= 'y2='+parseInt(coordinateArray[3])+'|';
+	            		}
+	            		
+	            		//add url if applicable
+	            		if(hotspot.actionType === 'href' && hotspot.url != undefined && hotspot.url.length>0) {
+	            			//strip additional charaters
+	            			hotspot.url = hotspot.url.replace(new RegExp('\\=', 'g'), '^');
+	            			
+	            			if(hotspot.url === HTTP_PROTOCOL || hotspot.url === HTTPS_PROTOCOL) {
+	            				hotspot.url = '';
+	            			}
+	            			hotspotStr	+= 'url='+hotspot.url+'|';            			
+	                        hotspotStr	+= 'target='+hotspot.target+'|';
+	            		}
+	            		if(hotspot.actionType === 'fragment') {
+	            			hotspotStr	+= 'fragment='+(hotspot.fragment ? hotspot.fragment : "-") +'|';
+	            		} else {
+	            			hotspotStr	+= 'sku='+hotspot.sku +'|';
+	            		}
+	            		hotspotStr	+= 'variables='+getHotspotVariablesStr(hotspot);
+	            		
+	            		//add hotspot to array
+	            		hotspotsArray.push(hotspotStr);
+	            	}
+	            	return hotspotsArray;
+	            }
+	            
+	            function getHotspotVariablesStr(hotspot) {
+	            	
+	            	var i;
+	            	var len = hotspot.variables.length;
+	            	var ret = '';
+	            	
+	            	for(i=0;i<len;i++) {
+	            		ret += (ret.length>0)? '^' : '';
+	            		ret += hotspot.variables[i].name + '=' + hotspot.variables[i].value;
+	            	}
+	            	return ret;
+	            }
+	            
+	            function getHotspotVariablesFromUI() {
+	            	
+	            	var ret = [];
+	            	var variableArray =  $('.genericVariable').find('input');
+	            	
+	            	var i;
+	            	var len = variableArray.length;
+	            	
+	            	for(i=0;i<len;i++) {
+	            		
+	            		var vStr	= $(variableArray[i]).val();
+	            		var vStrArr	= vStr.split('=');
+	            		
+	            		if(vStrArr.length<2) {
+	            			continue;
+	            		}
+	            		
+	            		var obj = {};
+	            		obj.name 	= vStrArr[0].replace(new RegExp(' ', 'g'), '-');
+	            		obj.value 	= vStrArr[1];
+	            		
+	            		//
+	            		$(variableArray[i]).val(obj.name+'='+obj.value);
+	            		
+	            		//add to array
+	            		ret.push(obj);
+	            	}
+	            	
+	            	return ret;
+	            }
+	            
+	            function populateFields(hotspot) {
+	            	
+	            	//BB if the hotspot is undefined if so bail
+	            	if(hotspot == undefined) {
+	            		return;
+	            	}
+	            	
+	            	//set name
+	            	$('#hotspot-name').val(hotspot.name);
+	            	
+	            	if(hotspot.actionType === 'quickview' || hotspot.actionType === 'fragment') {	
+		            	hotspot.url = '';
+                        setHrefValue('');
+
+		    			$('#href-wrapper').hide();
+
+					    $(".skuThumbnail").empty();
+		    			$('.skuThumbnail').parent().css('display', 'none'); //bb hide product thumbnail
+		    			
+		    			if(hotspot.actionType === 'quickview') {
+			    			$('#size-line').hide();
+			    			$('#btn-add-variable').show();
+			    			$('#generic-variables-container').show();
+			    			$('#svfragmentPicker').closest(".coral-Form-fieldwrapper").hide();
+			    			$('#svproductPicker').closest(".coral-Form-fieldwrapper").show();
+			    			$('input[value=quickview]').prop('checked','checked')
+		    			} else {
+			    			$('#size-line').show();
+			    			$('#btn-add-variable').hide();
+			    			$('#generic-variables-container').hide();
+			    			$('#svproductPicker').closest(".coral-Form-fieldwrapper").hide();
+			    			$('#svfragmentPicker').closest(".coral-Form-fieldwrapper").show();
+			    			$('input[value=fragment]').prop('checked','checked');
+		    			}
+		    			$('#quickview-wrapper').show();
+					    $('#generic-variables-container').empty();
+					    
+		    		} else {
+		    			hotspot.actionType = 'href';
+                        setHrefValue(HTTP_PROTOCOL);
+		    			$('#href-wrapper').show();
+		    			$('#quickview-wrapper').hide();
+		    			$('input[value=href]').prop('checked','checked');
+		    		}
+	            	
+	            	//set url value if applicable
+                    setHrefValue(hotspot.url);
+	                
+	                //set window target
+	                $('.winTargetRadio').find('input[value='+hotspot.target+']').prop('checked', 'checked');
+	            	
+	                //set sku
+	                $('.search-product-sku').val(hotspot.sku);
+	                $('.search-fragment').val(hotspot.fragment);
+					
+	                //populate generic variables
+	        		$('#generic-variables-container').empty();
+	        		
+	        		if(hotspot.variables == undefined) {
+	        			return;
+	        		}
+	        		
+	                var i;
+	                var len = hotspot.variables.length;
+	                
+	                for(i=0;i<len;i++) {
+	                	
+	                	//variable string
+	                	var variableStr = hotspot.variables[i].name + '=' + hotspot.variables[i].value;
+	                	
+	                	//add variable
+						if(hotspot.variables[i].name !== "reservedVal_productPath" && 
+							hotspot.variables[i].name !== "reservedVal_productThumbnail" &&
+							hotspot.variables[i].name !== "size"){
+							addGenericVariable(variableStr);
+						}
+						if(hotspot.variables[i].name === "size"){
+							var size = hotspot.variables[i].value.split(',');
+							$('#fragment-dialog-wid').val(size[0]);
+							$('#fragment-dialog-hei').val(size[1]);
+						}
+						if(hotspot.actionType === 'fragment' && hotspot.variables[i].name === "reservedVal_productPath"){
+							$('.search-fragment').val(hotspot.variables[i].value);
+						}
+						if ($(".sv-with-wcm-productPicker").length !== 0 && hotspot.actionType === 'quickview') {
+							// add SKU thumbnail
+							var skuThumbailUrl = getSKUThumbailUrl(variableStr);
+							
+							if (skuThumbailUrl != undefined && skuThumbailUrl.length>0 && hotspot.sku.length > 0) {
+								$(".skuThumbnail").parent().show();
+								$(".skuThumbnail").append("<img src='" + Granite.HTTP.externalize(skuThumbailUrl) + "'>");
+							}
+						}
+					}
+	            }
+	            function addGenericVariable(variableStr) {
+	            	
+	            	var variableLabel = '<span>' + $('#hotspot-editor').data('VAR_LABEL') + '</span><br/>'
+	            	var variableText = (variableStr == undefined)? $('#hotspot-editor').data('VAR_INSTRUCTION_TEXT') : variableStr;
+	            	
+	            	//add variable
+	        		var variableMarkup = '<span id="generic-variable-text" class="genericVariable coral-Form-field">';
+	        			variableMarkup += '<input is="coral-textfield" value="'+variableText+'">';
+	        			variableMarkup += '<button is="coral-button" class="btnClearText" icon="delete" iconsize="S">';
+	        			variableMarkup += '</button>';
+	        			variableMarkup += '</span>';
+	        		
+	        		//add html markup
+	        		$('#generic-variables-container').append(variableLabel);
+	        		var tempInput = $('#generic-variables-container').append(variableMarkup);
+	        		tempInput.find('input').on('keyup keydown', function(e) {
+	        			
+	        			if(e.keyCode == 13) {
+	        				e.preventDefault();
+	        			}
+	        			
+	        		});
+	        		
+	        		//click handler for variable deletion
+	        		$('.genericVariable > input').on('change', function(e) {
+	        			var hs = getHotspotDataById($('#hotspot-id').val());
+	    	    		hs.variables = extractReservedProductVariables().concat(getHotspotVariablesFromUI());
+	    	    		
+	    	    		addStep();
+	    	    	});
+	        		
+	        		
+	        		
+	        		$('.genericVariable > input').on('focus', function(e) {
+	        			if($(this).val().length > 1 && $(this).val() === $('#hotspot-editor').data('VAR_INSTRUCTION_TEXT')) {
+	        				$(this).val('');
+	        			}
+	        		});
+	        		
+	        		$('.genericVariable > input').on('focusout', function(e) {
+	        			
+	        			if($(this).val().length < 1) {
+	        				$(this).val($('#hotspot-editor').data('VAR_INSTRUCTION_TEXT'));
+	        			}
+	        		});
+	        		
+	        		//click handler for variable deletion
+	        		$('.btnClearText').on('click', function(e) {
+	        			
+	        			var hs = getHotspotDataById($('#hotspot-id').val());
+	        			var i;
+	        			var len = hs.variables.length;
+	        			
+	        			var variable = $(this).prev().val();
+	        			var variableName = variable.split('=')[0];
+	        			
+	        			for(i=0;i<len;i++) {
+	        				
+	        				if(hs.variables[i] == undefined) {
+	        					continue;
+	        				}
+	        				if(hs.variables[i].name === variableName) {
+	        					hs.variables.splice(i,1);
+	        				}
+	        			}
+	        			
+	        			//remove <br> el
+	        			$(this).parent().prev().remove();
+	        			//remove <span> for generic var label
+	        			$(this).parent().prev().remove();
+	        			//remove text field and "x" button
+	        			$(this).prev().val('');
+	        			$(this).parent().remove();
+	        		});
+	            }
+	            
+	            function extractReservedProductVariables(id) {
+	            	var pVars = [];
+	            	var hID = (id==undefined)? $('#hotspot-editor').data('activeHotspot') : id;
+	            	var hotspot = getHotspotDataById(hID);
+
+	            	if(typeof(hotspot)==="undefined")
+	            		return pVars;
+
+	            	var i;
+	            	var len = hotspot.variables.length;
+	            	var obj;
+	            	
+	            	for(i=0;i<len;i++) {
+	            		obj = hotspot.variables[i];
+	            		if(obj.name.startsWith('reservedVal_')) {
+	            			pVars.push(obj);
+	            		}
+	            	}
+	            	return pVars;
+	            }
+		    
+	            function populateComboBox(data, target, selectedIndex) {
+	                
+					var i;
+					var len = data.length;
+					
+					//set value to "" this is a hack for FF
+					$('#hotspot-id').val('');
+					
+					//empty select control and select list
+					$('#hotspot-id').get(0).items.clear();
+					
+					//bb hack.  For some reason the coral select doesn't empty it's children 
+					//when the api is used "...items.clear()".  Select component bug: CQ-95224
+//	???????				$('coral-selectlist').empty();
+					$('#engagement-container').find('coral-selectlist').empty();
+					
+					for(i=0;i<len;i++) {
+						$('#hotspot-id').get(0).items.add({ value: data[i].id, content: { innerHTML: data[i].name } });
+					}
+					
+					selectedIndex = (selectedIndex>=len)? len-1 : selectedIndex;
+					
+					//get selected item passed in
+					var selectedItem = $($('#hotspot-id').get(0).items.getAll()[selectedIndex]).val();
+					
+					//set selected item
+					//bb hack.  Select component bug: CQ-95224 For some reason the coral select doesn't empty it's children.  
+					setTimeout(function() {
+						$('#hotspot-id').val(selectedItem);
+					}, 0);
+	            }
+	            
+	            function nameInUse(name) {
+	            	var hotspots = $('#hotspot-editor').data('hotspots');
+	                var i;
+	                var len = hotspots.length;
+	                
+	                if(name === ''){
+	                    return false;
+	                }
+	                
+	                for(i=0;i<len;i++) {
+	                    if(name === hotspots[i].name) {
+	                        return true;
+	                    }
+	                }
+	                return false;
+	            }
+	            
+	            function recycleHotspotNames() {
+	            	
+	            	var hotspots = $('#hotspot-editor').data('hotspots');
+	            	var i;
+	            	var idx;
+	            	var len = hotspots.length;
+	            	var str = 'Hotspot';
+	            	
+	            	for(i=0;i<len;i++) {
+	
+	            		var hs = hotspots[i];
+	            		
+	            		if( hotspots[i].id.toLowerCase().substring(0, str.length) === str.toLowerCase() ) {
+	            			idx = (i+1);
+	            			//only update this if the name starts with "Hotspot "
+	            			if(hs.name.startsWith('Hotspot ')) {
+	            				hs.name = 'Hotspot '+idx;
+	            			}
+	            		}
+	            	}
+	            }
+	            
+                function adjustTenantUI(isTenant) {
+                    if (isTenant === true) {
+                        $('.sb-with-wcm-href').remove();
+                    } else {
+                        $('.sb-no-wcm-href').remove();
+                    }
+                }
+
+                function setHrefValue(value){
+                    if (isTenant === true) {
+	                    $('#href').val(value);
+                    } else {
+                        $("#href").find("input").val(value);
+                    }
+                }
+
+				function getSKUThumbailUrl(vars) {
+					var thumbnailUrl = '';
+
+					var item = vars.split("=");
+					// find the use picked product thumbnail first
+					if (item[0] == "reservedVal_productThumbnail") {
+						thumbnailUrl = item[1];
+					}
+					return thumbnailUrl;
+				}
+				function buildVar (key, val) {
+					return { "name" : key,"value" : val };
+				}
+				function clearVars (array, field){
+					var index;
+					for (var i=0; i < array.length ;i++) {
+						if(array[i].name == field){
+							index = i;
+						}
+					}
+					if (index !== undefined) {
+						array.splice(index, 1);
+					}
+				}
+				
+				// obtain parent folder
+				function getParentFolder() {
+					var assetPath= $('#asset-info').data('path');
+					var index = assetPath.lastIndexOf('/');
+					var folderPath = '';
+					if (index > 1) {
+						folderPath = assetPath.substr(0, index);
+					}
+					return folderPath;
+				}
+				
+				function validMixedQuickviewData() {
+					
+					var i;
+					var hotspots  = $('#hotspot-editor').data('hotspots');
+					var len = hotspots.length;
+					var tot = len;
+					var pCount = 0;
+					var mCount = 0;
+					
+					for (i= 0; i < len; i++) {
+						//if there is a sku proceed
+						if (hotspots[i].sku != undefined && (hotspots[i].sku !== "")){
+							
+							var vars = hotspots[i].hasOwnProperty("variables") ? hotspots[i].variables : "";
+							
+							//bb if there are no vars this has to be a manual sku because products always have vars, incement manual counter
+							if(vars.length < 1) {
+								mCount++;
+							}
+							else {
+								//see if hotspot has product variables if so increment product counter
+								if( extractReservedProductVariables(hotspots[i].id).length > 0) {
+									pCount++;
+								}
+								//increment manual counter
+								else {
+									mCount++;
+								}
+							}
+						}
+						else
+							tot--;
+					}
+					
+					//set flag
+					areAllMembersProducts = (pCount==tot);
+					
+					//compare counters with number of hotspots.
+					return (tot<1 || pCount==tot || mCount==tot);
+				}
+});
+})(document, Granite.$);

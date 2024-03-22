@@ -1,0 +1,422 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;
+/*
+ * The layer implementation for the Target mode. This class object contains the implementation of the layer
+ * specific function - set-up, tear-down, event handling, editable store loading
+ */
+(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+    var debugMode = window.location.href.indexOf("?debug-target-mode=true") >= 0
+        || window.location.href.indexOf("&debug-target-mode=true") >= 0;
+
+    function setUpSidePanel() {
+        ns.ui.SidePanel.showContent("js-SidePanel-content--edit");
+        ns.ui.SidePanel.restore();
+    }
+
+    function _debug(args) {
+        if (debugMode) {
+            console.log(args);
+        }
+    }
+
+    /**
+     * @const Default configuration
+     */
+    ns.LAYER_CONFIG = {
+        name: "Targeting",
+        iconClass: "targeted",
+        title: Granite.I18n.get("Targeting", "title of authoring layer"),
+        toolbarConstructor: ns.TargetingToolbar,
+        overlayConstructor: ns.TargetingOverlay,
+        sidePanel: {
+            setUp: setUpSidePanel
+        },
+        interactions: ns.edit.Interactions
+    };
+
+    /**
+     * Binds event listeners to event. If a new listener has to be bound it has to happen here.
+     */
+    var bindEventListeners = function () {
+
+        return this;
+    };
+
+    /**
+     * Unbinds the event listeners from the events. All the listeners that are bound must be unbound, otherwise bad things can happen
+     * @returns {ns.TargetingLayer}
+     */
+    var unbindEventListeners = function () {
+
+        return this;
+    };
+
+    /**
+     * the drag'n'drop behavior needs to be different in Target mode so we're overriding the drop controller
+     * @private
+     */
+    var _overrideComponentController = function () {
+        var componentController = ns.dropController.get(ns.Component.prototype.getTypeName());
+        componentController.handleDrop = function (event) {
+
+            var components = ns.components.find($(event.origin).attr('data-path')),
+                editableNeighbor = event.currentDropTarget.targetEditable,
+                insertBehavior = event.currentDropTarget.insertBehavior;
+
+            var targetEditable = editableNeighbor;
+            if (CQ.TargetedContentManager.isTargetComponent(editableNeighbor.type)) {
+                var children = editableNeighbor.getChildren();
+                $.each(children, function (i, e) {
+                    if (e.type === "foundation/components/parsys/new") {
+                        targetEditable = e;
+                        insertBehavior = "before";
+                    }
+                });
+            }
+            if (components.length > 0) {
+                ns.edit.actions.doInsert(components[0], insertBehavior, targetEditable);
+            }
+        };
+    };
+
+    var oldImageHandleDrop = undefined;
+    var oldImageIsInsertAllowed = undefined;
+    var _overrideImageDropController = function() {
+        var assetController = ns.dropController.get("Images");
+
+        // override the isInsertAllowed
+        // non-targeted image components only allow drop when the default experience is selected
+        assetController.isInsertAllowed = function (event) {
+            var target = $(event.target);
+            var editablePath = target.data("path");
+
+            if (oldImageIsInsertAllowed) {
+                var isTargetedComponent = false;
+
+                $.each(ns.editables, function (index, editable) {
+                    if (editable.path === editablePath) {
+                        var targetParent = CQ.TargetedContentManager.getTargetParent(editable);
+                        isTargetedComponent = !!targetParent;
+                        return false;
+                    }
+                });
+
+                var allowCheck = isTargetedComponent || CQ.TargetedContentManager.isDefaultExperienceSelected();
+
+                if (!allowCheck) {
+                    return false;
+                }
+
+                return oldImageIsInsertAllowed.call(assetController, event);
+            }
+
+            return false;
+        };
+
+        // override handler to intercept inheritance toggle if required
+        assetController.handleDrop = function (event) {
+            TargetingUI.MultiSiteTargeting.ensureInheritanceBroken(function () {
+                if (oldImageHandleDrop) {
+                    oldImageHandleDrop.call(assetController, event);
+                }
+            });
+        };
+    };
+
+    /*
+     * retrieves the parent editable
+     * if the editable is inside a target component then
+     * the parent is not looked up by path,
+     * but by DOM
+     */
+    var _overrideStoreGetParent = function (scope) {
+
+        ns.editables.getParent = function (inspectable, all) {
+
+            if (CQ.TargetedContentManager.isTargetComponent(inspectable.type)
+                    || inspectable.type === CQ.TargetingConstants.TEASER_RT) {
+                return scope.oldGetParent.apply(this, arguments);
+            }
+
+            var foundParent = scope.oldGetParent.apply(this, arguments);
+            if (!foundParent || (Array.isArray(foundParent) && foundParent.length == 0 )) {
+
+                var $editable = $(inspectable.dom);
+                if ($editable) {
+                    // let's find a <cq> parent for this
+                    var parent;
+                    if (inspectable.type === CQ.TargetingConstants.TARGET_PARSYS_RTYPE
+                            || inspectable.type === CQ.TargetingConstants.TARGET_RESPONSIVEGRID_RTYPE) {
+                        parent = $editable.parents(".target").get(0);
+                    } else {
+                        parent = $editable.parents(".targetparsys").get(0);
+                        if (!parent) {
+                            parent = $editable.parents(".target").get(0);
+                        }
+                    }
+
+                    if (parent) {
+                        var parentEditablePath = $(parent).children("cq");
+                        var storeEditables = this.find({path: parentEditablePath.attr("data-path")});
+                        return all ? storeEditables : storeEditables[0];
+                    }
+                }
+            }
+
+            return foundParent;
+        }
+    };
+
+
+    /*
+     * retrieves the children of the inspectable object
+     * if the inspectable is a target component then the children
+     * are retrieved using the DOM rather then the store's getChildren feature
+     */
+    var _overrideStoreGetChildren = function (scope) {
+        ns.editables.getChildren = function (inspectable) {
+            if (!CQ.TargetedContentManager.isTargetComponent(inspectable.type)) {
+                return scope.oldGetChildren.apply(this, arguments);
+            }
+            var innerEditables = inspectable && inspectable.dom ? inspectable.dom.find("cq") : undefined,
+                kids = [],
+                store = this;
+
+            if (innerEditables && innerEditables.length > 0) {
+                $.each(innerEditables, function (i, e) {
+                    var dataPath = $(e).attr("data-path");
+                    if (dataPath !== inspectable.path) {
+                        var kidEditable = store.find({path: $(e).attr("data-path")});
+                        if (kidEditable && kidEditable.length > 0) {
+                            kids.push(kidEditable[0]);
+                        }
+                    }
+                });
+            }
+            return kids;
+        }
+    };
+
+    var dropControllerEnabled = false;
+
+    var enableDropController = function(ns) {
+        if (!dropControllerEnabled) {
+            ns.dropController.enable();
+            dropControllerEnabled = true;
+        }
+    };
+
+    var disableDropController = function(ns) {
+        ns.dropController.disable();
+        dropControllerEnabled = false;
+    }
+
+    // build the layer
+    ns.TargetingLayer = ns.util.extendClass(ns.Layer, {
+
+        constructor: function TargetingLayer() {
+            var config;
+
+            if (arguments[0] === undefined || typeof arguments[0] === "object") {
+                config = arguments[0];
+
+            } else {
+                // Legacy: params not grouped in a config object
+                config = {
+                    name: arguments[0],
+                    iconClass: arguments[1],
+                    overlayConstructor: arguments[2],
+                    toolbarConstructor: arguments[3],
+                    title: arguments[4]
+                };
+            }
+
+            // Merge default config and passed config
+            var actualConfig = $.extend({}, ns.LAYER_CONFIG, config);
+
+            // Call super constructor
+            ns.TargetingLayer.super_.constructor.call(this, actualConfig);
+        },
+
+        isAvailable: function () {
+            _debug("[Targeting Layer] Determining if Target mode is available...");
+            var canEdit = true,
+                canTarget = true,
+                hasClientContext = true,
+                hasContextHub = true;
+
+            if (ns.page && ns.pageInfo) {
+                if (ns.pageInfo.status && ns.pageInfo.status.isLocked) {
+                    // not available if the page is locked
+                    canEdit = ns.ContentFrame && (ns.ContentFrame.contentWindow.CQ.shared.User.data.userID === ns.pageInfo.status.lockOwner);
+                    _debug("[Targeting Layer] User has edit privileges..." + canEdit);
+                }
+                if (ns.pageInfo.isTargetable) {
+                    // not available if the page is not target enabled
+                    // this is excluded via the PageInfoProvider
+                    canTarget = (ns.pageInfo.isTargetable == "true");
+                    _debug("[Targeting Layer] Page is targetable as per page info..." + canTarget)
+                }
+            }
+
+            //not available if we don't have a ClientContext OR ContextHub
+            var cc = CQ.TargetedContentManager.ClientContext;
+            hasClientContext = (cc !== null && typeof cc !== "undefined");
+            _debug("[Targeting Layer] Client context available (optional)..." + hasClientContext);
+            var ch = CQ.TargetedContentManager.ContextHub;
+            hasContextHub = (ch !== null && typeof ch !== "undefined");
+            _debug("[Targeting Layer] ContextHub available (mandatory)..." + hasContextHub);
+
+            // make it available in scaffolding mode
+            var layerName = ns.preferences.cookie.get("cq-editor-layer");
+            var isScaffolding = typeof layerName !== "undefined" && layerName === "Scaffolding";
+
+            return canEdit && canTarget && (hasClientContext || hasContextHub || isScaffolding);
+        },
+
+        // aditional setup tasks. This is called by the super-layer (Layer.js)
+        // after the boilerplate tasks
+
+        setUp: function () {
+            var that = this;
+            disableDropController(ns);
+            // unbind the editor events since we're not allowed to edit anything unless we have the targeting wizard running
+            ns.selection.unbindEvents(this.interactions);
+
+            if (!ns.TargetedContentEventingManager.isSetupAllowed()) {
+                _debug("[TargetingLayer][setUp] Set up not allowed, waiting for 'targeting-layer-setup-allowed' event");
+                channel.one("targeting-layer-setup-allowed", function () {
+                    that.setUp();
+                });
+                return;
+            } else {
+                _debug("[TargetingLayer][setUp] Set up is allowed");
+            }
+            ns.TargetedContentEventingManager.setUpStart();
+
+            _debug("[TargetingLayer][setUp] Starting set up");
+            $("#TargetEditorContent").show();
+
+            // decorate the store's getParent and getChildren
+            // to suit targeting needs
+            this.oldGetParent = ns.editables.getParent;
+            this.oldGetChildren = ns.editables.getChildren;
+            this.oldHandleDrop = ns.dropController.get(ns.Component.prototype.getTypeName()).handleDrop;
+            oldImageHandleDrop = ns.dropController.get("Images").handleDrop;
+            oldImageIsInsertAllowed = ns.dropController.get("Images").isInsertAllowed;
+
+            _overrideStoreGetParent(that);
+            _overrideStoreGetChildren(that);
+            _overrideComponentController();
+            _overrideImageDropController();
+
+            // remember the targeted editables
+            var targetedEditables = 0;
+
+            // destroy the overlays because some editables would still have the old ones instead of the TargetingOverlay
+            ns.overlayManager.teardown();
+            $.each(ns.editables, function (index, editable) {
+                if (CQ.TargetedContentManager.isTargetComponent(editable.type)) {
+                    editable.overlay = null;
+                    CQ.TargetedContentManager.rememberEditable(editable);
+                    targetedEditables++;
+                }
+            });
+            // setup the overlays again for the TargetingOverlay to kick in
+            ns.overlayManager.setup();
+
+            // if there are any targeted editables wait for them to be initialized
+            if (targetedEditables > 0) {
+                channel.on("targeted-editable-loaded", function (e) {
+                    targetedEditables--;
+                    if (targetedEditables == 0) {
+                        // trigger 'targeted-editables-initialized' after all targeted editables are initialized
+                        _debug("[TargetingLayer][setUp] All targeted editables initialized, triggering 'targeted-editables-initialized' event");
+                        channel.trigger("targeted-editables-initialized");
+                    }
+                });
+            } else {
+                // no targeted editables, trigger the event directly
+                _debug("[TargetingLayer][setUp] All targeted editables initialized, triggering 'targeted-editables-initialized' event");
+                channel.trigger("targeted-editables-initialized");
+            }
+
+            // editing features should only be enabled when the targeting wizard is started
+            channel.off("targeting-ui-experience-rail-shown.layer-setup").on("targeting-ui-experience-rail-shown.layer-setup", function (event) {
+                ns.selection.bindEvents(that.interactions);
+                enableDropController(ns);
+            });
+
+            //...and deactivated when we exit the wizard
+            channel.off("targeting-ui-experience-rail-hidden.layer-teardown").on("targeting-ui-experience-rail-hidden.layer-teardown", function (event) {
+                ns.selection.unbindEvents(that.interactions);
+                disableDropController(ns);
+            });
+
+            _debug("[TargetingLayer][setUp] Triggering 'targeting-layer-on' event");
+            channel.trigger("targeting-layer-on");
+
+            _debug("[TargetingLayer][setUp] Set up complete!");
+        },
+
+        // additional tearDown tasks. This is called by the super-layer
+        tearDown: function () {
+            var that = this;
+            _debug("[TargetingLayer][tearDown] Starting tear down...");
+            if (!ns.TargetedContentEventingManager.isTearDownAllowed()) {
+                _debug("[TargetingLayer][tearDown] Tear down not allowed, waiting for 'targeting-layer-teardown-allowed' event");
+                channel.one("targeting-layer-teardown-allowed", function () {
+                    that.tearDown();
+                });
+
+                return;
+            } else {
+                _debug("[TargetingLayer][tearDown] Tear down is allowed");
+            }
+            ns.TargetedContentEventingManager.tearDownStart();
+
+            $("#TargetEditorContent").show();
+
+            _debug("[TargetingLayer][tearDown] Triggering 'targeting-layer-off' event");
+            channel.trigger("targeting-layer-off");
+
+            // reset overriden functions
+            ns.editables.getParent = this.oldGetParent;
+            ns.editables.getChildren = this.oldGetChildren;
+            ns.dropController.get(ns.Component.prototype.getTypeName()).handleDrop = this.oldHandleDrop;
+            ns.dropController.get("Images").handleDrop = oldImageHandleDrop;
+            ns.dropController.get("Images").isInsertAllowed = oldImageIsInsertAllowed;
+            enableDropController(ns);
+            // Unbind events on interactions with inspectables
+            _debug("[TargetingLayer][tearDown] Tear down complete, triggering 'targeting-layer-teardown-complete' event!");
+            channel.trigger("targeting-layer-teardown-complete");
+        }
+
+    });
+
+    _debug("[TargetingLayer] Script loaded");
+
+
+    // register at the manager
+    ns.layerManager.registerLayer(new ns.TargetingLayer());
+
+}(jQuery, Granite.author, jQuery(document), this));
+
+ 

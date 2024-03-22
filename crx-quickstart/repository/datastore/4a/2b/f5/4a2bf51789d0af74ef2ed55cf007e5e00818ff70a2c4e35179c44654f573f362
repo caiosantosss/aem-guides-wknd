@@ -1,0 +1,534 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @private
+ * @class CQ.DialogEditor
+ * @extends CQ.Ext.Viewport
+ * The DialogEditor is an editor for creating dialogs.
+ * @constructor
+ * Creates a new DialogEditor.
+ * @param {Object} config The config object
+ */
+// TODO: allow replacement of top level panel (tab panel vs panel), alternatively provide wizard for creating different dialog types (check with CQDE)
+// TODO: implement support for editing params
+// TODO: allow reordering buttons
+CQ.DialogEditor = CQ.Ext.extend(CQ.Ext.Viewport, {
+    fieldCount: 0,
+
+    constructor:function(config) {
+        this.debug = config.debug;
+        var editor = this;
+
+        // apply config defaults
+        config = CQ.Util.applyDefaults(config, {
+            treeRoot: {
+                name:"dialog",
+                text:CQ.I18n.getMessage("Dialog"),
+                draggable:false,
+                expanded:true,
+                editor:this
+            }
+        });
+
+        // init preview panel
+        this.preview = new CQ.Ext.Panel({
+            id:"cq-dialogeditor-preview-wrapper",
+            region:"center",
+            bodyStyle:"padding:12px",
+            margins:"5 0 5 0",
+            autoScroll:true,
+            containerScroll:true,
+            collapsible:true,
+            collapseMode:"mini",
+            hideCollapseTool:true,
+            listeners: {
+                render: function(comp) {
+                    comp.loadMask = new CQ.Ext.LoadMask(comp.bwrap);
+                }
+            },
+            tbar:[
+                {
+                    id:"cq-dialogeditor-save",
+                    text:CQ.I18n.getMessage("Save"),
+                    handler:function() { editor.fireEvent("save", editor.getDialog()); },
+                    tooltip:{
+                        title:CQ.I18n.getMessage("Save Dialog"),
+                        text:CQ.I18n.getMessage("Save the current dialog"),
+                        autoHide:true
+                    }
+                }
+            ]
+        });
+
+        // init tree panel
+        this.dialogTree = new CQ.Ext.tree.TreePanel({
+            id:"cq-dialogeditor-structure",
+            title:CQ.I18n.getMessage("Structure"),
+            region:"center",
+            autoScroll:true,
+            containerScroll:true,
+            split:true,
+            enableDD:true,
+            ddScroll:true,
+            ddGroup:CQ.DialogEditor.DD_GROUP,
+            root:new CQ.DialogEditor.DialogTreeNode(config.treeRoot),
+            listeners: {
+                click: function(node, event) {
+                    if (node.getProperties) {
+                        editor.props.showProperties(node);
+                    }
+                },
+                beforenodedrop: function(event) {
+                    if (event.dropNode instanceof CQ.DialogEditor.TreeNode) {
+                        event.target.handleReorder(event);
+                    } else {
+                        event.target.handleDrop(event);
+                        event.dropStatus = true;
+                        return false;
+                    }
+                },
+                nodedragover: function(event) {
+                    if (event.dropNode instanceof CQ.DialogEditor.TreeNode) {
+                        return event.target.isReorderAllowed(event);
+                    } else {
+                        return event.target.isInsertAllowed(event);
+                    }
+                },
+                contextmenu: function(node, event) {
+                    var actions = node.getContextMenuActions();
+                    if (actions && (actions.length > 0)) {
+                        var menu = new CQ.Ext.menu.Menu({
+                            items:actions
+                        });
+                        var xy = event.getXY();
+                        menu.showAt(xy);
+                    }
+                    event.stopEvent();
+                }
+            }
+        });
+
+        // init tools panel
+        var controlRecord = CQ.Ext.data.Record.create([
+            { name: "title" },
+            { name: "category" },
+            { name: "insertCfg" }
+        ]);
+
+        var tpl = new CQ.Ext.XTemplate(
+            '<tpl for=".">',
+                '<div class="x-control">{text}</div>',
+            '</tpl>'
+        );
+
+        this.tools = new CQ.Ext.Panel({
+            id:"cq-dialogeditor-tools",
+            title:CQ.I18n.getMessage("Palette"),
+            autoScroll:true,
+            layout:"accordion",
+            region:"north",
+            height:320,
+            stateful:true,
+            split:true,
+            collapsible:true,
+            collapseMode:"mini",
+            hideCollapseTool:true,
+            listeners:{
+                render:function(comp) {
+                    var controlStores = [];
+                    for (var type in CQ.DialogEditor.MAPPINGS) {
+                        var title = CQ.DialogEditor.MAPPINGS[type].text;
+                        var category = CQ.DialogEditor.MAPPINGS[type].category;
+
+                        if (CQ.DialogEditor.MAPPINGS[type].hideInList) continue;
+
+                        // get according store
+                        var controlStore;
+                        if (controlStores[category]) {
+                            controlStore = controlStores[category];
+                        } else {
+                            // no store found for group of current component => create new store/view
+                            controlStore = new CQ.Ext.data.Store({
+                                "sortInfo":{
+                                    "field": "title",
+                                    "direction": "ASC"
+                                },
+                                "reader": new CQ.Ext.data.DataReader({}, controlRecord)
+                            });
+                            controlStores[category] = controlStore;
+
+                            var view = new CQ.Ext.DataView({
+                                "store":controlStore,
+                                "tpl":tpl,
+                                "autoHeight":true,
+                                "autoWidth":true,
+                                "border":false,
+                                "singleSelect":true,
+                                "multiSelect":false,
+                                "overClass":"x-control-over",
+                                "selectedClass":"x-control-selected",
+                                "itemSelector":"div.x-control",
+                                "loadingText":CQ.I18n.getMessage("Loading controls"),
+                                "prepareData":function(data) {
+                                    data.title = CQ.I18n.getVarMessage(data.title);
+                                    return data;
+                                },
+                                "listeners": {
+                                    "render": function(comp) {
+                                        var dragZone = new CQ.DialogEditor.DragZone(comp, {
+                                            containerScroll:true,
+                                            ddGroup:CQ.DialogEditor.DD_GROUP
+                                        });
+                                    }
+                                }
+                            });
+                            comp.add(
+                                new CQ.Ext.Panel({
+                                    "title":CQ.I18n.getVarMessage(category),
+                                    "autoScroll": true,
+                                    "containerScroll": true,
+                                    "border":false,
+                                    "layout":"fit",
+                                    "items":view
+                                })
+                            );
+                        }
+                        controlStore.addSorted(
+                                new CQ.Ext.data.Record(CQ.DialogEditor.MAPPINGS[type],
+                                        category + '#' + title));
+                    }
+                }
+            }
+        });
+
+        // init properties panel
+        this.props = new CQ.PropertyGrid({
+            region:"east",
+            margins:"5 5 5 0",
+            width:320,
+            collapsible:true,
+            collapseMode:"mini",
+            animate:true,
+            collapsed:false,
+            hideCollapseTool:true
+        });
+
+        this.props.on("rowcontextmenu",
+            function(grid, rowIndex, event) {
+                var src = grid.getSource();
+
+                // don't display ctx menu for jcr props
+                if ((grid.getStore().getAt(rowIndex).data.name.indexOf(
+                        CQ.DialogEditor.NT_JCR_NS_PREFIX) == -1)
+                        || (grid.getStore().getAt(rowIndex).data.name == "xtype")) {
+                    // display ctx menu for property
+                    var menu = new CQ.Ext.menu.Menu({
+                        items:[
+                            {
+                                text:CQ.I18n.getMessage("Remove"),
+                                handler:function() {
+                                    delete src[grid.getStore().getAt(rowIndex).data.name];
+
+                                    editor.props.setSource(src);
+                                    editor.updatePreview();
+                                },
+                                tooltip:{
+                                    title:CQ.I18n.getMessage("Remove Property"),
+                                    text:CQ.I18n.getMessage("Remove selected property"),
+                                    autoHide:true
+                                }
+                            }
+                        ]
+                    });
+                    var xy = event.getXY();
+                    menu.showAt(xy);
+                }
+                event.stopEvent();
+            }
+        );
+
+        // init component by calling super constructor
+        CQ.DialogEditor.superclass.constructor.call(this, {
+            id:"cq-dialogeditor",
+            layout:"border",
+            renderTo:"CQ",
+            items:[
+                {
+                    xtype:"panel",
+                    id:"cq-dialogeditor-wrapper",
+                    layout:"border",
+                    region:"center",
+                    border:false,
+                    items:[
+                        {
+                            id:"cq-header",
+                            xtype:"container",
+                            autoEl:"div",
+                            region:"north",
+                            items: [
+                                {
+                                    xtype:"panel",
+                                    border:false,
+                                    layout:"column",
+                                    cls: "cq-header-toolbar"
+                                }
+                            ]
+                        },{
+                            xtype:"panel",
+                            region:"west",
+                            layout:"border",
+                            margins:"5 0 5 5",
+                            width:320,
+                            collapsible:true,
+                            collapseMode:"mini",
+                            hideCollapseTool:true,
+                            animate:true,
+                            split:true,
+                            border:false,
+                            items:[ this.dialogTree, this.tools ]
+                        },
+                        this.preview,
+                        this.props
+                    ]
+                }
+            ]
+        });
+    },
+
+    initComponent: function(){
+        CQ.DialogEditor.superclass.initComponent.call(this);
+
+        this.addEvents(
+           /**
+            * @event save
+            * Fires when the editor wants to save the dialog.
+            * @param {Object} the dialog config to be saved
+            */
+           "save"
+        );
+    },
+
+    updatePreview: function() {
+        this.preview.loadMask.show();
+
+        // overrides for dialog editor
+        var previewCfg = CQ.Util.copyObject(this.getDialog());
+        CQ.Ext.apply(previewCfg, {
+            y:0,
+            draggable:false,
+            floating:false,
+            closeAction:"closeCallback",
+            closeCallback:CQ.Ext.emptyFn,
+            resizable:false
+        });
+        CQ.Util.formatData(previewCfg);
+        if (previewCfg.buttons == undefined) {
+            previewCfg.buttons = CQ.Dialog.OKCANCEL;
+        }
+        // create dialog preview
+        var dlg = CQ.WCM.getDialog(previewCfg);
+        for (var i=0; i<dlg.buttons.length; i++) {
+            dlg.buttons[i].setHandler(function() {
+                CQ.Ext.Msg.alert(
+                    CQ.I18n.getMessage("Button clicked"),
+                    this.text + CQ.I18n.getMessage(" was clicked."));
+            }, dlg.buttons[i]);
+        }
+        if (this.preview.items && (this.preview.items.getCount() > 0)) {
+            this.preview.remove(this.preview.items.get(0));
+        }
+        this.preview.add(dlg);
+        this.preview.doLayout();
+
+        this.preview.loadMask.hide();
+    },
+
+    getDialog: function() {
+        return this.dialogTree.getRootNode().getWidgetConfig();
+    },
+
+    loadDialog: function(config) {
+        var dlgConfig;
+        if (typeof(config) == "string") {
+            config = CQ.HTTP.eval(config);
+        }
+        if (typeof config != "object" || config.xtype != "dialog") {
+            dlgConfig = this.getDialogConfig(config);
+        } else {
+            dlgConfig = config;
+        }
+       
+        // load dialog tree
+        var root = this.dialogTree.getRootNode();
+        if (dlgConfig.title) {
+            root.setText(dlgConfig.title);
+        }
+        root.setWidgetConfig(dlgConfig);
+
+        this.loadDialogTree(dlgConfig, root);
+        this.loadButtons(dlgConfig, root);
+
+        root.expand(true);
+        this.updatePreview();
+    },
+
+    getDialogConfig: function(snippet) {
+        var dialogConfig;
+        if (CQ.DialogEditor.getXType(snippet) == "dialog") {
+            dialogConfig = snippet;
+        } else {
+            dialogConfig = {
+                "xtype": "dialog",
+                "jcr:primaryType":"cq:Dialog"
+            };
+            if (snippet["jcr:primaryType"] == "cq:Dialog") {
+                delete snippet["jcr:primaryType"];
+            }
+            if (snippet.xtype == "panel" && snippet.title) {
+                // panel with title: create a tab panel
+                dialogConfig.items = {
+                    "xtype": "tabpanel",
+                    items: snippet
+                };
+            } else {
+                dialogConfig.items = snippet;
+            }
+        }
+        dialogConfig.responseScope = snippet.responseScope;
+        dialogConfig.success = snippet.success;
+        dialogConfig.failure = snippet.failure;
+        dialogConfig.params = snippet.params;
+        dialogConfig.disableXSSFiltering = snippet.disableXSSFiltering;
+
+        return dialogConfig;
+    },
+
+    //private
+    loadDialogTree: function(widgetCfg, node) {
+        if (CQ.DialogEditor.getXType(widgetCfg) == "dialog") {
+            this.loadDialogTree(widgetCfg.items, node);
+        } else if (CQ.DialogEditor.getXType(widgetCfg) == "widgetcollection") {
+            for (var w in widgetCfg) {
+                if (typeof(widgetCfg[w]) != "object") continue;
+
+                var xtype = CQ.DialogEditor.getXType(widgetCfg[w]);
+                var label = widgetCfg[w].fieldLabel ? widgetCfg[w].fieldLabel : null;
+                var title = widgetCfg[w].title ? widgetCfg[w].title : label;
+
+                var mapping = CQ.DialogEditor.MAPPINGS[xtype];
+                if (mapping) {
+                    var newNode = CQ.DialogEditor.createDialogTreeNode(mapping,
+                            w, title, this);
+
+                    newNode.setWidgetConfig(widgetCfg[w]);
+                    node.appendChild(newNode);
+
+                    if (w.match("^"+CQ.DialogEditor.PROP_PREFIX) == CQ.DialogEditor.PROP_PREFIX) {
+                        var nbr = parseInt(w.substring(CQ.DialogEditor.PROP_PREFIX.length));
+                        if (nbr > this.fieldCount) {
+                            this.fieldCount = nbr;
+                        }
+                    }
+
+                    if (widgetCfg[w].items) {
+                        this.loadDialogTree(widgetCfg[w].items, newNode);
+                    }
+                }
+            }
+        } else {
+            var xtype = CQ.DialogEditor.getXType(widgetCfg);
+            var label = widgetCfg.fieldLabel ? widgetCfg.fieldLabel : null;
+            var title = widgetCfg.title ? widgetCfg.title : label;
+
+            var mapping = CQ.DialogEditor.MAPPINGS[xtype];
+            if (mapping) {
+                var newNode = CQ.DialogEditor.createDialogTreeNode(mapping,
+                        xtype, title, this);
+
+                newNode.setWidgetConfig(widgetCfg);
+                node.appendChild(newNode);
+
+                if (widgetCfg.items) {
+                    this.loadDialogTree(widgetCfg.items, newNode);
+                }
+            }
+        }
+    },
+
+    loadButtons: function(config, node) {
+        if (config.buttons) {
+            var btnsNode = new CQ.DialogEditor.ButtonsTreeNode({
+                name:"buttons",
+                text:CQ.I18n.getMessage("Buttons"),
+                editor:this
+            });
+            btnsNode.setWidgetConfig(config.buttons);
+            node.appendChild(btnsNode);
+
+            for (var b in config.buttons) {
+                if (typeof(config.buttons[b]) == "string") continue;
+                config.buttons[b].xtype = "button"; // HACK needed for button detection
+
+                // create tree node for the button
+                var btnNode = CQ.DialogEditor.createButtonTreeNode(
+                        config.buttons[b].text, this);
+                btnNode.setWidgetConfig(config.buttons[b]);
+                btnsNode.appendChild(btnNode);
+            }
+        }
+    },
+
+    getNextPropName: function() {
+        this.fieldCount++;
+        return CQ.DialogEditor.PROP_PREFIX + this.fieldCount;
+    }
+});
+CQ.Ext.reg("dialogeditor", CQ.DialogEditor);
+
+// UTILITIES
+CQ.DialogEditor.getXType = function(config) {
+    if (config["xtype"]) {
+        return config["xtype"];
+    } else if (config[CQ.DialogEditor.JCR_PRIMARY_TYPE]) {
+        return config[CQ.DialogEditor.JCR_PRIMARY_TYPE].substring(
+                CQ.DialogEditor.NT_CQ_NS_PREFIX.length).toLowerCase();
+    } else {
+        return CQ.DialogEditor.DEFAULT_FIELD_TYPE;
+    }
+};
+
+CQ.DialogEditor.createDialogTreeNode = function(mapping, name, title, editor) {
+    var config = {
+        name:name,
+        text:(title != null) ? title : mapping.text,
+        category:mapping.category,
+        allowedChilds:mapping.allowedChilds,
+        editor:editor
+    };
+    if (mapping.category == CQ.DialogEditor.CONTAINER) {
+        return new CQ.DialogEditor.ContainerTreeNode(config);
+    } else {
+        return new CQ.DialogEditor.FieldTreeNode(config);
+    }
+};
+
+CQ.DialogEditor.createButtonTreeNode = function(text, editor) {
+    var mapping = CQ.DialogEditor.MAPPINGS["button"];
+    var config = {
+        name:editor.getNextPropName(),
+        text:(text != null) ? text : mapping.text,
+        category:mapping.category,
+        editor:editor
+    };
+    return new CQ.DialogEditor.ButtonTreeNode(config);
+};

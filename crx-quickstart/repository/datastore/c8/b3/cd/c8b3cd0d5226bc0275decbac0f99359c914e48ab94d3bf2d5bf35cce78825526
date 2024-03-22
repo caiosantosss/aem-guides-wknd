@@ -1,0 +1,489 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2021 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+/* global Granite, AdobeDC */
+
+(function (document, $, Granite) {
+    "use strict";
+    var CLIENTID = "e4af3c3a0dc84729b8cfeeffe8868c85";
+    var CONTAINER_SEL = "adobe-dc-view-content";
+    var LABEL_PDF = Granite.I18n.get("PDF Viewer");
+    var annotationEnabled = false;
+    var pdfPath;
+    var adobeDCView;
+    var previewFilePromise;
+    var ui;
+    var ignoreAddedAnnotations;
+    var user;
+
+    // api selector
+    var API_PDF_SELECTOR = ".pdfannotation.json";
+
+    // ui events
+    var timelineChangeEvent = "cq-common-admin-timeline-change";
+
+    // keys
+    var ANNOTATION_ID = "annotationID",
+        ANNOTATION_PATH = "annotionPath";
+
+    // ui selectors
+    var cycleButtonSelector = "betty-titlebar-primary > coral-cyclebutton.granite-toggleable-control",
+        deleteSelector = ".cq-common-admin-timeline-event-expanded button",
+        timelineWrapperSelector = ".cq-common-admin-timeline",
+        timelineEventAnnotation = ".cq-dam-admin-timeline-event-annotation",
+        timelineItemSelector = ".cq-common-admin-timeline-event.comment-section-container",
+        timelineShowMoreSelector = ".cq-common-admin-timeline-more button";
+
+    function init() {
+
+        ui = $(window).adaptTo("foundation-ui");
+
+        // hide DMS7 preview container for PDF documents
+        $("#preview-container").hide();
+        
+        // check if annotation is enabled
+        annotationEnabled = $("#pdf-info").data("annotate") === true;
+
+        pdfPath = $("#pdf-info").data("assetPath");
+
+        // listen for viewer init
+        document.addEventListener("adobe_dc_view_sdk.ready", initPDFViewer);
+
+        $(".cq-common-admin-timeline-events").on("foundation-contentloaded.foundation", function (e) {
+            addTimelineItemSelectionEvent();
+        });
+
+        /*
+        CQ-4332310 For PDFs listen for cycle button change in asset details view (i.e. overview, renditions, content only, etc).
+        On change reload page to re-initialze viewer.
+        */
+        if (window.location.pathname.startsWith("/assetdetails.html/content/dam/")) {
+            // add small delay to ensure the event was triggered via user interatcion
+            setTimeout(function() {
+                $($(cycleButtonSelector).get(0)).on("coral-cyclebutton:change",function(event) {
+                    window.location.reload();
+                });
+            }, 500);
+        }
+    }
+
+    function initPDFViewer() {
+        // file info
+        var fileInfo = {
+            content: {location: {url: pdfPath}},
+            metaData: {fileName: LABEL_PDF, id: pdfPath}
+        };
+
+        // view info
+        var viewInfo = {clientId: CLIENTID, divId: CONTAINER_SEL};
+
+        // view options
+        var viewOptions = {
+            showAnnotationTools: annotationEnabled,
+            enableAnnotationAPIs: annotationEnabled,
+            showDownloadPDF: false,
+            showPrintPDF: false,
+            defaultViewMode: "FIT_WIDTH"
+        };
+
+        adobeDCView = new AdobeDC.View(viewInfo);
+        previewFilePromise = adobeDCView.previewFile(fileInfo, viewOptions);
+
+        if (annotationEnabled) {
+            loadUserInfo();
+
+            ui.wait();
+            // Load existing annotations before registering callbacks related to creating additional annotations
+            loadExistingAnnotations()
+                    .catch(console.log)
+                    .finally(function () {
+                        registerUIEventHandlers();
+                        ui.clearWait();
+                        // add handler for timeline item selection
+                        addTimelineItemSelectionEvent();
+
+                        // add handler for show more button click
+                        addTimelineShowMoreButtonClickEvent();
+
+                        // add small delay for things to initialize
+                        setTimeout(function () {
+                            ui.clearWait();
+                        }, 5000);
+
+                    });
+        }
+    }
+
+    function loadUserInfo() {
+        // get user info
+        $.ajax({
+            url: "/libs/cq/security/userinfo.json",
+            cache: false
+        }).done(function (data) {
+            if (data) {
+                user = {};
+                user.id = data.userID;
+                user.impersonated = data.impersonated;
+                user.name = data.userName;
+            }
+            var profile = {
+                userProfile: {
+                    name: data.userName,
+                    firstName: data.userName,
+                    lastName: "",
+                    email: ""
+                }
+            };
+
+            // set user info
+            adobeDCView.registerCallback(
+                    AdobeDC.View.Enum.CallbackType.GET_USER_PROFILE_API,
+                    function () {
+                        return new Promise(function (resolve, reject) {
+                            resolve({
+                                code: AdobeDC.View.Enum.ApiResponseCode.SUCCESS,
+                                data: profile
+                            });
+                        });
+                    },
+                    {});
+        });
+    }
+
+    function loadExistingAnnotations() {
+        // load annotations
+        var annotations = [];
+        var annotationPaths = pdfPath + API_PDF_SELECTOR;
+        ignoreAddedAnnotations = [];
+        var promise = new Promise(function (resolve, reject) {
+            $.ajax({
+                url: annotationPaths,
+                cache: false
+            }).done(function (data) {
+                if (data) {
+                    annotations = data.map(function (i) {
+                        return JSON.parse(i.annotation);
+                    });
+                    ignoreAddedAnnotations = data.map(function (i) {
+                        return i.id;
+                    });
+                    previewFilePromise.then(function (adobeViewer) {
+                        adobeViewer.getAnnotationManager().then(function (annotationManager) {
+                            annotationManager.addAnnotations(annotations)
+                                    .catch(console.log);
+                        });
+                    });
+                }
+                resolve(annotations);
+            }).fail(reject);
+        });
+        return promise;
+    }
+
+    function addTimelineShowMoreButtonClickEvent() {
+        // add selection event for new items in DOM (new items)
+        $(timelineShowMoreSelector).off("click").on("click", function () {
+            // add delay. there is an animation that takes a moment to load
+            setTimeout(addTimelineItemSelectionEvent, 2000);
+        });
+    }
+
+    function addTimelineItemSelectionEvent() {
+        $(timelineItemSelector).off("click").on("click", selectionAnnotationHandler);
+    }
+
+    function processAddedAnnotation(event) {
+        var id = event.data.id;
+        if (ignoreAddedAnnotations.includes(id)) {
+            return false;
+        }
+        var selector = event.data.target.selector;
+        var subtype = (selector && selector.subtype) || "";
+
+        // add annotation
+        var text = "";
+        if (event.data.bodyValue.length) {
+            text = event.data.bodyValue;
+        } else if (subtype) {
+            text = subtype;
+        }
+
+        var postUrl = pdfPath + API_PDF_SELECTOR;
+        var params = {
+            id: id,
+            text: text.substr(0, 50) + "...",
+            data: JSON.stringify(event.data)
+        };
+
+        // show wait cursor to prevent interaction durin save
+        ui.wait();
+        $.post(postUrl, params).always(function (response) {
+            refreshTimeline();
+            // refresh timeline panel
+            setTimeout(function () {
+                selectAnnotationInTimeline(id);
+            }, 1000);
+        }).always(function () {
+            ui.clearWait();
+        });
+    }
+
+    function processUpdatedAnnotation(event) {
+        var id = event.data.id;
+
+        // update annotation
+        var postUrl = pdfPath + API_PDF_SELECTOR + "/" + id;
+        var params = {
+            text: event.data.bodyValue.substr(0, 50) + "...",
+            data: JSON.stringify(event.data)
+        };
+
+        // show wait cursor to prevent interaction durin save
+        ui.wait();
+        $.ajax({
+            type: 'PUT',
+            url: postUrl,
+            data: params
+        }).always(function (response) {
+            // refresh timeline panel
+            refreshTimeline();
+            // no select the active item in the timeline
+            setTimeout(function () {
+                var $annotation = findAnnotationInTimeline(id);
+                if ($annotation) {
+                    selectAnnotationInTimeline(id);
+                } else {
+                    refreshTimeline();
+                }
+            }, 1000);
+        }).always(function () {
+            ui.clearWait();
+        });
+    }
+
+    // process annotation click event from viewer (select annotation in timeline)
+    function processClickedAnnotation(event) {
+        selectAnnotationInTimeline(event.data.id);
+    }
+
+    // process annotation click event from viewer (select annotation in timeline)
+    function processSelectedAnnotation(event) {
+        selectAnnotationInTimeline(event.data.id);
+    }
+
+    function findAnnotationInTimeline(id) {
+        var $annotation;
+        // find annotation in timeline
+        $(timelineEventAnnotation).each(function (obj) {
+            if ($(this).data("annotation").includes(id)) {
+                $annotation = $(this);
+                return false;
+            }
+        });
+        return $annotation;
+    }
+
+    function selectAnnotationInTimeline(id) {
+        var $annotation = findAnnotationInTimeline(id);
+        if ($annotation && !$annotation.parent().find(deleteSelector).is(":visible")) {
+            $annotation.click();
+            $annotation.trigger("mouseover");
+        }
+    }
+
+    function processDeletedAnnotation(obj) {
+        // get id
+        var id = (obj.data) ? obj.data.id : obj;
+
+        // annote api path
+        var annotationPaths = pdfPath + API_PDF_SELECTOR;
+        var annotations = [];
+        $.ajax({
+            url: annotationPaths,
+            cache: false
+        }).done(function (data) {
+
+            if (data) {
+                var comments = [];
+                var isParent = false;
+                annotations = data.map(function (i) {
+                    return JSON.parse(i.annotation);
+                });
+                for (var i = 0; i < annotations.length; i++) {
+                    var source = annotations[i].target.source;
+                    var annotationID = annotations[i].id;
+                    var parentID;
+
+                    if (id === annotationID && source.split(".").pop().toLowerCase() === "pdf") {
+                        isParent = true;
+                        parentID = id;
+                    } else if (source === parentID || id === annotationID) {
+                        comments.push(annotationID);
+                    }
+                }
+
+                // if this annotation is the parent and has children show warning.
+                if (isParent && comments.length > 0) {
+                    // add the parent to delete last
+                    comments.push(parentID);
+
+                    // show delete confirm with child dependency warning
+                    $("#modal-annotation-delete-confirm").get(0).show();
+
+                    // cancel delete
+                    $("#modal-annotation-delete-confirm").find(".btn-cancel").click(loadExistingAnnotations);
+
+                    // modal delete warning confirm
+                    $("#modal-annotation-delete-confirm").find("#btn-annotation-delete-confirm").on("click", function () {
+                        submitDelete(comments);
+                        // hide delete confirm modal
+                        $("#modal-annotation-delete-confirm").get(0).hide();
+                    });
+                } else if (isParent) {
+                    comments.push(id);
+                    submitDelete(comments);
+                } else {
+                    submitDelete(comments);
+                }
+            }
+        }).fail(function () {
+            alert("Error deleting annotation: [" + id + "]");
+        });
+    }
+
+    function submitDelete(comments) {
+
+        for (var i = 0; i < comments.length; i++) {
+            var id = comments[i];
+            var postUrl = pdfPath + API_PDF_SELECTOR + '/' + id;
+
+            $.ajax({
+                url: postUrl,
+                type: 'DELETE',
+                success: function (result) {
+                    // remove from ignore list
+                    removeStringValueFromArray(ignoreAddedAnnotations, id);
+                    // remove timeline UI
+                    var $annotation = findAnnotationInTimeline(id);
+                    if ($annotation) {
+                        $annotation.parent().remove();
+                    }
+
+                    // reload timeline items if the show "more" button is visible
+                    if ($(timelineShowMoreSelector).is(":visible")) {
+                        refreshTimeline();
+                    } else {
+                        // add timeline item selection listener
+                        addTimelineItemSelectionEvent();
+                    }
+                }
+            });
+        }
+    }
+
+    function refreshTimeline() {
+        var pathInfo = {"paths": [pdfPath]};
+        $(timelineWrapperSelector).trigger(timelineChangeEvent + timelineWrapperSelector, pathInfo);
+        // handlers for timeline asset selection, add a small delay so UI can redraw before adding listeners
+        ui.wait();
+        setTimeout(function () {
+            addTimelineItemSelectionEvent();
+            ui.clearWait();
+        }, 3000);
+    }
+
+    // select annotation handler
+    function selectionAnnotationHandler(event) {
+        event.preventDefault();
+        var path = $(this).find(timelineEventAnnotation).data("path");
+        var $deleteBtn = $(this).find(deleteSelector);
+        var $annotationWrapper = $(this);
+
+        // delete handler
+        $deleteBtn.off("click").on("click", function (event) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            // delete annotation
+            /*
+             remove annotation from viewer
+             */
+            var filter = {annotationIds: [$(this).attr(ANNOTATION_ID)]};
+            previewFilePromise.then(function (adobeViewer) {
+                adobeViewer.getAnnotationManager().then(function (annotationManager) {
+                    annotationManager.deleteAnnotations(filter)
+                            .catch(console.log);
+                });
+            });
+        });
+
+        var anntotationData = $(event.currentTarget).find("section").data("annotation");
+        var annoObj = JSON.parse(anntotationData.split("data:application/json,").pop());
+        if (annoObj) {
+            var id = annoObj.id;
+            // add annotation id to the delete button and the timeline item to prevent mulitple http requests
+            $deleteBtn.attr(ANNOTATION_ID, id);
+            $annotationWrapper.attr(ANNOTATION_ID, id);
+            $annotationWrapper.attr(ANNOTATION_PATH, path);
+            // select annotation
+            previewFilePromise.then(function (adobeViewer) {
+                adobeViewer.getAnnotationManager().then(function (annotationManager) {
+                    annotationManager.selectAnnotation(id)
+                            .catch(console.log);
+                });
+            });
+        }
+    }
+
+    /*
+     * Enumeration of supported events and also dispatcher reference for handler methods
+     */
+    var ANNOTATION_EVENTS = {
+        "ANNOTATION_ADDED": processAddedAnnotation,
+        "ANNOTATION_DELETED": processDeletedAnnotation,
+        "ANNOTATION_UPDATED": processUpdatedAnnotation,
+        "ANNOTATION_CLICKED": processClickedAnnotation,
+        "ANNOTATION_SELECTED": processSelectedAnnotation
+    };
+
+    function registerUIEventHandlers() {
+        var eventOptions = {
+            listenOn: Object.keys(ANNOTATION_EVENTS)
+        };
+
+        previewFilePromise.then(function (adobeViewer) {
+            adobeViewer.getAnnotationManager().then(function (annotationManager) {
+                annotationManager
+                        .registerEventListener(
+                                function (event) {
+                                    ANNOTATION_EVENTS[event.type](event, adobeViewer, annotationManager);
+                                }
+                        , eventOptions);
+            });
+        });
+    }
+
+    function removeStringValueFromArray(arr, value) {
+        for (var i = 0; i < arr.length; i++) {
+            if (arr[i] === value) {
+                arr.splice(i, i + 1);
+                break;
+            }
+        }
+    }
+
+    $(document).one("foundation-contentloaded", init);
+})(document, Granite.$, Granite);

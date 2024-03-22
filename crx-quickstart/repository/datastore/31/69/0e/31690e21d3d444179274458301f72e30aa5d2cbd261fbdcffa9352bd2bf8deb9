@@ -1,0 +1,563 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2013 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+/**
+ * globals
+ * -------
+ *
+ * {@see ContextHub.persistence}
+ * {@see ContextHub.eventing}
+ * {@see ContextHub.registerStore}
+ * {@see ContextHub.getAllStores}
+ * {@see ContextHub.getStore}
+ * {@see ContextHub.set}
+ * {@see ContextHub.get}
+ * {@see ContextHub.getItem}
+ * {@see ContextHub.setItem}
+ * {@see ContextHub.removeItem}
+ * {@see ContextHub.cleanAllStores}
+ * {@see ContextHub.resetAllStores}
+ * {@see ContextHub.sync}
+ * {@see ContextHub.bind}
+ * {@see ContextHub.isOptedOut}
+ */
+
+ContextHub.console.log(ContextHub.Shared.timestamp(), '[loading] contexthub.kernel - ContextHub.js');
+
+(function($, window) {
+    'use strict';
+
+    if (typeof window.ContextHubKernelConfig === 'undefined') {
+        ContextHub.console.error('[-] ContextHub configuration is not set!');
+    }
+
+    /**
+     * @namespace ContextHub
+     */
+    window.ContextHub = $.extend({
+        version: '0.5.28-20230203-2148'
+    }, window.ContextHub);
+
+    /* contains list of registered stores */
+    var stores = {};
+
+    /* array containing tasks added by sync() and bind() */
+    var syncRequests = [];
+    var bindRequests = [];
+
+    /* initialization of ContextHub's persistence */
+    var persistence = new ContextHub.Utils.Persistence();
+
+    /* initialization of ContextHub's eventing */
+    var eventing = new ContextHub.Utils.Eventing(window.ContextHubKernelConfig.eventing);
+
+    /* indicates whether ContextHub functionality (persistence, segmentation engine) should be disabled due to user request */
+    var optedOut = null;
+
+    /**
+     * Registers specified store in ContextHub and triggers 'register' event.
+     *
+     * If store is SessionStore or PersistedStore a 'ready' event is triggered immediately, assuming that all data
+     * is prepared before registering store in ContextHub.
+     *
+     * If store is JSONPStore or PersistedJSONPStore a 'ready' event is triggered each time after calling {@code queryService()}.
+     *
+     * @this ContextHub
+     * @param {String} storeName - store name
+     * @param {ContextHub.Store.Core|ContextHub.Store.JSONPStore|ContextHub.Store.PersistedJSONPStore|ContextHub.Store.PersistedStore|ContextHub.Store.SessionStore} store - store instance
+     */
+    var registerStore = function(storeName, store) {
+        if ($.type(store) === 'object') {
+            stores = stores || {};
+
+            /* don't register same store twice */
+            if (!stores[storeName]) {
+                stores[storeName] = store;
+
+                /* add time stamp */
+                ContextHub.console.timeStamp('registering "' + storeName + '"');
+
+                /* get store keys (since it's store registration phase, those keys are either persisted or from initialValues) */
+                var storeKeys = store.getKeys();
+                var overlay = { keys: { all: { hash: {}, list: storeKeys } } };
+
+                $.each(storeKeys, function(idx, key) {
+                    overlay.keys.all.hash[key] = true;
+                });
+
+                /* trigger event */
+                this.eventing.trigger(ContextHub.Constants.EVENT_STORE_REGISTERED + ':' + storeName, {}, {
+                    defer: 0,
+                    _: {
+                        action: 'store-registered',
+                        store: storeName,
+                        registeredAt: new Date().getTime(),
+                        overlay: overlay
+                    }
+                });
+
+                /* if store is not JSONPStore or PersistedJSONPStore also trigger 'ready' event immediately */
+                if (!store.queryService) {
+                    store.announceReadiness();
+                }
+            }
+        }
+    };
+
+    /**
+     * Returns all registered stores.
+     *
+     * @return {Object} stores
+     */
+    var getAllStores = function() {
+        return stores;
+    };
+
+    /**
+     * Returns store of specified name or null if store wasn't found.
+     *
+     * @param {String} name store name
+     * @return {ContextHub.Store.SessionStore|ContextHub.Store.PersistedStore|ContextHub.Store.JSONPStore|ContextHub.Store.PersistedJSONPStore|null} store
+     */
+    var getStore = function(name) {
+        return (($.type(name) === 'string') && name.length) ? ContextHub.Utils.JSON.tree.getItem(stores, name) : null;
+    };
+
+    /**
+     * Returns value of specified key (prefixing it by '/store/'). See {@see getItem}.
+     *
+     * @this ContextHub
+     * @param {String} key - key name
+     * @return {Object|null} - value
+     */
+    var get = function(key) {
+        return this.getItem('/store/' + key);
+    };
+
+    /**
+     * Sets key/value pair. Key is prefixed by '/store/'. See {@see setItem}.
+     *
+     * @this ContextHub
+     * @param {String} key - key name
+     * @param {Object} value - value
+     */
+    var set = function(key, value) {
+        this.setItem('/store/' + key, value);
+    };
+
+    /**
+     * Since stores can use a custom persistence mode, we can't assume it's always ContextHub's default persistence.
+     * This method returns persistence used by a store holding a given key (format: /store/foobar/key-name).
+     *
+     * @private
+     * @param {String} key - key name
+     * @returns {Object} storage and key name
+     */
+    var getStorageByProperty = function(key) {
+        /* by default use ContextHub's persistence */
+        var storage = ContextHub.persistence;
+
+        /* split key into chunks */
+        var storeProperty = key;
+        var keyChunks = ContextHub.Utils.JSON.tree.sanitizeKey(storeProperty);
+
+        if (keyChunks) {
+            /* save store name */
+            var storeName = keyChunks.shift();
+
+            /* in case key contained '/store' prefix - skip it */
+            if (storeName === 'store') {
+                storeName = keyChunks.shift();
+            }
+
+            /* get the store */
+            var store = ContextHub.getStore(storeName);
+
+            /* if it's registered, use its persistence */
+            if (store) {
+                storage = store;
+                storeProperty = '/' + keyChunks.join('/');
+            }
+        }
+
+        return { storage: storage, storeProperty: storeProperty };
+    };
+
+    /**
+     * Returns value of specified key. As call is global (ContextHub.getItem()), key has to specify which store have
+     * to be queried (for example: "/store/foobar/key-name").
+     *
+     * @this ContextHub
+     * @param {String} key - key name
+     * @return {Object|null} - value
+     */
+    var getItem = function(key) {
+        var data = getStorageByProperty(key);
+
+        /* return value of a given key */
+        return data.storage.getItem(data.storeProperty);
+    };
+
+    /**
+     * Sets key/value pair. As the call is global (ContextHub.setItem()), key has to specify which store have to be
+     * updated (for example: "/store/foobar/key-name").
+     *
+     * @param {String} key - key name
+     * @param {Object} value - value
+     */
+    var setItem = function(key, value) {
+        var data = getStorageByProperty(key);
+
+        /* store given value */
+        data.storage.setItem(data.storeProperty, value);
+    };
+
+    /**
+     * Removes specified key from the persistence. As the call is global (ContextHub.removeItem()), key has to specify
+     * which store have to be updated (for example: "/store/foobar/key-name").
+     *
+     * @param {String} key - key name
+     */
+    var removeItem = function(key) {
+        var data = getStorageByProperty(key);
+
+        /* remove given key */
+        data.storage.removeItem(data.storeProperty);
+    };
+
+    /**
+     * Returns object containing key/value pairs of specified properties.
+     *
+     * @private
+     * @param {Array} properties
+     * @return {Object}
+     */
+    var getAllItems = function(properties) {
+        var result = {};
+        var count = 0;
+        var keysList = [];
+
+        /* iterate over property names */
+        $.each(properties, function(idx, key) {
+            if (key) {
+                var path = ContextHub.Utils.JSON.tree.sanitizeKey(key);
+
+                /* if key contains '/store/' - remove it from result key name */
+                if (path[0] === 'store') {
+                    key = '/' + path.slice(1).join('/');
+                } else {
+                    /* but path needs to have '/store/' prefix */
+                    path.unshift('store');
+                }
+
+                /* get value */
+                path = '/' + path.join('/');
+                var value = ContextHub.getItem(path);
+
+                /* and add it to the result set */
+                if (value !== null) {
+                    count++;
+                    result = ContextHub.Utils.JSON.tree.setItem(result, key, value);
+                    keysList.push(key);
+                }
+            }
+        });
+
+        result._length = count;
+        result._keys = keysList;
+        return result;
+    };
+
+    /**
+     * Executes successAction with values of provided properties if they are available within timeout, otherwise
+     * defaultAction is called with as much properties as possible (available at that time).
+     *
+     * @param {String|Array} properties
+     * @param {Function} successAction
+     * @param {Function} defaultAction
+     * @param {Number} timeout
+     */
+    var sync = function(properties, successAction, defaultAction, timeout) {
+        /* create one element array if string was provided */
+        if ($.type(properties) === 'string') {
+            properties = [properties];
+        }
+
+        /* sanitize names in properties array */
+        var sanitizedProperties = [];
+
+        $.each(properties, function(id, item) {
+            var sanitizedItem = '/' + ContextHub.Utils.JSON.tree.sanitizeKey(item).join('/');
+            sanitizedProperties.push(sanitizedItem);
+        });
+
+        properties = sanitizedProperties;
+
+        /* use empty function if handlers were not provided */
+        successAction = successAction || function() {};
+        defaultAction = defaultAction || function() {};
+
+        /* get properties that are matching the request and are already set */
+        var availableProperties = getAllItems(properties);
+
+        /* call successAction if all properties are set already */
+        if (availableProperties._length === properties.length) {
+            successAction(availableProperties);
+            return;
+        }
+
+        /* otherwise call defaultAction after reaching timeout */
+        var failureHandlerId = 0;
+        var taskCompleted = false;
+
+        /* task will be called when timeout is reached or with every 'data' event */
+        var task = function(taskId) {
+            /* just return if task is completed */
+            if (taskCompleted) {
+                return true;
+            }
+
+            /* get properties that are matching the request and are already set */
+            var values = getAllItems(properties);
+            var handler = null;
+
+            /* timeout reached - select default action */
+            if ($.type(taskId) === 'undefined') {
+                handler = defaultAction;
+            }
+
+            /* all properties are ready, so cancel timeout handler - select success action */
+            if (values._length === properties.length) {
+                handler = successAction;
+                window.clearTimeout(failureHandlerId);
+            }
+
+            /* execute handler and mark task as completed */
+            if (handler) {
+                taskCompleted = true;
+                handler(values);
+            }
+
+            return taskCompleted;
+        };
+
+        /* create timeout handler and add task to sync() requests list */
+        failureHandlerId = window.setTimeout(task, timeout);
+        syncRequests.push(task);
+    };
+
+    /**
+     * Cleans persistence of all configured stores.
+     */
+    var cleanAllStores = function() {
+        var wasPaused = eventing.isPaused();
+        this.eventing.pause();
+
+        $.each(getAllStores(), function(idx, store) {
+            store.clean();
+        });
+
+        if (!wasPaused) {
+            this.eventing.resume();
+        }
+    };
+
+    /**
+     * Resets persistence of all configured stores. If keepRemainingData is true, all key/value pairs which are not
+     * initial data will not get removed from the persistence. This function is called when "reset" button is clicked in ContextHub UI.
+     *
+     * @param {Boolean} keepRemainingData
+     */
+    var resetAllStores = function(keepRemainingData) {
+        var wasPaused = eventing.isPaused();
+
+        /* invalidate cache and re-check for opt-out cookie */
+        ContextHub.isOptedOut(true);
+
+        /* pause eventing and reset stores */
+        ContextHub.eventing.pause();
+
+        $.each(getAllStores(), function(idx, store) {
+            store.reset(keepRemainingData);
+        });
+
+        if (!wasPaused) {
+            ContextHub.eventing.resume();
+        }
+    };
+
+    /**
+     * Similar function to {@link #sync()}, but the requested synchronization can be executed several times when
+     * requested properties are getting modified.
+     *
+     * @param {String|Array} properties
+     * @param {Function} successAction
+     * @param {Function} defaultAction
+     * @param {Number} timeout
+     */
+    var bind = function(properties, successAction, defaultAction, timeout) {
+        /* create one element array if string was provided */
+        if ($.type(properties) === 'string') {
+            properties = [properties];
+        }
+
+        /* sanitize names in properties array */
+        var sanitizedProperties = [];
+
+        $.each(properties, function(id, item) {
+            var sanitizedItem = '/' + ContextHub.Utils.JSON.tree.sanitizeKey(item).join('/');
+            sanitizedProperties.push(sanitizedItem);
+        });
+
+        properties = sanitizedProperties;
+
+        /* use empty function if handlers were not provided */
+        successAction = successAction || function() {};
+        defaultAction = defaultAction || function() {};
+
+        /* get properties that are matching the request and are already set */
+        var availableProperties = getAllItems(properties);
+
+        /* call successAction if all properties are set already */
+        var createTimeoutHandler = true;
+
+        if (availableProperties._length === properties.length) {
+            createTimeoutHandler = false;
+            successAction(availableProperties);
+        }
+
+        /* otherwise call defaultAction after reaching timeout */
+        var failureHandlerId = 0;
+
+        /* task will be called when timeout is reached or with every 'data' event */
+        var task = function(taskId, modifiedItems) {
+            if (modifiedItems) {
+                var lookup = {};
+                var skip = true;
+
+                /* create a lookup - thanks to that we can react on "/a/b" (if it's being watched) even if "/a/b/c/d" was modified */
+                $.each(modifiedItems, function(item) {
+                    lookup = ContextHub.Utils.JSON.tree.setItem(lookup, item, true);
+                });
+
+                /* check if at least one property was modified */
+                for (var x = 0; x < properties.length; x++) {
+                    if (ContextHub.Utils.JSON.tree.getItem(lookup, properties[x])) {
+                        skip = false;
+                        break;
+                    }
+                }
+
+                /* none of required properties were modified */
+                if (skip) {
+                    return;
+                }
+            }
+
+            /* get current values */
+            var values = getAllItems(properties);
+            var handler = defaultAction;
+
+            /* all properties are ready, so cancel timeout handler - select success action */
+            if (values._length === properties.length) {
+                handler = successAction;
+                window.clearTimeout(failureHandlerId);
+            }
+
+            /* execute handler */
+            handler(values);
+        };
+
+        /* create timeout handler and add task to bind() requests list */
+        if (createTimeoutHandler) {
+            failureHandlerId = window.setTimeout(task, timeout);
+        }
+
+        bindRequests.push(task);
+    };
+
+    /**
+     * Checks whether "cq-opt-out" cookie is present.
+     *
+     * @param {Boolean} [invalidateCache] - invalidate cache
+     * @return {Boolean} true if ContextHub functionality (persistence, segmentation engine) should be disabled
+     */
+    var isOptedOut = function(invalidateCache) {
+        /* clears cache to re-check */
+        if (invalidateCache) {
+            optedOut = null;
+        }
+
+        /* check if opt-out cookie is set (remember result, so intensive calls will not affect performance) */
+        if (optedOut === null) {
+            optedOut = ContextHub.Utils.Cookie.getItem('cq-opt-out') !== null;
+        }
+
+        return optedOut;
+    };
+
+    /* set ContextHub's public interface */
+    $.extend(ContextHub, {
+        persistence: persistence,
+        eventing: eventing,
+        registerStore: registerStore,
+        getAllStores: getAllStores,
+        getStore: getStore,
+        set: set,
+        get: get,
+        getItem: getItem,
+        setItem: setItem,
+        removeItem: removeItem,
+        cleanAllStores: cleanAllStores,
+        resetAllStores: resetAllStores,
+        sync: sync,
+        bind: bind,
+        isOptedOut: isOptedOut
+    });
+
+    /* "store-updated" listener used by sync() and bind() */
+    ContextHub.eventing.on(ContextHub.Constants.EVENT_STORE_UPDATED, function(event, data) {
+        /* iterate over pending sync() requests */
+        $.each(syncRequests || [], function(id, handler) {
+            /* execute task and remove it from the list if it's completed */
+            if (handler && handler(id)) {
+                delete syncRequests[id];
+                syncRequests = $.grep(syncRequests, $.isFunction);
+            }
+        });
+
+        /* are there any binds registered? */
+        if ((bindRequests || []).length) {
+            /* create a list of properties which were modified during this update */
+            var modifiedItems = {};
+
+            if (data.keys) {
+                $.each(data.keys.all.list, function(idx, item) {
+                    modifiedItems['/' + data.store + item] = true;
+                });
+            }
+
+            /* iterate over bind() requests and execute them */
+            $.each(bindRequests || [], function(id, handler) {
+                if (handler) {
+                    handler(id, modifiedItems);
+                }
+            });
+        }
+    }, 'sync-bind');
+
+}(ContextHubJQ, window));

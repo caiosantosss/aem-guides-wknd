@@ -1,0 +1,1194 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.ComponentExtractor
+ * @extends CQ.Ext.Viewport
+ * The ComponentExtractor lets the user extract components from a website/page.
+ * @constructor
+ * Creates a new ComponentExtractor.
+ * @param {Object} config The config object
+ */
+
+CQ.wcm.ComponentExtractor = CQ.Ext.extend(CQ.Ext.Viewport, {
+    frame: null,
+
+    highlightWidth: 8,
+
+    highlightColor: "#d3ea9b",
+
+    highlightSelectColor: "#abd551",
+
+    topOffset: 0,
+
+    filter: null,
+
+    selectionInfo: null,
+
+    tree: null,
+
+    components: null,
+
+    selectBtn: null,
+
+    openBtn: null,
+
+    selectedElement: null,
+
+    dropRegion: null,
+
+    dropTarget: null,
+
+    displayComponents: [],
+
+    componentList: null,
+
+    highlightBorder: null,
+
+    loadedPath: null,
+
+    pageName: null,
+
+    mouseoverRegistered: false,
+
+    mouseoverActivated: false,
+
+    constructor : function(config) {
+        window.onbeforeunload = function() {
+            window.onbeforeunload = null;
+            // Note: please don't break the following line, it needs
+            //       to be a single string for the i18n extractor
+            return CQ.I18n.getMessage("Do you really want to leave the page? This could be an automatic redirect from the imported page, so please click cancel if you don't want this.");
+        };
+
+        // load components
+        for (var i=0; i<config.displayComponents.length; i++) {
+            this.displayComponents.push(new RegExp(config.displayComponents[i]));
+        }
+        this.loadedPath = CQ.HTTP.getAnchor(document.location.href);
+        this.pageName = this.loadedPath.match("\/etc\/designs/(.*?)\/")[1];
+
+        // add resource type from the loadedPath
+        this.displayComponents.push(new RegExp(this.pageName+"/components"));
+
+        var frameEl = document.createElement("iframe");
+        frameEl.id = "frame_cq-ce";
+        frameEl.name = "frame_cq-ce";
+        frameEl.frameBorder = "0";
+        frameEl.border = "0";
+
+        this.frame = new CQ.Ext.Element(frameEl);
+        this.frame.addClass("cq-frame");
+        this.frame.setStyle("width", "100%");
+        this.frame.setStyle("height", "100%");
+        this.frame.on("load", this.onFrameLoad, this);
+        CQ.Ext.dd.Registry.register(this.frame.dom);
+
+        var extractor = this;
+        this.selectionInfo = new CQ.Ext.Toolbar.TextItem({
+            "text":CQ.I18n.getMessage("Nothing selected.")
+        });
+
+        this.filter = new CQ.Ext.form.TriggerField({
+            "triggerClass":"x-form-clear-trigger",
+            "emptyText":CQ.I18n.getMessage("Enter selector to filter elements"),
+            "width":240,
+            "onTriggerClick":function() {
+                this.reset();
+            }
+        });
+
+        this.tree = new CQ.Ext.tree.TreePanel({
+            "title":CQ.I18n.getMessage("Document Tree"),
+            "width":320,
+            "region":"east",
+            "margins":"5 5 0 0",
+            "cmargins":"5 5 0 5",
+            "split":true,
+            "collapsible":true,
+            "collapsed":true,
+            "animate":true,
+            "border":true,
+            "autoScroll":true,
+            "containerScroll":true,
+            "root":new CQ.Ext.tree.TreeNode({
+                "name":"doc",
+                "text":CQ.I18n.getMessage("Document"),
+                "expanded":true
+            })
+        });
+
+        this.components = new CQ.Ext.Panel({
+            "title":CQ.I18n.getMessage("Components"),
+            "border":true,
+            "autoScroll":true,
+            "containerScroll":true,
+            "layout":"accordion",
+            "width":220,
+            "region":"west",
+            "margins":"5 0 0 5",
+            "cmargins":"5 5 0 5",
+            "split":true,
+            "collapsible":true,
+            "animate":true,
+            "tbar":[
+                {
+                    "iconCls":"cq-siteadmin-refresh",
+                    "handler":extractor.loadComponents,
+                    "scope":extractor
+                }
+            ]
+        });
+
+        this.mappings = new CQ.Ext.grid.EditorGridPanel({
+            "title":CQ.I18n.getMessage("Mappings"),
+            "border":true,
+            "autoScroll":true,
+            "containerScroll":true,
+            "height":220,
+            "region":"south",
+            "margins":"0 5 5 5",
+            "cmargins":"5 5 5 5",
+            "split":true,
+            "collapsible":true,
+            "collapsed":false,
+            "animate":true,
+            "viewConfig":new CQ.Ext.grid.GridView({
+                "forceFit":true
+            }),
+            "store":new CQ.Ext.data.Store({}),
+            "cm":new CQ.Ext.grid.ColumnModel({
+                defaults: {
+                    sortable:true
+                },
+                columns: [
+                    {
+                        "header":CQ.I18n.getMessage("Element"),
+                        "dataIndex":"element",
+                        "renderer":function(value) {
+                            return extractor.getElementHint(value);
+                        }
+                    },{
+                        "header":CQ.I18n.getMessage("Component"),
+                        "dataIndex":"component"
+                    },{
+                        "header":CQ.I18n.getMessage("Path"),
+                        "editor":new CQ.Ext.form.TextField({
+                            "allowBlank":false
+                        }),
+                        "dataIndex":"path"
+                    },{
+                        "header":CQ.I18n.getMessage("Insert ID"),
+                        "dataIndex":"insertID",
+                        "hidden":true
+                    }
+                ]
+            }),
+            "sm":new CQ.Ext.grid.RowSelectionModel({
+                "singleSelect":true,
+                "listeners": {
+                    "selectionchange":function(selModel) {
+                        var record = selModel.getSelected();
+                        if (record) {
+                            var el = record.get("element");
+
+                            extractor.updateHighlight(extractor.highlightBorder, {
+                                "background-color":extractor.highlightSelectColor
+                            });
+                            extractor.showHighlight(el, extractor.highlightBorder);
+                            extractor.updateSelectionInfo(el);
+                            extractor.updateTreeSelection(el);
+                            extractor.setSelectedElement(el, true);
+                        }
+                    }
+                }
+            }),
+            "tbar":[
+                {
+                    "text":CQ.I18n.getMessage("Generate"),
+                    "handler":function() {
+                        var colon = "";
+                        var mappings = "";
+                        var complete = true;
+                        var store = extractor.mappings.getStore();
+                        store.each(function(record) {
+                            var component = record.get("component");
+                            var path = record.get("path");
+                            var insertID = record.get("insertID");
+
+                            if ((path == null) || (path == "")) {
+                                complete = false;
+                                return false;
+                            } else {
+                                mappings += colon + insertID + "=" + component + "," + path;
+                                colon = ":";
+                            }
+                        }, this);
+
+                        if (!complete) {
+                            CQ.Ext.Msg.show({
+                                title:"Missing Paths",
+                                msg:CQ.I18n.getMessage("Please provide paths for all component mappings."),
+                                width:400,
+                                buttons:CQ.Ext.MessageBox.OK,
+                                icon:CQ.Ext.MessageBox.ERROR
+                            });
+                        } else {
+                            CQ.Ext.Msg.wait("Please wait page component is generated.", "Generating page", {
+                                interval:120,
+                                increment:60,
+                                text:"Generating page..."
+                            });
+
+                            CQ.Ext.Ajax.request({
+                                url:CQ.HTTP.externalize("/libs/wcm/bin/siteimporter/generate"),
+                                params:{
+                                    "resource":extractor.loadedPath,
+                                    "mappings":mappings,
+                                    "_charset_":"utf-8"
+                                },
+                                success:function(response, options) {
+                                    store.commitChanges();
+                                    CQ.Ext.Msg.hide();
+                                },
+                                failure:function(response, options) {
+                                    CQ.Ext.Msg.hide();
+
+                                    CQ.Ext.Msg.show({
+                                        title:"Error",
+                                        msg:response.responseText,
+                                        width:400,
+                                        buttons:CQ.Ext.MessageBox.OK,
+                                        icon:CQ.Ext.MessageBox.ERROR
+                                    });
+                                }
+                            });
+                        }
+                    }
+                },"-",{
+                    "text":CQ.I18n.getMessage("Remove"),
+                    "handler":function() {
+                        var sm = extractor.mappings.getSelectionModel();
+                        var sel = sm.getSelections();
+
+                        var store = extractor.mappings.getStore();
+                        for (var i=0; i<sel.length; i++) {
+                            store.remove(sel[i]);
+                        }
+                    }
+                },{
+                    "text":CQ.I18n.getMessage("Remove All"),
+                    "handler":function() {
+                        var store = extractor.mappings.getStore();
+                        store.removeAll();
+                    }
+                }
+            ]
+        });
+
+        this.openBtn = new CQ.Ext.Button({
+            "text":CQ.I18n.getMessage("Open"),
+            "handler":function() {
+                var name = extractor.loadedPath.match(/\/dev\/(.*?)-original.html/)[1];
+                window.open("http://" + window.location.host + "/content/" + name + ".html", "win_" + name);
+            }
+        });
+
+        this.selectBtn = new CQ.Ext.Button({
+            "text":CQ.I18n.getMessage("Select"),
+            "enableToggle":true,
+            "toggleHandler":function(button, pressed) {
+                var body = extractor.frame.dom.contentDocument.body;
+                if (pressed) {
+                    extractor.hideFrame(extractor.highlightBorder);
+                    extractor.updateHighlight(extractor.highlightBorder, {
+                        "background-color":extractor.highlightColor
+                    });
+                    if (!extractor.mouseoverRegistered) {
+                        extractor.registerMouseover([body]);
+                        extractor.mouseoverRegistered = true;
+                    }
+
+                    extractor.mouseoverActivated = true;
+                } else {
+                    extractor.mouseoverActivated = false;
+                }
+            }
+        });
+
+        this.extractBtn = new CQ.Ext.Button({
+            "text":CQ.I18n.getMessage("Extract..."),
+            "handler":this.extractComponent,
+            "scope":this,
+            "disabled":true
+        });
+
+        this.insertBtn = new CQ.Ext.Button({
+            "text":CQ.I18n.getMessage("Insert"),
+            "handler":this.insertComponent,
+            "scope":this,
+            "hidden":true,
+            "disabled":true
+        });
+
+        this.restoreBtn = new CQ.Ext.Button({
+            "text":CQ.I18n.getMessage("Restore"),
+            "handler":this.restorePage,
+            "scope":this,
+            "hidden":true,
+            "disabled":false
+        });
+
+        this.removeBtn = new CQ.Ext.Button({
+            "text":CQ.I18n.getMessage("Remove"),
+            "handler":this.removeComponent,
+            "hidden":true,
+            "scope":this,
+            "disabled":true
+        });
+
+        CQ.wcm.ComponentExtractor.superclass.constructor.call(this, {
+            "id" :"cq-ce",
+            "layout":"border",
+            "renderTo":CQ.Util.getRoot(),
+            "items" : [
+                {
+                    "id":"cq-ce-wrapper",
+                    "xtype":"panel",
+                    "region":"center",
+                    "layout":"border",
+                    "items": [
+                        {
+                            "id":"cq-header",
+                            "xtype":"container",
+                            "autoEl":"div",
+                            "region":"north"
+                        },
+                        this.tree,
+                        this.components,
+                        this.mappings,
+                        {
+                            "xtype":"panel",
+                            "id":"cq-ce-framewrapper",
+                            "region":"center",
+                            "margins":"5 0 0 0",
+                            "items":new CQ.Ext.BoxComponent({
+                                "autoEl": {
+                                    "tag": "div"
+                                },
+                                "style": {
+                                    "width": "100%",
+                                    "height": "100%"
+                                },
+                                "listeners":{
+                                    render:function(wrapper) {
+                                        extractor.frame.appendTo(wrapper.getEl());
+                                    }
+                                }
+                            }),
+                            "tbar":[
+                                this.openBtn,
+                                this.selectBtn,
+                                /*this.insertBtn,*/
+                                this.removeBtn,
+                                this.extractBtn,
+                                this.restoreBtn
+                            ],
+                            "bbar":[
+                                this.selectionInfo,
+                                "->",
+                                this.filter
+                            ],
+                            "listeners":{
+                                "render":function(comp) {
+                                    // load resource if defined as anchor
+                                    if (extractor.loadedPath) {
+                                        extractor.loadResource(extractor.loadedPath);
+                                    }
+                                },
+                                "resize":function(panel, adjWidth, adjHeight, rawWidth, rawHeight) {
+                                    if (extractor.selectedElement) {
+                                        extractor.showHighlight(
+                                                    extractor.selectedElement,
+                                                    extractor.highlightBorder);
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+    },
+
+    initComponent : function() {
+        CQ.wcm.ComponentExtractor.superclass.initComponent.call(this);
+
+        // init history
+        new CQ.Ext.form.Hidden({
+            "id":CQ.Ext.History.fieldId,
+            "renderTo":CQ.Util.ROOT_ID
+        });
+        var historyFrame = document.createElement("iframe");
+        historyFrame.id = CQ.Ext.History.iframeId;
+        historyFrame.src = CQ.Ext.SSL_SECURE_URL;
+        historyFrame.className = "x-hidden";
+        historyFrame.frameBorder = "0";
+        historyFrame.border = "0";
+        new CQ.Ext.Element(historyFrame).appendTo(CQ.Util.getRoot());
+
+        // register for history changes to reload resources
+        CQ.Ext.History.init();
+
+        var extractor = this;
+        CQ.Ext.History.on("change", function(token) {
+            extractor.loadResource(token);
+        });
+    },
+
+    onFrameLoad: function() {
+        var extractor = this;
+
+        // fake content finder to enable DD
+        CQ.WCM.getTopWindow().CQ_ContentFinder = {
+            "getContentWindow": function() {
+                return extractor.frame.dom.contentWindow;
+            }
+        };
+
+        // strip offending head tags
+        var base = CQ.Ext.get(this.frame.dom.contentDocument.documentElement).select("base", false);
+        if (base) {
+            base.remove();
+        }
+
+        this.loadComponents();
+        this.highlightBorder = this.createHighlightBorder(this.highlightColor);
+
+        this.loadMappings();
+        this.loadTree([CQ.Ext.get(this.frame.dom.contentDocument.body)]);
+        this.setSelectedElement(null);
+
+        // remove unload handler with some delay
+        (function(){
+            window.onbeforeunload = null;
+        }).defer(2000);
+    },
+
+    loadComponents: function() {
+        var extractor = this;
+
+        // load component list
+        if (this.componentList) {
+            this.componentList = null;
+            this.components.items.each(function(item) {
+                this.components.remove(item);
+            }, this);
+        }
+        var path = "";
+        var url = CQ.HTTP.externalize("/libs/wcm/core/content/components.json");
+        url = CQ.HTTP.noCaching(url);
+        var res = CQ.HTTP.get(url);
+
+        var info = null;
+        if (CQ.HTTP.isOk(res)) {
+            info = CQ.Util.eval(res);
+        } else {
+            info = {};
+        }
+        this.componentList = new CQ.wcm.ComponentList(path, info);
+        var all = this.componentList.getAllComponents();
+
+        // filter components by resource type
+        for (var c in all) {
+            var comp = all[c];
+            var add = false;
+            if (!comp.virtual) {
+                for (var i=0; i<extractor.displayComponents.length; i++) {
+                    if (extractor.displayComponents[i].test(comp.resourceType)) {
+                        add = true;
+                        break;
+                    }
+                }
+            }
+            if (!add) {
+                delete all[c];
+            }
+        }
+        var compStores = new CQ.Ext.util.MixedCollection();
+        CQ.wcm.ComponentList.updateStores(compStores, all);
+
+        compStores.each(function(compStore, index, total) {
+            if (compStore.group == ".hidden") {
+                compStore.group = CQ.I18n.getMessage("Hidden");
+            }
+            var panel = this.components.add(
+                    new CQ.Ext.Panel(CQ.Util.formatData({
+                        "id":"cq-componenlist-" + compStore.group,
+                        "title":compStore.group,
+                        "cls":"cq-sidekick-buttons " + CQ.DOM.encodeClass(compStore.group, "cq-cmpts"),
+                        "autoScroll": true,
+                        "containerScroll": true,
+                        "border":false,
+                        "layout":"fit",
+                        "items": extractor.createDataView(compStore)
+                    }))
+            );
+        }, this);
+        this.components.doLayout();
+    },
+
+    createHighlightBorder: function(color) {
+        // register markup frame
+        var body = this.frame.dom.contentDocument.body;
+
+        // register frame elements
+        var bTopEl = document.createElement("div");
+        var bTop = new CQ.Ext.Element(bTopEl);
+        bTop.appendTo(body);
+        bTop.hide();
+
+        // TODO should this come from CSS?
+        bTop.applyStyles({
+            "background-color":color,
+            "position":"absolute",
+            "height":this.highlightWidth + "px"
+        });
+
+        var bBottomEl = document.createElement("div");
+        bBottom = new CQ.Ext.Element(bBottomEl);
+        bBottom.appendTo(body);
+        bBottom.hide();
+
+        // TODO should this come from CSS?
+        bBottom.applyStyles({
+            "background-color":color,
+            "position":"absolute",
+            "height":this.highlightWidth + "px"
+        });
+
+        var bLeftEl = document.createElement("div");
+        bLeft = new CQ.Ext.Element(bLeftEl);
+        bLeft.appendTo(body);
+        bLeft.hide();
+
+        // TODO should this come from CSS?
+        bLeft.applyStyles({
+            "background-color":color,
+            "position":"absolute",
+            "width":this.highlightWidth + "px"
+        });
+
+        var bRightEl = document.createElement("div");
+        bRight = new CQ.Ext.Element(bRightEl);
+        bRight.appendTo(body);
+        bRight.hide();
+
+        // TODO should this come from CSS?
+        bRight.applyStyles({
+            "background-color":color,
+            "position":"absolute",
+            "width":this.highlightWidth + "px"
+        });
+
+        return {
+            "top":bTop,
+            "bottom":bBottom,
+            "left":bLeft,
+            "right":bRight
+        };
+    },
+
+    createDataView: function(componentStore) {
+        return new CQ.Ext.DataView({
+            "tpl": CQ.wcm.ComponentList.TEMPLATE,
+            "autoHeight": true,
+            "autoWidth": true,
+            "border":false,
+            "singleSelect":true,
+            "multiSelect":false,
+            "overClass":"x-btn-over",
+            "selectedClass":"x-btn-selected",
+            "itemSelector":"table.x-btn",
+            "loadingText":CQ.I18n.getMessage("Loading components"),
+            "listeners":{
+                "render":function(comp) {
+                    comp.dragZone = new CQ.wcm.ComponentExtractor.DragZone(comp, {
+                        containerScroll:false
+                    });
+                    comp.dragZone.addToGroup(CQ.wcm.EditBase.DD_GROUP_COMPONENT);
+                    comp.dragZone.removeFromGroup(CQ.wcm.EditBase.DD_GROUP_DEFAULT);
+                }
+            },
+            "store":componentStore,
+            "prepareData": function(data) {
+                data.title = CQ.I18n.getVarMessage(data.title);
+                data.description = CQ.I18n.getVarMessage(data.description);
+                return data;
+            }
+        });
+    },
+
+    loadMappings: function() {
+        var mappingsPath = this.loadedPath.substr(0,
+                            this.loadedPath.lastIndexOf("/")) + "/mappings.infinity.json";
+
+        var doc = this.frame.dom.contentDocument;
+
+        var extractor = this;
+        CQ.Ext.Ajax.request({
+            url:CQ.HTTP.externalize(mappingsPath),
+            success:function(response, options) {
+                var store = extractor.mappings.getStore();
+
+                var mappings = CQ.Util.eval(response);
+                for (var m in mappings) {
+                    var mapping = mappings[m];
+                    if (mapping.component) {
+                        // find element
+                        var el = CQ.Ext.query("*[@componentInsertId='" + m +"']", doc.body);
+                        if (el.length > 0) {
+                            el = CQ.Ext.get(el[0]);
+
+                            var rID = extractor.getElementHint(el);
+                            var record = new CQ.wcm.ComponentExtractor.ReplacementRecord({
+                                "element":el,
+                                "component":mapping.component,
+                                "path":mapping.path,
+                                "insertID":m
+                            }, rID);
+                            store.add([record]);
+                        }
+                    }
+                }
+            },
+            failure:function(response, options) {
+                // nothing to do here, records could not be loaded
+            }
+        });
+    },
+
+    loadTree: function(elements) {
+        // remove existing nodes
+        var root = this.tree.getRootNode();
+        CQ.Ext.each(root.childNodes, function(child, index, all) {
+            child.remove();
+        });
+        this.loadTreeNodes(elements, root);
+        root.expand(false);
+    },
+
+    // private
+    loadTreeNodes: function(elements, parent) {
+        for (var i=0; i<elements.length; i++) {
+            var el = elements[i];
+
+            var name = this.getElementHint(el);
+            var node = parent.appendChild(new CQ.Ext.tree.TreeNode({
+                "name":name,
+                "text":name,
+                "leaf":el.dom.childNodes.length == 0,
+                "singleClickExpand":true
+            }));
+            node.on("click", function(node, event) {
+                this.updateHighlight(this.highlightBorder, {
+                    "background-color":this.highlightSelectColor
+                });
+                this.showHighlight(node.relatedElement, this.highlightBorder);
+                this.updateSelectionInfo(node.relatedElement);
+                this.setSelectedElement(node.relatedElement);
+            }, this);
+            node.relatedElement = el;
+            el.relatedTreeNode = node;
+
+            for (var j=0; j<el.dom.childNodes.length; j++) {
+                var childEl = CQ.Ext.get(el.dom.childNodes[j]);
+                if (childEl) {
+                    this.loadTreeNodes([childEl], node);
+                }
+            }
+        }
+    },
+
+    registerMouseover: function(elements) {
+        for (var i=0; i<elements.length; i++) {
+            var el = CQ.Ext.get(elements[i]);
+
+            el.on("mouseover", this.handleMouseover, this);
+            el.on("mouseout", this.handleMouseout, this);
+            el.on("click", this.handleClick, this);
+        }
+    },
+
+    unregisterMouseover: function(elements) {
+        for (var i=0; i<elements.length; i++) {
+            var el = CQ.Ext.get(elements[i]);
+
+            el.un("mouseover", this.handleMouseover, this);
+            el.un("mouseout", this.handleMouseout, this);
+            el.un("click", this.handleClick, this);
+        }
+    },
+
+    handleMouseover: function(event, element, object) {
+        if (this.mouseoverActivated) {
+            var el = CQ.Ext.get(element);
+
+            if (this.isFiltered(el)) {
+                this.showHighlight(el, this.highlightBorder);
+                this.updateSelectionInfo(el);
+                this.updateTreeSelection(el);
+            }
+        }
+    },
+
+    handleMouseout: function(event, element, object) {
+        if (this.mouseoverActivated) {
+            var el = CQ.Ext.get(element);
+
+            this.hideFrame(this.highlightBorder);
+            this.updateSelectionInfo();
+        }
+    },
+
+    isFiltered: function(el) {
+        var selector = this.filter.getValue();
+        if (selector && (selector != "")) {
+            return el.is(selector);
+        }
+        return true;
+    },
+
+    updateTreeSelection: function(el) {
+        // update tree
+        if (el.relatedTreeNode) {
+        	el.relatedTreeNode.ensureVisible();
+            el.relatedTreeNode.select(); 
+        }
+    },
+
+    updateSelectionInfo: function(el) {
+        var msg;
+
+        if (el) {
+            var hint = this.getElementHint(el);
+            msg = CQ.I18n.getMessage("Selected Element") + ": " + hint;
+        } else {
+            msg = CQ.I18n.getMessage("Nothing selected.");
+        }
+        CQ.Ext.get(this.selectionInfo.el).update(msg);
+    },
+
+    updateHighlight: function(highlightBorder, styles) {
+        highlightBorder.top.applyStyles(styles);
+        highlightBorder.bottom.applyStyles(styles);
+        highlightBorder.left.applyStyles(styles);
+        highlightBorder.right.applyStyles(styles);
+    },
+
+    showHighlight: function(el, highlightBorder) {
+        var box = el.getBox();
+
+        var window = this.frame.dom.contentWindow;
+        var topOffset = window.scrollY + this.topOffset;
+        var leftOffset = window.scrollX;
+
+        // update and display element frame
+        highlightBorder.top.applyStyles({
+            "left":(box.x - this.highlightWidth + leftOffset) + "px",
+            "top":(box.y - this.highlightWidth + topOffset) + "px",
+            "width":(box.width + (this.highlightWidth * 2)) + "px"
+        });
+        highlightBorder.top.show();
+
+        highlightBorder.bottom.applyStyles({
+            "left":(box.x - this.highlightWidth + leftOffset) + "px",
+            "top":(box.y + box.height +topOffset) + "px",
+            "width":(box.width + (this.highlightWidth * 2)) + "px"
+        });
+        highlightBorder.bottom.show();
+
+        highlightBorder.left.applyStyles({
+            "left":(box.x - this.highlightWidth + leftOffset) + "px",
+            "top":(box.y - this.highlightWidth + topOffset) + "px",
+            "height":(box.height + (this.highlightWidth * 2)) + "px"
+        });
+        highlightBorder.left.show();
+
+        highlightBorder.right.applyStyles({
+            "left":(box.x + box.width + leftOffset) + "px",
+            "top":(box.y - this.highlightWidth + topOffset) + "px",
+            "height":(box.height + (this.highlightWidth * 2)) + "px"
+        });
+        highlightBorder.right.show();
+    },
+
+    getElementHint: function(el) {
+        var hint = el.dom.nodeName;
+        if (el.dom.id && (el.dom.id != "")) {
+            hint += "#" + el.dom.id;
+        }
+        var classes = el.dom.getAttribute("class");
+        if (classes && (classes != "")) {
+            hint += "." + classes.replace(/ /g, ".");
+        }
+        return hint;
+    },
+
+    hideFrame: function(highlightBorder) {
+        highlightBorder.top.hide();
+        highlightBorder.bottom.hide();
+        highlightBorder.left.hide();
+        highlightBorder.right.hide();
+    },
+
+    handleClick: function(event, element, object) {
+        if (this.mouseoverActivated) {
+            event.stopEvent();
+
+            this.setSelectedElement(CQ.Ext.get(element));
+            this.updateHighlight(this.highlightBorder, {
+                "background-color":this.highlightSelectColor
+            });
+            this.mouseoverActivated = false;
+        }
+    },
+
+    setSelectedElement: function(el, noGridSelection) {
+        if (this.dropTarget) {
+            this.dropTarget.destroy();
+            this.dropTarget = null;
+        }
+        this.dropRegion = null;
+
+        // set selected element
+        this.selectedElement = el;
+        if (this.selectedElement != null) {
+            this.extractBtn.setDisabled(false);
+            //this.insertBtn.setDisabled(false);
+            this.removeBtn.setDisabled(false);
+
+            this.dropRegion = CQ.Ext.lib.Region.getRegion(el.dom);
+            this.dropTarget = new CQ.wcm.EditBase.DropTarget(this.selectedElement, {
+                "ddGroup":CQ.wcm.EditBase.DD_GROUP_COMPONENT
+            });
+            if (!noGridSelection) {
+                // select in grid
+                var store = this.mappings.getStore();
+                var selModel = this.mappings.getSelectionModel();
+
+                var rID = this.getElementHint(this.selectedElement);
+                var record = store.getById(rID);
+                if (record) {
+                    selModel.selectRecords([record]);
+                } else {
+                    selModel.clearSelections();
+                }
+            }
+        } else {
+            //this.insertBtn.setDisabled(true);
+            this.removeBtn.setDisabled(true);
+            this.extractBtn.setDisabled(true);
+        }
+        this.selectBtn.toggle(false);
+    },
+
+    loadResource: function(path) {
+        if (path) {
+            this.frame.dom.src = CQ.HTTP.externalize(path + "?wcmmode=disabled");
+        } else {
+            this.frame.dom.contentWindow.location.reload();
+            this.setSelectedElement(null);
+        }
+    },
+
+    restorePage: function() {
+        var extractor = this;
+        CQ.HTTP.post("/libs/wcm/bin/siteimporter/editorigpage",function() {
+            CQ.Notification.notify("page restored", "");
+            window.location.reload();
+        }, {
+            'path':extractor.loadedPath,
+            'operation':'restore'
+        }, null, true);
+    },
+
+    insertComponent: function() {
+        var extractor = this;
+        if (this.selectedElement) {
+            var newid = "new_" + new Date().getTime();
+            var lastel = this.selectedElement;
+            var el = this.selectedElement.insertSibling('<DIV componentInsertId="'+newid+'">[place holder]</DIV>', 'after');
+            this.loadTree([CQ.Ext.get(this.frame.dom.contentDocument.body)]);
+            extractor.setSelectedElement(el,true);
+            extractor.updateSelectionInfo(el);
+            extractor.updateTreeSelection(el);
+            extractor.updateHighlight(extractor.highlightBorder, {
+                "background-color":extractor.highlightSelectColor
+            });
+            extractor.showHighlight(el, extractor.highlightBorder);
+            var lastid = lastel.dom.getAttribute('componentInsertId');
+
+            CQ.HTTP.post("/libs/wcm/bin/siteimporter/editorigpage",function() {
+                    CQ.Notification.notify("inserted", "page saved");
+                }, {
+                'path':extractor.loadedPath,
+                'operation':'insert',
+                'content':'[place holder]',
+                'newid':newid,
+                'id':lastid
+            }, null, true);
+        }
+    },
+
+    removeComponent: function() {
+        var extractor = this;
+        if (this.selectedElement) {
+            var lastel = this.selectedElement;
+            var myid = lastel.dom.getAttribute('componentInsertId');
+            this.loadTree([CQ.Ext.get(this.frame.dom.contentDocument.body)]);
+            lastel.remove();
+            this.hideFrame(this.highlightBorder);
+
+            CQ.HTTP.post("/libs/wcm/bin/siteimporter/editorigpage",function() {
+                    CQ.Notification.notify("removed", "page saved");
+                }, {
+                'path':extractor.loadedPath,
+                'operation':'remove',
+                'id':myid
+            }, null, true);
+
+        }
+    },
+
+    extractComponent: function() {
+        var extractor = this;
+        if (this.selectedElement) {
+            var defpath = "/apps/" + this.pageName + "/components";
+            var dialog = CQ.WCM.getDialog({
+                "jcr:primaryType": "cq:Dialog",
+                "id": CQ.Util.createId("cq-extract-component"),
+                "title":CQ.I18n.getMessage("Extract Component"),
+                "formUrl":CQ.HTTP.externalize("/libs/wcm/bin/siteimporter/extract"),
+                "params": {
+                    "_charset_":"utf-8",
+                    "resource":this.loadedPath,
+                    "insertID":this.selectedElement.dom.getAttribute("componentInsertId")
+                },
+                "height":400,
+                "modal":true,
+                "okText":CQ.I18n.getMessage("Create"),
+                "success":function() {
+                    extractor.loadComponents();
+                },
+                "items":{
+                    "jcr:primaryType": "cq:Panel",
+                    "items": {
+                        "jcr:primaryType": "cq:WidgetCollection",
+                        "path": {
+                            "xtype":"pathfield",
+                            "fieldLabel":CQ.I18n.getMessage("Path"),
+                            "allowBlank":false,
+                            "name":"path",
+                            "predicate": "nosystem",
+                            "rootPath": "/",
+                            "showTitlesInTree": false,
+                            "value":defpath
+                        },
+                        "label":{
+                            "fieldLabel":CQ.I18n.getMessage("Label"),
+                            "allowBlank":false,
+                            "name":"label"
+                        },
+                        "overwrite":{
+                            "fieldLabel":CQ.I18n.getMessage("Overwrite"),
+                            "fieldDescription":CQ.I18n.getMessage("Force overwrite of existing component"),
+                            "xtype":"selection",
+                            "type":"checkbox",
+                            "name":"overwrite"
+                        },
+                        "title": {
+                            "fieldLabel":CQ.I18n.getMessage("Title"),
+                            "allowBlank":false,
+                            "name":"title"
+                        },
+                        "description": {
+                            "xtype":"textarea",
+                            "fieldLabel":CQ.I18n.getMessage("Description"),
+                            "name":"description"
+                        },
+                        "group": {
+                            "fieldLabel":CQ.I18n.getMessage("Group"),
+                            "name":"group"
+                        },
+                        "supertype": {
+                            "fieldLabel":CQ.I18n.getMessage("Supertype"),
+                            "value":"foundation/components/parbase",
+                            "name":"supertype"
+                        },
+                        "allowedParents": {
+                            "fieldLabel":CQ.I18n.getMessage("Allowed Parents"),
+                            "name":"allowedParents",
+                            "value":"*/parsys"
+                        }
+                    }
+                }
+            });
+            dialog.show();
+        }
+    }
+});
+CQ.Ext.reg("componentextractor", CQ.wcm.ComponentExtractor);
+
+CQ.wcm.ComponentExtractor.ReplacementRecord  = CQ.Ext.data.Record.create([
+    { name: "element" },
+    { name: "component" },
+    { name: "path" },
+    { name: "insertID" }
+]);
+
+CQ.wcm.ComponentExtractor.maskFrame = function() {
+    if (!CQ.wcm.ComponentExtractor.frameMask) {
+        CQ.wcm.ComponentExtractor.frameMask = CQ.Ext.get("cq-ce-framewrapper").mask();
+    }
+    return CQ.wcm.ComponentExtractor.frameMask;
+};
+
+CQ.wcm.ComponentExtractor.unmaskFrame = function() {
+    if (CQ.wcm.ComponentExtractor.frameMask) {
+        CQ.wcm.ComponentExtractor.frameMask = null;
+        CQ.Ext.get("cq-ce-framewrapper").unmask();
+    }
+};
+
+CQ.wcm.ComponentExtractor.DragZone = CQ.Ext.extend(CQ.wcm.Sidekick.DragZone4ContentFinder, {
+    notifyDropDT: function(dropTarget, e, data) {
+        var extractor = CQ.Ext.getCmp("cq-ce");
+        var store = extractor.mappings.getStore();
+
+        var rID = extractor.getElementHint(extractor.selectedElement);
+        var record = store.getById(rID);
+        if (record) {
+            record.set("component", data.records[0].get("resourceType"));
+            record.commit();
+        } else {
+            record = new CQ.wcm.ComponentExtractor.ReplacementRecord({
+                "element":extractor.selectedElement,
+                "component":data.records[0].get("resourceType"),
+                "path":"",
+                "insertID":extractor.selectedElement.dom.getAttribute("componentInsertId")
+            }, rID);
+            store.add([record]);
+        }
+        return true;
+    },
+
+    notifyOverDT : function(dropTarget, e, data) {
+        return this.dropAllowed; // drop is always allowed
+    },
+
+    CF_cleanUpDD: function() {
+        CQ.wcm.ComponentExtractor.unmaskFrame();
+
+        this.dropTargets = [];
+        this.dropTargetRegions = [];
+
+        this.dragging = false;
+        this.IDDM_dragCurrent = false;
+    },
+
+    CF_b4StartDrag: function(x,y) {
+        if(!CQ.WCM.isContentWindowLoading()) {
+            var finder = CQ.WCM.getContentFinder();
+            if (!finder) {
+                throw new Error("No finder defined");
+            }
+            var wrapper = CQ.Ext.getCmp("cq-ce-framewrapper");
+            finder.contentWindowLeft = wrapper.getEl().getX();
+            finder.contentWindowTop = wrapper.getEl().getY()
+                + wrapper.getTopToolbar().getEl().getHeight();
+
+            CQ.wcm.ComponentExtractor.maskFrame();
+
+            this.dropTargets = [];
+            this.dropTargetRegions = [];
+            var contentWindow = CQ.WCM.getContentWindow();
+            try {
+                if (!contentWindow.CQ) return;
+            }
+            catch (e) {
+                return;
+            }
+
+            //run this part asynchronously to avoid behavior: proxy does not follow the mouse pointer
+            var currentObj = this;
+            window.setTimeout(function() {
+                var extractor = CQ.Ext.getCmp("cq-ce");
+
+                var selectedEl = CQ.Ext.getCmp("cq-ce").selectedElement;
+                if (selectedEl) {
+                    currentObj.dropTargets.push(extractor.dropTarget);
+                    currentObj.dropTargetRegions.push(extractor.dropRegion);
+                }
+            }, 1);
+
+            this.mouse = {
+                "pos":[-1,-1],
+                "lastPos":[-1,-1],
+                "time":0
+            };
+        }
+    },
+
+    CF_handleMouseMove: function(e) {
+        if(!CQ.WCM.isContentWindowLoading()) {
+            var finder = CQ.WCM.getContentFinder();
+
+            if (!finder) {
+                throw new Error("No finder defined");
+            }
+
+            var scrollLeft = CQ.Ext.dd.DDM.getScrollLeft();
+            var scrollTop = CQ.Ext.dd.DDM.getScrollTop();
+
+            var x = e.getPageX() - finder.contentWindowLeft + scrollLeft;
+            var y = e.getPageY() - finder.contentWindowTop + scrollTop;
+
+            var regions = this.dropTargetRegions;
+            for (var i = 0; i < regions.length; i++) {
+                var r = regions[i];
+                var adaptedRegion = new CQ.Ext.lib.Region(r.top, r.right, r.bottom, r.left);
+                adaptedRegion.adjust(scrollTop, scrollLeft, scrollTop, scrollLeft);
+
+                if (adaptedRegion.contains(new CQ.Ext.lib.Point(x, y))) {
+                    var target = this.dropTargets[i];
+                    if (target == this.cachedTarget) {
+                        this.onDragOver(e);
+                        this.updateMouseInfo(x,y);
+                        return;
+                    } else {
+                        if (this.cachedTarget) {
+                            this.onDragOut(e);
+                        }
+                        this.onDragEnter(e, target);
+                        this.updateMouseInfo(x,y);
+                        return;
+                    }
+                }
+            }
+            if (this.cachedTarget) {
+                this.onDragOut(e);
+            }
+            this.updateMouseInfo(x,y);
+        }
+    }
+});

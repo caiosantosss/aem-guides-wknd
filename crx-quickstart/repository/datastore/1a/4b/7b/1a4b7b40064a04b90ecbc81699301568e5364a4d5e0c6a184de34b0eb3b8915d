@@ -1,0 +1,405 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2014 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%><%
+%><%@include file="/libs/granite/ui/global.jsp"%><%
+%><%@page session="false"
+          import="com.adobe.cq.projects.ui.ProjectWizard,
+                  com.adobe.cq.projects.api.Project,
+                  com.adobe.cq.projects.api.ProjectLink,
+                  com.adobe.cq.projects.api.ProjectManager,
+                  com.adobe.granite.ui.components.AttrBuilder,
+                  com.adobe.granite.workflow.exec.Workflow,
+                  com.adobe.granite.workflow.metadata.MetaDataMap,
+                  com.day.cq.wcm.api.Template,
+                  org.apache.commons.lang.ArrayUtils,
+                  org.apache.jackrabbit.JcrConstants,
+                  javax.jcr.RepositoryException,
+                  javax.jcr.Session, javax.jcr.security.AccessControlManager,
+                  javax.jcr.security.Privilege,
+                  java.net.URLEncoder,
+                  java.util.ArrayList,
+                  java.util.Iterator,
+                  java.util.List, java.io.UnsupportedEncodingException,
+                  com.adobe.granite.workflow.WorkflowException, java.util.Collections, com.adobe.cq.projects.api.ProjectException" %>
+<%@ page import="com.adobe.granite.ui.components.Config" %>
+<%@ page import="com.adobe.granite.ui.components.Tag" %>
+<%
+%><%@include file="/libs/cq/gui/components/projects/admin/workflow/utils.jsp"%><%
+
+    Resource linkResource = (Resource) request.getAttribute("projectLinkResource");
+
+    AccessControlManager acm = null;
+    try {
+        acm = resourceResolver.adaptTo(Session.class).getAccessControlManager();
+    } catch (RepositoryException e) {
+        log.error("Unable to get access manager", e);
+    }
+
+    List<String> permissions = new ArrayList<String>();
+    permissions.add("cq-project-admin-actions-open-activator");
+
+    if (hasPermission(acm, linkResource, Privilege.JCR_REMOVE_NODE)) {
+        permissions.add("cq-projects-admin-actions-delete-link-activator");
+    }
+
+    final boolean canStartWork =  hasPermission(acm, linkResource, Privilege.JCR_ADD_CHILD_NODES);
+
+    final ResourceResolver rr = resourceResolver;
+    ProjectManager pm = rr.adaptTo(ProjectManager.class);
+
+    String suffix = slingRequest.getRequestPathInfo().getSuffix();
+    Resource projectResource = resourceResolver.getResource(suffix);
+    Project project = projectResource.adaptTo(Project.class);
+    ProjectLink link = linkResource.adaptTo(ProjectLink.class);
+    final ValueMap linkProps = linkResource.adaptTo(ValueMap.class);
+
+    final String title = link.getTitle() != null ? link.getTitle() : i18n.get("Workflows", "Title for the project workflow card");
+
+    String ctx = request.getContextPath();
+    String href = ctx + "/libs/cq/core/content/projects/showwork.html?item=" + encodeURIComponent(project.adaptTo(Resource.class).getPath());
+
+    //Determine what workflow wizard should appear and provide the required parameters to launch it.
+    //If the work card specifies a tag the wizard associated with the first model that matches the tag will be used.
+    String wizardHref = "/libs/cq/core/content/projects/wizard/startwork.html";
+    ProjectWizard wizard = new ProjectWizard(slingRequest, cmp);
+    String[] workTags = linkProps.get("tags", String[].class);
+
+    List<WorkflowModel> workflows = Collections.<WorkflowModel>emptyList();
+    try {
+        workflows = pm.getWorkflows(project);
+    } catch(ProjectException e) {
+        log.info("Failed to load workflow models", e);
+    }
+    WorkflowModel matchedModel = findWorkflowModel(workflows, workTags);
+
+    if (workTags != null && workTags.length > 0) {
+        if (matchedModel != null) {
+            href += "&model=" + encodeURIComponent(matchedModel.getId());
+            Resource templateModel = getMatchingTemplateModel(project, matchedModel);
+            if (templateModel != null) {
+                //Launch the specific wizard for the matched workflow model
+                wizardHref = templateModel.adaptTo(ValueMap.class).get("wizard", String.class);
+                wizard.getProjectValues().put("modelId", matchedModel.getId());
+            }
+        } else {
+            // if we have tags but no matching model in our project template
+            // we should not allow users to launch a wizard
+            wizardHref = null;
+        }
+    }
+
+    // generate required inputs for the wizard
+    if (StringUtils.isNotEmpty(wizardHref)) {
+        Resource wizardResource = rr.getResource(wizardHref.replaceAll(".html",""));
+        wizardResource = wizardResource.getChild(JcrConstants.JCR_CONTENT);
+        ValueMap paramMap = wizard.getWizardValues(wizardResource);
+        if (paramMap != null) {
+            final StringBuilder wizardParams = new StringBuilder();
+            for (String key : paramMap.keySet()) {
+                wizardParams.append(wizardParams.length() == 0 ? "?" : "&");
+                wizardParams.append(key).append("=").append(URLEncoder.encode(paramMap.get(key, ""), "UTF-8"));
+            }
+            wizardHref += wizardParams.toString();
+        } else {
+            wizardHref += "?project=" + slingRequest.getRequestPathInfo().getSuffix();
+            if (matchedModel != null) {
+                wizardHref += "&modelId=" + matchedModel.getId();
+            }
+        }
+    }
+
+    //Get all work for the model specified by this card. If card does not specify
+    //any tags all work started by this project will be included.
+    WorkflowSession wfSession = rr.adaptTo(WorkflowSession.class);
+    Resource projectContent = projectResource.getChild(JcrConstants.JCR_CONTENT);
+    Resource workResource = rr.getResource(projectContent, getWorkFolderPath(link));
+    List<Workflow> allWorkflows = new ArrayList<Workflow>();
+    if (workResource != null) {
+        Iterator<Resource> allWork = workResource.listChildren();
+        while (allWork.hasNext()) {
+            Resource workRef = allWork.next();
+            ValueMap workRefProps = workRef.adaptTo(ValueMap.class);
+            String workflowId = workRefProps.get("workflow.id", String.class);
+            if (workflowId != null) {
+                String modelId = workRefProps.get("model.id", String.class);
+                // if we don't have any tags the we will automatically add the model to the result
+                // otherwise process the next model and continue
+                if (StringUtils.isNotEmpty(modelId)) {
+                    if (workTags != null && workTags.length > 0) {
+                        if (matchedModel == null || !matchedModel.getId().equals(modelId)) {
+                            continue;
+                        }
+                    }
+                    try {
+                        Workflow workflow = wfSession.getWorkflow(workflowId);
+                        allWorkflows.add(workflow);
+                    } catch (WorkflowException e) {
+                        // TODO: make this a warn once references to (purged) workflows are cleane up
+                        log.debug("Unable to get information for workflow instance {} {} cause: {}",
+                                new Object[] { workRefProps.get("workflow.id"),
+                                        workRefProps.get("model.id"),
+                                        e.getMessage()});
+                    }
+                }
+            }
+        }
+    }
+
+    final AttrBuilder fact_attrs = new AttrBuilder(request, xssAPI);
+    int totalCount = allWorkflows.size();
+    int runningCount = 0;
+    int completedCount = 0;
+    int suspendedCount = 0;
+    int abortedCount = 0;
+
+    if (totalCount == 0) {
+        fact_attrs.addClass("empty");
+    }
+
+    for (Workflow wf : allWorkflows) {
+        if (Workflow.State.RUNNING.toString().equals(wf.getState())) {
+            runningCount++;
+        }
+        if (Workflow.State.COMPLETED.toString().equals(wf.getState())) {
+            completedCount++;
+        }
+        if (Workflow.State.SUSPENDED.toString().equals(wf.getState())) {
+            suspendedCount++;
+        }
+        if (Workflow.State.ABORTED.toString().equals(wf.getState())) {
+            abortedCount++;
+        }
+
+    }
+
+    final long percentRunning = (long) (100.0 * (double)runningCount/totalCount);
+    final long percentComplete = (long) (100.0 * (double)completedCount/totalCount);
+    final long percentSuspended = (long) (100.0 * (double)suspendedCount/totalCount);
+    final long percentAborted = (long) (100.0 * (double)abortedCount/totalCount);
+
+    String xssWizardHref = xssAPI.getValidHref(wizardHref);
+
+    ValueMap cardMap = resource.adaptTo(ValueMap.class);
+    int cardWeight = cardMap.get("cardWeight", 0);
+
+    String xssHrefWorkflowList = xssAPI.getValidHref(href);
+    Config cfg = new Config(projectResource);
+    Tag tag = cmp.consumeTag();
+    AttrBuilder attrs = tag.getAttrs();
+    attrs.addOthers(cfg.getProperties(), "class");
+
+    String xssTileid = xssAPI.encodeForHTML((String) request.getAttribute("cq-projects-tile-id"));
+
+    tag.printlnStart(out);
+
+%>
+
+<div class="cq-projects-Pod-content" data-item-count="<%= allWorkflows.size() %>"><%
+    if (totalCount == 0 && !StringUtils.isEmpty(wizardHref)) {
+        if (canStartWork) {
+%><div class="cq-projects-Pod-content-instructions">
+    <a href="<%= xssWizardHref %>">
+        <i class="coral-Icon coral-Icon--workflowAdd"></i>
+    </a>
+    <h5><%= i18n.get("Add Work") %></h5>
+</div><%
+} else { %>
+    <div class="cq-projects-Pod-content-instructions">
+        <a>
+            <i class="coral-Icon coral-Icon--workflow"></i>
+        </a>
+        <h5><%= xssAPI.encodeForHTML(i18n.getVar(title))   %></h5>
+    </div><%
+        }
+    } else {
+    %><ul class="cq-projects-Pod-workflowPod-stats">
+        <li>
+            <div>
+                <div class="cq-projects-Pod-workflowPod-stats-entry">
+                    <h4 class="cq-projects-Pod-workflowPod-stats-item-status"><%=i18n.get("Running")%></h4>
+                                <span><%
+                                    if (runningCount == 1) {
+                                %><%=i18n.get("1 workflow")%><%
+                                } else {
+                                %><%=i18n.get("{0} workflows", null, Integer.toString(runningCount))%><%
+                                    }
+                                %></span>
+                </div>
+                <h3><%= percentRunning%>%</h3>
+                <div class="bar active">
+                    <span style="width:<%=percentRunning%>%"></span>
+                </div>
+            </div>
+        </li>
+        <li>
+            <div>
+                <div class="cq-projects-Pod-workflowPod-stats-entry">
+                    <h4 class="cq-projects-Pod-workflowPod-stats-item-status"><%=i18n.get("Completed","workflow pod")%></h4>
+                                <span><%
+                                    if (completedCount == 1) {
+                                %><%=i18n.get("1 workflow")%><%
+                                } else {
+                                %><%=i18n.get("{0} workflows", null, Integer.toString(completedCount))%><%
+                                    }
+                                %></span>
+                </div>
+                <h3><%= percentComplete%>%</h3>
+                <div class="bar complete">
+                    <span style="width:<%=percentComplete%>%"></span>
+                </div>
+            </div>
+        </li><%
+        if (suspendedCount > 0) {
+    %><li>
+        <div>
+            <div class="cq-projects-Pod-workflowPod-stats-entry">
+                <h4 class="cq-projects-Pod-workflowPod-stats-item-status"><%=i18n.get("Suspended")%></h4>
+                                <span><%
+                                    if (suspendedCount == 1) {
+                                %><%=i18n.get("1 workflow")%><%
+                                } else {
+                                %><%=i18n.get("{0} workflows", null, Integer.toString(suspendedCount))%><%
+                                    }
+                                %></span>
+            </div>
+            <h3><%= percentSuspended%>%</h3>
+            <div class="bar suspended">
+                <span style="width:<%=percentSuspended%>%"></span>
+            </div>
+        </div>
+    </li><%
+        }
+        if (abortedCount > 0) {
+    %><li>
+        <div>
+            <div class="cq-projects-Pod-workflowPod-stats-entry">
+                <h4 class="cq-projects-Pod-workflowPod-stats-item-status"><%=i18n.get("Aborted")%></h4>
+                                <span><%
+                                    if (abortedCount == 1) {
+                                %><%=i18n.get("1 workflow")%><%
+                                } else {
+                                %><%=i18n.get("{0} workflows", null, Integer.toString(abortedCount))%><%
+                                    }
+                                %></span>
+            </div>
+            <h3><%= percentAborted%>%</h3>
+            <div class="bar suspended">
+                <span style="width:<%=percentAborted%>%"></span>
+            </div>
+        </div>
+    </li><%
+        }
+    %></ul><%
+        }%>
+    <script>
+        var cnt = $('#<%=xssTileid%> .cq-projects-Pod-content').attr('data-item-count');
+        var curHeader = $('#<%=xssTileid%> h1');
+        var newHeaderText = curHeader.text() + " (" + cnt + ")";
+        curHeader.text(newHeaderText);
+    </script>
+</div><%
+    tag.printlnEnd(out);
+%><%!
+    String encodeURIComponent(String s) {
+        try {
+            return URLEncoder.encode(s, "UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    boolean hasPermission(AccessControlManager acm, Resource resource, String privilege) {
+        try {
+            if (acm != null) {
+                Privilege p = acm.privilegeFromName(privilege);
+                return acm.hasPrivileges(resource.getPath(), new Privilege[]{p});
+            }
+        } catch (RepositoryException e) {
+            // if we have a error then we will return false.
+        }
+        return false;
+    }
+
+    /**
+     * Return the work folder path required by this work card. A default work folder will be returned if
+     * the work card does not specify a target.
+     */
+    private String getWorkFolderPath(ProjectLink link) {
+        Resource projectResource = link.getProject().adaptTo(Resource.class);
+        Resource projectContent = projectResource.getChild(JcrConstants.JCR_CONTENT);
+        ValueMap projectProps = projectContent.adaptTo(ValueMap.class);
+        String workFolderPath = projectProps.get("work.folder", "work");
+        return workFolderPath;
+    }
+
+    /**
+     * Return workflow model resource from template whose modelId property matches the workflow model id.
+     * @param project
+     * @param model
+     * @return Model resource from template that has a matching model id
+     */
+    private Resource getMatchingTemplateModel(Project project, WorkflowModel model) {
+        Template projectTemplate = project.adaptTo(Template.class);
+        Resource templateResource = projectTemplate.adaptTo(Resource.class);
+
+        Iterator<Resource> models = templateResource.getChild("workflows/models").listChildren();
+        while (models.hasNext()) {
+            Resource modelResource = models.next();
+            ValueMap map = modelResource.adaptTo(ValueMap.class);
+            String modelId = map.get("modelId", String.class);
+            if (!StringUtils.isEmpty(modelId) && model.getId().equals(modelId)) {
+                return modelResource;
+            }
+        }
+
+        return null;
+    }
+
+    private WorkflowModel findWorkflowModel(List<WorkflowModel> models, String[] tags) {
+        Iterator<WorkflowModel> it = models.iterator();
+        while (it.hasNext()) {
+            WorkflowModel wfmodel = it.next();
+            if (doesModelContainTag(wfmodel, tags)) {
+                return wfmodel;
+            }
+        }
+        return null;
+    }
+
+    private boolean doesModelContainTag(WorkflowModel model, String[] tags) {
+        if (tags == null || tags.length == 0) {
+            return false;
+        }
+
+        if (ArrayUtils.contains(tags, "*")) {
+            return true;
+        }
+
+        MetaDataMap metaData = model.getMetaDataMap();
+        String tagStr = metaData.get("tags", String.class) != null ? metaData.get("tags", String.class) : null;
+        String tagStrSplits[] = (StringUtils.isNotEmpty(tagStr)) ? tagStr.trim().split(",") : new String[0];
+        for (String tag : tagStrSplits) {
+            for (String checkTag : tags) {
+                if (checkTag.equals(tag)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+%>
+

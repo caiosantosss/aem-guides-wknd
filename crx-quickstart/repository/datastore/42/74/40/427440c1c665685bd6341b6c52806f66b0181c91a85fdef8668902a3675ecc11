@@ -1,0 +1,519 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function($) {
+    "use strict";
+
+    if ($.DAM === undefined) {
+        $.DAM = {};
+    }
+    $.DAM.FolderShare = $.DAM.FolderShare || {};
+
+    var ui = $(window).adaptTo("foundation-ui");
+
+    var ns = ".cq-damadmin-admin-folder-settings-form";
+
+    var orderable = "#orderable";
+
+    var contributionCheckbox = "#asset-contribution-checkbox";
+
+    var saveAndClose = false;
+
+    var emptyCug = true;
+
+    var CUG_TABLE_SELECTOR = "table.cug-table";
+
+    $(document).on("click", "#shell-propertiespage-doneactivator", function() {
+        saveAndClose = true;
+    });
+
+    function validateRequiredField() {
+        var fields = $('.aem-assets-metadata-form-tab [aria-required="true"]');
+        var len = fields.length;
+        for (var i = 0; i < len; i++) {
+            Coral.commons.ready(fields[i], function(elem) {
+                $(elem).checkValidity();
+                $(elem).updateErrorUI();
+            });
+        }
+    }
+
+    var conditions = [];
+    $.DAM.FolderShare.FormValidator = $.DAM.FolderShare.FormValidator || {};
+
+    $.DAM.FolderShare.FormValidator.Condition = function() {
+        /**
+         * This will be called to evaluate the condition.
+         *
+         * @Return  - true if condition is valid., false otherwise
+         */
+        this.apply = function(formData) {
+            throw new Error("Not implemented");
+        };
+
+        /**
+         * This message will be shown on error dialog when {Condition.apply} returns false;
+         * @type {string}
+         */
+        this.getErrorMessage = function() {
+            throw new Error("Not implemented");
+        };
+    };
+
+    $.DAM.FolderShare.FormValidator.registerCondition = function(condition) {
+        conditions.push(condition);
+    };
+
+    $.DAM.FolderShare.FormValidator.validate = function(formData) {
+        var valid = true;
+        conditions.every(function(condition) {
+            if (!condition.apply(formData)) {
+                // condition failed, show error dialog
+                ui.prompt(Granite.I18n.get("Error"), condition.getErrorMessage(), "error", [{
+                    text: Granite.I18n.get("Close"),
+                    primary: true,
+                    handler: function() {}
+                }]);
+                valid = false;
+                return false;
+            }
+            return true;
+        });
+        return valid;
+    };
+
+    $(document).on("submit.folderSetting", ns, function(e) {
+        e.preventDefault();
+        var wizard = this;
+        var folderPath = $(".cq-damadmin-admin-folder-settings-form").attr("action");
+
+        $.DAM.FolderShare.updateCugToFolder(folderPath, function() {
+            // submit the form after cug policy is applied to folder
+            $.DAM.FolderShare.submit(wizard, saveAndClose);
+        });
+    });
+
+    $(document).on("foundation-contentloaded", function(e) {
+        // update the initial state of CUG
+        emptyCug = !($(".cug-table.users-table tr").length);
+        // remove the name attr of ordered checkbox to avoid duplicate submission of jcr:primaryType
+        $(orderable).removeAttr("name");
+
+        Coral.commons.ready($("#aem-assets-metadataeditor-formid"), function() {
+            validateRequiredField();
+        });
+
+        if ($(contributionCheckbox).length) {
+            // hide the irrelevant tabs when contribution checkbox is checked
+            toggleTabs(!($(contributionCheckbox).prop("checked")));
+        }
+        if (Granite.Toggles.isEnabled("ft-cq-4301964")) {
+            $("#autotag").hide();
+        }
+    });
+
+    $(document).on("coral-overlay:beforeopen", "#soft-submit-popover", function() {
+        $(this)[0].target = "#shell-propertiespage-doneactivator";
+    });
+
+    function _removeDuplicateandAddNewMember(members, id, userDetailsMap) {
+        var duplicateFound = false;
+        var role = $("#member-role button").text();
+        members.find("tr").each(function() {
+            var m = $(this);
+            var mID = m.find(".name input[type=\"hidden\"]").val();
+            var mRole = m.find(".role span").text().trim();
+            if (id === mID) {
+                if (role !== mRole) {
+                    var user = m.find(".name").text();
+                    var content = Granite.I18n.get("Change the role of {0} from {1} to {2} ?",
+                        [ "<b>" + user + "</b>", "<b>" + mRole + "</b>", "<b>" + role + "</b>" ]);
+                    // showWarning(type, content, m, members, id, userDetails);
+                    ui.prompt(Granite.I18n.get("Remove Duplicate"), content, "warning", [{
+                        text: Granite.I18n.get("Cancel"),
+                        id: "duplicateUserDialogCancelButton"
+                    }, {
+                        text: Granite.I18n.get("Confirm"),
+                        id: "duplicateUserDialogConfirmButton",
+                        warning: true,
+                        handler: function() {
+                            m.remove();
+                            addUserToMembersTable(members, id, userDetailsMap);
+                        }
+                    }]);
+                }
+
+                duplicateFound = true;
+                return;
+            }
+        });
+
+        if (!duplicateFound) {
+            addUserToMembersTable(members, id, userDetailsMap);
+        }
+    }
+
+    function addUserToMembersTable(members, id, userDetailsMap) {
+        _addUserToTable(members, id, userDetailsMap, $("#member-role button").text(),
+            $("#member-role input[name=role]").val(), "teamMemberPrincipalName", "teamMemberRole");
+    }
+
+    function addUserToCugTable($cugTable, id, userDetailsMap) {
+        _addUserToTable($cugTable, id, userDetailsMap,
+            Granite.I18n.get("Viewer"), "", "cug-principle-id", "");
+    }
+
+    function _addUserToTable($table, id, userDetailsMap, role, roleValue, idInputName, roleInputName) {
+        var avatar = userDetailsMap.image;
+        if (!avatar) {
+            avatar = Granite.HTTP.externalize(
+                "/libs/granite/security/clientlib/themes/default/resources/sample-user-thumbnail.36.png");
+        }
+        var name = userDetailsMap.name;
+        var userId = userDetailsMap.value;
+        var email = userDetailsMap.email;
+        // create the markup with these values
+        var member = $("<tr is=\"coral-table-row\">");
+        var cavatar = $("<td is=\"coral-table-cell\" class=\"avatar\"><img width=\"42\"></td>");
+        $("img", cavatar).attr("src", avatar);
+        var cName = $("<td is=\"coral-table-cell\" class=\"name\">" + name + "<input type=\"hidden\"></input></td>");
+        $("input", cName).attr("name", idInputName).attr("value", id);
+        var cUserid = $("<td is=\"coral-table-cell\" class=\"userid\"><span class=\"greyText\"></span></td>");
+        $("span", cUserid).text(userId);
+        var cEmail = $("<td is=\"coral-table-cell\" class=\"useremail\"><span class=\"greyText\"></span></td>");
+        $("span", cEmail).text(email);
+        var cRole;
+        if (roleInputName && roleInputName !== "") {
+            cRole = $("<td is=\"coral-table-cell\" class=\"role greyText\"><span></span><input type=\"hidden\"></td>");
+            $("input", cRole).attr("name", roleInputName);
+            $("input", cRole).attr("value", roleValue);
+        } else {
+            cRole = $("<td is=\"coral-table-cell\" class=\"role greyText\"><span></span></td>");
+        }
+        $("span", cRole).text(role);
+        var cRemove = $("<td is=\"coral-table-cell\" class=\"remove\">" +
+            "<button is=\"coral-button\" variant=\"quiet\" icon=\"close\" iconsize=\"XS\"></button></td>");
+        member.append(cavatar);
+        member.append(cName);
+        if (email) {
+            member.append(cEmail);
+        } else {
+            member.append(cUserid);
+        }
+        member.append(cRole);
+        member.append(cRemove);
+        $table.append(member);
+    }
+
+    $(document).on("click", "#add-user", function(e) {
+        var userPicker = $("#foldershare-settings-userpicker");
+        var inputAssignee = $("input[type='hidden']", userPicker);
+        var userId = inputAssignee.val().trim();
+        var userDetailsMap = new Object();
+        if (userId && userId.length > 0) {
+            var userList =
+            $("#foldershare-settings-userpicker .userpicker-add-user")
+                .toArray();
+            for (var idx = 0; idx < userList.length; idx++) {
+                var user = userList[idx];
+                if (user.value && userId === user.value) {
+                    userDetailsMap["name"] = user.dataset.name;
+                    userDetailsMap["email"] = user.dataset.email;
+                    userDetailsMap["value"] = user.dataset.authorizableid;
+                    userDetailsMap["image"] = user.dataset.image;
+                    break;
+                }
+            }
+            var id = userDetailsMap.value;
+            if (id) {
+                var members = $("table.members-table");
+
+                _removeDuplicateandAddNewMember(members, id, userDetailsMap);
+            }
+            // remove the text from the text box and disable the add button
+            userPicker.val("");
+            $("#add-user").attr("disabled", "disabled");
+        }
+    });
+
+    $(document).on("click", ".remove", function(e) {
+        e.preventDefault();
+        // var type = "remove";
+        var member = $(this).closest("tr");
+        var user = member.find(".name").text();
+
+        var content = Granite.I18n.get("Remove {0} from the folder?", "<b>" + user + "</b>");
+        // showWarning(type, content, member)
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.prompt(Granite.I18n.get("Remove"), content, "warning", [{
+            text: Granite.I18n.get("Cancel"),
+            id: "removeUserDialogCancelButton"
+        }, {
+            text: Granite.I18n.get("Confirm"),
+            id: "removeUserDialogConfirmButton",
+            primary: true,
+            handler: function() {
+                member.remove();
+            }
+        }]);
+    });
+
+    $(document).on("submit.collection", "form.foundation-form.searchpanel", function(evt) {
+        $("form.foundation-form .search").closest("form").off("submit.foundation-form");
+        $(".content").overlayMask("hide");
+        evt.preventDefault();
+    });
+
+    $(document).on("change", "#foldersharesettings #orderable", function(e) {
+        var target = $(e.target);
+        var checked = target.prop("checked");
+        var folderType = $("[name='jcr:primaryType']");
+        if (checked) {
+            folderType.val("sling:OrderedFolder");
+        } else {
+            folderType.val("sling:Folder");
+        }
+    });
+
+    $(document).on("change", contributionCheckbox, function(e) {
+        var target = $(e.target);
+        var checked = target.prop("checked");
+        toggleTabs(!checked);
+    });
+
+    $(document).on("click", "#add-cug-user", function(e) {
+        var userPicker = $("#foldershare-settings-userpicker-cug");
+        var inputAssignee = $("input[type='hidden']", userPicker);
+        var userId = inputAssignee.val().trim();
+        var userDetailsMap = new Object();
+        if (userId && userId.length > 0) {
+            var userList =
+            $("#foldershare-settings-userpicker-cug .userpicker-add-user")
+                .toArray();
+            for (var idx = 0; idx < userList.length; idx++) {
+                var user = userList[idx];
+                if (user.value && userId === user.value) {
+                    userDetailsMap["name"] = user.dataset.name;
+                    userDetailsMap["principalName"] = user.dataset.principalName;
+                    userDetailsMap["email"] = user.dataset.email;
+                    userDetailsMap["value"] = user.dataset.authorizableid;
+                    userDetailsMap["image"] = user.dataset.image;
+                    break;
+                }
+            }
+            var principalName = userDetailsMap.principalName;
+            // authorizable ID and principal name can be different. See CQ-4274689
+            // if principalName is not present use value for backward compatibility
+            var id = principalName ? principalName : userDetailsMap.value;
+            if (id) {
+                onCugMemberAdd(id, userDetailsMap);
+            }
+            // remove the text from the text box and disable the add button
+            userPicker.val("");
+            $("#add-cug-user").attr("disabled", "disabled");
+        }
+    });
+
+    function onCugMemberAdd(userId, userDetailsMap) {
+        var $cugTable = $(CUG_TABLE_SELECTOR);
+        var $cugs = $("table.cug-table tr");
+        var duplicate = false;
+        // ignore if duplicate user
+        $.each($cugs, function() {
+            var id = $("input[name='cug-principle-id']", $(this)).val();
+            if (userId === id) {
+                duplicate = true;
+                return false;
+            }
+        });
+
+        // add this user to table
+        if (!duplicate) {
+            addUserToCugTable($cugTable, userId, userDetailsMap);
+        }
+    }
+
+    $(document).on("change", "#foldershare-settings-userpicker", function(e) {
+        var text = e.target.value;
+        var addUser = $("#add-user");
+        if (text && text.length > 0) {
+            addUser.removeAttr("disabled");
+        } else {
+            addUser.attr("disabled", "disabled");
+        }
+    });
+
+    $(document).on("change", "#foldershare-settings-userpicker-cug", function(e) {
+        var text = e.target.value;
+        var addCugUser = $("#add-cug-user");
+        if (text && text.length > 0) {
+            addCugUser.removeAttr("disabled");
+        } else {
+            addCugUser.attr("disabled", "disabled");
+        }
+    });
+
+    function getCugPrinciples() {
+        var cugPrinciples = [];
+        var $cugTable = $(CUG_TABLE_SELECTOR);
+        var $cugList = $("input[name='cug-principle-id']", $cugTable);
+        $.each($cugList, function() {
+            cugPrinciples.push($(this).val());
+        });
+        return cugPrinciples;
+    }
+
+    $.DAM.FolderShare.updateCugToFolder = function(pagePath, callback) {
+        var principles = getCugPrinciples();
+        if (principles.length < 1 && emptyCug) {
+            // no cug updated
+            callback();
+            return;
+        }
+        if (principles.length < 1) {
+            principles.push("");
+        }
+        var settings = {
+            type: "POST",
+            data: { principalNames: principles, _charset_: "UTF-8" },
+            complete: function(xhr, status) {
+                if (status === "success") {
+                    callback();
+                } else if (status === "error") {
+                    showCugErrorDialog(callback);
+                }
+            }
+        };
+
+        $.ajax(Granite.HTTP.externalize(pagePath + ".cugpolicy.conf"), settings);
+    };
+
+    function showCugErrorDialog(callback) {
+        var dialog;
+        if ($("#cug-error-dialog").length) {
+            dialog = $("#cug-error-dialog");
+        } else {
+            var folderPath = $(".cq-damadmin-admin-folder-settings-form").attr("action");
+            dialog = new Coral.Dialog().set({
+                id: "cug-error-dialog",
+                variant: "error",
+                header: {
+                    innerHTML: Granite.I18n.get("CUG Update Error")
+                },
+                content: {
+                    innerHTML: Granite.I18n.get(
+                        "Error while updating CUG policy on folder {0}. Do you want to continue?", folderPath)
+                }
+            });
+
+            $.each(dialog.getElementsByTagName("coral-dialog-footer"), function(cnt, item) {
+                // Continue Button
+                var continueButton = new Coral.Button().set({
+                    variant: "primary",
+                    innerText: Granite.I18n.get("Continue")
+                });
+
+                // Cancel Button
+                var cancelButton = new Coral.Button().set({
+                    variant: "default",
+                    innerText: Granite.I18n.get("Cancel")
+                });
+
+                item.appendChild(cancelButton);
+                item.appendChild(continueButton);
+
+                continueButton.on("click", function() {
+                    callback();
+                });
+                cancelButton.on("click", function() {
+                    dialog.hide();
+                });
+            });
+        }
+        document.body.appendChild(dialog);
+    }
+
+    function toggleTabs(show) {
+        if (show) {
+            $("coral-tab").show();
+        } else {
+            $("coral-tab").hide();
+            var detailsTabLabel = Granite.I18n.get("Details");
+            var sourcingTabLabel = Granite.I18n.get("Asset Contribution");
+            $("coral-tab coral-tab-label:contains('" + detailsTabLabel + "')").parent().show();
+            $("coral-tab coral-tab-label:contains('" + sourcingTabLabel + "')").parent().show();
+        }
+    }
+
+    $.DAM.FolderShare.submit = function(wizardForm, hintFields) {
+        $(".aem-assets-foldershare-selected-profile-detail")
+            .replaceWith('<div id="aem-assets-foldershare-selected-profile-detail"></div>');
+        // var operation = $(".foundation-wizard-step input[name=\":operation\"]").val();
+        var foundationContentPath = $(".foundation-content-path").data("foundationContentPath");
+        // var redirectionContentPath = $(".foundation-content-path").data("folder-parent-path");
+        // var folderShareSettings = $("#foldersharesettings");
+        var successMessage = "";
+        var errorMessage = "";
+        // Add the path of the current folder which is going to be shared before form submission
+        var input = document.createElement("INPUT");
+        input.setAttribute("type", "hidden");
+        input.setAttribute("name", "path");
+        input.setAttribute("value", foundationContentPath);
+        wizardForm.appendChild(input);
+
+        var data = new FormData(document.getElementById("folder-settings-form"));
+
+        for (var j = 0; j < hintFields.length; j++) {
+            data.append(hintFields[j].name, hintFields[j].value);
+        }
+
+        if ($.DAM.FolderShare.FormValidator.validate(data)) {
+            var processData = false;
+            var contentType = false;
+            successMessage = Granite.I18n.get("Folder properties have been saved");
+            errorMessage = Granite.I18n.get("Failed to save folder properties");
+            var ui = $(window).adaptTo("foundation-ui");
+
+            $.ajax({
+                type: wizardForm.method,
+                url: wizardForm.action,
+                data: data,
+                processData: processData,
+                contentType: contentType
+            }).done(function(html) {
+                ui.prompt(Granite.I18n.get("Success"), successMessage, "success", [{
+                    text: Granite.I18n.get("OK"),
+                    primary: true,
+                    handler: function() {
+                        if (saveAndClose) {
+                            location.href =
+                                $(".foundation-backanchor").attr("href");
+                        }
+                    }
+                }]);
+            }).fail(function(xhr, error, errorThrown) {
+                ui.prompt(Granite.I18n.get("Error"), errorMessage, "error", [{
+                    text: Granite.I18n.get("Close"),
+                    primary: true,
+                    handler: function() {
+                        location.href =
+                                $(".foundation-backanchor").attr("href");
+                    }
+                }]);
+            });
+        }
+    };
+})(jQuery);

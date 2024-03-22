@@ -1,0 +1,524 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2015 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, document, undefined) {
+    "use strict";
+
+    var EMPTY_TITLE = Granite.I18n.get("New slide");
+    var DROPAREA_PARAMETER_CLASS_PREFIX = 'js-cq-DropArea-param-';
+    var SLIDE_DIALOG_CONTENT_SELECTOR = ".js-cq-Slideshow-content";
+    var SLIDE_SELECT_SELECTOR = ".js-cq-Slideshow-select";
+    var SLIDE_ADD_ACTION_SELECTOR = ".js-cq-Slideshow-add";
+    var SLIDE_DELETE_ACTION_SELECTOR = ".js-cq-Slideshow-delete";
+    var SLIDE_NAME_TEXTFIELD_SELECTOR = ".js-cq-Slideshow-name";
+    var SLIDE_DROPAREA_SELECTOR = ".js-cq-Slideshow-dropArea";
+    var PARAMS_CONTAINER_CLASS = "js-cq-DropArea-params";
+
+    var DROPAREA_ASSET_SELECTED_EVENT = 'assetSelected';
+
+    /**
+     * A Slide internal reference
+     * @typedef {{id: number, name: string, title: string, path: string, fileReference: string, mimeType: string}} Slide
+     */
+
+    /**
+     * Internal list of slides
+     *
+     * @type {Array.<Slide>}
+     * @private
+     */
+    var _slides = [];
+
+    /**
+     * Currently displayed slide
+     *
+     * @type {Slide}
+     * @private
+     */
+    var _currentSlide;
+
+    /**
+     * Internally used by the id sequence generator
+     *
+     * @type {number}
+     * @private
+     */
+    var _nextId = 0;
+
+    /**
+     * Slideshow content container
+     * @type {jQuery}
+     */
+    var $slideshowContainer;
+
+    /**
+     * Container of hidden form params
+     *
+     * @type {jQuery}
+     */
+    var $paramContainer = $('<span class="' + PARAMS_CONTAINER_CLASS + '"><input type="hidden" name="_charset_" value="utf-8" /></span>');
+
+    /**
+     * {@code Coral.Select} widget
+     */
+    var select;
+
+    /**
+     * Area on which assets are dropped
+     *
+     * @type {jQuery}
+     */
+    var $dropArea;
+
+    /**
+     * {@code Coral.Textfield}
+     */
+    var textField;
+
+    /**
+     * Generates Sling form parameters based on the given slide
+     *
+     * @param {Slide} slide - The slide object
+     * @param {boolean} [deleteSlide] - Should the slide be deleted from the repository
+     */
+     function setSlideSlingParams (slide, deleteSlide) {
+        if (slide && slide.name && slide.name.length > 0) {
+            var regex = new RegExp(/([a-zA-Z0-9_-]+)/);
+            var match = regex.exec(slide.name);
+            if (match && match.length > 1) {
+                var ctnClass = DROPAREA_PARAMETER_CLASS_PREFIX + match[1];
+                var nodeName = './' + slide.name;
+                $paramContainer.find('.' + ctnClass).remove();
+                var slingGroup = $('<span class="' + ctnClass + '"></span>');
+
+                if (deleteSlide) {
+                    slingGroup.append('<input type="hidden" name="' + nodeName + '@Delete" value="true">');
+                } else {
+                    if (slide.title) {
+                        slingGroup.append('<input type="hidden" name="' + nodeName + '/jcr:title" value="' + slide.title + '">');
+                    } else {
+                        slingGroup.append('<input type="hidden" name="' + nodeName + '/jcr:title@Delete" value="delete">');
+                    }
+                    if (slide.fileReference) {
+                        slingGroup.append('<input type="hidden" name="' + nodeName + '/fileReference" value="' + slide.fileReference + '">');
+                    } else {
+                        slingGroup.append('<input type="hidden" name="' + nodeName + '/fileReference@Delete" value="delete">');
+                    }
+                }
+
+                $paramContainer.append(slingGroup);
+            }
+        }
+    }
+
+    /**
+     * Adapt the given HTML element or a jQuery to a slide instance
+     *
+     * @param {jQuery|HTMLElement} element - Source element for the
+     * @returns {Slide}
+     */
+    function adaptToSlide (element) {
+        var slide;
+
+        if (element) {
+            var $element = element instanceof jQuery ? element : $(element);
+
+            // Get the id of from the name attribute
+            var regex = new RegExp(/([0-9]+)$/);
+            var name = $element.data('name');
+            var match = regex.exec(name);
+            var id;
+
+            if (match) {
+                id = parseInt(match[1]);
+            }
+
+            var fileReference = $element.data('fileReference');
+
+            var text = $element.text();
+            if (text === EMPTY_TITLE || text === fileReference) {
+                text = '';
+            }
+
+            slide = {
+                id: id,
+                name: name,
+                title: text,
+                path: $element.data('path'),
+                fileReference: fileReference,
+                mimeType: $element.data('dataAssetMimetype')
+            };
+
+            setSlideSlingParams(slide);
+        }
+
+        return slide;
+    }
+
+    /**
+     * Returns a new empty slide object
+     *
+     * @returns {Slide}
+     */
+    function createNewSlide () {
+        var id = getNextId();
+        return {
+            id: id,
+            name: 'image' + id,
+            title: '',
+            path: '',
+            fileReference: '',
+            mimeType: ''
+        };
+    }
+
+    /**
+     * Initializes the {@code _nextId} sequence from the list of slides to the biggest available value or {@code 0}
+     *
+     * @param {Array.<Slide>} slides - List of slides
+     */
+    function initNextId (slides) {
+        var id = -1;
+
+        for (var i = 0; i < slides.length; i++) {
+            if (id < slides[i].id) {
+                id = slides[i].id;
+            }
+        }
+
+        _nextId = id + 1;
+    }
+
+    /**
+     * Returns the next available id
+     *
+     * @returns {number}
+     */
+    function getNextId () {
+        return _nextId++;
+    }
+
+    /**
+     * Initializes the list of available slides
+     *
+     * @param {Coral.Select} select Select DOM Element
+     */
+    function initSlides (select) {
+        _slides = [];
+
+        var items = select.items.getAll();
+        var length = items.length;
+        if (length > 0) {
+            for (var i = 0; i < length; i++) {
+                var slide = adaptToSlide(items[i]);
+                _slides.push(slide);
+            }
+
+            _currentSlide = _slides[0];
+        } else {
+            // Init with an empty slide
+            var slide = createNewSlide();
+            _currentSlide = slide;
+            _slides.push(slide);
+            addItem(slide);
+            select.value = slide.name;
+        }
+
+        initNextId(_slides);
+    }
+
+    /**
+     * Returns the position of the given slide in the list
+     *
+     * @param {Slide} slide - Actual slide to be found
+     * @returns {number} - Position of the slide in the list
+     */
+    function getSlidePosition (slide) {
+        for (var i = 0; i < _slides.length; i++) {
+            if (slide.name === _slides[i].name) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Returns the Option from the {@code Coral.Select} Widget
+     *
+     * @param {string} value - Value of the targeted {@code HTMLelement} option
+     * @returns {jQuery} - jQuery Object encapsulating the {@code HTMLelement} option
+     */
+    function getItem (value) {
+        var items = select.items.getAll();
+
+        for (var i = 0, length = items.length; i < length; i++) {
+            var item = items[i];
+            if (value === item.value) {
+                return item;
+            }
+        }
+    }
+
+    /**
+     * Sets the current slide based on {@code value}'s type and data
+     *
+     * If {@code value} is null or undefined, current slide is set to the very first option contained in the {@code Coral.Select} Widget
+     *
+     * @param {Slide|string} [value] - Value of the slide to be set as currently being displayed. Can be either a slide {@code Object}, a string or not set
+     */
+    function setCurrentSlide (value) {
+        var item;
+
+        // Value is an object
+        if (value && value.name) {
+            _currentSlide = value;
+        } else {
+            // Value is a string equal to the value of an item
+            if (value && value.length > 0) {
+                item = getItem(value);
+            } else {
+                item = select.items.first();
+            }
+
+            _currentSlide = adaptToSlide(item);
+        }
+
+        select.value = _currentSlide.name;
+        setSlideDetail(_currentSlide);
+        setSlideSlingParams(_currentSlide);
+    }
+
+    /**
+     * Fills the detail fields with the given slide data
+     *
+     * @param {Slide} slide - Slide for which data should be displayed
+     */
+    function setSlideDetail (slide) {
+        textField.value = (slide && slide.title ? slide.title : '');
+        $dropArea.trigger($.Event(DROPAREA_ASSET_SELECTED_EVENT, {
+            path: slide && slide.fileReference ? slide.fileReference : '',
+            silent: true
+        }));
+    }
+
+    /**
+     * Returns the text to be displayed for the given slide
+     *
+     * @param {Slide} slide - The slide from which to extract the string
+     * @returns {string} - The string to be displayed as the value of the {@code Coral.Select}
+     */
+    function getDisplayTextFromSlide (slide) {
+        if (slide.title && slide.title.length > 0) {
+            return slide.title;
+        } else if (slide.fileReference && slide.fileReference > 0) {
+            return slide.fileReference;
+        }
+
+        return EMPTY_TITLE;
+    }
+
+    function updateItemValue(item, slide) {
+        if (!item || !slide) {
+            return;
+        }
+
+        if (item.content) {
+            item.content.textContent = getDisplayTextFromSlide(slide);
+        }
+
+        item.value = slide.name;
+
+        if (item.dataset) {
+            item.dataset.name = slide.name;
+            item.dataset.path = slide.path;
+            item.dataset.fileReference = slide.fileReference;
+            item.dataset.dataAssetMimetype = slide.mimeType;
+        }
+    }
+
+    /**
+     * Updates the values of a {@code Coral.Select.Item} with the given slide
+     *
+     * @param {Slide} slide - The slide corresponding to the option to be updated
+     * @param {number} [position] - Position of the slide in the list. If no position is provided, tries to determine position from the {@code slide} itself
+     */
+    function updateSlide (slide, position) {
+        if (!position || position < 0) {
+            position = getSlidePosition(slide);
+        }
+
+        // If the slide is not yet in the list of slides update that list
+        // To keep it synchronized
+        if (position === -1) {
+            _slides.push(slide);
+            position = _slides.length - 1;
+            addItem(slide, position);
+        } else {
+            var item = getItem(slide.name);
+            updateItemValue(item, slide);
+        }
+
+        select.value = slide.name;
+        setSlideSlingParams(slide);
+    }
+
+    /**
+     * Adds a new {@code Coral.Select.Item} to the {@code Coral.Select} based on the given slide's data
+     *
+     * @param {Slide} slide - The slide from which to extract data from
+     * @param {number} [position] - the position where to add the {@code Coral.Select.Item}
+     */
+    function addItem (slide, position) {
+        // Add item only if it is not yet in the list
+        var currentItem = getItem(slide.name);
+
+        if (currentItem) {
+            return;
+        }
+
+        var items = select.items.getAll();
+        var beforeItem;
+
+        if ($.isNumeric(position) && position < select.items.length) {
+            beforeItem = items[position];
+        }
+
+        var addedItem = select.items.add(convertToSlideConfig(slide), beforeItem);
+
+        addedItem.dataset.name = slide.name;
+        addedItem.dataset.path = slide.path;
+        addedItem.dataset.fileReference = slide.fileReference;
+        addedItem.dataset.dataAssetMimetype = slide.mimeType;
+
+        select.value = slide.name;
+    }
+
+    /**
+     * Pushes the current Slide to the list of {@code Coral.Select.Item} of the {@code Coral.Select},
+     * creates a new empty {@code slide} and sets it as the current slide
+     */
+    function addNewSlideBtnCallback () {
+        var newSlide = createNewSlide();
+        _slides.push(newSlide);
+        addItem(newSlide);
+        setCurrentSlide(newSlide);
+        setSlideSlingParams(_currentSlide);
+    }
+
+    /**
+     * Deletes the current slide
+     */
+    function deleteCurrentSlideBtnCallback () {
+        var i = getSlidePosition(_currentSlide);
+        var removedSlide;
+        // Next slide to be displayed after the deletion
+        var nextSlide;
+
+        if (i >= 0) {
+            removedSlide = _slides.splice(i, 1)[0];
+            var length = select.items.length;
+
+            if (removedSlide && i < length) {
+                if (_slides.length > 0) {
+                    if (i > 0) {
+                        nextSlide = i < _slides.length -1 ? _slides[i] : _slides[i - 1];
+                    } else {
+                        nextSlide = _slides[0];
+                    }
+                } else {
+                    // If there is no more slide in the list, creates a new empty slide
+                    nextSlide = createNewSlide();
+                    _slides.push(nextSlide);
+                    addItem(nextSlide);
+                }
+
+                if (nextSlide && nextSlide.path && nextSlide.path.length > 0) {
+                    select.value = nextSlide.name;
+                }
+
+                var items = select.items.getAll();
+                select.items.remove(items[i]);
+
+                setCurrentSlide(nextSlide);
+                setSlideSlingParams(removedSlide, true);
+            }
+        }
+    }
+
+    /**
+     * Converts a {@code Slide} object into a configuration object suitable for the creation of a {@code Coral.Select.Item}
+     *
+     * @param {Slide} slide - The slide to extract data from
+     * @returns {{content: {textContent: {}}, value: string}}
+     */
+    function convertToSlideConfig (slide) {
+        return {
+            content: {
+                textContent: getDisplayTextFromSlide(slide)
+            },
+            value: slide.name
+        };
+    }
+
+    channel.on('foundation-contentloaded', function() {
+        $slideshowContainer = $(SLIDE_DIALOG_CONTENT_SELECTOR).eq(0);
+        if ($slideshowContainer.length > 0) {
+            _nextId = 0;
+            select = $slideshowContainer.find(SLIDE_SELECT_SELECTOR)[0];
+            var addSlideBtn = $slideshowContainer.find(SLIDE_ADD_ACTION_SELECTOR)[0];
+            var deleteSlideBtn = $slideshowContainer.find(SLIDE_DELETE_ACTION_SELECTOR)[0];
+            textField = $slideshowContainer.find(SLIDE_NAME_TEXTFIELD_SELECTOR)[0];
+            $dropArea = $slideshowContainer.find(SLIDE_DROPAREA_SELECTOR).eq(0);
+
+            if ($slideshowContainer.find('.' + PARAMS_CONTAINER_CLASS).length === 0) {
+                $slideshowContainer.prepend($paramContainer);
+            }
+
+            initSlides(select);
+            setSlideDetail(_currentSlide);
+
+            addSlideBtn.on('click', addNewSlideBtnCallback);
+            deleteSlideBtn.on('click', deleteCurrentSlideBtnCallback);
+
+            // listen for drag and drop events on the DropArea
+            $dropArea.on(DROPAREA_ASSET_SELECTED_EVENT, function (event) {
+                _currentSlide.path = '';
+                _currentSlide.fileReference = event.path;
+                _currentSlide.mimeType = event.mimetype;
+
+                updateSlide(_currentSlide);
+            });
+
+            // Update the slide title from the title field
+            $slideshowContainer.on('blur keyup', SLIDE_NAME_TEXTFIELD_SELECTOR, function (event) {
+                _currentSlide.title = event.target.value;
+                var i = getSlidePosition(_currentSlide);
+
+                if (i <= _slides.length) {
+                    updateSlide(_currentSlide, i);
+                }
+            });
+
+            // Listen for Select Widget selection change
+            select.on('change', function(event) {
+                if (event.target.selectedItem) {
+                    setCurrentSlide(event.target.selectedItem.value);
+                }
+            });
+        }
+    });
+
+}(jQuery, Granite.author, jQuery(document), this, document));

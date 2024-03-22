@@ -1,0 +1,620 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+CQ.Ext.ns("CQ.wcm.emulator");
+CQ.Ext.ns("CQ.wcm.emulator.plugins");
+
+/**
+ * Wraps the content of the element into the tag defined by the given config or a default div.
+ * @param {Object} config The tag config.
+ * @param {Boolean} returnDom Whether to return the resulting DOM of the new element.
+ * @param {Object} bufferDomConfig The config for the dom buffering.
+ */
+CQ.Ext.Element.prototype.wrapContent = function (config, returnDom, bufferDomConfig) {
+    var df = this.bufferDom(bufferDomConfig);
+
+    var newEl = this.insertFirst(config || {tag: "div"});
+    newEl.dom.appendChild(df);
+    return returnDom ? newEl : CQ.Ext.get(newEl);
+};
+
+/**
+ * Buffers the DOM of the element into a newly created document fragment, which is returned.
+ * @param {Object} config Configs:<ul>
+ *     <li>excluded {String[]}: ids of excluded nodes</li>
+ *     </ul>
+ * @return {DocumentFragment} The document fragment.
+ */
+CQ.Ext.Element.prototype.bufferDom = function (config) {
+    config = config || {};
+    config.excluded = config.excluded || [];
+    // collect all child nodes to re-add them to the new element
+    var df = document.createDocumentFragment();
+
+    // set the length explicitly, as the childNodes.length reduces itself with every iteration
+    var numNodes = this.dom.childNodes.length;
+    for (var i = numNodes - 1; i >= 0 ; i--) {
+        var node = this.dom.childNodes[i];
+
+        //exclude CQ div from buffering
+        //add test if(node.id) to avoid moves of empty text node: this cause df to be empty. Do not know why.
+        // So moving only elements with ids...
+        if (node && node.id && config.excluded.indexOf(node.id) == -1) {
+            //nodes are read from end to 0, they have to be inserted the other way
+            df.insertBefore(node, df.firstChild);
+        }
+    }
+
+    return df;
+};
+
+/**
+ * This method removes the dom children of the element and appends it to the given receiver element's dom. Optionally
+ * the element is removed.
+ * @param {CQ.Ext.Element} receiverElement The element to receive this element's content.
+ * @param {Boolean} remove Whether to remove this element from the DOM or not.
+ * @param {Object} bufferDomConfig The config for the dom buffering.
+ */
+CQ.Ext.Element.prototype.unwrapContent = function (receiverElement, remove, bufferDomConfig) {
+
+    // collect all child nodes to re-add them to the new element
+    var df = this.bufferDom(bufferDomConfig);
+    receiverElement.dom.appendChild(df);
+    if (remove) {
+        this.remove();
+    }
+};
+
+// register the CQ.Ext.Element extensions
+CQ.Ext.CompositeElement.createCallback(CQ.Ext.CompositeElement.prototype, "wrapContent");
+CQ.Ext.CompositeElement.createCallback(CQ.Ext.CompositeElement.prototype, "unwrapContent");
+
+/**
+ * The emulator manager manages emulators (starting, stopping, switching in between emulators). The manager
+ * is launched via the #launch method and can receive a full list of emulators and their config.
+ */
+CQ.wcm.emulator.EmulatorManager_class = CQ.Ext.extend(CQ.Ext.util.Observable, {
+
+        /**
+         * @cfg {String} The HTML ID ("<link id="..." .../>) of the CSS styling the actual content displayed in the
+         * emulator. This is used to replace the relevant CSS when switching emulators.
+         */
+        contentCssId: null,
+
+        /**
+         * @cfg {String} The default emulator to start from the list of available emulators.
+         */
+        defaultEmulator: null,
+
+        /**
+         * @cfg {Object} The emulator configurations.
+         */
+        emulatorConfigs: null,
+
+        /**
+         * @cfg {Boolean} Flag indicating whether to show the "edit" link in the group info window (Defaults to false)
+         */
+        groupReadOnly: false,
+
+        /**
+         * the emulator names desired by the caller
+         * @private
+         */
+        emulatorNames: null,
+
+        /**
+         * The currently active emulator
+         * @private
+         */
+        currentEmulator: null,
+
+        /**
+         * The element containing all emulator elements.
+         * @private
+         */
+        emulatorWrapper: null,
+
+        /**
+         * This element contains the actual emulator device
+         * @private
+         */
+        emulatorDevice: null,
+
+        /**
+         * Holds the emulator top toolbar (carousel, group info)
+         * @private
+         */
+        emulatorToolbar: null,
+
+        /**
+         * @cfg {Number} The absolute path parent level for which to remember which emulator is in use.
+         */
+        separationPathLevel: null,
+
+        /**
+         * @cfg {Boolean} True to show the toolbar (defaults to true).
+         */
+        showToolbar: true,
+
+        /**
+         * Receives a configuration containing all emulators to be managed. The configuration also specifies
+         * the default emulator to launch. Every emulator is defined by its desired configuration. A sample
+         * configuration might look as follows:
+         *
+         * var config = {
+         *   defaultEmulator: "iPhone",
+         *   contentCssId: "mobileContentCss",
+         *   showCarousel: true,
+         *   emulatorConfigs: {
+         *       iPhone: {
+         *           plugins: {
+         *               "rotation": {
+         *                   ptype: CQ.wcm.emulator.plugins.RotationPlugin.NAME,
+         *                   config: {
+         *                      defaultDeviceOrientation: "vertical"
+         *                   }
+         *               }
+         *           },
+         *           title: "iPhone Emulator",
+         *           description: "...",
+         *           contentCssUrl: "/path/to/content.css"
+         *       },
+         *       blackberry: {
+         *           title: "Blackberry Emulator",
+         *           description: "...",
+         *           contentCssUrl: "/path/to/content.css"
+         *       },
+         *       w800: {
+         *           title: "Sony Ericsson W800 Emulator",
+         *           description: "...",
+         *           contentCssUrl: "/path/to/content.css"
+         *       }
+         *   }
+         * };
+         *
+         * var emulatorMgr = CQ.WCM.getEmulatorManager();
+         * emulatorMgr.launch(config);
+         */
+        launch: function(config) {
+
+            this.getEmulatorConfigs(config);
+            this.getEmulatorNames(config);
+
+            if (config.contentCssId) {
+                this.contentCssId = config.contentCssId;
+            }
+
+            this.separationPathLevel = (config.separationPathLevel) ? config.separationPathLevel : 1;
+
+            var body = CQ.Ext.getBody();
+
+            // wrap body in emulator framework
+            this.emulatorDevice =
+            body.wrapContent({tag: "div", id: CQ.wcm.emulator.EmulatorManager.EMULATOR_DEVICE_ID},false, {
+                excluded: CQ.wcm.emulator.EmulatorManager.WRAPPING_EXCLUDED_IDS
+            });
+            this.emulatorWrapper =
+            this.emulatorDevice.wrap({tag: "div", id: CQ.wcm.emulator.EmulatorManager.EMULATOR_WRAPPER_ID});
+
+            var emulatorName = CQ.HTTP.getCookie(CQ.wcm.emulator.EmulatorManager.EMULATOR_COOKIE_NAME);
+
+            if (!emulatorName || !this.emulatorConfigs[emulatorName]) {
+                emulatorName = config.defaultEmulator || this.getDefaultEmulator();
+                this.defaultEmulator = emulatorName;
+            }
+
+            this.emulatorToolbar = new CQ.wcm.emulator.EmulatorToolbar(this, config);
+            var showBody = true;
+            if (emulatorName) {
+                this.currentEmulator = new CQ.wcm.emulator.Emulator(this,
+                                                                    emulatorName,
+                                                                    this.emulatorConfigs[emulatorName]);
+                // finally start the emulator
+                showBody = this.startEmulator(this.currentEmulator);
+            }
+
+
+            // CSS hides the body to prevent content being visible before the emulator is loaded. after launch
+            // is complete, ensure that the body is shown.
+            if (showBody) {
+                body.show();
+            }
+
+            if( this.showToolbar ) {
+                this.emulatorToolbar.start();
+            }
+        },
+
+        isActive: function() {
+            return (this.emulatorDevice);
+        },
+
+        getEmulatorConfigs: function(config) {
+            if (null == this.emulatorConfigs) {
+                if (config && config.emulatorConfigs) {
+                    this.emulatorConfigs = config.emulatorConfigs;
+
+                } else {
+                    this.emulatorConfigs = this.getEmulatorConfigsFromPage();
+                }
+            }
+            return this.emulatorConfigs;
+        },
+
+        getEmulatorNames: function(config) {
+            if (null == this.emulatorNames) {
+                var emulatorNames = [];
+                var emulators = this.getEmulatorConfigs(config);
+                for (var name in emulators) {
+                    emulatorNames.push(name);
+                }
+                this.emulatorNames = emulatorNames;
+            }
+
+            return this.emulatorNames;
+        },
+
+        getCurrentEmulator: function() {
+            return this.currentEmulator;
+        },
+
+        getEmulatorIndex: function(emulator) {
+            var names = this.getEmulatorNames();
+            for (var i = 0; i < names.length; i++) {
+                var name = names[i];
+                if (emulator && emulator.getName() == name) {
+                    return i;
+                }
+            }
+
+            return 0;
+        },
+
+        getEmulatorToolbar: function() {
+            return this.emulatorToolbar;
+        },
+
+        getEmulatorConfigsFromPage: function() {
+            var emulators = {};
+            var pageInfo = CQ.WCM.getPageInfo(CQ.WCM.getPagePath());
+            var cfg = pageInfo["emulators"];
+            if (cfg && ["groups"]) {
+                cfg = cfg["groups"];
+            }
+            if (!cfg) {
+                return {};
+            }
+            for (var group in cfg) {
+                for (var name in cfg[group]) {
+                    if (typeof cfg[group][name] != "object") {
+                        continue;
+                    }
+                    var emulatorCfg = cfg[group][name];
+                    var emulator = {};
+                    emulator.title = emulatorCfg.text;
+                    if (!emulatorCfg.group) {
+                        emulator.group = group;
+                    } else {
+                        emulator.group = emulatorCfg.group;
+                    }
+                    emulator.plugins = {};
+                    if (emulatorCfg.canRotate) {
+                        emulator.plugins["rotation"] = {
+                            "ptype": CQ.wcm.emulator.plugins.RotationPlugin.NAME,
+                            "config": {
+                                "defaultDeviceOrientation": "vertical"
+                            }
+                        }
+                    }
+                    if (emulatorCfg.hasTouchScrolling) {
+                        emulator.plugins["touchscrolling"] = {
+                            "ptype": CQ.wcm.emulator.plugins.TouchScrollingPlugin.NAME,
+                            "config": {}
+                        }
+                    }
+                    emulators[name] = emulator;
+                }
+            }
+            return emulators;
+        },
+
+        getDefaultEmulator: function() {
+            var configs = this.getEmulatorConfigs();
+            if (configs) {
+                for (var name in configs) {
+                    if (typeof configs[name] == "object") {
+                        return name;
+                    }
+                }
+            }
+            return "";
+        },
+
+        /**
+         * Switch to a new emulator
+         */
+        switchEmulator: function(switchTo) {
+
+            // only switch if no emulator started yet and the switch target is not the one already started
+            if (!this.currentEmulator || this.currentEmulator && this.currentEmulator.getName() != switchTo) {
+
+                var nextEmulator = new CQ.wcm.emulator.Emulator(this, switchTo, this.emulatorConfigs[switchTo]);
+
+                if (this.isActive()) {
+                    // prevent "flash" of emulator content prior to loading a new device group URL
+                    // therefore only stop the current emulator if the next emulator's device group is identical
+                    if (CQ.wcm.emulator.EmulatorManager.SKIP_GROUP_TEST || this.currentEmulator.getGroup() == nextEmulator.getGroup()) {
+                        this.stopEmulator();
+                    }
+
+                    this.startEmulator(nextEmulator);
+
+                    // todo: this would be nice if it could be handled via eventing
+                    var carousel = this.emulatorToolbar.getCarousel();
+                    if (carousel) {
+                        carousel.updateTitle();
+                        carousel.positionCarousel(true);
+                    }
+                } else {
+                    this.currentEmulator = nextEmulator;
+                }
+            }
+        },
+
+        /**
+         * Switch to the previous emulator in sequence.
+         */
+        switchToPrevious: function() {
+            this.switchEmulator(this.getPreviousEmulatorName());
+        },
+
+        /**
+         * Switch to the next emulator in sequence.
+         */
+        switchToNext: function() {
+            this.switchEmulator(this.getNextEmulatorName());
+        },
+
+        /**
+         * If multiple emulators have been requested, this provides access to the next emulator in the chain
+         * much like a pagination of emulators.
+         */
+        getNextEmulatorName: function() {
+            var names = this.getEmulatorNames();
+            for (var i = 0; i < names.length; i++) {
+                var name = names[i];
+                if (this.currentEmulator.getName() == name) {
+                    if (i > 0 && i == names.length - 1) {
+                        return names[0];
+                    } else {
+                        if ((i + 1) <= names.length - 1) {
+                            return names[i + 1];
+                        }
+                    }
+                }
+            }
+        },
+
+        /**
+         * If multiple emulators have been requested, this provides access to the next emulator in the chain
+         * much like a pagination of emulators.
+         */
+        getPreviousEmulatorName: function() {
+            var names = this.getEmulatorNames();
+            for (var i = 0; i < names.length; i++) {
+                var name = names[i];
+                if (this.currentEmulator.getName() == name) {
+                    if (i > 0) {
+                        return names[i - 1];
+                    } else {
+                        if (i == 0) {
+                            return names[names.length - 1];
+                        }
+                    }
+                }
+            }
+        },
+
+        /**
+         * This method starts the given emulator and switches the content CSS against the new emulator's CSS.
+         * @param {CQ.wcm.emulator.Emulator} emulator The emulator to be started.
+         */
+        startEmulator: function(emulator) {
+            if (emulator) {
+                this.currentEmulator = emulator;
+                if (this.contentCssId && emulator.getContentCssPath()) {
+                    CQ.Ext.util.CSS.swapStyleSheet(this.contentCssId, emulator.getContentCssPath());
+                }
+
+                var cookiePath = CQ.Util.getAbsoluteParent(CQ.WCM.getPagePath(), this.separationPathLevel);
+                CQ.HTTP.setCookie(
+                        CQ.wcm.emulator.EmulatorManager.EMULATOR_COOKIE_NAME,
+                        emulator.getName(),
+                        CQ.HTTP.externalize(cookiePath)
+                );
+
+                // first check whether the url contains the expected device group selector
+                // if not, redirect, otherwise start emulator normally
+                var emulatorGroup = emulator.getGroup();
+                if (null != emulatorGroup) {
+
+                    var selectors = CQ.HTTP.getSelectors();
+                    var lastSelector = selectors[selectors.length - 1];
+
+                    if (!CQ.wcm.emulator.EmulatorManager.SKIP_GROUP_TEST && lastSelector != emulatorGroup) {
+
+                        var url = this.assembleUrl(selectors, emulatorGroup);
+
+                        setTimeout(function() {
+                            CQ.shared.Util.load(url);
+                        }, 1);
+
+                        return false;
+                    } else {
+                        if (this.fireEvent("beforestart", emulator) === false) {
+                            return false;
+                        }
+                        emulator.start();
+                        this.fireEvent("start", emulator);
+                    }
+                } else {
+                    if (this.fireEvent("beforestart", emulator) === false) {
+                        return false;
+                    }
+                    emulator.start();
+                    this.fireEvent("start", emulator);
+                }
+            }
+            return true;
+        },
+
+        assembleUrl: function(selectors, emulatorGroup) {
+            var schemeAndAuthority = CQ.HTTP.getSchemeAndAuthority(location.href);
+            var path = CQ.HTTP.externalize(CQ.HTTP.getPath());
+            var extension = CQ.HTTP.getExtension();
+            var suffix = CQ.HTTP.getSuffix();
+            var query = (location.href.indexOf("?") > 0) ? location.href.substring(location.href.indexOf("?")) : null;
+            var selectorString = null;
+
+            if (selectors.length > 0) {
+
+                // make sure that for redirection existing selectors are kept
+                // and that the last selector is verified to be an emulator group selector.
+                // if the last selector does not match any emulator group, append the group selector,
+                // otherwise replace it.
+                var append = true;
+                var lastSelector = selectors[selectors.length - 1];
+                var emulators = this.getEmulatorConfigs();
+                for (var name in emulators) {
+                    var config = emulators[name];
+                    if (config.group == lastSelector) {
+                        append = false;
+                        break;
+                    }
+                }
+
+                selectorString = selectors.join(".");
+                selectorString = (append)
+                        ? selectorString + "." + emulatorGroup
+                        : selectorString.substring(0, selectorString.lastIndexOf(".") + 1) + emulatorGroup;
+
+            } else {
+                selectorString = emulatorGroup;
+            }
+
+            var url = schemeAndAuthority;
+            url += path;
+            url += (null != selectorString) ? "." + selectorString : "";
+            url += "." + extension;
+            url += (null != suffix) ? suffix : "";
+            url += (null != query) ? query : "";
+
+            return url;
+        },
+
+        /**
+         * This method stops the currently active emulator.
+         */
+        stopEmulator: function() {
+            if (this.currentEmulator) {
+                if (this.fireEvent("beforestop", this.currentEmulator) === false) {
+                    return false;
+                }
+                CQ.HTTP.clearCookie(
+                        CQ.wcm.emulator.EmulatorManager.EMULATOR_COOKIE_NAME,
+                        CQ.HTTP.externalize("/")
+                );
+                this.currentEmulator.stop();
+                this.fireEvent("stop", this.currentEmulator);
+                this.currentEmulator = null;
+            }
+        },
+
+        constructor: function() {
+            CQ.wcm.emulator.EmulatorManager_class.superclass.constructor.call(this);
+        }
+
+});
+
+CQ.wcm.emulator.EmulatorManager = new CQ.wcm.emulator.EmulatorManager_class();
+/**
+ * The plugin registry holds all known emulator plugins.
+ */
+CQ.wcm.emulator.plugins.PluginRegistry = function() {
+
+    var registry = {};
+
+    return {
+
+        /**
+         * Registers a plugin in the registry.
+         * @param {String} ptype A unique name (type identifier) for the plugin.
+         * @param {Function} clazz The plugin implementation class.
+         * @param {Object} config The plugin's configuration.
+         */
+        register: function(ptype, clazz, config) {
+            registry[ptype] = new clazz(config);
+        },
+
+        /**
+         * Returns all registered plugins.
+         * @return {Object} The plugins.
+         */
+        getAll: function() {
+            return registry;
+        },
+
+        /**
+         * Returns a plugin as identified by the given name / type.
+         * @param {String} ptype The name / type of the plugin, as registered previously.
+         */
+        getByType: function(ptype) {
+            return registry[ptype];
+        }
+    }
+}();
+
+/**
+ * The HTML ID of the div wrapping all emulator elements (emulator switcher, emulator itself, ...).
+ */
+CQ.wcm.emulator.EmulatorManager.EMULATOR_WRAPPER_ID = "cq-emulator-wrapper";
+
+/**
+ * The HTML ID of the div containing the emulator device
+ */
+CQ.wcm.emulator.EmulatorManager.EMULATOR_DEVICE_ID = "cq-emulator-device";
+CQ.wcm.emulator.EmulatorManager.EMULATOR_COOKIE_NAME = "cq-emulator";
+
+/**
+ * The HTML ID of the main emulator div.
+ */
+CQ.wcm.emulator.EmulatorManager.EMULATOR_ID = "cq-emulator";
+
+/**
+ * The HTML ID of the emulator's content div containing the page content.
+ */
+CQ.wcm.emulator.EmulatorManager.CONTENT_ID = "cq-emulator-content";
+
+/**
+ * Skip the device group test and allows stop previous emulator.
+ */
+CQ.wcm.emulator.EmulatorManager.SKIP_GROUP_TEST = false;
+
+CQ.wcm.emulator.EmulatorManager.WRAPPING_EXCLUDED_IDS = ["CQ"];
+
+/**
+ * Utility method to statically access the emulator manager.
+ * @return {CQ.wcm.emulator.EmulatorManager} The emulator manager.
+ */
+CQ.wcm.emulator.EmulatorManager.getInstance = function() {
+    return CQ.WCM.getContentWindow().CQ.wcm.emulator.EmulatorManager;
+};

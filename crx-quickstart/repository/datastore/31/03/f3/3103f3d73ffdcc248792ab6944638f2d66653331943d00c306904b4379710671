@@ -1,0 +1,469 @@
+/**
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+CQ.taskmanagement.TaskManagementAdmin = { };
+
+CQ.taskmanagement.TaskManagementAdmin.createTask = function(action, event) {
+
+    var config = {
+        "okHandler": function(taskInfo) {
+            var selectedNode = CQ.taskmanagement.TaskManagementAdmin.getSelectedNode();
+            if (!selectedNode) {
+                return;
+            }
+
+            var url = "/libs/granite/taskmanager/createtask";
+
+            CQ.Ext.Ajax.request({
+                "url": url,
+                "method": "POST",
+                "jsonData": JSON.stringify(taskInfo),
+                "params":{
+                    "_charset_":"utf-8"
+                },
+                "success": function(response, options) {
+                    CQ.Notification.notify(null, CQ.I18n.getMessage("Task Created"));
+
+                    var nodeToReload = selectedNode;
+                    if (nodeToReload) {
+                        if (!nodeToReload.reload) {
+                            nodeToReload = nodeToReload.parentNode;
+                        }
+                        nodeToReload.reload(function() {
+                            CQ.taskmanagement.TaskManagementAdmin.getTaskTree().selectPath(nodeToReload.getPath(), null, function(success, node) {
+                                CQ.Ext.getCmp("cq-taskmanager" + "-grid").getStore().reload();
+                                if (success) {
+                                    nodeToReload.expand();
+                                }
+                            });
+                        });
+                    }
+                },
+                "failure": function(response, options) {
+                    CQ.Notification.notify(null, CQ.I18n.getMessage("Failed to create task"));
+                }
+            });
+        }
+    };
+
+    var mySelectedNode = CQ.taskmanagement.TaskManagementAdmin.getSelectedNode();
+    var parentTaskId;
+    if (mySelectedNode) {
+        parentTaskId = mySelectedNode.attributes.id;
+        if (parentTaskId!=null && parentTaskId.match("^xnode")!=null) {
+            parentTaskId = null;
+        }
+    }
+    var dialog = new  CQ.taskmanagement.CreateTaskDialog(config, parentTaskId);
+    dialog.show();
+};
+
+CQ.taskmanagement.TaskManagementAdmin.showTaskDetails = function(taskInfo, onSuccessCallback) {
+
+    var config = {
+        "okHandler": function(updatedTaskInfo) {
+            var url = "/libs/granite/taskmanager/updatetask";
+            var doComplete = false;
+
+            CQ.Ext.Ajax.request({
+                "url": url,
+                "method": "POST",
+                "params": {
+                    taskId: this.taskInfo.id,
+                    _charset_:"utf-8"
+                },
+                "jsonData": JSON.stringify(updatedTaskInfo),
+                "success": function(response, options) {
+                    if (doComplete) {
+                        CQ.Notification.notify(null, CQ.I18n.getMessage("Task Completed"));
+                    } else {
+                        CQ.Notification.notify(null, CQ.I18n.getMessage("Task Updated"));
+                    }
+
+                    if (onSuccessCallback) {
+                        var updatedTaskInfo = JSON.parse(response.responseText);
+                        onSuccessCallback(updatedTaskInfo);
+                    }
+                },
+                "failure": function(response, options) {
+                    if (doComplete) {
+                        CQ.Notification.notify(null, CQ.I18n.getMessage("Failed to complete task"));
+                    } else {
+                        CQ.Notification.notify(null, CQ.I18n.getMessage("Failed to update task"));
+                    }
+                }
+            });
+        }
+    };
+
+    var dialog = new  CQ.taskmanagement.TaskDetailsDialog(config, taskInfo);
+    dialog.show();
+};
+
+CQ.taskmanagement.TaskManagementAdmin.createTaskFromAnnotation = function(aAnnotation, taskCreatedCallback) {
+    var config = {
+        "okHandler": function(taskInfo) {
+            var url = "/libs/granite/taskmanager/createtask";
+
+            CQ.Ext.Ajax.request({
+                "url": url,
+                "method": "POST",
+                "jsonData": JSON.stringify(taskInfo),
+                "params":{
+                    "_charset_":"utf-8"
+                },
+                "success": function(response, options) {
+                    CQ.Notification.notify(null, CQ.I18n.getMessage("Task Created"));
+
+                    var taskResponse = undefined;
+                    if (response !== undefined && response.responseText !== undefined) {
+                        taskResponse = JSON.parse(response.responseText);
+                    }
+                    if (taskResponse!==undefined) {
+                        alert("Got a task id back: "+taskResponse.id);
+                    } else {
+                        alert("unknown reply");
+                    }
+                },
+                "failure": function(response, options) {
+                    CQ.Notification.notify(null, CQ.I18n.getMessage("Failed to create task"));
+                }
+            });
+        }
+    };
+
+    var parentTaskId = null;
+    var dialog = new  CQ.taskmanagement.CreateAnnotationTaskDialog(config, parentTaskId, aAnnotation);
+    dialog.show();
+};
+
+CQ.taskmanagement.TaskManagementAdmin.openTasks = function(newWindow, evt) {
+    if (typeof newWindow == "object" && evt) {
+        newWindow = evt.shiftKey; // workaround for action calls
+    }
+
+    var grid = CQ.taskmanagement.TaskManagementAdmin.getActiveGrid();
+    var selections = grid.getSelectionModel().getSelections();
+    for (var i = 0; i < selections.length; i++) {
+        CQ.taskmanagement.TaskManagementAdmin.openTask(selections[i].id, selections[i].get("type"), newWindow, selections[i]);
+        newWindow = true; // force new window when opening multiple pages
+    }
+};
+
+CQ.taskmanagement.TaskManagementAdmin.deleteTasks = function(newWindow, evt) {
+    var selectedNode = CQ.taskmanagement.TaskManagementAdmin.getSelectedNode();
+
+    var grid = CQ.taskmanagement.TaskManagementAdmin.getActiveGrid();
+    var selections = grid.getSelectionModel().getSelections();
+
+    if (selections) {
+        CQ.taskmanagement.TaskManagementAdmin.promptForDelete(selections, selectedNode,
+            function(cSelections, cSelectedNode) {
+                for (var i = 0; i < cSelections.length; i++) {
+                    CQ.taskmanagement.TaskManagementAdmin.deleteTaskOnServer(cSelections[i].id, cSelectedNode);
+                }
+            });
+    }
+};
+
+CQ.taskmanagement.TaskManagementAdmin.deleteTaskOnServer = function(taskId, selectedNode) {
+    var url = "/libs/granite/taskmanager/deletetask";
+
+    CQ.Ext.Ajax.request({
+        "url": url,
+        "method": "POST",
+        "params": {
+            taskId: taskId,
+            _charset_:"utf-8"
+        },
+        "success": function(response, options) {
+            CQ.Notification.notify(null, CQ.I18n.getMessage("Task Deleted"));
+
+            // reload everything...
+            // admin is not defined here: admin.reloadPages();
+            var nodeToReload = selectedNode;
+            if (nodeToReload) {
+                if (!nodeToReload.reload) {
+                    nodeToReload = nodeToReload.parentNode;
+                }
+                nodeToReload.reload(function() {
+                    CQ.taskmanagement.TaskManagementAdmin.getTaskTree().selectPath(selectedNode.getPath(), null, function(success, node) {
+                        CQ.Ext.getCmp("cq-taskmanager" + "-grid").getStore().reload();
+                        if (success) {
+                            selectedNode.expand();
+                        }
+                    });
+                });
+            }
+        },
+        "failure": function(response, options) {
+            CQ.Notification.notify(null, CQ.I18n.getMessage("Failed to delete task"));
+        }
+    });
+};
+
+CQ.taskmanagement.TaskManagementAdmin.promptForDelete = function(selections, selectedNode, deleteCallBack) {
+    if (!selections) {
+        return;
+    }
+
+    var msg, title;
+    if (selections.length > 1) {
+        msg = CQ.I18n.getMessage("Are you sure you want to permanently delete these tasks?");
+        title = CQ.I18n.getMessage("Delete Tasks");
+    } else {
+        msg = CQ.I18n.getMessage("Are you sure you want to permanently delete this task?");
+        title = CQ.I18n.getMessage("Delete Task");
+    }
+
+    CQ.Ext.Msg.show({
+        "title":title,
+        "msg":msg,
+        "buttons":CQ.Ext.Msg.YESNO,
+        "icon":CQ.Ext.MessageBox.QUESTION,
+        "fn":function(btnId) {
+            if (btnId == "yes") {
+                deleteCallBack(selections, selectedNode);
+            }
+        },
+        "scope":this
+    });
+};
+
+CQ.taskmanagement.TaskManagementAdmin.openTask = function(path, type, newWindow, selection) {
+    var config = {};
+    config = CQ.utils.Util.applyDefaults(config, {
+        "xtype": "taskeditor",
+        "contentPath": "/jcr:content/metadata",
+        "assetInfo": {
+            "width": 50,
+            "height": 20,
+            "size": 30,
+            "lastModified": 0,
+            "title": "Task Editor",
+            "mime": ""
+        },
+        "readOnly": false,
+        taskInfo:selection.json
+    });
+
+    config.id =  config.taskInfo.id;
+    config.path = config.taskInfo.contentPath;
+    config.title = CQ.shared.XSS.getXSSValue(CQ.I18n.getVarMessage(config.taskInfo.name));
+
+    var editor = CQ.Util.build(config, true);
+
+    var tabPanel = CQ.Ext.getCmp("cq-taskmanager-tabpanel");
+    tabPanel.add(editor);
+
+    tabPanel.setActiveTab(editor);
+};
+
+CQ.taskmanagement.TaskManagementAdmin.createTaskProject = function(action, event) {
+    var config = {
+        "okHandler": function(taskInfo) {
+            var selectedNode = CQ.taskmanagement.TaskManagementAdmin.getSelectedNode();
+            if (!selectedNode) {
+                return;
+            }
+
+            var url = "/libs/granite/taskmanager/createtask";
+
+            CQ.Ext.Ajax.request({
+                "url": url,
+                "method": "POST",
+                "jsonData": JSON.stringify(taskInfo),
+                "params":{
+                    "_charset_":"utf-8"
+                },
+                "success": function(response, options) {
+                    CQ.Notification.notify(null, CQ.I18n.getMessage("Project Created"));
+
+                    // reload everything...
+                    // admin is not defined here: admin.reloadPages();
+                    var nodeToReload = selectedNode;
+                    if (nodeToReload) {
+                        if (!nodeToReload.reload) {
+                            nodeToReload = nodeToReload.parentNode;
+                        }
+                        nodeToReload.reload(function() {
+                            CQ.taskmanagement.TaskManagementAdmin.getTaskTree().selectPath(selectedNode.getPath(), null, function(success, node) {
+                                CQ.Ext.getCmp("cq-taskmanager" + "-grid").getStore().reload();
+                                if (success) {
+                                    selectedNode.expand();
+                                }
+                            });
+                        });
+                    }
+                },
+                "failure": function(response, options) {
+                    CQ.Notification.notify(null, CQ.I18n.getMessage("Failed to create task"));
+                }
+            });
+        }
+    };
+
+    var mySelectedNode = CQ.taskmanagement.TaskManagementAdmin.getSelectedNode();
+    var parentTaskId;
+    if (mySelectedNode) {
+        parentTaskId = mySelectedNode.attributes.id;
+        if (parentTaskId!=null && parentTaskId.match("^xnode")!=null) {
+            parentTaskId = null;
+        }
+    }
+    var dialog = new  CQ.taskmanagement.CreateTaskProjectDialog(config, parentTaskId);
+    dialog.show();
+};
+
+// @private
+CQ.taskmanagement.TaskManagementAdmin.getSelectedNode = function() {
+    var tree = CQ.taskmanagement.TaskManagementAdmin.getTaskTree();
+    var selectedNode;
+    try {
+        selectedNode = tree.getSelectionModel().getSelectedNode();
+    } catch (e) {
+    }
+
+    return selectedNode;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.reloadSelectedNode = function() {
+    var tree = CQ.taskmanagement.TaskManagementAdmin.getTaskTree();
+    var selectedNode;
+    try {
+        selectedNode = tree.getSelectionModel().getSelectedNode();
+    } catch (e) {
+    }
+    if (selectedNode && selectedNode != tree.getRootNode()) {
+        var selectedPath = selectedNode.getPath();
+        selectedNode.parentNode.reload(function() {
+            tree.selectPath(selectedPath, null, function(success, node) {
+                if (success) {
+                    node.expand();
+                }
+            });
+        });
+    } else {
+        tree.getRootNode().reload();
+    }
+    CQ.taskmanagement.TaskManagementAdmin.getActiveGrid().getStore().reload();
+};
+
+// @private
+CQ.taskmanagement.TaskManagementAdmin.getTaskTree = function() {
+    return CQ.Ext.getCmp("cq-taskmanager-tree");
+};
+
+CQ.taskmanagement.TaskManagementAdmin.getActiveGrid = function() {
+    var grid = CQ.Ext.getCmp("cq-taskmanager-grid");
+    var tabPanel = CQ.Ext.getCmp("cq-taskmanager-tabpanel");
+    if (tabPanel) {
+        var g = CQ.Ext.getCmp(tabPanel.getActiveTab().id + "-grid");
+        if(g) {
+            grid = g;
+        }
+    }
+    return grid;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.hasListSelection = function() {
+    var grid = CQ.taskmanagement.TaskManagementAdmin.getActiveGrid();
+    if (grid) {
+        var selections = grid.getSelectionModel().getSelections();
+        return selections.length > 0;
+    }
+    return false;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.hasProjectSelected = function() {
+    var taskTree = CQ.taskmanagement.TaskManagementAdmin.getTaskTree();
+    if (taskTree) {
+        var selectedNode = taskTree.getSelectionModel().getSelectedNode();
+        return selectedNode && (selectedNode.attributes.taskType === "project");
+    }
+    return false;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.hasTaskSelected = function() {
+    var taskTree = CQ.taskmanagement.TaskManagementAdmin.getTaskTree();
+    if (taskTree) {
+        var selectedNode = taskTree.getSelectionModel().getSelectedNode();
+        return selectedNode && (selectedNode.attributes.taskType === "projectsubtask");
+    }
+    return false;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.hasTreeRootSelected = function() {
+    var taskTree = CQ.taskmanagement.TaskManagementAdmin.getTaskTree();
+    if (taskTree) {
+        var selectedNode = taskTree.getSelectionModel().getSelectedNode();
+        return selectedNode && (selectedNode.parentNode===null);
+    }
+    return false;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.canCreateTasks = function() {
+    return CQ.taskmanagement.TaskManagementAdmin.hasProjectSelected() || CQ.taskmanagement.TaskManagementAdmin.hasTaskSelected();
+};
+
+CQ.taskmanagement.TaskManagementAdmin.canCreateProjects = function() {
+   return true;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.getTargetFromList = function() {
+    if (CQ.taskmanagement.TaskManagementAdmin.hasListSelection()) {
+        var grid = CQ.taskmanagement.TaskManagementAdmin.getActiveGrid();
+        if (grid) {
+            var selections = grid.getSelectionModel().getSelections();
+            return selections[0].id;
+        }
+    }
+    return null;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.getTargetFromTree = function() {
+    if (CQ.taskmanagement.TaskManagementAdmin.hasTreeSelection()) {
+        var taskTree = CQ.taskmanagement.TaskManagementAdmin.getTaskTree();
+        if (taskTree) {
+            return taskTree.getSelectionModel().getSelectedNode();
+        }
+    }
+    return null;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.canDoFolderOp = function() {
+    return true;
+};
+
+CQ.taskmanagement.TaskManagementAdmin.hasTreeSelection = function() {
+    var tree = CQ.Ext.getCmp("cq-taskmanager-tree");
+    if (tree) {
+        var selectedNode = tree.getSelectionModel().getSelectedNode();
+        return selectedNode != null;
+    }
+    return false;
+};
+
+
+CQ.taskmanagement.TaskManagementAdmin.getLocalizedStatusMessage = function(task) {
+    if (task && task.status) {
+        if (task.status.toLowerCase()=="complete") {
+            return CQ.I18n.getMessage("Completed");
+        }
+        return CQ.I18n.getMessage("Active");
+    }
+    return "";
+};

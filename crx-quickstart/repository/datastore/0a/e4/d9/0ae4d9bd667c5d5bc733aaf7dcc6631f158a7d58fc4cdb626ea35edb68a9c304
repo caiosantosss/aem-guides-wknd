@@ -1,0 +1,476 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2013 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+/**
+ * globals
+ * -------
+ *
+ * {@see ContextHub.Store.JSONPStore} extends {@see ContextHub.Store.Core}
+ * {@see ContextHub.Store.JSONPStore.prototype.init}
+ * {@see ContextHub.Store.JSONPStore.defaultConfig}
+ * {@see ContextHub.Store.JSONPStore.prototype.getServiceDetails}
+ * {@see ContextHub.Store.JSONPStore.prototype.configureService}
+ * {@see ContextHub.Store.JSONPStore.prototype.getServiceURL}
+ * {@see ContextHub.Store.JSONPStore.prototype.queryService}
+ * {@see ContextHub.Store.JSONPStore.prototype.getRawResponse}
+ * {@see ContextHub.Store.JSONPStore.prototype.reset}
+ * {@see ContextHub.Store.JSONPStore.prototype.setUpdateInterval}
+ */
+
+ContextHub.console.log(ContextHub.Shared.timestamp(), '[loading] contexthub.generic-stores - ContextHub.Store.JSONPStore.js');
+
+(function($, window) {
+    'use strict';
+
+    window.ContextHub.Store = window.ContextHub.Store || {};
+
+    /**
+     * Constructs a ContextHub.Store.JSONPStore store.
+     *
+     * @namespace ContextHub.Store.JSONPStore
+     * @extends ContextHub.Store.Core
+     * @constructor
+     */
+    ContextHub.Store.JSONPStore = function() {};
+
+    /* inherit from ContextHub.Store.Core */
+    ContextHub.Utils.inheritance.inherit(ContextHub.Store.JSONPStore, ContextHub.Store.Core);
+
+    /**
+     * Generates JS valid name of a callback function.
+     *
+     * @param {String} name - store name
+     * @return {String} javascript valid function name
+     */
+    var generateCallbackName = function(name) {
+        var validName = name || '';
+        validName = validName.replace(/[^a-zA-Z0-9]/g, '');
+
+        /* generates hash basing on the name */
+        var generate = function() {
+            var seed = 0;
+
+            for (var y = 0; y < name.length; y++) {
+                seed = ~~(((seed << 5) - seed) + name.charCodeAt(y));
+            }
+
+            var x = Math.sin(seed) * 10000;
+            return x - Math.floor(x);
+        };
+
+        /* extend the name if needed */
+        if ((validName.length === 0) || (validName !== name)) {
+            validName = 'x' + validName + generate().toString(36).substr(2, 5);
+        }
+
+        return validName;
+    };
+
+    /**
+     * Initialize this store.
+     *
+     * @param {String} name - name of the store
+     * @param {Object} config - configuration
+     */
+    ContextHub.Store.JSONPStore.prototype.init = function(name, config) {
+        this.config = $.extend(true, {}, this.config, ContextHub.Store.JSONPStore.defaultConfig, config);
+        this.callbackName = generateCallbackName(name);
+        this.uber('init', name, this.config);
+        this.setUpdateInterval();
+    };
+
+    /**
+     * Default configuration of ContextHub.Store.JSONPStore
+     *
+     * Available config properties:
+     * {
+     *   eventDeferring: [int],
+     *   persistence: [object],
+     *   eventing: [object],
+     *   service: {
+     *     jsonp: [boolean],
+     *     script: [boolean],
+     *     timeout: [int],
+     *     ttl: [int],
+     *     secure: [boolean],
+     *     host: [string],
+     *     port: [int],
+     *     path: [string],
+     *     params: [object],
+     *     synchronous: [boolean]
+     *   },
+     *   pollInterval: [int]
+     * }
+     *
+     * @namespace ContextHub.Store.JSONPStore.defaultConfig
+     */
+    ContextHub.Store.JSONPStore.defaultConfig = {
+        eventDeferring: 16 * 2,
+        persistence: null,
+        eventing: ContextHub.eventing,
+        service: null
+    };
+
+    /**
+     * Returns service details.
+     *
+     * @this ContextHub.Store.JSONPStore
+     * @return {Object}
+     */
+    ContextHub.Store.JSONPStore.prototype.getServiceDetails = function() {
+        return this.config.service;
+    };
+
+    /**
+     * Sets service configuration (updates or overrides the config).
+     *
+     * @param {Object} serviceConfig - config
+     * @param {Boolean} [override] - if true, current config will be overwritten
+     * @this ContextHub.Store.JSONPStore
+     */
+    ContextHub.Store.JSONPStore.prototype.configureService = function(serviceConfig, override) {
+        this.config.service = override ? serviceConfig : $.extend(true, {}, this.config.service, serviceConfig);
+    };
+
+    /**
+     * Resolves given parameter (supported patterns: ${variable:ContextHub.Paths.*} or ${contexthub:/path/to/key} - for
+     * example ${contexthub:/store/profile/age} will get replaced with it's value or empty string).
+     *
+     * @private
+     * @param {String} parameter
+     * @return {String}
+     */
+    ContextHub.Store.JSONPStore.prototype.resolveParameter = function(parameter) {
+        var parameterValue = ($.type(parameter) === 'boolean') ? String(parameter) : parameter;
+        var result = parameterValue || '';
+        var allowedPrefix = [
+            'ContextHub.Paths.'
+        ];
+
+        if ($.type(parameterValue) === 'string') {
+            var matches = result.match(/\$\{(contexthub|variable):[^}]+}/g);
+
+            /* replace all matching patterns with values */
+            if (matches) {
+                $.each(matches, function(idx, item) {
+                    /* ${category:key} -> [ 'category', 'key' ] */
+                    var chunks = item.slice(2, -1).split(/:/);
+                    var category = chunks.shift();
+                    var key = chunks.shift();
+                    var replacement = null;
+
+                    if (category === 'contexthub') {
+                        replacement = ContextHub.persistence.getItem(key);
+                    }
+
+                    if ((category === 'variable') && key) {
+                        $.each(this.allowedPrefix, function(x, el) {
+                            var validPrefix = key.indexOf(el) === 0;
+
+                            if (validPrefix) {
+                                replacement = ContextHub.Utils.JSON.tree.getItem(window, key.replace(/\./g, '/'));
+                            }
+
+                            return !validPrefix;
+                        });
+                    }
+
+                    result = result.replace(item, replacement || '');
+                }.bind({ allowedPrefix: allowedPrefix }));
+            }
+        }
+
+        return result;
+    };
+
+    /**
+     * Returns URL to a service. If {@code resolve} is set to true, all parameters will get resolved too.
+     *
+     * @this ContextHub.Store.JSONPStore
+     * @param {Boolean} resolve - determines whether parameters should be resolved
+     * @return {String} - service URL
+     */
+    // eslint-disable-next-line complexity
+    ContextHub.Store.JSONPStore.prototype.getServiceURL = function(resolve) {
+        var service = this.getServiceDetails();
+        var url = [];
+        var params = [];
+        var resolvedPath;
+
+        if ($.type(service) !== 'object') {
+            return null;
+        }
+
+        /* if it's JSONP service, set a callback function */
+        if (service.jsonp) {
+            var jsonCallback;
+
+            if (service.jsonp === true) {
+                jsonCallback = 'callback';
+            } else {
+                jsonCallback = ('' + service.jsonp).replace(/[^a-zA-Z0-9_$]/g, '');
+            }
+
+            service.params = service.params || {};
+            service.params[jsonCallback] = 'ContextHub.Callbacks.' + this.callbackName;
+        }
+
+        /* build url */
+        service.port = (service.port && service.port === 80) ? '' : service.port;
+
+        if (service.host) {
+            if (typeof service.secure === 'undefined' || service.secure === 'auto') {
+                url.push('//');
+            } else {
+                url.push(service.secure ? 'https://' : 'http://');
+            }
+
+            url.push(service.host);
+            url.push(service.port ? (':' + service.port) : '');
+        } else {
+            url.push(window.location.protocol + '//' + window.location.host);
+        }
+
+        service.path = service.path || '/';
+        resolvedPath = '' + (resolve ? this.resolveParameter(service.path) : service.path);
+        url.push(resolvedPath);
+
+        /* encode query parameters */
+        $.each(service.params || {}, function(key, value) {
+            params.push(encodeURIComponent(key) + '=' + encodeURIComponent(resolve ? this.resolveParameter(value) : value));
+        }.bind(this));
+
+        /* add encoded parameters to url */
+        if (params.length) {
+            /* add character indicating beginning of the query string or "&" if path already contains some parameters */
+            url.push((resolvedPath.indexOf('?') === -1) ? '?' : '&');
+
+            /* join all parameters */
+            url.push(params.join('&'));
+        }
+
+        return url.join('');
+    };
+
+    /**
+     * Returns the request options.
+     *
+     * @this ContextHub.Store.JSONPStore
+     * @return {Object} - request options
+     */
+    ContextHub.Store.JSONPStore.prototype.getRequestOptions = function() {
+        function isBasicAuth(auth) { return auth && auth.user && auth.password; }
+        function isBearerAuth(auth) { return auth && auth.token && !auth.header; }
+        function isCustomAuth(auth) { return auth && auth.token && auth.header; }
+
+        var service = this.getServiceDetails();
+
+        /* ajax request options */
+        var options = {
+            timeout: service.timeout,
+            async: service.synchronous ? false : true,
+            method: service.method || 'GET',
+            headers: {}
+        };
+
+        if (isCustomAuth(service.auth)) {
+            options.headers[service.auth.header] = service.auth.token;
+        } else if (isBearerAuth(service.auth)) {
+            options.headers.Authorization = 'Bearer ' + service.auth.token;
+        } else if (isBasicAuth(service.auth)) {
+            options.headers.Authorization = 'Basic ' + btoa(service.auth.user + ':' + service.auth.password);
+        } else if (service.auth && Object.keys(service.auth).length){
+            ContextHub.console.log('Invalid JSONP service authorization options. Please use "user"/"password" or "token" options, instead of: ', JSON.stringify(service.auth));
+        }
+
+        return options;
+    }
+
+    /**
+     * Performs a query to remote service. Event 'ready' is triggered once query is finished.
+     * Callback is executed with result set as a parameter.
+     *
+     * @this ContextHub.Store.JSONPStore
+     * @param {Boolean} reload
+     */
+    // eslint-disable-next-line complexity
+    ContextHub.Store.JSONPStore.prototype.queryService = function(reload) {
+        var url = this.getServiceURL(true);
+
+        /* do nothing if service is not configured properly */
+        if (!url) {
+            return;
+        }
+
+        /* vars */
+        var isScript = this.config.service.jsonp || this.config.service.script;
+        var wasPaused = this.isEventingPaused();
+        var self = this;
+
+        /* force reload */
+        if (reload) {
+            this.removeItem('_', { silent: true });
+        }
+
+        /* check last response time and service url */
+        var lastResponseTime = this.getItem(ContextHub.Constants.SERVICE_RESPONSE_TIME_KEY) || 0;
+        var lastUrl = this.getItem(ContextHub.Constants.SERVICE_LAST_URL_KEY);
+
+        /* if response lifetime is still valid and url didn't change since last query, return cached response */
+        if ((lastResponseTime + this.config.service.ttl > new Date().getTime()) && (lastUrl === url)) {
+            this.duration = 'cached';
+            this.announceReadiness();
+            return;
+        }
+
+        this.setItem(ContextHub.Constants.SERVICE_LAST_URL_KEY, url);
+
+        /* set up callback handler */
+        window.ContextHub.Callbacks = window.ContextHub.Callbacks || {};
+        ContextHub.Callbacks[this.callbackName] = this.callbackFunction.bind(this);
+
+        /* ajax request options */
+        var options = this.getRequestOptions();
+        options.url = url;
+
+        if (isScript) {
+            $.extend(options, {
+                dataType: 'script',
+                cache: true
+            });
+        }
+
+        /* pause eventing and reset timer */
+        this.pauseEventing();
+        this.duration = 0;
+        ContextHub.Shared.timers.start(this.name);
+
+        /* perform a query */
+        var request = $.ajax(options);
+
+        /* attach success handler if a requested resource is not a script */
+        if (!isScript) {
+            request.done(function(result, status, xhr) {
+                var responseJSON = ContextHub.Utils.JSON.parse(xhr.responseText);
+                ContextHub.Callbacks[self.callbackName](responseJSON);
+            });
+        }
+
+        /* attach failure handler */
+        request.fail(function(error) {
+            self.failureHandler(error);
+        });
+
+        /* complete the request - resume eventing and announce readiness */
+        request.always(function() {
+            if (!wasPaused) {
+                self.resumeEventing();
+            }
+
+            self.announceReadiness();
+        });
+    };
+
+    /**
+     * Default success handler - returns unmodified data. User should override it to post process the response before
+     * it's stored in the persistence.
+     *
+     * @private
+     * @param {Object} response
+     * @returns {Object}
+     */
+    ContextHub.Store.JSONPStore.prototype.successHandler = function(response) {
+        return response;
+    };
+
+    /**
+     * Default failure handler - logs error message in the console. User should override it to handle failure properly.
+     *
+     * @private
+     * @this ContextHub.Store.JSONPStore
+     * @param {Object} error
+     */
+    ContextHub.Store.JSONPStore.prototype.failureHandler = function(error) {
+        var config = (this.config || {}).service;
+
+        ContextHub.console.log('There was an error while accessing JSONP service in the store "' + this.name + '", configuration: ', config, ', error: ', error);
+    };
+
+    /**
+     * Stores in persistence data returned by a service (post-processed by a success handler). Stores duration time
+     * used to query the JSONP service.
+     *
+     * @private
+     * @this ContextHub.Store.JSONPStore
+     * @param {Object} response
+     */
+    ContextHub.Store.JSONPStore.prototype.callbackFunction = function(response) {
+        this.duration = ContextHub.Shared.timers.finish(this.name) + 'ms';
+
+        this.setItem(ContextHub.Constants.SERVICE_RESPONSE_TIME_KEY, new Date().getTime());
+
+        var processedResponse = this.successHandler(response);
+        var responseType = (processedResponse instanceof Array) ? [] : {};
+        processedResponse = $.extend(true, responseType, processedResponse);
+
+        this.setItem(ContextHub.Constants.SERVICE_RAW_RESPONSE_KEY, processedResponse);
+    };
+
+    /**
+     * Returns raw response from a service.
+     *
+     * @this ContextHub.Store.JSONPStore
+     * @return {Object}
+     */
+    ContextHub.Store.JSONPStore.prototype.getRawResponse = function() {
+        return this.getItem(ContextHub.Constants.SERVICE_RAW_RESPONSE_KEY) || {};
+    };
+
+    /**
+     * Resets store's persistence (if keepRemainingData is not set) and performs a query to external service.
+     *
+     * @param {Boolean} keepRemainingData - indicates if a current data should stay in the persistence
+     */
+    ContextHub.Store.JSONPStore.prototype.reset = function(keepRemainingData) {
+        this.uber('reset', keepRemainingData);
+        this.queryService(false);
+    };
+
+    /**
+     * Start interval which updates the store every given milliseconds.
+     *
+     * @param {Number} interval - time in milliseconds to update values. Will override JSONP config.
+     */
+    ContextHub.Store.JSONPStore.prototype.setUpdateInterval = function(interval) {
+        interval = isNaN(interval) ? this.config.pollInterval : interval;
+
+        if (this.intervalHandler){
+            window.clearInterval(this.intervalHandler);
+            this.intervalHandler = null;
+        }
+
+        if (interval > 0) {
+            var self = this;
+
+            this.intervalHandler = window.setInterval(function() {
+                self.queryService(true);
+            }, interval);
+        }
+    };
+
+
+}(ContextHubJQ, window));

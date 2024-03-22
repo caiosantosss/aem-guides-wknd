@@ -1,0 +1,644 @@
+/*
+ * Copyright 1997-2011 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.form.ImageMap.UI
+ * @extends CQ.form.SmartImage.Tool.UserInterface
+ * @private
+ * The ImageMap.UI provides the external user interface
+ * for the image map tool.
+ * @constructor
+ * Creates a new ImageMap.UI.
+ * @param {Object} config The config object
+ */
+CQ.form.ImageMap.UI = CQ.Ext.extend(CQ.form.SmartImage.Tool.UserInterface, {
+
+    /**
+     * Flag if the tool is currently active (managed by {@link CQ.form.ImageMap})
+     * @private
+     * @type Boolean
+     */
+    isActive: false,
+
+    /**
+     * The basic working area
+     * @private
+     * @type CQ.form.SmartImage.ImagePanel
+     */
+    workingArea: null,
+
+    /**
+     * Current edit mode.
+     * @private
+     * @type Number
+     */
+    editMode: null,
+
+    /**
+     * Current area tyoe.
+     * @private
+     * @type Number
+     */
+    areaType: null,
+
+    /**
+     * The latest polygon shape added
+     * @private
+     * @type CQ.form.ImageMap.PolyArea
+     */
+    polyAreaAdded: null,
+
+    /**
+     * The {@link CQ.form.SmartImage.ShapeSet} used to display the map's areas.
+     * @private
+     * @type CQ.form.SmartImage.ShapeSet
+     */
+    mapShapeSet: null,
+
+
+    constructor: function(config) {
+        var clickHandler = function(item) {
+            this.toolClicked(item.itemId);
+        }.createDelegate(this);
+        // as Ext does only save the CQ.Ext.Elements of toolbar items, we'll have to
+        // keep references of the underlying buttons on our own
+        this.toolbarButtons = {
+            "addRect": new CQ.Ext.Toolbar.Button( {
+                "itemId": "addRect",
+                "text": CQ.I18n.getMessage("Rectangle"),
+                "enableToggle": true,
+                "toggleGroup": "mapperTools",
+                "allowDepress": false,
+                "handler": clickHandler
+            } ),
+            "addCircle": new CQ.Ext.Toolbar.Button( {
+                "itemId": "addCircle",
+                "text": CQ.I18n.getMessage("Circle"),
+                "enableToggle": true,
+                "toggleGroup": "mapperTools",
+                "allowDepress": false,
+                "handler": clickHandler
+            } ),
+            "addPoly": new CQ.Ext.Toolbar.Button( {
+                "itemId": "addPoly",
+                "text": CQ.I18n.getMessage("Polygon"),
+                "enableToggle": true,
+                "toggleGroup": "mapperTools",
+                "allowDepress": false,
+                "handler": clickHandler
+            } ),
+            "editPolyPoint": new CQ.Ext.Toolbar.Button( {
+                "itemId": "editPolyPoint",
+                "xtype": "tbbutton",
+                "text": CQ.I18n.getMessage("Polygon point"),
+                "enableToggle": true,
+                "toggleGroup": "mapperTools",
+                "allowDepress": false,
+                "handler": clickHandler
+            } ),
+            "edit": new CQ.Ext.Toolbar.Button( {
+                "itemId": "edit",
+                "text": CQ.I18n.getMessage("Edit"),
+                "enableToggle": true,
+                "toggleGroup": "mapperTools",
+                "allowDepress": false,
+                "handler": clickHandler
+            } )
+        };
+
+        var toolbar = new CQ.Ext.Toolbar( {
+            "xtype": "toolbar",
+            "items": [
+                CQ.I18n.getMessage("Add") + ":",
+                this.toolbarButtons["addRect"],
+                this.toolbarButtons["addCircle"],
+                this.toolbarButtons["addPoly"],
+                this.toolbarButtons["editPolyPoint"],
+                {
+                    "xtype": "tbseparator"
+                },
+                this.toolbarButtons["edit"],
+                {
+                    "xtype": "tbseparator"
+                }, {
+                    "itemId": "delete",
+                    "xtype": "tbbutton",
+                    "text": CQ.I18n.getMessage("Delete"),
+                    "handler": function() {
+                        this.deleteSelection();
+                    }.createDelegate(this)
+                }
+            ]
+        } );
+        var defaults = {
+            "layout": "column",
+            "bodyStyle": "padding-top: 1px; " +
+                 "padding-bottom: 1px; " +
+                 "padding-left: 3px; " +
+                 "padding-right: 2px;",
+            "width": CQ.themes.SmartImage.Tool.MAP_TOOLS_WIDTH,
+            "tbar": toolbar,
+            "items": [ {
+                "itemId": "col1",
+                "xtype": "panel",
+                "layout": "form",
+                "border": false,
+                "columnWidth": 0.5,
+                "labelWidth": CQ.themes.SmartImage.Tool.MAP_AREAEDITOR_LABEL_WIDTH,
+                "defaults": {
+                    "itemCls": "cq-map-areaeditor-fieldlabel",
+                    "cls": "cq-map-areaeditor-text",
+                    "fieldClass": "cq-map-areaeditor-text",
+                    "width": CQ.themes.SmartImage.Tool.MAP_AREAEDITOR_FIELD_WIDTH
+                },
+                "items": [ {
+                    "itemId": "areaDefUrl",
+                    "name": "url",
+                    "xtype": "pathfield",
+                    "fieldLabel": CQ.I18n.get("HREF"),
+                    "listeners": {
+                        "dialogopen": {
+                            "fn": function() {
+                                this.__position = this.getPosition();
+                                this.hide();
+                            },
+                            "scope": this
+                        },
+                        "dialogclose": {
+                            "fn": function() {
+                                this.show();
+                                this.setPosition(this.__position);
+                            },
+                            "scope": this
+                        }
+                    }
+                }, {
+                    "itemId": "areaDefTarget",
+                    "name": "target",
+                    "xtype": "textfield",
+                    "fieldLabel": CQ.I18n.get("Target")
+               } ]
+            }, {
+                "itemId": "col2",
+                "xtype": "panel",
+                "layout": "form",
+                "border": false,
+                "columnWidth": 0.5,
+                "labelWidth": CQ.themes.SmartImage.Tool.MAP_AREAEDITOR_LABEL_WIDTH,
+                "defaults": {
+                    "itemCls": "cq-map-areaeditor-fieldlabel",
+                    "cls": "cq-map-areaeditor-text",
+                    "fieldClass": "cq-map-areaeditor-text",
+                    "width": CQ.themes.SmartImage.Tool.MAP_AREAEDITOR_FIELD_WIDTH
+                },
+                "items": [ {
+                    "itemId": "areaDefText",
+                    "name": "text",
+                    "xtype": "textfield",
+                    "fieldLabel": CQ.I18n.get("Text")
+                }, {
+                    "itemId": "areaDefCoords",
+                    "name": "coords",
+                    "xtype": "textfield",
+                    "fieldLabel": CQ.I18n.get("Coordinates")
+               } ]
+            } ]
+        };
+        CQ.Util.applyDefaults(config, defaults);
+        CQ.form.ImageMap.UI.superclass.constructor.call(this, config);
+    },
+
+    /**
+     * Initializes the user interface's components.
+     */
+    initComponent: function() {
+        CQ.form.ImageMap.UI.superclass.initComponent.call(this);
+        this.areaDefUrl = this.items.get("col1").items.get("areaDefUrl");
+        this.areaDefTarget = this.items.get("col1").items.get("areaDefTarget");
+        this.areaDefText = this.items.get("col2").items.get("areaDefText");
+        this.areaDefCoords = this.items.get("col2").items.get("areaDefCoords");
+        this.areaDefCoords.on("specialkey", function(tf, keyEvent) {
+            var editedArea = this.editedArea;
+            if ((keyEvent.getKey() == CQ.Ext.EventObject.ENTER)
+                    && (editedArea != null)) {
+                if (editedArea.fromCoordString(this.areaDefCoords.getValue())) {
+                    // var repaintAreas = [ editedArea ];
+                    this.workingArea.drawImage();
+                }
+                this.areaDefCoords.setValue(editedArea.toCoordString());
+            }
+        }, this);
+        this.setDestinationAreaEditorEnabled(false);
+    },
+
+    /**
+     * Notifies the image map of the working area it is used on and the shape set it
+     * must use for displaying the image area's shapes.
+     * @param {CQ.form.SmartImage.ImagePanel} workingArea The working area
+     * @param {CQ.form.SmartImage.ShapeSet} mapShapeSet The shape set
+     */
+    notifyWorkingArea: function(workingArea, mapShapeSet) {
+        this.workingArea = workingArea;
+        this.mapShapeSet = mapShapeSet;
+        this.workingArea.on("addrequest", this.onAddRequest, this);
+        this.workingArea.on("selectionchange", this.onSelectionChange, this);
+        this.workingArea.on("dragchange", this.onVisualChange, this);
+        this.workingArea.on("rollover", this.onRollover, this);
+    },
+
+    /**
+     * Handler for clicks on tools (add rect/circle/polygon, edit, etc.).
+     * @param {String} value The tool id ("edit", "editPolyPoint", "addRect", "addCircle",
+     *        "addPoly")
+     */
+    toolClicked: function(value) {
+        if (value == "edit") {
+            this.switchEditMode(CQ.form.ImageMap.EDITMODE_EDIT, null);
+        } else if (value == "editPolyPoint") {
+            this.switchEditMode(
+                    CQ.form.ImageMap.EDITMODE_EDIT,
+                    CQ.form.ImageMap.AREATYPE_POINT);
+        } else if (value == "addRect") {
+            this.switchEditMode(
+                    CQ.form.ImageMap.EDITMODE_ADD,
+                    CQ.form.ImageMap.AREATYPE_RECT);
+        } else if (value == "addCircle") {
+            this.switchEditMode(
+                    CQ.form.ImageMap.EDITMODE_ADD,
+                    CQ.form.ImageMap.AREATYPE_CIRCLE);
+        } else if (value == "addPoly") {
+            this.switchEditMode(
+                    CQ.form.ImageMap.EDITMODE_ADD,
+                    CQ.form.ImageMap.AREATYPE_POLYGON);
+        }
+    },
+
+    /**
+     * Enables or disables the destination area editor.
+     * @param {Boolean} isEnabled True to enable the destination area editor
+     */
+    setDestinationAreaEditorEnabled: function(isEnabled) {
+        this.areaDefUrl.setDisabled(!isEnabled);
+        this.areaDefTarget.setDisabled(!isEnabled);
+        this.areaDefText.setDisabled(!isEnabled);
+        this.areaDefCoords.setDisabled(!isEnabled);
+    },
+
+    /**
+     * Saves the current content of the destination area editor to the specified image area.
+     * @param {CQ.form.ImageMap.Area} area Area to save data to
+     */
+    saveDestinationArea: function(area) {
+        if (!area) {
+            area = this.editedArea;
+        }
+        if (area) {
+            var url = this.areaDefUrl.getValue();
+            if (url.length > 0) {
+                if (url.charAt(0) != "/") {
+                    var protocolSepPos = url.indexOf("://");
+                    if (protocolSepPos < 0) {
+                        if (url.indexOf("mailto:") != 0) {
+                            url = "http://" + url;
+                        }
+                    }
+                }
+            }
+            area.destination.url = url;
+            area.destination.target = this.areaDefTarget.getValue();
+            area.destination.text = this.areaDefText.getValue();
+        }
+    },
+
+    /**
+     * Loads the current content of the destination area editor from the specified image
+     * area.
+     * @param {CQ.form.ImageMap.Area} area area to load data from; null to clear the current
+     *        content
+     */
+    loadDestinationArea: function(area) {
+        if (area != null) {
+            this.areaDefUrl.setValue(area.destination.url);
+            this.areaDefTarget.setValue(area.destination.target);
+            this.areaDefText.setValue(area.destination.text);
+            this.areaDefCoords.setValue(area.toCoordString());
+        } else {
+            this.areaDefUrl.setValue("");
+            this.areaDefTarget.setValue("");
+            this.areaDefText.setValue("");
+            this.areaDefCoords.setValue("");
+        }
+    },
+
+
+    // Edit mode related stuff -------------------------------------------------------------
+
+    /**
+     * Switches edit mode.
+     * @param {Number} editMode new edit mode; defined by constants with prefix
+     *        EDITMODE_
+     * @param {Number} areaType new area type (if applicable; for example the area to add);
+     *        defined by constants with prefix AREATYPE_
+     */
+    switchEditMode: function(editMode, areaType) {
+        this.editMode = editMode;
+        this.areaType = areaType;
+        this.adjustToolbar();
+        if (this.editMode == CQ.form.ImageMap.EDITMODE_ADD) {
+            this.finishPolygonBuilding(false);
+            this.workingArea.blockRollOver();
+            this.workingArea.clearSelection();
+            this.workingArea.drawImage();
+        } else if (this.editMode == CQ.form.ImageMap.EDITMODE_EDIT) {
+            if (this.areaType != CQ.form.ImageMap.AREATYPE_POINT) {
+                this.finishPolygonBuilding(false);
+            }
+            // repaintAreas = this.getSelectedAreas();
+            this.workingArea.unblockRollOver();
+            this.workingArea.drawImage();
+        }
+        if (!this.polyAreaAdded) {
+            this.workingArea.drawImage();
+        }
+    },
+
+    /**
+     * Adjusts the toolbar to the current edit mode.
+     * @private
+     */
+    adjustToolbar: function() {
+        var valueToSelect = null;
+        if (this.editMode == CQ.form.ImageMap.EDITMODE_EDIT) {
+            if (this.areaType == CQ.form.ImageMap.AREATYPE_POINT) {
+                valueToSelect = "editPolyPoint";
+            } else {
+                valueToSelect = "edit";
+            }
+        } else if (this.editMode == CQ.form.ImageMap.EDITMODE_ADD) {
+            if (this.areaType == CQ.form.ImageMap.AREATYPE_RECT) {
+                valueToSelect = "addRect";
+            } else if (this.areaType == CQ.form.ImageMap.AREATYPE_POLYGON) {
+                valueToSelect = "addPoly";
+            } else if (this.areaType == CQ.form.ImageMap.AREATYPE_CIRCLE) {
+                valueToSelect = "addCircle";
+            }
+        }
+        for (var buttonId in this.toolbarButtons) {
+            if (this.toolbarButtons.hasOwnProperty(buttonId)) {
+                var item = this.toolbarButtons[buttonId];
+                item.suspendEvents();
+                item.toggle(buttonId == valueToSelect);
+                item.resumeEvents();
+            }
+        }
+    },
+
+    /**
+     * Deletes the currently selected areas and polygon points (if any).
+     * @return {Boolean} True if at least one area has actually been deleted
+     */
+    deleteSelection: function() {
+        // if there are any areas with polygon points selected, delete those points first
+        var isHandleDeleted = false;
+        var areaCnt = this.mapShapeSet.getShapeCount();
+        for (var areaIndex = 0; areaIndex < areaCnt; areaIndex++) {
+            var areaToCheck = this.mapShapeSet.getShapeAt(areaIndex);
+            if (areaToCheck.areaType == CQ.form.ImageMap.AREATYPE_POLYGON) {
+                if (areaToCheck.selectedHandle != null) {
+                    areaToCheck.removePoint(areaToCheck.selectedHandle);
+                    isHandleDeleted = true;
+                }
+            }
+        }
+        if (!isHandleDeleted) {
+            // remove selected areas completely
+            this.workingArea.deleteSelectedShapes();
+        } else {
+            this.workingArea.drawImage();
+        }
+    },
+
+    /**
+     * Finishes the building of a polygon (executed by the user).
+     * @param {Boolean} requestRepaint True to request a repaint of the image; false if the
+     *        redraw is executed later on
+     * @private
+     */
+    finishPolygonBuilding: function(requestRepaint) {
+        if (this.polyAreaAdded) {
+            this.polyAreaAdded.isSelected = false;
+            this.polyAreaAdded.selectedHandle = null;
+            if (requestRepaint) {
+                this.workingArea.drawImage();
+            }
+        }
+        this.polyAreaAdded = null;
+    },
+
+
+    // Event handling ----------------------------------------------------------------------
+
+    /**
+     * Handles "add (something) requested (by user)".
+     * @param {Object} coords Coordinates; properties: x, y
+     */
+    onAddRequest: function(coords) {
+        if (this.isActive) {
+            coords = coords.unzoomed;
+            if (this.editMode == CQ.form.ImageMap.EDITMODE_ADD) {
+                var shapeToAdd;
+                if (this.areaType == CQ.form.ImageMap.AREATYPE_RECT) {
+                    shapeToAdd = new CQ.form.ImageMap.RectArea({ },
+                        coords.y, coords.x, coords.y + 1, coords.x + 1);
+                } else if (this.areaType == CQ.form.ImageMap.AREATYPE_CIRCLE) {
+                    shapeToAdd = new CQ.form.ImageMap.CircularArea({ },
+                        coords.x, coords.y, 1);
+                } else if (this.areaType == CQ.form.ImageMap.AREATYPE_POLYGON) {
+                    shapeToAdd = new CQ.form.ImageMap.PolyArea({ }, coords.x, coords.y);
+                    shapeToAdd.selectPointAt(0);
+                    this.polyAreaAdded = shapeToAdd;
+                }
+                if (shapeToAdd) {
+                    this.workingArea.selectShape(shapeToAdd);
+                    this.mapShapeSet.addShape(shapeToAdd);
+                    this.workingArea.scheduleForDragging(shapeToAdd);
+                }
+            } else if ((this.editMode == CQ.form.ImageMap.EDITMODE_EDIT)
+                    && (this.areaType == CQ.form.ImageMap.AREATYPE_POINT)) {
+                // adding polygon point
+                var polyToEdit;
+                if (this.polyAreaAdded) {
+                    polyToEdit = [ this.polyAreaAdded ];
+                } else {
+                    polyToEdit = this.workingArea.getRolledOverShapes();
+                }
+                var pointAdded;
+                var isPointAdded = false;
+                var blockAddPoint = false;
+                var tolerance = this.workingArea.getTolerance();
+                polyToEdit =
+                    this.filterOnAreaType(polyToEdit, CQ.form.ImageMap.AREATYPE_POLYGON);
+                if (polyToEdit.length > 0) {
+                    var addCnt = polyToEdit.length;
+                    for (var addIndex = 0; addIndex < addCnt; addIndex++) {
+                        var polygonToProcess = polyToEdit[addIndex];
+                        // add new point if no handle is selected, otherwise just move the
+                        // existing handle
+                        if (polygonToProcess.handleId == null) {
+                            pointAdded = polygonToProcess.insertPoint(
+                                    coords.x, coords.y, tolerance);
+                            if (pointAdded != null) {
+                                polygonToProcess.handleId = pointAdded;
+                                polygonToProcess.selectPoint(pointAdded);
+                                isPointAdded = true;
+                            }
+                        } else {
+                            // use default move when added to a rolled over point
+                            blockAddPoint = true;
+                        }
+                    }
+                }
+                // if we can neither insert the point on an existing edge of the shape nor
+                // move an existing point, then we just add the point if we are building a
+                // new polygon
+                if (!isPointAdded && this.polyAreaAdded && !blockAddPoint) {
+                    pointAdded = this.polyAreaAdded.addPoint(coords.x, coords.y);
+                    if (pointAdded != null) {
+                        this.polyAreaAdded.selectPoint(pointAdded);
+                    }
+                }
+                this.workingArea.drawImage();
+            }
+        }
+    },
+
+    /**
+     * Handles selection change events by adapting the "area destination" editor to the
+     * selected areas.
+     * @param {CQ.form.ImageMap.Area[]} selectedAreas list with currently selected areas
+     * @private
+     */
+    onSelectionChange: function(selectedAreas) {
+        if (this.isActive) {
+            var logText =
+                    "ImageMap#onSelectionChange: Received selection change for areas: ";
+            if (selectedAreas.length > 0) {
+                var selectionCnt = selectedAreas.length;
+                for (var ndx = 0; ndx < selectionCnt; ndx++) {
+                    if (ndx > 0) {
+                        logText += ", ";
+                    }
+                    logText += selectedAreas[ndx].serialize();
+                }
+            } else {
+                logText += "None";
+            }
+            CQ.Log.debug(logText);
+            if (this.editedArea != null) {
+                this.saveDestinationArea(this.editedArea);
+            }
+            if (selectedAreas.length == 1) {
+                this.editedArea = selectedAreas[0];
+                this.loadDestinationArea(this.editedArea);
+                this.setDestinationAreaEditorEnabled(true);
+            } else {
+                this.editedArea = null;
+                this.loadDestinationArea(null);
+                this.setDestinationAreaEditorEnabled(false);
+            }
+        }
+    },
+
+    /**
+     * Handles visual changes (such as move, add/remove polygon point).
+     * @param {CQ.form.ImageMap.Area[]} changedAreas Array of areas that have changed (and
+     *        hence must be updated)
+     * @param {Boolean} isDragEnd True if the event signals the end of a drag operation
+     * @private
+     */
+    onVisualChange: function(changedAreas, isDragEnd) {
+        if (this.isActive) {
+            var areaCnt = changedAreas.length;
+            var coordStr;
+            var isSet = false;
+            for (var areaIndex = 0; areaIndex < areaCnt; areaIndex++) {
+                if (changedAreas[areaIndex] == this.editedArea) {
+                    coordStr = this.editedArea.toCoordString();
+                    this.areaDefCoords.setValue(coordStr);
+                    isSet = true;
+                    break;
+                }
+            }
+            if (!isSet && (changedAreas.length == 1)) {
+                coordStr = changedAreas[0].toCoordString();
+                this.areaDefCoords.setValue(coordStr);
+            }
+            if (isDragEnd && ((this.editMode == CQ.form.ImageMap.EDITMODE_ADD)
+                    && (this.areaType == CQ.form.ImageMap.AREATYPE_POLYGON))) {
+                this.switchEditMode(CQ.form.ImageMap.EDITMODE_EDIT,
+                    CQ.form.ImageMap.AREATYPE_POINT);
+            }
+        }
+    },
+
+    /**
+     * Handles rollover events.
+     * @param {Array} rolloveredAreas list with currently "rolled over areas"
+     * @private
+     */
+    onRollover: function(rolloveredAreas) {
+        if (this.isActive) {
+            var logText = "ImageMap#onRollover: Received rollover for areas: ";
+            if (rolloveredAreas.length > 0) {
+                var rolloverCnt = rolloveredAreas.length;
+                for (var ndx = 0; ndx < rolloverCnt; ndx++) {
+                    if (ndx > 0) {
+                        logText += ", ";
+                    }
+                    logText += rolloveredAreas[ndx].serialize();
+                }
+            } else {
+                logText += "None";
+            }
+            CQ.Log.debug(logText);
+            if (this.editedArea == null) {
+                if (rolloveredAreas.length == 1) {
+                    this.loadDestinationArea(rolloveredAreas[0]);
+                } else {
+                    this.loadDestinationArea(null);
+                }
+            }
+        }
+    },
+
+
+    // Helpers -----------------------------------------------------------------------------
+
+    /**
+     * Filters the specified list of areas for a specific area type.
+     * @param {CQ.form.ImageMap.Area[]} listToFilter The area list to be filtered
+     * @param {Number} areaType Area type to be recognized for the filtered list
+     * @return {CQ.form.ImageMap.Area[]} The filtered list
+     */
+    filterOnAreaType: function(listToFilter, areaType) {
+        var filteredAreas = new Array();
+        var areaCnt = listToFilter.length;
+        for (var areaNdx = 0; areaNdx < areaCnt; areaNdx++) {
+            var areaToCheck = listToFilter[areaNdx];
+            if (areaToCheck.areaType == areaType) {
+                filteredAreas.push(areaToCheck);
+            }
+        }
+        return filteredAreas;
+    }
+
+});

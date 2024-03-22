@@ -1,0 +1,865 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.form.TableEdit
+ * @extends CQ.form.CompositeField
+ * @deprecated Use {@link CQ.form.TableEdit2} instead.
+ * The TableEdit provides a widget for creation
+ * of tables.
+ * @constructor
+ * Creates a new TableEdit.
+ * @param {Object} config The config object
+ */
+CQ.form.TableEdit = CQ.Ext.extend(CQ.form.CompositeField, {
+
+    /**
+     * @cfg {Boolean} isFormField
+     * True if this is a form field (defaults to true). This value should not be changed
+     * unless you exactly know what you are doing.
+     */
+    isFormField: true,
+
+    /**
+     * @cfg {Boolean} hideLabel
+     * True to hide the label of this form field (defaults to true). This value should not
+     * be changed unless you exactly know what you are doing.
+     */
+    hideLabel: true,
+
+    /**
+     * @cfg {Boolean} useColPercentage
+     * True if percentages must be used to manage columns width (defaults to false)
+     */
+    useColPercentage: false,
+
+    /**
+     * The hidden Field of this Component
+     * @private
+     * @type CQ.Ext.form.Hidden
+     */
+    hiddenField: null,
+
+    /**
+     * The data store of the GridPanel
+     * @private
+     * @type CQ.Ext.data.Store
+     */
+    store: null,
+
+    /**
+     * The column model of the GridPanel
+     * @private
+     * @type CQ.Ext.grid.ColumnModel
+     */
+    colModel: null,
+
+    /**
+     * An array of fields for the DataStore
+     * @private
+     * @type Array
+     */
+    fields: [],
+
+    /**
+     * An array of columns for the ColumnModel
+     * @private
+     * @type Array
+     */
+    columnArray: [],
+
+    /**
+     * @cfg {Object} editorConfig
+     * Configuration of the {@link CQ.form.RichText WYSIWYG component} that is is used
+     * to enter each table cell. See {@link CQ.form.RichText} for a description of all
+     * available options.
+     * @deprecated Not supported as of CQ 5.3, as the component has completely been rebuilt
+     */
+    editorConfig: null,
+
+    /**
+     * @cfg {Object} gridConfig
+     * Configuration of the {@link CQ.Ext.grid.EditorGridPanel grid component} that is used
+     * to display the entire table. See {@link CQ.Ext.grid.EditorGridPanel} for a desciption
+     * of all available options.
+     * @deprecated Not supported as of CQ 5.3, as the component has completely been rebuilt
+     */
+    gridConfig: null,
+
+    /**
+     * The RichText component used for editing cells
+     * @private
+     * @type CQ.form.RichText
+     */
+    htmlEditor: null,
+
+    /**
+     * The GridEditor wrapping {@link #htmlEditor}
+     * @private
+     * @type CQ.Ext.grid.GridEditor
+     */
+    editor: null,
+
+    /**
+     * The EditorGrid
+     * @private
+     * @type CQ.Ext.grid.EditorGrid
+     */
+    editorGrid: null,
+
+    /**
+     * Deletes the row of the currently selected cell.
+     */
+    deleteRow: function() {
+        var grid = this.editorGrid;
+        var selModel = grid.getSelectionModel();
+        var cell = selModel.getSelectedCell();
+        if (cell) {
+            CQ.Ext.Msg.confirm(CQ.I18n.getMessage("Delete Row"),
+                    CQ.I18n.getMessage("Are you sure you want to delete this row?"),
+                    function(e) {
+                        if (e == 'yes') {
+                            this.editorGrid.stopEditing();
+                            this.editorGrid.store.remove(this.editorGrid.store.getAt(cell[0]));
+                        }
+                    }, this);
+        }
+    },
+
+    /**
+     * Deletes the column of the currently selected cell.
+     */
+    deleteColumn: function() {
+        var selModel = this.editorGrid.getSelectionModel();
+        var cell = selModel.getSelectedCell();
+        if (cell) {
+            this.editorGrid.stopEditing();
+            CQ.Ext.Msg.confirm(CQ.I18n.getMessage("Delete Column"),
+                    CQ.I18n.getMessage("Are you sure you want to delete this column?"),
+                    function(e) {
+                        // unlink all editor references to prevent destruction
+                        // of the editor.
+                        var colCount = this.editorGrid.colModel.getColumnCount();
+                        var rowCount = this.editorGrid.store.getCount();
+                        for (var j = 0; j < colCount; j++) this.editorGrid.colModel.setEditor(j, null);
+
+                        // manually leftshift cell-values right of
+                        // the currently selected cell
+                        // (this is not really efficient, but saves us
+                        //  a lot of headaches with the dataIndices)
+                        for (var i = 0; i < rowCount; ++i) {
+                            var rec = this.editorGrid.store.getAt(i);
+                            for (var j = 0; j < colCount - 1; ++j) {
+                                var k = (j < cell[1])?j:j + 1;
+                                var dix = this.editorGrid.colModel.getDataIndex(j);
+                                var six = this.editorGrid.colModel.getDataIndex(k);
+                                rec.set(dix, rec.get(six));
+                            }
+                        }
+                        // update width information
+                        for(var j=0;j<colCount-1;j++){
+                            var k = (j<cell[1])?j:j+1;
+                            var w = this.editorGrid.colModel.getColumnWidth(k);
+                            this.editorGrid.colModel.setColumnWidth(j,w);
+                        }
+                        // update field and column configuration
+                        this.fields.pop();
+                        this.columnArray.pop();
+                        this.editorGrid.colModel.setConfig(this.columnArray);
+
+                        // reset editor references
+                        for (var j = 0; j < colCount - 1; j++) this.editorGrid.colModel.setEditor(j, this.editor);
+                    }, this);
+        }
+    },
+
+    /**
+     * Adds n new empty rows to the end of the table.
+     * @param {Number} n The number of rows to add
+     */
+    addRows: function(n){
+        this.editorGrid.stopEditing();
+        var rc = new CQ.Ext.data.Record.create(this.fields);
+        var colCount = this.editorGrid.colModel.getColumnCount();
+        for(var i=0;i<n;++i){
+            var data = {};
+            for(var j=0;j<colCount;++j){
+                data['tcol-'+j] = "";
+            }
+            this.editorGrid.store.add(new rc(data));
+        }
+    },
+
+    /**
+     * Adds n new empty columns to the table
+     * @param {Number} n The number of columns to add
+     */
+    addColumns: function(n){
+        // Because we only have one Editor for all the grid cells
+        // we have to use a little workaround here.
+        this.editorGrid.stopEditing();
+        var colCount = this.editorGrid.colModel.getColumnCount();
+        // unlink all editor references to prevent destruction
+        // of the editor.
+        for(var j=0;j<colCount;j++) this.editorGrid.colModel.setEditor(j,null);
+        for(var i = colCount; i < colCount+n; ++i){
+            var name = 'tcol-'+(i);
+            var text = String.fromCharCode(65+i/26)+String.fromCharCode(65+i%26);
+            this.fields.push({
+                    "name": name,
+                    "mapping": 'td:nth('+(i+1)+')/@innerHTML'
+            });
+            this.columnArray.push({
+                'header': text,
+                'dataIndex': name,
+                'width': CQ.form.TableEdit.DEFAULT_COLUMN_WIDTH,
+                'tooltip': text,
+                'sortable': this.gridConfig.sortable
+            });
+        }
+        this.editorGrid.colModel.setConfig(this.columnArray);
+
+        /*
+         * initialize values for all the new column-cells.
+         * this is done in this 'ugly' way because defaultValue
+         * seems to be ignored when reconfiguring the columnModel
+         * todo: i'm still looking for a more elegant solution.
+         */
+        this.editorGrid.store.each(function(record){record.set(name, "");});
+
+        // reset editor references
+        for(var j=0;j<colCount+n;j++) this.editorGrid.colModel.setEditor(j,this.editor);
+    },
+
+    /**
+     * Generates and returns the table as HTML code.
+     * @return {String} The HTML code representing the table
+     */
+    getValue: function(){
+        /* Get Dimensions */
+        var colCount = this.editorGrid.colModel.getColumnCount();
+        var rowCount = this.editorGrid.store.getCount();
+
+        /* Set up HTML Containers */
+        var container = document.createElement("div");
+        var table = container.appendChild(document.createElement("table"));
+
+        /* Build colgroup from columnModel */
+        var colgroup = table.appendChild(document.createElement("colgroup"));
+        for(var i=0; i<colCount; ++i){
+            var col = colgroup.appendChild(document.createElement("col"));
+            var retrieveColWidth = this.editorGrid.colModel.getColumnWidth(i);
+            if(this.useColPercentage) {
+                col.width = this.convertWidthToPercentage(retrieveColWidth) + "%";
+            } else {
+                col.width = retrieveColWidth;
+            }
+        }
+
+        /* Build table cells from dataStore */
+        var tbody = table.appendChild(document.createElement("tbody"));
+        for(var row=0;row<rowCount;++row){
+            var tr = tbody.appendChild(document.createElement("tr"));
+            var record = this.editorGrid.store.getAt(row);
+            for(var col=0;col<colCount;++col){
+                if(!this.editorGrid.colModel.isHidden(col)){
+                    /* only save visible columns */
+                    var element = "td";
+                    var td = tr.appendChild(document.createElement(element));
+                    var text = record.get(this.editorGrid.colModel.getDataIndex(col));
+                    td.innerHTML = text?text:"";
+                }
+            }
+        }
+
+        // adjust internal links
+        var hpr = CQ.form.rte.HtmlProcessor;
+        var html = container.innerHTML;
+        html = hpr.executeInternalizeLinks(html, [ {
+                "tag": "a",
+                "attribute": "href"
+            } ]);
+        html = this.htmlEditor.editorKernel.postProcessor.process(html);
+        return html;
+    },
+
+    /**
+     * Initializes the ColumnModel and DataStore from the specified HTML representation of
+     * a table.
+     * @param {String} content The HTML code representing the table
+     * @private
+     */
+    initializeTable: function(content){
+        /* Get HTML Table from Record */
+        var table = document.createElement("div");
+        /*
+         *  workaround for the chicken-egg-problem in addRows/addColumns.
+         *  If there is no previous content
+         *  initialize the html-table with one empty cell.
+         */
+        if(!content){
+            table.innerHTML = "<table><colgroup><col></colgroup><tbody><tr><td></td></tr></tbody></table>";
+        }
+        else{
+            table.innerHTML = content;
+        }
+
+        table = CQ.Ext.get(table);
+        var headers = table.query("col");
+
+        this.fields = [];
+        this.columnArray = [];
+
+        /* Extract Column&Field information */
+        for(var i=0,h; h = headers[i]; ++i){
+            var name = 'tcol-'+i;
+            var text = String.fromCharCode(65+i/26)+String.fromCharCode(65+i%26);
+            this.fields.push({
+                    "name": name,
+                    "mapping": 'td:nth('+(i+1)+')/@innerHTML'
+            });
+
+            var width = h.width;
+            if(width) {
+                if(this.useColPercentage) {
+                    width = this.convertPercentageToWidth(width);
+                }
+            } else {
+                width = CQ.form.TableEdit.DEFAULT_COLUMN_WIDTH;
+            }
+
+            this.columnArray.push({
+                'header': text,
+                'dataIndex': name,
+                'width': parseInt(width),
+                'tooltip': h.title,
+                'sortable': this.gridConfig.sortable,
+                'editor': this.editor
+            });
+        }
+
+        /* Create DataStore */
+        this.editorGrid.store = new CQ.Ext.data.Store({
+            "reader": new CQ.Ext.data.XmlReader({
+                    "record": 'tr'
+            }, this.fields)
+        });
+
+        /* Retrieve Data from Store and reconfigure the GridPanel */
+        this.editorGrid.store.loadData(table.dom);
+        this.editorGrid.colModel = new CQ.Ext.grid.ColumnModel(this.columnArray);
+    },
+
+    /**
+     * Clears the component's content.
+     * @private
+     */
+    clear: function() {
+        if(this.htmlEditor) {
+            this.htmlEditor.setValue("");
+        }
+        if(this.editorGrid) {
+            this.editorGrid.stopEditing();
+            this.editorGrid.store.removeAll();
+        }
+    },
+
+    /**
+     * Sets the value of the field using the specified record. If no according value
+     * exists the default value is set. The component's state and view are initialized
+     * accordingly. This method is usually called by {@link CQ.Dialog#processRecords}.
+     * @param {CQ.Ext.data.Record} record The record
+     * @param {String} path The content path the record was created from
+     */
+    processRecord: function(record, path){
+        if (this.fireEvent('beforeloadcontent', this, record, path) !== false) {
+            var v = record.get(this.getName());
+            if (v == undefined && this.defaultValue != null) {
+                if (this.isApplyDefault(record, path)) {
+                   this.setValue(this.defaultValue);
+                }
+            }
+            if(v!=null) {
+                /* if there is content, reconfigure the
+                   column model and the datastore */
+                this.clear();
+                this.initializeTable(v);
+                this.editorGrid.reconfigure(this.editorGrid.store, this.editorGrid.colModel);
+                this.hiddenField.setValue(this.getValue());
+            }
+            this.fireEvent('loadcontent', this, record, path);
+        }
+    },
+
+    /**
+     * <p>Computes the total grid width.</p>
+     * <p>Warning: returns CQ.form.TableEdit.DEFAULT_GRID_WIDTH if component is not yet
+     * rendered</p>
+     * @return {Number} The computed total columns width
+     * @private
+     */
+    getColsTotalWidth: function() {
+        if (this.editorGrid.colModel)
+            return this.editorGrid.colModel.getTotalWidth();
+        //before rendering and while computing columns width when using percentage, we need a default grid width
+        return CQ.form.TableEdit.DEFAULT_GRID_WIDTH;
+    },
+
+    /**
+     * Converts a number of pixels into a percentage of the total grid width
+     * @param {Number} colWidthPixel Column width in pixels
+     * @return {Number} The computed percentage
+     * @private
+     */
+    convertWidthToPercentage: function(colWidthPixel) {
+        var res = 0;
+        if (colWidthPixel > 0) {
+            res = Math.round(100 * colWidthPixel / this.getColsTotalWidth());
+        }
+        return res;
+    },
+
+    /**
+     * Converts a percentage of the grid width into a number of pixels
+     * @param {Number|String} colWidthPercentage Column width in percent. Accepts strings
+     *        with % suffix ("50%").
+     * @return {Number} The computed width
+     * @private
+     */
+    convertPercentageToWidth: function(colWidthPercentage) {
+        var toConvert = colWidthPercentage;
+        if (typeof colWidthPercentage == "string") {
+            if (colWidthPercentage.charAt(colWidthPercentage.length - 1) == '%') {
+                toConvert = colWidthPercentage.substring(0, colWidthPercentage.length - 1);
+            }
+        }
+        toConvert = Math.round(toConvert * this.getColsTotalWidth() / 100);
+        return toConvert;
+    },
+
+    /**
+     * <p>Returns a formatted value of a column width (+/- a optional parameter diff value).
+     * </p>
+     * If useColPercentage is true, returns a string like "XX%", else "XXpx".
+     * @param {Number} index Column index
+     * @param {Number} diff  Diff to add to the current column width
+     * @return {String} Formatted value
+     * @private
+     */
+    getColDisplayWidth: function(index, diff) {
+        var retrieveColWidth = this.editorGrid.colModel.getColumnWidth(index);
+        if (diff) retrieveColWidth += diff;
+        if (this.useColPercentage) {
+            return this.convertWidthToPercentage(retrieveColWidth) + "%";
+        } else {
+            return retrieveColWidth + "px";
+        }
+    },
+
+    /**
+     * Pastes HTML-based content at GridCell (x,y). Extends the table if necessary.
+     * @private
+     * @param {Number} y The starting row
+     * @param {Number} x The starting column
+     * @param {String} html A string containing the table as HTML code
+     */
+    pasteHTML: function(y,x,html){
+        var table = document.createElement("div");
+        table.innerHTML = html;
+        table = CQ.Ext.get(table);
+        var rows = table.query("tr");
+        if(!rows||rows.length==0)return false;
+        var cols = CQ.Ext.get(rows[0]).query("td");
+        if(!cols||cols.length==0)return false;
+
+        var pasteRowCount = rows.length;
+        var pasteColCount = cols.length;
+        var rowCount = this.editorGrid.store.getCount();
+        var colCount = this.editorGrid.colModel.getColumnCount();
+
+        // extend number of rows if necessary
+        if(y+rows.length > rowCount){
+            this.addRows((y+pasteRowCount)-rowCount);
+        }
+
+        // extend number of columns if necessary
+        if(x+cols.length > colCount){
+            this.addColumns((x+pasteColCount)-colCount);
+        }
+
+        this.editorGrid.reconfigure(this.editorGrid.store, this.editorGrid.colModel);
+
+        // fill in the values
+        var v;
+        for(var i=0;i<pasteRowCount;++i){
+            var rec = this.editorGrid.store.getAt(i+y);
+            var newcols = CQ.Ext.get(rows[i]).query("td");
+            for(var j=0, col=0;j<cols.length;++j,++col){
+                var dataIndex = this.editorGrid.colModel.getDataIndex(j+x);
+                // catch: sometimes excel generates colspan information
+                v = newcols[col].innerHTML;
+                if(v!=null && dataIndex)rec.set(dataIndex, v);
+                if(newcols[col].colSpan > 1) {
+                    j += (newcols[col].colSpan-1);
+                }
+            }
+        }
+
+        // reconfigure models, and select last
+        // inserted cell for editing
+        this.editor.setValue(v);
+        this.editorGrid.selModel.select(y+pasteRowCount-1, x+pasteColCount-1);
+        this.editorGrid.startEditing(y+pasteRowCount-1, x+pasteColCount-1);
+        return false;
+    },
+
+    /**
+     * The before sync event handler of the html editor. Updates the corresponding
+     * cell-value to allow WYSIWYG editing. If it finds linebreaks/tabs in the content,
+     * it automatically splits up the content into different table cells. If it finds a
+     * &lt;table&gt;-tag, it assumes a copy-paste from Excel/OO and extends the table.
+     * @private
+     * @param {Object} ed The Editor Object
+     * @param {Object} html The content to be synched
+     * @return {Boolean} false to abort synching, else false
+     */
+    editorSync: function(ed, html){
+        var x, y;
+        this.isSynced = true;
+        /* find coordinates of currently selected
+         * cell, or choose top-left corner of grid */
+        var cell = this.editorGrid.selModel.getSelectedCell();
+        if (cell) {
+            y = cell[0];
+            x = cell[1];
+        } else {
+            y = 0;
+            x = 0;
+        }
+        if (html) {
+            var htmlLC = html.toLowerCase();
+            if (htmlLC.indexOf("<table") >= 0) {
+                /* this looks like a paste from
+                   excel -> update/extend gridpanel */
+                this.editorGrid.stopEditing();
+                return this.pasteHTML(y,x,html);
+            }
+
+            if (cell) {
+                var name = this.editorGrid.getColumnModel().getDataIndex(cell[1]);
+                var rec = this.editorGrid.store.getAt(cell[0]);
+                rec.set(name, html);
+            }
+        }
+        this.isSynced = false;
+    },
+
+    /**
+     * The keyboard handler for the Grid
+     * @private
+     * @param {CQ.Ext.EventObject} e The keyboard Event
+     */
+    gridKeyHandler: function(e){
+    /*
+        switch(e.getKey()){
+            case e.ENTER:
+                // press enter to edit the cell
+                var cell =  this.editorGrid.selModel.getSelectedCell();
+                if(cell){
+                   this.editorGrid.startEditing(cell[0], cell[1]);
+                }
+                break;
+            default:
+                // no default behaviour
+        }
+        */
+    },
+
+    /**
+     * The resize handler
+     * Needed to refresh the gridPanels view.
+     * @private
+     */
+    onResize: function(w, h){
+        if (this.editor) {
+            this.editor.setSize(w, h);
+        }
+        if(this.editorGrid.view){
+            this.editorGrid.view.refresh();
+        }
+    },
+
+    /**
+     * Handler for the Show Event
+     * Used to make sure the subcomponents are enabled
+     * @private
+     */
+    onShow: function(e){
+        this.editorGrid.enable();
+        this.htmlEditor.enable();
+    },
+
+    /**
+     * Handler for the Rendering Event.
+     * Used to subscribe to events of the parentDialog
+     * @private
+     */
+    onRender: function(e){
+        /* call parent handler */
+        CQ.form.TableEdit.superclass.onRender.call(this, e);
+        /* this is a workaround to subscribe to the beforesubmit
+           event of the parent-dialog.
+           eventually this should probably be implemented in the
+           dialog. */
+        var parentDialog = this.findParentByType("dialog");
+        if(parentDialog){
+            parentDialog.on("beforesubmit", function(e){
+                this.htmlEditor.syncValue();
+                this.editorGrid.stopEditing();
+                this.hiddenField.setValue(this.getValue());
+                /* disable subcomponents to prevent submission
+                   of their fields */
+                this.editorGrid.disable();
+                this.htmlEditor.disable();
+            }, this);
+
+            parentDialog.on("show", function(e){
+                if(this.editorGrid) {
+                    this.editorGrid.enable();
+                }
+                if(this.htmlEditor)
+                    this.htmlEditor.enable();
+
+                if(this.editorGrid.view.splitone) {
+                    this.editorGrid.view.splitone.enableTooltip = true;
+                    this.editorGrid.view.splitone.showTooltip = this.showResizeTooltip;
+                    this.editorGrid.view.splitone.hideTooltip = this.hideResizeTooltip;
+                }
+
+            },this);
+        }
+
+        // initialize the editor after it's been rendered
+        // to make sure it receives focus and activates itself
+        // this would trigger a BrowserException in FF
+        // but is necessary for IE
+        if(CQ.Ext.isIE){
+            this.htmlEditor.on("render", this.htmlEditor.initEditor);
+        }
+        return true;
+    },
+
+    /**
+     * @private
+     */
+    fixFocusIssue: function() {
+        // workaround for a IE-related, nasty focus issue introduced by Ext 2.2
+        var tableEdit = this;
+        CQ.Ext.apply(this.editorGrid.view, {
+
+            "focusCell": function(row, col, hscroll) {
+                if (!tableEdit.isSynced) {
+                    CQ.Ext.grid.GridView.prototype.focusCell.call(this, row, col, hscroll);
+                }
+            }
+
+        });
+
+    },
+
+    /**
+     * @private
+     */
+    showResizeTooltip: function(x, y) {
+        var tableEdit = this.grid.findParentByType("tableedit");
+        var html = tableEdit.getColDisplayWidth(this.cellIndex);
+        this.tooltip = new CQ.Ext.ToolTip({
+            "target": this.grid.id,
+            "html": html,
+            "trackMouse": true,
+            "autoHide": false,
+            "visibilityMode": CQ.Ext.Element.DISPLAY,
+            "targetXY": [x,y],
+            "tableEdit": tableEdit,
+            "cellIndex": this.cellIndex
+        });
+
+        this.tooltip.on("move", function(cmp, x, y) {
+            var endX = Math.max(this.minX, x);
+            var diff = endX - this.startPos;
+            this.tooltip.body.dom.innerHTML = this.tooltip.tableEdit.getColDisplayWidth(this.tooltip.cellIndex, diff);
+        }, this);
+
+        this.tooltip.enable();
+        this.tooltip.show();
+    },
+
+    /**
+     * @private
+     */
+    hideResizeTooltip: function(x, y) {
+        this.tooltip.hide();
+        this.tooltip.disable();
+        this.tooltip.destroy();
+    },
+
+    /**
+     * @private
+     */
+    initComponent: function(){
+        CQ.form.TableEdit.superclass.initComponent.call(this);
+
+        /* create richtext-editor & editorgridpanel*/
+        this.htmlEditor = new CQ.form.RichText(this.editorConfig);
+        this.editor = new CQ.Ext.grid.GridEditor(this.htmlEditor, {
+            "autoSize": null
+        });
+
+        //this.htmlEditor = new CQ.Ext.form.HtmlEditor(this.editorConfig);
+        this.editorGrid = new CQ.Ext.grid.EditorGridPanel(this.gridConfig);
+
+        /* initialize columnModel and DataStore from an empty table */
+        this.initializeTable(this.defaultValue);
+
+        /* add subwidgets */
+        this.add(this.htmlEditor);
+        this.add(this.editorGrid);
+
+        /* sync with grid-cell for WYSIWYG editing */
+        this.htmlEditor.on("beforesync", this.editorSync ,this);
+
+        /* update value of hiddenfield after each edit */
+        this.editorGrid.on("afteredit", function(e){
+            this.hiddenField.setValue(this.getValue());
+        },this);
+
+        /* the keyhandler for the grid */
+        this.editorGrid.on("keypress", this.gridKeyHandler, this);
+
+
+        /* add hiddenField */
+        this.hiddenField = new CQ.Ext.form.Hidden({
+                "name": this.name
+        });
+        this.add(this.hiddenField);
+    },
+
+    constructor: function(config) {
+        var tableEdit = this;
+        var defaults = {
+            "hideLabel": true,
+            "autoHeight": false,
+            "defaultValue": "",
+            "gridConfig": {
+                "xtype": "editorgrid",
+                "isFormField": false,
+                "height": 158,
+                "sm": new CQ.Ext.grid.CellSelectionModel({
+                // this is a hack to prevent IE from
+                // hiding the component.
+                // actual problem is in GridView.focusCell
+                    "handleMouseDown": function() {
+                    }
+                }),
+                "afterRender": function() {
+                    CQ.Ext.grid.EditorGridPanel.prototype.afterRender.call(this);
+                    tableEdit.fixFocusIssue();
+                },
+                "clicksToEdit": 1,
+                "enableColumnMove": true,
+                "enableHdMenu": false,
+                "hideLabel": true,
+                "stateful": false,
+                "sortable": false,
+                "tbar": [
+                {
+                    "text": CQ.I18n.getMessage("Add Row"),
+                    "handler": function() {
+                        this.addRows(1);
+                    },
+                    "scope": this
+                },
+                {
+                    "text": CQ.I18n.getMessage("Add Column"),
+                    "handler": function() {
+                        this.addColumns(1);
+                    },
+                    "scope": this
+                },
+                {
+                    "text": CQ.I18n.getMessage("Delete Row"),
+                    "handler": this.deleteRow,
+                    "scope": this
+                },
+                {
+                        "text": CQ.I18n.getMessage("Delete Column"),
+                        "handler": this.deleteColumn,
+                        "scope": this
+                }/*,
+                {
+                    "text": "valuetest",
+                    "handler": function() {
+                        alert(this.getValue())
+                    },
+                    "scope": this
+                }  */
+                        ]
+            },
+            "editorConfig": {
+                "height": 60,
+                "hideLabel": true,
+                "defaultPasteMode": "browser",
+                "removeSingleParagraphContainer": true,
+                "tabSize": 1,
+                "name": ""
+            }
+        };
+
+        /* initialize ColumnModel & DataStore */
+        CQ.Util.applyDefaults(config, defaults);
+
+        if (config.useColPercentage) {
+            CQ.Util.applyDefaults(config, {
+                "gridConfig": {
+                    "viewConfig": {
+                        "forceFit": true,
+                        "autoFill": true
+                    }
+                }
+            });
+        }
+
+        /* call parent constructor */
+        CQ.form.TableEdit.superclass.constructor.call(this, config);
+
+        //this.doLayout();
+    }
+});
+
+/**
+ * The default column width of a newly added column.
+ * @static
+ * @type Number
+ */
+CQ.form.TableEdit.DEFAULT_COLUMN_WIDTH = 100;
+
+/**
+ * The default pre-computed grid width. Must be adjusted depending on Dialog default width.
+ * @static
+ * @type Number
+ */
+CQ.form.TableEdit.DEFAULT_GRID_WIDTH = 450;
+
+/**
+ * Register the Component as xtype "tableedit"
+ */
+CQ.Ext.reg("tableedit", CQ.form.TableEdit);

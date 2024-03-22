@@ -1,0 +1,1460 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (window, document, Granite, $) {
+    "use strict";
+
+    //events
+    var EVENT_DATA_CHANGE 	= 'cs-data-change',
+        HOTSPOT				= 'hotspot',
+        SLIDE				= 'slide',
+        IMAGE_MAP			= 'map',
+        EVENT_EMPTY_SET = 'cs-empty-set',
+        EVENT_NON_EMPTY_SET = 'cs-non-empty-set',
+        EVENT_WARNING = 'cs-warning',
+        EVENT_CS_ENABLE_ACTIONS = 'cs-enable-actions',
+    	EVENT_CS_DISABLE_ACTIONS = 'cs-disable-actions';
+
+    var CREATE			= 'create',
+    	DEFAULT			= 'default',
+    	ACTION_TYPE		= 'actionType',
+    	HREF 			= 'href',
+    	HTTP			= 'http://',
+    	URL 			= 'url',
+    	QUICK_VIEW 		= 'quickview:',
+    	QUICK_VIEW_FRAGMENT	= 'fragment',
+    	SKU		 		= 'sku',
+    	FRAGMENT 		= 'fragment',
+    	TARGET 			= 'target',
+    	DEL_TARGET 		= 'target',
+    	RESERVED_PATH	= 'reservedVal_productPath',
+    	RESERVED_THUMB	= 'reservedVal_productThumbnail',
+    	WWW				= 'www.',
+    	LABEL 			= 'label';
+    
+    var BTN_DELETE_SLIDE = '.cs-btn-del-slide',
+    	BTN_MAP_CREATE 		= '.mapCreateButton',
+    	NAME_FIELD 			= '#hotspot-name',
+    	SEARCH_PRODUCT_SKU 	= '.search-product-sku',
+    	SEARCH_FRAGMENT 	= '.search-fragment',
+    	HREF_FIELD			= '#href',
+    	SKU_FIELD			= '#sku';
+
+	var DATA_MIXED_SKU = 'cs-mixed-sku';
+    //DOM
+    var HOTSPOT_BTN = '#btn-hotspot',
+        IMAGEMAP_BTN = '#btn-imagemap',
+        EDITOR_INFO = '.dm-setup-info';
+
+    //Message
+    var MSG_MISMATCH_PROD_TYPE = Granite.I18n.get("You have associated hotspots/image map to a product using AEM product picker and manual entry.<br>Please select only one method.");
+    
+    var typedUrl = "";
+
+    var HTTP_PROTOCOL = 'http://';
+    var HTTPS_PROTOCOL = 'https://';
+    
+    $(document).one('foundation-contentloaded', function(){
+
+    	//asset info
+    	$('#map-info').data('assetPath', '');
+    	$('#map-info').data('editorInit', false);
+    	$('#map-info').data('mid', 0);
+    	$('#map-info').data('sid', 0);
+    	$('#map-info').data('mapRefArray', []);
+    	$('#map-info').data('VAR_INSTRUCTION_TEXT', Granite.I18n.get('Add Variable (i.e. var1=true)'));
+
+		// more data
+		var isTenant = $(EDITOR_INFO).data("isTenantUser");
+
+        /**
+    	 * set default view to quickview
+    	 */
+    	$('#href-wrapper').hide();
+		$('#variables-wrapper').show();
+		
+		//hide instructions for now
+		showActionsControlPanel(false);
+		
+		//Enable/disable hotspot/imagemap buttons based on number of slide
+	    $(document).on(EVENT_EMPTY_SET, function(){
+	        $(HOTSPOT_BTN).attr('disabled',true);
+	        $(IMAGEMAP_BTN).attr('disabled',true);
+	    });
+
+	    $(document).on(EVENT_NON_EMPTY_SET, function(){
+	        $(HOTSPOT_BTN).attr('disabled',false);
+	        $(IMAGEMAP_BTN).attr('disabled',false);
+	    });
+		
+		// Enable action buttons (Imagemap create, Hotspot create, & slide delete)
+		$(document).on(EVENT_CS_ENABLE_ACTIONS, function() {
+			
+			// Enable Imagemap create, Hotspot create buttons
+			$(BTN_MAP_CREATE).removeClass('cs-simple-disable');
+			
+			// Enable delete slide button
+			$(BTN_DELETE_SLIDE).removeClass('cs-simple-disable');
+		});
+		
+		// Disable action buttons (Imagemap create, Hotspot create, & slide delete)
+        $(document).on(EVENT_CS_DISABLE_ACTIONS, function() {
+        	
+        	// Disable Imagemap create, Hotspot create buttons
+        	$(BTN_MAP_CREATE).removeClass('cs-simple-disable');
+        	$(BTN_MAP_CREATE).addClass('cs-simple-disable');
+        	
+        	// Disable delete slide button
+        	$(BTN_DELETE_SLIDE).removeClass('cs-simple-disable');
+        	$(BTN_DELETE_SLIDE).addClass('cs-simple-disable');
+        });
+        
+    	$(document).on('map-editor-ready', function(e) {
+    		if(!$('#map-info').data('editorInit')) {
+    			$('#map-info').data('editorInit', true);
+
+    			//if there are no maps bail
+    			var maps = $.dmcs.getCurrentState().slides[$('#map-info').data('sid')].maps;
+        		if(maps == undefined || maps.length < 1) {
+        			return;
+        		}
+
+    			//load maps (default to first slide
+        		loadMaps($('#map-info').data('sid'));
+    		}
+    	});
+
+    	$(document).on(EVENT_DATA_CHANGE, function(e) {
+    		loadMaps($('#map-info').data('sid'));
+    	});
+
+    	$(document).on('map-select', function(e) {
+    		
+    		var mId = parseInt(e.mapId);
+    		
+    		if($('#map-info').data('mid') == mId) {
+    			//set delete button mode
+    			setDeleteMode($('#'+mId.toString()).data('type'));
+    			return;
+    		}
+    		
+    		//set selected map
+    		setMapSelected(mId);
+    	});
+
+    	function setMapSelected(id) {
+    		
+    		//set map id
+    		$('#map-info').data('mid', id);
+    		
+    		//select new hot spot set to blank first
+            $('#hotspot-id').val('');
+    		
+    		//set delete button mode
+    		setDeleteMode($('#'+id.toString()).data('type'));
+    		//update UI with map metadata properties
+			setActionPanelDataProperties($.dmcs.getSlide($('#map-info').data('sid')).maps, id);
+			
+			if(!$('#'+id.toString()).hasClass('selected')) {
+				mapUtil._selectMap(id.toString());
+			}
+			
+			//select new hot spot
+            $('#hotspot-id').val(id.toString());
+    	}
+    	
+    	$(document).on('map-canvas-click', function() {
+    		//set delete button mode
+    		//setDeleteMode(SLIDE);
+    	});
+
+    	$(document).on('map-update', function(e) {
+    		$('#map-info').data('mid', parseInt(e.mapId));
+    		
+    		var $map = $('#'+e.mapId);
+
+    		if($(NAME_FIELD).is(':focus') && $(NAME_FIELD).val().length > 0) {
+    			$map.data(LABEL, $(NAME_FIELD).val());
+    		}
+    		
+    		var area = $.dmcs.item.buildArea($map.data('x'), $map.data('y'), Math.round($map.data('wid')), Math.round($map.data('hei')));
+    		var map = $.dmcs.item.buildMap(area, $map.data(URL), $map.data(TARGET), $map.data(LABEL), $map.data('fragment'), $map.data('type'), $map.data('actionType'));
+    		
+			$(document).trigger($.dmcs.event.buildMap($('#map-info').data('sid'), parseInt(e.mapId), map));
+    	});
+
+    	function setDeleteMode(mode) {
+    		var btnText = 'Delete Slide';
+
+            if(mode !== SLIDE) {
+            	$('#btn-delete-map').data(DEL_TARGET, mode);
+            }
+
+            if(mode === HOTSPOT) {
+            	btnText = 'Delete Hotspot';
+            }
+            else if(mode === IMAGE_MAP) {
+            	btnText = 'Delete ImageMap';
+            }
+    	}
+
+    	function getValueFromUrl(url, qvtype) {
+    		var baseStr = url.split(QUICK_VIEW + qvtype + '=')[1]
+    		return (baseStr == undefined)? '' : baseStr.split('&')[0];
+    	}
+    	
+    	function buildMapQVUrlString(url, variables, qvtype, qvvalue) {
+
+    		var qvval = (qvvalue != undefined)? qvvalue : getValueFromUrl(url, qvtype);
+    		//add prefix an sku/fragment
+    		var ret = QUICK_VIEW + qvtype + '=' + qvval;
+
+    		if(variables.length < 1) {
+    			return ret;
+    		}
+
+    		var i = 0;
+			var len  = variables.length;
+			//for product thumbnail and path
+			var path;
+			var thumbnail;
+			for(i=0;i<len;i++) {
+				if(variables[i] == null) {
+					continue;
+				}
+				if(variables[i].key == "reservedVal_productPath"){
+					path = variables[i].val;
+					continue;
+				}
+				if(variables[i].key == "reservedVal_productThumbnail"){
+					thumbnail = variables[i].val;
+					continue;
+				}				
+				ret += '&' + variables[i].key + '=' + variables[i].val;
+			}
+			if (path){
+				ret += "&reservedVal_productPath=" + path;
+			}
+			if(thumbnail){
+				ret += "&reservedVal_productThumbnail=" + thumbnail;
+			}
+    		return ret;
+    		
+    	}
+
+
+    	function convertURLVariablesToArray(url) {
+    		return getGenericVariables(url,2);
+    	}
+
+    	$(document).on('cs-data-ready', function(e) {
+    		//load slide
+            var slide = $.dmcs.getSlide(e.slides.order[0]);
+    		if(slide) {
+    			loadSlide(slide);
+    		}
+    	});
+    	
+    	$('#btn-delete-map').on('click', function(e) {
+    		
+    		if($.dmcs.getCurrentState().slides.length < 1) {
+    			return;
+    		}
+
+    		var target = $(this).data(DEL_TARGET);
+            $('#delete-'+target).get(0).show();
+            $('#delete-'+target).on('coral-overlay:beforeclose', function(e) {
+    			//remove click handler from buttons
+    			$(this).off();
+    			$('#delete-'+target).find('#delete--warning').off();
+    		});
+    		$('#delete-'+target).find('#delete--warning').click(function(e) {
+    			
+    			$('#delete-'+target).get(0).hide();
+    			
+    			var id = $('.'+IMAGE_MAP+'.selected').attr('id');
+    			if(target === HOTSPOT) {
+    				id = $('.'+HOTSPOT+'.selected').attr('id');
+    			}
+    			$(document).trigger($.dmcs.event.buildMap($('#map-info').data('sid'), id, null));
+    			
+    			//remove click handler from buttons
+    			$(this).off();
+    			$('#delete-'+target).find('#delete--cancel').off();
+    		});
+    	});
+
+    	$('#hotspot-id').on('change', function(e) {
+    		var $el = $(this);
+    		var mId = parseInt($el.val());
+    		if($('#map-info').data('activeHotspot') == mId) {
+    			//select map if active map is not selected...
+    			if(!$('#'+$el.val()).hasClass('selected')) {
+    				mapUtil._selectMap(mId.toString());
+    			}
+				return;
+			}
+    		
+    		//select map
+			mapUtil._selectMap(mId.toString());
+			setMapSelected(mId);
+
+			//save id.  for some reason this component dispatches duplicate events
+    		$('#map-info').data('activeHotspot', mId);
+    	});
+    	
+    	//restrict invalid key input
+    	$(NAME_FIELD).bind('keydown', function() {
+    		switch (event.keyCode) {
+	            case 8:  // Backspace
+	            case 9:  // Tab
+	            case 13: // Enter
+	            case 37: // Left
+	            case 38: // Up
+	            case 39: // Right
+	            case 40: // Down
+	            break;
+	            default:
+	            var regex = new RegExp("^[a-zA-Z0-9 ]+$");
+	            var key = event.key;
+	            if (!regex.test(key)) {
+	                event.preventDefault();
+	                return false;
+	            }
+	            break;
+	        }
+    	});
+
+    	//BB Use Keypress event listener helper to track changes
+    	$(NAME_FIELD).on($.s7dm.helper.event.KEYPRESS_COMPLETED, function() {
+    		updateSelectedMapActionData(LABEL, $(this).val());
+    		//update select control
+    		var selectedIndex = $('#map-info').data('mid');
+    		//update label property in combo box to reflect the hotspots name
+    		$('#map-info').data('mapRefArray')[selectedIndex]['label'] = $(this).val();
+            populateComboBox(selectedIndex);
+    	});
+        $(NAME_FIELD).off('change');
+        $.s7dm.helper.registerKeypress($(NAME_FIELD));
+
+        //BB Use Keypress event listener helper to track changes
+        getSKUItem().on($.s7dm.helper.event.KEYPRESS_COMPLETED, function() {
+            updateSelectedMapActionData(SKU, $(this).val(),$('.foundation-picker-collection .cq-commerce-picker-selectable[selected]').length != 0);
+            if (!isValidMixedQuickviewData()){
+                var ui = $(window).adaptTo("foundation-ui");
+                if (ui != undefined) {
+                    $(document).trigger({ 'type': EVENT_WARNING,
+                        'message': MSG_MISMATCH_PROD_TYPE,
+                        'title': Granite.I18n.get("Mixed Product Setup"),
+                        'isconfirm': false,
+                        'confirm': null });
+                }                
+            }
+        });
+        $(getSKUItem()).off('change');
+        $.s7dm.helper.registerKeypress($(getSKUItem()));
+
+		$.updateFragmentUIfn = function () { // late reinit fragment relative UI
+			getFragmentItem().on($.s7dm.helper.event.KEYPRESS_COMPLETED, function() {
+				updateSelectedMapActionData('fragment', $(SEARCH_FRAGMENT).data("fragmentlabel")); // $(SEARCH_FRAGMENT).val());
+			});
+			$(getFragmentItem()).off('change');
+			$.s7dm.helper.registerKeypress($(getFragmentItem()));
+		}
+
+		$(HREF_FIELD).on($.s7dm.helper.event.KEYPRESS_COMPLETED, function() {
+			if (typedUrl !== '' && $(this).val() !== typedUrl) {
+				reviseHref($(this).val()); // reset the url with ".html" suffix
+			}
+			updateSelectedMapActionData(URL, $(this).val());
+		});
+
+		$(HREF_FIELD).off('change');
+		$.s7dm.helper.registerKeypress($(HREF_FIELD), 1000);
+
+		$(HREF_FIELD).on('keyup', function(e) {
+			typedUrl = e.target.value;
+		});
+
+		$(HREF_FIELD).on('change', function(e) {
+			if ($(this).val() !== typedUrl) {
+				reviseHref($(this).val()); // reset the url with ".html" suffix
+			}
+			updateSelectedMapActionData(URL, $(this).val());
+		});
+
+
+		$('.actionRadioGroup').on('change', function(e) {
+        	
+    		var $map = $('#'+$('#map-info').data('mid'));
+    		var prop = ($(e.target).val()==='quickview') ? QUICK_VIEW : ($(e.target).val() === 'fragment'? 'fragment' : HREF);
+    		
+    		//clear form
+    		clearActionsForm($(e.target).val());
+    		
+    		updateSelectedMapActionData(ACTION_TYPE, prop);
+    		
+    		setHrefSkuView($(e.target).val());
+			if($(e.target).val()==='quickview') {
+
+				while($('.btnClearText').length != 0) {
+					$('.btnClearText').trigger('click');
+				};
+			}
+    	});
+      
+        function updateFragmentSize(e) {
+			updateSelectedMapActionData('fragment', $(SEARCH_FRAGMENT).data("fragmentlabel")); // $(SEARCH_FRAGMENT).val());
+		}
+        
+		$('#fragment-dialog-wid').on('change', updateFragmentSize);
+    	$('#fragment-dialog-hei').on('change', updateFragmentSize);
+    	
+    	function getParamFromUrl(url, key) {
+    		var variables = convertURLVariablesToArray(url);
+    		for(var i=0; i < variables.length; i++ ) {
+    			if(variables[i].key == key) {
+    				return variables[i].val; 
+    			} 
+    		}
+    		return null;
+    	}
+    	
+    	function updateFragmentSizeControls(url) {
+    		$('#fragment-dialog-wid').off('change');
+    		$('#fragment-dialog-hei').off('change');
+
+    		var size = getParamFromUrl(url, 'size');
+    		size = size != null ? size : "400,300";
+    		$('#fragment-dialog-wid').val(size.split(',')[0]);
+    		$('#fragment-dialog-hei').val(size.split(',')[1]);
+			if(!$(SEARCH_FRAGMENT).val()) {
+				$('#btn-preview-fragment').addClass('is-disabled');
+			} else {
+				$('#btn-preview-fragment').removeClass('is-disabled');
+			}
+    		
+    		$('#fragment-dialog-wid').on('change', updateFragmentSize);
+    		$('#fragment-dialog-hei').on('change', updateFragmentSize);
+    	}
+
+        
+        $('#btn-preview-fragment').on('click', function(e) {
+    		var map = $.dmcs.getCurrentState().slides[$('#map-info').data('sid')].maps[$('#map-info').data('mid')];
+    		var mapVariables = convertURLVariablesToArray(map.url);
+        	var inData = {};
+        	for(var i=0; i <  mapVariables.length; i++) {
+        		var cur = mapVariables[i];
+            	inData[cur.key] = cur.val;
+        	}
+        	s7dmQuickviewFragment.callCommercePlugin(inData);
+        });
+        
+        $('.windowTargetMethod').on('change', function(e) {
+        	updateSelectedMapActionData(TARGET, $(e.target).val());
+        });
+    	
+    	function setHrefSkuView(actionType) {
+    		
+    		var $map = $('#'+$('#map-info').data('mid'));
+    		
+    		if(actionType === 'quickview') {
+    			$('#href-wrapper').hide();
+    			$('#size-line').hide();
+    			
+    			$('#variables-wrapper').show();
+    			$('#btn-add-variable').show();
+    			
+    			$('#generic-variables-container').show();
+				$('#svfragmentPicker').closest(".coral-Form-fieldwrapper").hide();
+    			$('#svproductPicker').show();
+    			setHrefValue('');
+    		} else if(actionType === 'fragment') {
+    			$('#href-wrapper').hide();
+
+    			$('#variables-wrapper').show();
+    			$('#size-line').show();
+    			$('#btn-add-variable').hide();
+    			
+    			$('#generic-variables-container').hide();
+				$('#svproductPicker').hide();
+    			$('#svfragmentPicker').closest(".coral-Form-fieldwrapper").show();
+    			setHrefValue('');    			
+    		} else {
+    			$('#size-line').hide();
+
+    			var mapVariables = convertURLVariablesToArray($map.data('url'));
+
+    			if(mapVariables.length>0) {
+                    $('#delete-variables').get(0).show();
+                        $('#delete-variables').find('#delete--warning').click(function(e) {
+    					$('#href-wrapper').show();
+    	    			$('#variables-wrapper').hide();
+    	    			$map.data(TARGET, $('input[name=windowTarget]').val());
+    	    			$map.data(SKU, '');
+    	    			getSKUItem().val('');
+    	    			if (!isTenant){
+    	    			    $(".skuThumbnail").parent().css("display", "none");
+    	    			}
+
+    	    			$('#generic-variables-container').empty();
+
+    	        		$('#delete-variables').get(0).hide();
+    	    		}).parent().find('#cancel-variable-delete').click(function(e) {
+    	    			$('input[value=quickview]').prop('checked','checked');
+    	    			$('#delete-variables').get(0).hide();
+    	    		});
+    			}
+    			else {
+    				$('#href-wrapper').show();
+	    			$('#variables-wrapper').hide();
+	    			$map.data(TARGET, $('input[name=windowTarget]').val());
+	    			$map.data(SKU, '');
+    	    			getSKUItem().val('');
+    	    			if (!isTenant){
+    	    			    $(".skuThumbnail").parent().css("display", "none");
+    	    			}
+
+    	    			$('#generic-variables-container').empty();
+    			}
+    		}
+    		
+    	}
+
+    	function clearActionsForm(qvtyp) {
+    		$('#controls-container').addClass('cs-simple-disable');
+    		qvtyp = qvtyp ? qvtyp : 'quickview';
+    		$('input[type=text]').val('');
+    		$('input[value=' + qvtyp + ']').prop('checked','checked');
+
+    		if(qvtyp == 'fragment') {
+    			$('#fragment-dialog-wid').val('400');
+    	        $('#fragment-dialog-hei').val('300');
+    			if(!$(SEARCH_FRAGMENT).val()) {
+    				$('#btn-preview-fragment').addClass('is-disabled');
+    			} else {
+    				$('#btn-preview-fragment').removeClass('is-disabled');
+    			}
+    		
+    		}
+    		
+			setHrefSkuView(qvtyp);
+
+    		$('#generic-variables-container').empty();
+            getSKUItem().val('');
+            if(!isTenant){
+                $(".skuThumbnail").html("");
+                $(".skuThumbnail").parent().css("display", "none");
+             }
+            populateComboBox();
+    	}
+
+    	function updateSelectedMapActionData(property, value, isProduct) {
+    		
+    		var mapid = $('#map-info').data('mid');
+    		var $map = $('#'+mapid);
+    		var map = $.dmcs.getCurrentState().slides[$('#map-info').data('sid')].maps[$('#map-info').data('mid')]
+
+    		$.each( map, function( key, value ) {
+				$map.data(key, value);
+			});
+    		//update DOM $map data with prop
+    		$map.data(property, value);
+    		
+    		if(property===URL || property===TARGET){
+    			var contextPath = $(EDITOR_INFO).data('context-path');
+    			var urlStr = $map.data(URL);
+    			var urlSkuString = '';
+    			
+    			contextPath = (contextPath==undefined)? '' : contextPath;
+    			
+    			if(urlStr !== '' 
+    				&& urlStr.startsWith('/') ) {
+    				//append context path if applicable
+    				if(!urlStr.startsWith(contextPath)){
+    					urlSkuString = (contextPath.length > 1)? contextPath + urlStr : urlStr;
+    				}
+    				else
+    					urlSkuString = urlStr;
+    			}
+    			else if(urlStr.startsWith(WWW) || !urlStr.startsWith('http')) {
+    				urlSkuString = HTTP + urlStr;
+    			}
+    			else
+    				urlSkuString = urlStr;
+    		} else if(property === 'fragment'){
+    			var variables = convertURLVariablesToArray(map.url);
+                clearVars(variables, "fragment");
+                clearVars(variables, "reservedVal_productPath");
+                clearVars(variables, "reservedVal_productThumbnail");
+                clearVars(variables, "size");
+                variables.push({ "key" : "reservedVal_productPath","val" : $(SEARCH_FRAGMENT).data('path') });
+                variables.push({ "key" : "size", "val" : $('#fragment-dialog-wid').val() + "," + $('#fragment-dialog-hei').val() });
+    			urlSkuString = buildMapQVUrlString(map.url, variables, FRAGMENT, value);
+    			if(!$(SEARCH_FRAGMENT).val()) {
+    				$('#btn-preview-fragment').addClass('is-disabled');
+    			} else {
+    				$('#btn-preview-fragment').removeClass('is-disabled');
+    			}
+
+    		} else if(property===SKU){
+    			var variables = convertURLVariablesToArray(map.url);
+                        clearVars(variables, "reservedVal_productPath");
+                        clearVars(variables, "reservedVal_productThumbnail");
+                        if(isProduct){
+                            variables.push({ "key" : "reservedVal_productPath","val" : $(SEARCH_PRODUCT_SKU).data("path") });
+                            variables.push({ "key" : "reservedVal_productThumbnail","val" : Granite.HTTP.internalize($(SEARCH_PRODUCT_SKU).data("skuThumbnail")) });
+                        }
+    			urlSkuString = buildMapQVUrlString(map.url, variables, SKU, value);
+    		}
+    		else if(property===LABEL){
+    			urlSkuString = $map.data(URL);
+    		}
+
+    		//update url property in map data
+			$map.data(URL, urlSkuString);
+			
+    		//notify data controller
+    		var area = $.dmcs.item.buildArea($map.data('x'), $map.data('y'), Math.round($map.data('wid')), Math.round($map.data('hei')));
+    		map = $.dmcs.item.buildMap(area, $map.data(URL), $map.data(TARGET), $map.data(LABEL), $map.data('fragment'), $map.data('type'), $map.data('actionType'));
+    		if(property==='actionType' && value == 'fragment') {
+    			map.url = '';
+    			map.actionType = 'fragment';
+    		} else if(property==='actionType' && value == 'href') {
+    			map.actionType = 'href';
+    		}
+    		$(document).trigger($.dmcs.event.buildMap($('#map-info').data('sid'), parseInt(mapid), map));
+    	}
+
+    	$(document).on('cs-slide-selected', function(e) {
+    		
+    		if($.dmcs.getOrderedSlideCount() < 1) {
+    			zoomViewer.dispose();
+    		}
+
+    		if ($.dmcs.getOrderedSlideCount() === 0) {
+    		    $("#map-info").data("forceUpdate", true);
+    		    return;
+    		}
+
+    		var forceUpdate = $("#map-info").data("forceUpdate");
+            if (!forceUpdate) {
+                // skip update when selecting the same slide again
+                if(($('#map-info').data('sid') === e.sid && $('#map-info').data('assetPath').length > 0)
+                    || ( $('#map-info').data('assetPath').length < 1
+                    || $.dmcs.getSlide(e.sid) == null)
+                    && $('#map-info').data('sid')) {
+                    return;
+                }
+            }
+
+            $("#map-info").data("forceUpdate", false);
+    		$('#map-info').data('sid', e.sid);
+    		
+    		//clear action panel data
+    		clearActionsForm();
+
+            //need to check whether the slide exist or not first
+            if ($.dmcs.getSlide(e.sid)) {
+                //load new slide
+                var slide = $.dmcs.getSlide(e.sid);
+
+                //remove maps
+                $('.hotspot,.map').remove();
+                
+                //load slide
+                loadSlide(slide);
+                
+                //load maps
+                setTimeout(function() {
+                	loadMaps(e.sid);
+                },1000);
+            }
+    	});
+    	
+    	function getUrlBaseString(url) {
+    		
+    		var ret = '';
+    		
+    		//remove variables from url String
+			var baseUrlString = '';
+			var i;
+			var gVars = url.split('&');
+			var len = gVars.length;
+			
+			for(i=0;i<len;i++) {
+				var gVar = gVars[i];
+				if(!gVar.startsWith('quickview:') 
+						&& !gVar.startsWith(RESERVED_PATH) 
+						&& !gVar.startsWith(RESERVED_THUMB) 
+						) {
+					continue;
+				}
+				
+				//prepend ampersand if this is not the first variable
+				if(i>0) {
+					baseUrlString += '&';
+				}
+				
+				//rebuild variable string with
+				baseUrlString += gVar;
+			}
+			
+			ret = baseUrlString;
+			
+			return ret;
+    	}
+    	
+    	//get variables string
+		function getAllGenericVarsFromUI() {
+			
+    		var url = '';
+			if ($('.genericVariable > input').length > 0) {
+				var gVars = $('.genericVariable > input');
+				var i = 0;
+				var len = gVars.length;
+				var variableString = '';
+				
+				for(i=0; i<len; i++) {
+					
+					var $el = $($('.genericVariable > input')[i]);
+					
+					//if this is placeholder text bail
+	    			if($el.val() === $('#map-info').data('VAR_INSTRUCTION_TEXT')) {
+	    				continue;
+	    			}
+					
+					var label = $el.val().split('=')[0];
+            		var val = $el.val().split('=')[1];
+					variableString += '&'+label+'='+val;
+				}
+				url += variableString;
+			}
+			return url;
+    	}
+		
+    	function triggerUpdateEvent (sid, mapid, map) {
+    		
+    		$(document).trigger($.dmcs.event.buildMap(sid, mapid, map));
+    		
+    		$('#map-info').data('pending', false);
+    	}
+    	
+    	function updateActionPanelUIControls(sid, mapid) {
+
+    		if($.dmcs.getSlide(sid) == null) {
+    			$('#instructions-container').show();
+    			$('#controls-container').hide();
+    			return;
+    		}
+
+    		//remove hidden class
+    		$('#controls-container,#instructions-container').removeClass('hide');
+
+    		//show controls?
+    		showActionsControlPanel(getMaps($.dmcs.getSlide(sid).maps).length>0) ;
+
+			//update ui with map metadata proerties
+			setActionPanelDataProperties($.dmcs.getSlide(sid).maps, mapid);
+    	}
+
+    	function showActionsControlPanel(show) {
+    		//remove hidden class
+    		$('#controls-container,#instructions-container').removeClass('hide');
+
+    		if(show) {
+    			//show controls container
+        		$('#instructions-container').hide();
+    			$('#controls-container').show();
+    			return;
+    		}
+
+    		$('#instructions-container').show();
+			$('#controls-container').hide();
+    	}
+
+    	function setActionPanelDataProperties(maps, mapid) {
+
+    		if(mapid == undefined || maps[mapid] == null) {
+    			$('#controls-container').addClass('cs-simple-disable');
+    			return;
+    		}
+    		$('#controls-container').removeClass('cs-simple-disable');
+    		/*
+    		 *
+    		 */
+    		//get array w/o null values
+    		var map = maps[mapid];
+    		var maps = getMaps(maps);
+    		var actionType = (map[ACTION_TYPE].startsWith("quickview")) ? QUICK_VIEW : (map[ACTION_TYPE] === 'fragment' ? 'fragment' : URL);
+    		var sku = '';
+    		var variables = convertURLVariablesToArray(map[URL]);
+
+    		//set name, target, url
+    		if (map[LABEL] !== $(NAME_FIELD).val()) {
+    		    $(NAME_FIELD).val(map[LABEL]);
+    		}
+
+    		//figure out quickview vs url
+    		if(actionType === QUICK_VIEW) {
+    			sku = getValueFromUrl(map[URL], SKU);
+    			getSKUItem().val(sku);
+       		} else if(actionType === QUICK_VIEW_FRAGMENT) {
+       			var path = getParamFromUrl(map[URL], 'reservedVal_productPath');
+       			if(typeof(path) == 'string') {
+           			$(SEARCH_FRAGMENT).data('path', path);
+       			}
+       			getFragmentItem().val(path);
+				var fragmentlabel = getParamFromUrl(map[URL], 'fragment');
+				getFragmentItem().data("fragmentlabel", fragmentlabel);
+       			updateFragmentSizeControls(map[URL]);
+       		} else {
+    			//if actiontype is url and url prop starts with "quickview.." reset the url value to an empty string
+    			map[URL] = (map[URL].startsWith(QUICK_VIEW))? '' : map[URL];
+    			
+    			setHrefValue(map[URL]);
+    		}
+
+    		//update ui for url/quickview action
+    		if(actionType === QUICK_VIEW) {
+    			$('input[value=quickview]').prop('checked','checked');
+				setHrefSkuView('quickview');
+    		} else if(actionType === QUICK_VIEW_FRAGMENT) {
+    			$('input[value=fragment]').prop('checked','checked');
+				setHrefSkuView('fragment');
+    		} else {
+    			$('input[value=href]').prop('checked','checked');
+    			setHrefSkuView('href');
+    			//set target radio value
+    			if(map[TARGET].length > 0) {
+    				$('input[value="'+map[TARGET]+'"]').prop('checked','checked');
+    			}
+    		}
+
+            //clear product thumbnail
+            if(!isTenant){
+                $(".skuThumbnail").parent().css("display", "none");
+            }
+    		//set generic variables?
+
+            $('#generic-variables-container').empty();
+
+			//check item is product
+			var itemIsProduct = isProduct(variables);
+			var i = 0;
+			var len = variables.length;
+			var variableString;
+			var isProductSet = false;
+			for(i=0;i<len;i++) {
+    			if(variables[i] == null) {
+    				continue;
+    			}
+    		if((variables[i]['key']=="reservedVal_productThumbnail" || variables[i]['key']=="reservedVal_productPath")&& itemIsProduct){
+					if(!isProductSet){
+						populateProductFields(getProductFields(variables));
+						isProductSet = true;
+					}
+					else continue;
+			}
+			else{
+				
+				if(variables[i]['key']=="reservedVal_productThumbnail" || variables[i]['key']=="reservedVal_productPath") {
+					
+					continue;
+				}
+				variableString = variables[i]['key'] +'='+variables[i]['val'];
+				addGenericVariable(variableString);
+			}
+    	}
+    }
+
+    	function getMaps(mapArray) {
+    		var maps = [];
+    		var i =0;
+    		var len = mapArray.length;
+
+    		for(i=0;i<len;i++) {
+    			if(mapArray[i] == null) {
+    				continue;
+    			}
+    			maps.push(mapArray[i]);
+    		}
+    		return maps;
+    	}
+
+    	function loadSlide(slide) {
+			var url = (slide.assetId ? slide.assetId : slide.assetPath);
+    		//set map utility mode to 'default'
+    		if($('#map-info').data('editorInit')) {
+    			mapUtil._setMode(DEFAULT);
+    			$(BTN_MAP_CREATE).trigger('blur');
+    		}
+    		
+    		if(zoomViewer.isDisposed) {
+    			initializeViewer();
+    			zoomViewer.setParam("asset", url);
+            	zoomViewer.init();
+    		} else if($('#map-info').data('assetPath').length < 1) {
+            	//set asset and initialize viewer
+            	zoomViewer.setParam("asset", url);
+                //add aemmode=0 for DMS7 case to disable path base
+                if (url.indexOf('/') != 0) {
+                    zoomViewer.setParam("aemmode", "0");
+                }
+            	zoomViewer.init();
+            }
+            else {
+            	//change asset
+            	zoomViewer.setAsset(url);
+            }
+    		$('#map-info').data('assetPath', url);
+
+    		//load hot spots if applicable
+	    	loadImageMetadata(slide);
+    	}
+
+    	function loadMaps(sid) {
+
+    		if($.dmcs.getCurrentState().slides.length < 1) {
+    			return;
+    		}
+
+    		//remove all maps and hotspots
+    		$('#map-info').data('mapRefArray', []);
+    		$('.'+HOTSPOT+',.'+IMAGE_MAP).remove();
+    		$('.editHandle').remove();
+
+    		//loadMaps if applicable
+    		var coordinates;
+    		var len = 0;
+    		var mapType;
+    		var obj = {};
+
+            //need to check that slide is not returning null first in case of deletion
+            if ($.dmcs.getSlide(sid)){
+                len = $.dmcs.getSlide(sid).maps.length;
+            }
+    		if(len>0) {
+    			var i = 0;
+    			var $map;
+    			for(i=0;i<len;i++) {
+    				if($.dmcs.getSlide(sid).maps[i] == null) {
+    					continue;
+    				}
+
+    				//get object representation of image map definition string
+    				var mapObject = $.dmcs.getSlide(sid).maps[i];
+    				if(!mapObject.type) {
+    					continue;
+    				}
+
+    				//flatten data structure
+    				$.each( mapObject.area, function( key, value ) {
+    					mapObject[key] = value;
+    				});
+
+    				//add to canvas
+    				if(mapObject.type === HOTSPOT) {
+        				$map = mapUtil._addHotspot(i.toString(), mapObject);
+    				}
+    				else if(mapObject.type === IMAGE_MAP) {
+        				$map = mapUtil._addMap(i.toString(), mapObject);
+    				}
+
+    				var excludeProps = ["uiDraggable", "hasEvents", "draggable", "coord"];
+
+    				//append properties from map creation
+    				$.each( $map.data(), function( key, value ) {
+    					if(excludeProps.indexOf(key) < 0) {
+    						mapObject[key] = value;
+    					}
+    				});
+
+    				//add merged data
+    				$map.data(mapObject);
+
+    				//append to mapRefArray for select control (dropdown)
+    				$('#map-info').data('mapRefArray')[i] = {label:mapObject[LABEL], id:i};
+    			}
+    			
+    			if($('#map-info').data('mapRefArray').length > 0) {
+    				populateComboBox($('#map-info').data('mid'));
+    				
+    				//select the active hotspot/map
+    				$('.hotspot[id="'+$('#hotspot-id').val()+'"],.map[id="'+$('#hotspot-id').val()+'"]').trigger('mousedown');
+    			}
+    		}
+
+    		//show hide instructions/controls
+    		updateActionPanelUIControls(sid, $('#map-info').data('mid'));
+    	}
+    	
+    	function populateComboBox(selectedIndex) {
+
+    		var data = $('#map-info').data('mapRefArray');
+            var i;
+            var len = data.length;
+
+          //set selected item
+            $('#hotspot-id').val("");
+            
+            //empty select control and select list
+            $('#hotspot-id').get(0).items.clear();
+            
+            if (len < 1) {
+            	return;
+            }
+
+            for(i=0;i<len;i++) {
+            	//bb if current item is undefined skip it
+            	if(data[i] == undefined) {
+            		continue;
+            	}
+            	// use browser to handle encoding of label by adding it as text to a temp div
+            	var tempDiv = $('<div/>');
+            	tempDiv.text(data[i].label);
+            	$('#hotspot-id').get(0).items.add({ value: data[i].id, content: { innerHTML: tempDiv.html() } });
+            }
+            
+            //figure out selected index (skip undefined).
+            var selectedItem = $($('#hotspot-id').get(0).items.getAll()[selectedIndex]).val();
+            
+            //if a item is deleted it will still be in the array but, it will be undefined.  Find the next defined item..
+            if(selectedItem == undefined) {
+            	len = $('#hotspot-id').get(0).items.length;
+            	for(i = len; i--;) {
+                	selectedItem = $($('#hotspot-id').get(0).items.getAll()[i]).val();
+                	if(selectedItem == undefined) {
+                		continue;
+                	}
+                	break;
+                }
+            }    
+            $('#hotspot-id').val(selectedItem);
+        }
+
+    	$(BTN_MAP_CREATE).on('click', function(e) {
+
+    		if($.dmcs.getCurrentState().slides.length < 1) {
+    			return;
+    		}
+
+    		var mapId = $.dmcs.getMapCount($('#map-info').data('sid'));
+    		var mapType = this.id.replace('btn-', '');
+			mapType = (mapType === 'hotspot')? HOTSPOT : IMAGE_MAP;
+
+    		if(mapUtil.mode === CREATE) {
+
+				showMapCreateInProgressWarning(mapType);
+
+				//update map type
+				mapUtil._setMapType(mapType);
+    			return;
+    		}
+
+			//set editor disposition
+			mapUtil._setMapType(mapType);
+			mapUtil._setMode(CREATE, mapId);
+
+			//show actions tab control panel
+			//clear action panel data
+    		clearActionsForm();
+			showActionsControlPanel(true);
+    	});
+
+    	function showMapCreateInProgressWarning(mapType) {
+
+    		if(mapType == undefined) {
+    			mapType = mapUtil._getMapType();
+    		}
+
+			if(mapUtil._getMapType() === mapType) {
+				if(mapType === HOTSPOT) {
+					$('#add-hotspot-warning').get(0).show();
+				}
+				else if(mapType === IMAGE_MAP) {
+					$('#add-map-warning').get(0).show();
+				}
+			}
+    	}
+
+    	$('#btn-add-variable').on('click', function(e) {
+
+    		if($.dmcs.getCurrentState().slides.length < 1) {
+    			return;
+    		}
+
+    		if(mapUtil.mode === CREATE) {
+    			showMapCreateInProgressWarning();
+    			return;
+    		}
+
+    		//add variable
+    		addGenericVariable();
+    	});
+
+    	function addGenericVariable(variableStr) {
+
+    		var mapArray = $.dmcs.getSlide($('#map-info').data('sid')).maps;
+    		var mapObject = mapArray[$('#map-info').data('mid')];
+    		var mapVariables = convertURLVariablesToArray(mapObject.url);
+			var variableIndex = $('.fieldLabel').length;
+			var variableLabel = '<span>' + Granite.I18n.get('Generic variable') + '</span><br/>'
+        	var variableText = (variableStr == undefined || variableStr == "=")? $('#map-info').data('VAR_INSTRUCTION_TEXT') : variableStr;
+    		
+        	//add variable
+    		var variableMarkup = '<span id="generic-variable-text" class="genericVariable coral-Form-field fieldLabel">';
+                variableMarkup += '<input is="coral-textfield" idx="'+variableIndex+'" type="text" target="'+$('#map-info').data('mid')+'" value="'+variableText+'">';
+                variableMarkup += '<button is="coral-button" id="'+variableIndex+'" type="button" class="btnClearText" icon="delete" iconsize="S">';
+                variableMarkup += '</button>';
+                variableMarkup += '</span>';
+
+    		//add variable
+    		if(variableStr == undefined) {
+    			mapVariables[variableIndex] = {key:'', val:''};
+    		}
+
+    		//add html markup
+    		$('#generic-variables-container').append(variableLabel);
+    		var tempInput = $('#generic-variables-container').append(variableMarkup);
+    		tempInput.find('input').on('keyup keydown', function(e) {
+    			if(e.keyCode == 13) {
+    				e.preventDefault();
+    			}
+    		});
+
+    		//click handler for variable deletion
+    		$('.genericVariable > input').on('change', function(e) {
+
+    			//if this is placeholder text bail
+    			if($(this).val() === $('#map-info').data('VAR_INSTRUCTION_TEXT')) {
+    				return;
+    			}
+
+    			var variableIndex = parseInt($(this).attr('idx'));
+    			//get map string and convert to object
+    			var mapArray = $.dmcs.getSlide($('#map-info').data('sid')).maps;
+    			var map = mapArray[parseInt($(this).attr('target'))];
+    			var mapVariables = convertURLVariablesToArray(map.url);
+
+    			var label = $(this).val().split('=')[0];
+    			var val = $(this).val().split('=')[1];
+
+    			//update "variables" property in DOM
+    			var $map = $('#'+$('#map-info').data('mid'));
+
+    			if(label !== '') {
+    				mapVariables.push({key:label, val:val});
+    				var newURL = buildMapQVUrlString(map.url, mapVariables, SKU);
+    				$map.data(URL, newURL);
+    			}
+
+        		var area = $.dmcs.item.buildArea($map.data('x'), $map.data('y'), Math.round($map.data('wid')), Math.round($map.data('hei')));
+        		map = $.dmcs.item.buildMap(area, $map.data(URL), $map.data(TARGET), $map.data(LABEL), $map.data('fragment'), $map.data('type'), $map.data('actionType'));
+    			$(document).trigger($.dmcs.event.buildMap($('#map-info').data('sid'), parseInt($(this).attr('target')), map));
+	    	});
+
+    		$('.genericVariable > input').on('focus', function(e) {
+    			if($(this).val().length > 1 && $(this).val() === $('#map-info').data('VAR_INSTRUCTION_TEXT')) {
+    				$(this).val('');
+    			}
+    		});
+
+    		$('.genericVariable > input').on('focusout', function(e) {
+    			if($(this).val().length < 1) {
+    				$(this).val($('#map-info').data('VAR_INSTRUCTION_TEXT'));
+    			}
+    		});
+
+    		//click handler for variable deletion
+    		$('.btnClearText[id='+variableIndex+']').on('click', function(e) {
+    			var variableIndex = parseInt($(this).prev().attr('idx'));
+    			//get map string and convert to object
+    			var mapArray = $.dmcs.getSlide($('#map-info').data('sid')).maps;
+    			var map = mapArray[parseInt($(this).prev().attr('target'))];
+    			var mapVariables = getGenericVariables(map.url, 0);
+    			var reservedVariables = getGenericVariables(map.url, 1);
+    			
+    			//remove deleted variable
+    			mapVariables.splice(variableIndex, 1);
+    			
+    			//rebuild variables with reserved variables and generic variables
+    			mapVariables = $.merge(reservedVariables, mapVariables);
+
+    			//remove textfield from ui
+    			//remove <br> el
+    			$(this).parent().prev().remove();
+    			//remove <span> for generic var label
+    			$(this).parent().prev().remove();
+    			//remove text field and "x" button
+    			$(this).prev().val('');
+    			$(this).parent().remove();
+    			
+    			
+    			//update "variables" property in DOM
+    			var $map = $('#'+$('#map-info').data('mid'));
+    			
+    			//get base url with reserved values
+    			var baseUrl = getUrlBaseString(map.url);
+    			var newURL = buildMapQVUrlString(baseUrl, mapVariables, SKU);
+				$map.data(URL, newURL);
+
+        		var area = $.dmcs.item.buildArea($map.data('x'), $map.data('y'), Math.round($map.data('wid')), Math.round($map.data('hei')));
+        		var map = $.dmcs.item.buildMap(area, $map.data(URL), $map.data(TARGET), $map.data(LABEL), $map.data('fragment'), $map.data('type'), $map.data('actionType'));
+        		
+    			$(document).trigger($.dmcs.event.buildMap($('#map-info').data('sid'), parseInt($(this).prev().attr('target')), map));
+    		});
+        }
+
+    	//map drawing tool
+        var mapUtil = new ImageMapUtil();
+        var zoomViewer;
+        
+    	initializeViewer();
+    	
+    	/**
+    	 * @param {string} url
+    	 * @param {number} mode 0 = only generic variables list, 1 = only reserved variables list, 2 all variables 
+    	 * @return {object} filtered variables list based on mode
+    	 */
+    	function getGenericVariables(url, mode) {
+    		var variables = [];
+
+    		if(url == undefined) {
+    			return variables;
+    		}
+
+			//get quickview definition and variables if possible.
+			if(url.startsWith(QUICK_VIEW)) {
+				//get quick view stuff (sku, variables)
+				var i;
+				var urlStr = url.split(QUICK_VIEW)[1];
+				var variablesArray = urlStr.split('&');
+				var genericVariablesArray = [];
+
+				//check for "generic variables"
+				if(variablesArray.length > 1) {
+					var len = variablesArray.length;
+					var tmpArr = [];
+					for(i=0; i<len; i++) {
+						tmpArr = variablesArray[i].split('=');
+						//skip entry if is "sku"
+						var varKey = tmpArr[0];
+						
+						if(mode == 2 && varKey === SKU) {
+							continue;
+						}
+						else if(mode == 0 
+								&& (varKey === SKU || (varKey === RESERVED_PATH || varKey === RESERVED_THUMB ))) {
+							continue;
+						}
+						else if(mode == 1 && (varKey !== RESERVED_PATH && varKey !== RESERVED_THUMB )) {
+							continue;
+						}
+						genericVariablesArray.push({key:tmpArr[0], val:tmpArr[1]});
+					}
+				}
+				//set properties
+				variables = genericVariablesArray;
+			}
+    		return variables;
+    	}
+    	
+
+		function initializeViewer() {
+			// create viewer that is used for editing
+			zoomViewer = new s7viewers.ZoomViewer({
+				containerId: "s7viewer",
+				params: {
+					serverurl: Granite.HTTP.externalize('/is/image/'),
+					singleclick:'none',
+					doubleclick: 'none',
+					iconeffect: '0,0,0,0'
+				}
+	        });
+			
+			zoomViewer.setHandlers({
+	            "initComplete":function() {
+
+	            	//create mapping util for drawing maps
+		    		var mapOpts = {
+		    				viewerId: "s7viewer",
+		    				canvasId: "hotspotCanvas",
+		    				backgroundColor: "#FFFFFF",
+		    				borderColor: 'blue',
+		    				hotspotClassName: HOTSPOT,
+		    				mapClassName: IMAGE_MAP,
+		    				mapType : IMAGE_MAP,
+		    				viewerComponent:zoomViewer.getComponent("zoomView"),
+	                        viewerContainer:zoomViewer.getComponent("container")
+		    		};
+
+		    		//init mapping utility
+				    mapUtil._init(mapOpts);
+				    
+				    //invoke resize to reposition hotspot/s in the event the canvas size has changed..
+				    mapUtil._resizeCanvasEvent();
+				    
+				    //If there is a selected map for the active slide select it!
+				    var maps = $.dmcs.getCurrentState().slides[$('#map-info').data('sid')].maps;
+				    if(maps.length > 0 && maps[$('#map-info').data('mid')] != null) {
+				    	setMapSelected($('#map-info').data('mid'));
+				    }
+	            }
+	        });
+		}
+
+        function loadImageMetadata(slide) {
+			var scene7Id = slide.assetId;
+			var aemPath = slide.assetPath;
+        	var metadataPath = aemPath + '/_jcr_content/metadata.json?ts=' + new Date().getTime();
+
+			$.get( metadataPath, function(data) {
+
+				var delimiter = data['dam:sha1'];
+				var mapData = data['imageMap'];
+
+				//set asset dimesions
+				mapUtil.setAssetDimensions(data['tiff:ImageWidth'], data['tiff:ImageLength']);
+			})
+           	.fail(function() {
+           	});
+        }
+
+		function setHrefValue(value){
+			$(HREF_FIELD).val(value);
+		}
+
+		function reviseHref(value){
+            var contextPath = Granite.HTTP.getContextPath();
+    		//add context path if applicable and if it has not been added already
+    		if (value !== ''  
+    				&& (contextPath.length != 0 ? value.substring(0, contextPath.length) !== contextPath : true)
+    				&& value.substring(0, HTTP_PROTOCOL.length) !== HTTP_PROTOCOL
+    				&& value.substring(0, HTTPS_PROTOCOL.length) !== HTTPS_PROTOCOL
+        			&& value.substring(0, 'www'.length) !== 'www') {
+
+    			if(value.startsWith('/')) {
+	                if(contextPath !== "" && value.indexOf(contextPath) != 0){
+	                	value = contextPath + value;
+	                }
+	            	if(!value.endsWith(".html") && !(/\.([^\/\.]+)$/.test(value))){
+	            		value += '.html';
+	                }
+		            setHrefValue(value);
+	        	}
+	        }
+    		return value;
+	    }
+        
+		function getSKUItem(){
+			// We need to keep "#sku" for AoD since it doesn't install wcm package, ".sv-with-wcm-productPicker" is only for AEM for now
+			return isTenant ? $(SKU_FIELD) : $(SEARCH_PRODUCT_SKU);
+		}
+		
+		function getFragmentItem(){
+			return $(SEARCH_FRAGMENT);
+		}
+		
+		function isProduct(array){
+			var productPath = "";
+			var productThumbnail = "";
+			for(var i=0;i<array.length;i++) {
+				if(array[i].key == "reservedVal_productThumbnail"){
+					productThumbnail = array[i].val;
+				}
+				if(array[i].key == "reservedVal_productPath"){
+					productPath = array[i].val;
+				}				
+			}
+			return ((productPath !="") && (productThumbnail !=""));
+		}
+		function getProductFields(array){
+			var productPath = "";
+			var productThumbnail = "";
+			for(var i=0;i<array.length;i++) {
+				if(array[i].key == "reservedVal_productThumbnail"){
+					productThumbnail = array[i].val;
+				}
+				if(array[i].key == "reservedVal_productPath"){
+					productPath = array[i].val;
+				}				
+			}
+			return { "productPath" : productPath,"productThumbnail" : productThumbnail };
+		}
+		function populateProductFields(product){
+			$(".skuThumbnail").parent().show();
+			$(".skuThumbnail").html("");
+			$(".skuThumbnail").append("<img src='" + Granite.HTTP.externalize(product.productThumbnail) + "'>");			
+		}
+		function clearVars(array, field){
+			var index = getIdxVars(array, field);
+			while(index != -1){
+				array.splice(index, 1);
+				index = getIdxVars(array, field);
+			}
+		}
+		
+		function getIdxVars(array, field){
+			for (var i=0; i < array.length ;i++) {
+				if(array[i].key == field){
+					return i;
+				}
+			}
+			return -1;
+		}
+		//check hotspots in all slides contain muxed sku
+		function isValidMixedQuickviewData() {
+			
+			if(isTenant) {
+				return true;
+			}
+			
+			var productSku = 0;
+			var manualSku = 0;
+			var withSku = 0;
+			var allSlides = $.dmcs.getSlides();
+			for (var i=0; i < allSlides.length; i++){
+				
+				//if the slide is null (has been deleted) skip this iteration of the loop
+				if(allSlides[i] == null) {
+					continue;
+				}
+				
+				var slideMaps = allSlides[i].maps;
+				
+				for (var j=0; j<slideMaps.length; j++){
+					if(!slideMaps[j]) { // skip deleted map
+						continue;
+					}
+					var sku = getValueFromUrl(slideMaps[j][URL], SKU);
+					var mapVars = convertURLVariablesToArray(slideMaps[j][URL]);
+					if (sku != ""){
+						withSku++;
+						if (isProduct(mapVars)){
+							productSku++;
+						}
+						else{
+							manualSku++;
+						}
+					}
+				}
+			}
+			$(document).data(DATA_MIXED_SKU, ((withSku == manualSku) || (withSku == productSku)));
+			return ((withSku == manualSku) || (withSku == productSku));
+		}
+    });
+})(window, document, Granite, Granite.$);

@@ -1,0 +1,1101 @@
+/*************************************************************************
+*
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+*  Copyright 2011 Adobe Systems Incorporated
+*  All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and are protected by trade secret or copyright law.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+**************************************************************************/
+
+/**
+ * @class CQ.undo.util.UndoUtils
+ * @static
+ *
+ */
+CQ.undo.util.UndoUtils = function() {
+
+    var pageMarker = "/jcr:content/";
+
+    var dateFormats = [
+        "D M d Y H:i:s \\G\\M\\TO",         // Sling
+        "Y-m-d\\TH:i:s.uP",                 // DateTime
+        "m/d/Y"                             // DateField (preferred ...)
+    ];
+
+    return {
+
+        /**
+         * Check if the given string starts with (one of) the given partial string(s).
+         * @param {String} str String to check
+         * @param {String|Array} partialStr partial String(s)
+         * @return {Boolean} True, if str starts with partialStr, else false
+         */
+        strStartsWith: function(str, partialStr) {
+            if (CQ.Ext.isArray(partialStr)) {
+                var strCnt = partialStr.length;
+                for (var s = 0; s < strCnt; s++) {
+                    if (CQ.undo.util.UndoUtils.strStartsWith(str, partialStr[s])) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            var pLen = partialStr.length;
+            if (str.length >= pLen) {
+                return (str.substring(0, pLen) == partialStr);
+            }
+            return false;
+        },
+
+        /**
+         * Check if the given string ends with (one of) the given partial string(s).
+         * @param {String} str String to check
+         * @param {String|Array} partialStr partial String(s)
+         * @return {Boolean} True, if str ends with partialStr, else false
+         */
+        strEndsWith: function(str, partialStr) {
+            if (CQ.Ext.isArray(partialStr)) {
+                var strCnt = partialStr.length;
+                for (var s = 0; s < strCnt; s++) {
+                    if (CQ.undo.util.UndoUtils.strEndsWith(str, partialStr[s])) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            var sLen = str.length;
+            var pLen = partialStr.length;
+            if (sLen >= pLen) {
+                return (str.substring(sLen - pLen, sLen) == partialStr);
+            }
+            return false;
+        },
+
+        /**
+         * Executes a simple String replacement.
+         * @param {String} text The source text
+         * @param {Number} startPos The first character to be replaced
+         * @param {Number} endPosIncl The last character (inclusive) to be replaced
+         * @param {String} replacement The replacement
+         * @return {String} The result of the replacement
+         */
+        strReplace: function(text, startPos, endPosIncl, replacement) {
+            var preStr = "";
+            if (startPos > 0) {
+                preStr = text.substring(0, startPos);
+            }
+            var postStr = "";
+            if ((endPosIncl + 1) < text.length) {
+                postStr = text.substring(endPosIncl + 1, text.length);
+            }
+            return preStr + replacement + postStr;
+        },
+
+        /**
+         * <p>Determines the parent path of the specified item (which can be an editable
+         * or a stub for an editable).</p>
+         * @param {CQ.wcm.EditBase|Object} item The editable or a suitable stub object
+         */
+        getParentPath: function(item) {
+            var parentPath;
+            if (item.getParentPath) {
+                parentPath = item.getParentPath();
+            } else {
+                var pathSep = item.path.lastIndexOf("/");
+                parentPath = (pathSep >= 0 ? item.path.substring(0, pathSep) : "/");
+            }
+            return parentPath;
+        },
+
+        /**
+         * <p>Gets the current data of a paragraph from the server and prepares it for
+         * being used in a createParagraph context.</p>
+         * @param {CQ.wcm.EditBase|Object} item The item; can be a stub
+         * @param {Boolean} basicDataOnly (optional) True to retrieve basic data only (must
+         *        be set to true if item is a stub)
+         * @return {Object} The current data of a paragraph
+         */
+        getCurrentData: function(item, basicDataOnly) {
+
+            /*
+            AdobePatentID="2789US01"
+            */
+
+            // request data for parent object (as we need to detrmine a reference object
+            // that can be used for recreating a paragraph at the correct position)
+            var pathSep = item.path.lastIndexOf("/");
+            var parentPath = CQ.undo.util.UndoUtils.getParentPath(item);
+            var name = (pathSep >= 0 ? item.path.substring(pathSep + 1) : item.path);
+            var response = CQ.HTTP.get(CQ.HTTP.externalize(
+                    CQ.HTTP.noCaching(parentPath + ".infinity" + CQ.HTTP.EXTENSION_JSON)));
+            if (!CQ.HTTP.isOk(response)) {
+                if (response.status === 300) {
+                    return false;
+                }
+                throw new Error("Could not read paragraph data for undo.");
+            }
+            var data = CQ.Ext.util.JSON.decode(response.responseText);
+            var takeNext = false;
+            var insertPath = null;
+            for (var key in data) {
+                if (data.hasOwnProperty(key)) {
+                    if (key == name) {
+                        takeNext = true;
+                    } else if (takeNext) {
+                        insertPath = parentPath + "/" + key;
+                        break;
+                    }
+                }
+            }
+            data = data[name];
+            var blobs = null;
+            var compInfo = null;
+            if (basicDataOnly !== true) {
+                // determine blobs
+                blobs = [ ];
+                CQ.undo.util.UndoUtils.determineBlobs(data, blobs);
+                // determine additional component info
+                compInfo = {
+                    "dialog": item.dialog
+                };
+                var dom = item.getEl().dom;
+                var cls = dom.getAttribute(CQ.Ext.isIE6 || CQ.Ext.isIE7 ? "className"
+                        : "class");
+                // Workaround for IE 8 when run in a portal context ...
+                cls = (cls != null ? cls : (CQ.Ext.isIE8 ? dom["className"] : ""));
+                var sectionPos = cls.indexOf("section");
+                if (sectionPos >= 0) {
+                    var endPos = sectionPos + "section".length - 1;
+                    cls = CQ.undo.util.UndoUtils.strReplace(cls, sectionPos, endPos, "");
+                }
+                compInfo["divAttributes"] = {
+                    "class": cls
+                };
+                // filter data
+                var blobCnt = blobs.length;
+                for (var b = 0; b < blobCnt; b++) {
+                    var blob = blobs[b];
+                    var fieldNames = blob.field.split("/");
+                    var hrchCnt = fieldNames.length - 1;
+                    var fieldData = data;
+                    for (var h = 0; h < hrchCnt; h++) {
+                        fieldData = fieldData[fieldNames[h]];
+                    }
+                    delete fieldData[fieldNames[hrchCnt]];
+                }
+            }
+            CQ.undo.util.UndoUtils.filterJSON(data);
+            return {
+                "insertBefore": insertPath,
+                "data": data,
+                "compInfo": compInfo,
+                "blobs": blobs
+            };
+        },
+
+        /**
+         * Adds the default fields (charset, last modified info) to the specified parameter
+         * object.
+         * @param {Object} params The parameter object
+         */
+        addDefaultFields: function(params) {
+            params[CQ.Sling.CHARSET] = "UTF-8";
+            params["cq:lastModified"] = "";
+            params["cq:lastModifiedBy"] = "";
+        },
+
+        /**
+         * @private
+         */
+        filterJSON: function(json, createTypeHint) {
+            var uu = CQ.undo.util.UndoUtils;
+            if (CQ.Ext.isObject(json)) {
+                for (var key in json) {
+                    if (json.hasOwnProperty(key)) {
+                        if (uu.isFiltered(key)) {
+                            if ((key != "jcr:primaryType") || !createTypeHint) {
+                                delete json[key];
+                            }
+                        } else {
+                            var replacement = uu.filterJSON(json[key], createTypeHint);
+                            if (replacement != null) {
+                                json[key] = replacement;
+                            }
+                        }
+                    }
+                }
+            } else if (CQ.Ext.isArray(json)) {
+                var itemCnt = json.length;
+                for (var i = 0; i < itemCnt; i++) {
+                    uu.filterJSON(json[i], createTypeHint);
+                }
+            } else if (CQ.Ext.isString(json)) {
+                return uu.parseDate(json);
+            }
+            return null;
+        },
+
+        /**
+         * Tries to parse the specified String to a {@link Date} object.
+         * @param {String} str The string to parse
+         * @return {Date} The parsed Date; null if the String doesn't represent a valid
+         *         Date
+         */
+        parseDate: function(str) {
+            var date = null;
+            var fmtCnt = dateFormats.length;
+            for (var f = 0; f < fmtCnt; f++) {
+                date = Date.parseDate(str, dateFormats[f]);
+                if (date) {
+                    return date;
+                }
+            }
+            return null;
+        },
+
+        /**
+         * Creates a String to be used for tranferring a Date to the server.
+         * @param {Date} date The date
+         * @return {String} The String
+         */
+        toDateStr: function(date) {
+            return (date ? date.format(dateFormats[0]) : "");
+        },
+
+        /**
+         * <p>Checks if the specified property name has to be filtered out.</p>
+         * @param {String} name The property name to check (jcr:lastModified, chartType,
+         *        ...)
+         */
+        isFiltered: function(name) {
+            var lastSepPos = name.lastIndexOf("/");
+            if (lastSepPos >= 0) {
+                name = name.substring(lastSepPos + 1);
+            }
+            switch (name) {
+                case "jcr:primaryType":
+                case "jcr:lastModified":
+                case "jcr:lastModifiedBy":
+                case "jcr:created":
+                case "jcr:createdBy":
+                case ":jcr:data":
+                case "jcr:uuid":
+                    return true;
+            }
+            var uu = CQ.undo.util.UndoUtils;
+            return uu.strEndsWith(name, [ "@Delete", "@MoveFrom" ]);
+        },
+
+        /**
+         * Creates a suitable type hint for the specified data
+         * @param {Object} data The data object, containing name/value pairs
+         * @param {String} name The name of the object
+         */
+        createTypeHint: function(data, name) {
+            var value = data[name];
+            var typeHint = CQ.undo.util.UndoUtils.getTypeForHint(value);
+            // required value conversion
+            if (typeHint == "Date") {
+                data[name] = CQ.undo.util.UndoUtils.toDateStr(value);
+            }
+            if (typeHint) {
+                data[name] = String(data[name]);
+                data[name + CQ.Sling.TYPEHINT_SUFFIX] = typeHint;
+            }
+        },
+
+        /**
+         * Creates a suitable type for the specified object.
+         * @param {Object} value The value
+         * @return {String} The type
+         */
+        getTypeForHint: function(value) {
+            var typeHint = null;
+            if (CQ.Ext.isNumber(value)) {
+                if (parseInt(value) == parseFloat(value)) {
+                    typeHint = "Long";
+                } else {
+                    typeHint = "Double";
+                }
+            } else if (CQ.Ext.isDate(value)) {
+                typeHint = "Date";
+            } else if (CQ.Ext.isBoolean(value)) {
+                typeHint = "Boolean"
+            }
+            return typeHint;
+        },
+
+        /**
+         * <p>Creates a Sling-compatible parameter object from the specified JSON object.
+         * </p>
+         * @param {Object} json The JSON object
+         * @param {String} prefix (optional) current prefix
+         * @param {Object} parameters (optional) A predefined parameters object
+         * @param {Boolean} isRecursiveCall (optional) True if the method is called
+         *        recursively
+         * @return {Object} An object with HTTP parameters
+         */
+        jsonToSlingParameters: function(json, prefix, parameters, isRecursiveCall) {
+            var uu = CQ.undo.util.UndoUtils;
+            parameters = parameters || { };
+            prefix = prefix || "./";
+            if (CQ.Ext.isObject(json)) {
+                for (var key in json) {
+                    if (json.hasOwnProperty(key)) {
+                        if (key == "jcr:primaryType") {
+                            var typeHint = (uu.strEndsWith(prefix, "/")
+                                        ? prefix.substring(0, prefix - 1) : prefix)
+                                    + CQ.Sling.TYPEHINT_SUFFIX;
+                            parameters[typeHint] = json[key];
+                        } else {
+                            var newPrefix = prefix
+                                    + (uu.strEndsWith(prefix, "/") ? "" : "/") + key;
+                            uu.jsonToSlingParameters(json[key], newPrefix, parameters,
+                                    true);
+                        }
+                    }
+                }
+            } else if (isRecursiveCall || !uu.strEndsWith(prefix, "sling:resourceType")) {
+                // sling:resourceType gets only filtered for "top-level" components, but is
+                // kept for sub components (aka sling:ResourceTypes in a recursed call)
+                parameters[prefix] = json;
+                uu.createTypeHint(parameters, prefix);
+            }
+            return parameters;
+        },
+
+        /**
+         * Creates a "diff object" of the specified source objects.
+         * @param {Object} originalData The original data
+         * @param {Object} changedData The changed data
+         * @return {Object} The diff object
+         */
+        diffObject: function(originalData, changedData) {
+
+            /*
+            AdobePatentID="2789US01"
+            */
+
+            var uu = CQ.undo.util.UndoUtils;
+            var originalDiff = { };
+            var changedDiff = { };
+            var added = { };
+            var deleted = { };
+            var changeCnt = 0;
+            var addCnt = 0;
+            var deleteCnt = 0;
+            var key;
+            for (key in originalData) {
+                if (originalData.hasOwnProperty(key) && !uu.isFiltered(key)) {
+                    if (changedData.hasOwnProperty(key)) {
+                        var originalValue = originalData[key];
+                        var changedValue = changedData[key];
+                        if (originalValue != changedValue) {
+                            originalDiff[key] = originalValue;
+                            changedDiff[key] = changedValue;
+                            changeCnt++;
+                        }
+                    } else {
+                        deleted[key] = originalData[key];
+                        deleteCnt++;
+                    }
+                }
+            }
+            for (key in changedData) {
+                if (changedData.hasOwnProperty(key) && !originalData.hasOwnProperty(key)) {
+                    if (!uu.isFiltered(key)) {
+                        added[key] = changedData[key];
+                        addCnt++;
+                    }
+                }
+            }
+            return {
+                "original": originalDiff,
+                "changed": changedDiff,
+                "added": added,
+                "deleted": deleted,
+                "changeCnt": changeCnt,
+                "addCnt": addCnt,
+                "deleteCnt": deleteCnt
+            };
+        },
+
+        /**
+         * Creates suitable POST data for a undo/redo request from diff data (as created
+         * by {@link #diffObject}).
+         *
+         * @param {Object} toUpdate The parameters to be updated by the resulting request
+         * @param {Object} toCreate The parameters to be created by the resulting request
+         * @param {Object} toDelete The parameters to be deleted by the resulting request
+         * @param {Boolean} updateModified Determines if lastModified/lastModified info
+         *        should be updated by the resulting request
+         * @param {Boolean} addCharset Determines if charset information should be provided
+         */
+        createPostData: function(toUpdate, toCreate, toDelete, updateModified, addCharset) {
+            var uu = CQ.undo.util.UndoUtils;
+            var params = { };
+            if (toUpdate) {
+                for (var updatePrm in toUpdate) {
+                    if (toUpdate.hasOwnProperty(updatePrm)) {
+                        params[updatePrm] = toUpdate[updatePrm];
+                        uu.createTypeHint(params, updatePrm);
+                    }
+                }
+            }
+            if (toCreate) {
+                for (var createPrm in toCreate) {
+                    if (toCreate.hasOwnProperty(createPrm)) {
+                        params[createPrm] = toCreate[createPrm];
+                        uu.createTypeHint(params, createPrm);
+                    }
+                }
+            }
+            if (toDelete) {
+                for (var deletePrm in toDelete) {
+                    if (toDelete.hasOwnProperty(deletePrm)) {
+                        params[deletePrm + CQ.Sling.DELETE_SUFFIX] = "";
+                    }
+                }
+            }
+            if (updateModified === true) {
+                params["./jcr:lastModified"] = "";
+                params["./jcr:lastModifiedBy"] = "";
+            }
+            if (addCharset === true) {
+                params[CQ.Sling.CHARSET] = "UTF-8";
+            }
+            return params;
+        },
+
+        /**
+         * <p>Sorts the {@link CQ.undo.actions.RemoveParagraphAction}s of the specified
+         * undo step in a way that they can be redone without causing errors for adjacent
+         * paragraphs that both get removed.</p>
+         *
+         * @param {CQ.undo.UndoStep} step The undo step
+         */
+        sortRemoveParagraphActions: function(step) {
+            var actions = step.undoActions;
+            // console.log("Unsorted actions: ", CQ.Util.copyObject(actions));
+            var removes = [ ];
+            var actionCnt = actions.length;
+            for (var a = actionCnt - 1; a >= 0; a--) {
+                var actionToCheck = actions[a];
+                if (actionToCheck instanceof CQ.undo.actions.RemoveParagraphAction) {
+                    removes.push(actionToCheck);
+                    actions.splice(a, 1);
+                }
+            }
+            var sortedRemoves = [ ];
+            // actions are safe if their insert path is referencing either a path that
+            // is not marked for removal or that will be removed later (hence undone
+            // before actionToCheck)
+            var hasSafePredecessor = function(actionToCheck) {
+                var predPath = actionToCheck.insertPath;
+                for (var r = 0; r < removes.length; r++) {
+                    if (removes[r].path == predPath) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            while (removes.length > 0) {
+                var removeCnt = removes.length;
+                var changes = 0;
+                for (var r = removeCnt - 1; r >= 0; r--) {
+                    var removalToCheck = removes[r];
+                    if (hasSafePredecessor(removalToCheck)) {
+                        sortedRemoves.push(removalToCheck);
+                        removes.splice(r, 1);
+                        changes++;
+                    }
+                }
+                // prevent endless loop - should not happen
+                if (changes == 0) {
+                    throw new Error("Could not sort RemoveParagraphActions.");
+                }
+            }
+            var copyCnt = sortedRemoves.length;
+            for (var c = 0; c < copyCnt; c++) {
+                actions.push(sortedRemoves[c]);
+            }
+            // console.log("Final actions: ", actions);
+        },
+
+        /**
+         * <p>Checks if the specified target info (as provided by some undo ID change
+         * events) are valid for the specified action.</p>
+         * @param {Object} targetInfo The target info to check
+         * @param {CQ.undo.UndoAction} action The undo action to check against
+         * @return {Boolean} True if the target info is valid for the action (or if no
+         *         target info has been specified)
+         */
+        isValidForTarget: function(targetInfo, action) {
+            if (!targetInfo) {
+                return true;
+            }
+            if (targetInfo.target == "others") {
+                return (targetInfo.action != action);
+            }
+            var undoHistory = CQ.undo.UndoManager.getHistory();
+            var targetStep = undoHistory.getStepForAction(targetInfo.action);
+            if (!targetStep) {
+                // action not (yet) in history - so for sure invalid
+                return false;
+            }
+            var checkStep = undoHistory.getStepForAction(action);
+            if (!checkStep) {
+                throw new Error("Invalid step to check.");
+            }
+            var targetStepIndex = undoHistory.getStepIndex(targetStep);
+            var checkStepIndex = undoHistory.getStepIndex(checkStep);
+            switch (targetInfo.target) {
+                case "previousSteps":
+                    return (checkStepIndex < targetStepIndex);
+                    break;
+            }
+            return false;
+        },
+
+        /**
+         * Resolves the multivalue placeholder "$" (that is used for dragging multiple
+         * assets from Content Finder to a paragraph).
+         * @param {Object} data The data to resolve
+         * @return {Array} An array that contains the resolved property names (inluding
+         *         those that don't represent multivalue properties and though weren't
+         *         resolved in any way) plus an info if a property name resulted from
+         *         resolving a multivalue property name
+         */
+        resolveMultiValuePlaceholder: function(data) {
+            var resolvedPropertyNames = [ ];
+            for (var key in data) {
+                if (data.hasOwnProperty(key)) {
+                    var value = data[key];
+                    if ((key.indexOf("$") > 0) && CQ.Ext.isArray(value)) {
+                        var itemCnt = value.length;
+                        for (var i = 0; i < itemCnt; i++) {
+                            var itemKey = key.replace("$", (i + 1));
+                            data[itemKey] = value[i];
+                            resolvedPropertyNames.push({
+                                "property": itemKey,
+                                "resolved": true
+                            });
+                        }
+                        delete data[key];
+                    } else {
+                        resolvedPropertyNames.push({
+                            "property": key,
+                            "resolved": false
+                        });
+                    }
+                }
+            }
+            return resolvedPropertyNames;
+        },
+
+        /**
+         * Adds a BLOB marker field to the specified container ({@link CQ.Dialog} or
+         * {@link CQ.Ext.form.FormPanel}).
+         * @param {CQ.Dialog|CQ.Ext.form.FormPanel} container The container
+         * @param {Object} value The value of the field (properties: field (field name),
+         *        type (type of the blob operation), path (paragraph path)
+         */
+        addBlobMarkerField: function(container, value) {
+
+            /*
+            AdobePatentID="2789US01"
+            */
+
+            if (container) {
+                var xtype = container.getXType();
+                var form = (xtype == "dialog" ? container.formPanel
+                        : (xtype == "form" ? container : null));
+                if (form) {
+                    var fieldName = value.field;
+                    if (CQ.undo.util.UndoUtils.strStartsWith(fieldName, "./")) {
+                        fieldName = fieldName.substring(2);
+                    }
+                    var strRep = value.type + ":" + value.path + "/" + fieldName;
+                    var blobField = new CQ.Ext.form.Hidden({
+                        "name": CQ.undo.UndoDefs.BLOB_MARKER_FIELD,
+                        "value": strRep
+                    });
+                    form.add(blobField);
+                    blobField.render(form.getForm().getEl());
+                }
+            }
+        },
+
+        /**
+         * Adds a marker field to the specified container ({@link CQ.Dialog} or
+         * {@link CQ.Ext.form.FormPanel}).
+         * @param {CQ.Dialog|CQ.Ext.form.FormPanel} container The container
+         */
+        addUndoMarker: function(container) {
+            if (container) {
+                var xtype = container.getXType();
+                var form = (xtype == "dialog" ? container.formPanel
+                        : (xtype == "form" ? container : null));
+                if (form) {
+                    var markerField = new CQ.Ext.form.Hidden({
+                        "name": CQ.undo.UndoDefs.UNDO_MARKER_FIELD,
+                        "value": ""
+                    });
+                    form.add(markerField);
+                    markerField.render(form.getForm().getEl());
+                }
+            }
+        },
+
+        /**
+         * Removes all BLOB marker fields from the specified Container ({@link CQ.Dialog} or
+         * {@link CQ.Ext.form.FormPanel}).
+         * @param {CQ.Dialog|CQ.Ext.form.FormPanel} container
+         */
+        removeBlobMarkerFields: function(container) {
+            if (container) {
+                var xtype = container.getXType();
+                var form = (xtype == "dialog" ? container.formPanel
+                        : (xtype == "form" ? container : null));
+                if (form) {
+                    var items = form.items;
+                    var fieldsToRemove = [ ];
+                    items.each(function(item) {
+                        if (item.getName) {
+                            if (item.getName() == CQ.undo.UndoDefs.BLOB_MARKER_FIELD) {
+                                fieldsToRemove.push(item);
+                            }
+                        }
+                    });
+                    var removeCnt = fieldsToRemove.length;
+                    for (var r = 0; r < removeCnt; r++) {
+                        var item = fieldsToRemove[r];
+                        form.remove(item, true);
+                    }
+                }
+            }
+        },
+
+        /**
+         * <p>Determines the BLOBs from the specified data structure and adds them to the
+         * specified list of BLOBs.</p>
+         * @param {Object} data The data structure (as returned by server)
+         * @param {Array} blobs The list of BLOBs
+         * @param {String} path The currently processed path
+         * @param {String} currentField (optional) The path of the currently processed field
+         */
+        determineBlobs: function(data, blobs, path, currentField) {
+
+            /*
+            AdobePatentID="2789US01"
+            */
+
+            if (path == null) {
+                path = "";
+            }
+            if (data) {
+                var isComponent = false;
+                if (data["sling:resourceType"]) {
+                    isComponent = true;
+                } else if (data["jcr:primaryType"] == "nt:resource") {
+                    blobs.push(new CQ.undo.util.Blob({
+                        "op": "update",
+                        "path": currentField,
+                        "field": currentField
+                    }));
+                }
+                for (var key in data) {
+                    if (data.hasOwnProperty(key)) {
+                        var child = data[key];
+                        if (CQ.Ext.isObject(child)) {
+                            if (isComponent) {
+                                currentField = path + key;
+                            }
+                            CQ.undo.util.UndoUtils.determineBlobs(child, blobs,
+                                    path + key + "/", currentField);
+                        }
+                    }
+                }
+            }
+        },
+
+        /**
+         * <p>Saves a BLOB and returns the ID.</p>
+         * <p>The result will contain a property "id" which contains the ID of the saved
+         * BLOB (if not deleted) and a flag "deleted" that determines if the BLOB has been
+         * removed and hence not actually been saved - which is a valid state).</p>
+         * @param {String} url The URL of the servlet
+         * @param {String} parPath The paragraph's path
+         * @param {String} subPath The sub path to the nt:resource
+         * @param {String} originalBlobId (optional) The ID of an original BLOB; if
+         *        provided, the BLOB is only saved if the jcr:lastModified property has
+         *        changed, otherwise the original BLOB gets removed instead
+         * @return {Object} The result of the save operation; null if saving the BLOB failed
+         */
+        saveBinary: function(url, parPath, subPath, originalBlobId) {
+
+            /*
+            AdobePatentID="2789US01"
+            */
+
+            // Using POST, as we're actually changing something in the repository
+            var result = null;
+            var params = {
+                "operation": "save",
+                "par": parPath,
+                "srcPath": subPath
+            };
+            if (originalBlobId) {
+                params["originalBlob"] = originalBlobId;
+            }
+            var resp = CQ.HTTP.post(url, null, params, null, true);
+            if (CQ.HTTP.isOk(resp)) {
+                var id = resp.headers["Path"];
+                if ((id != null) && (id.length == 0)) {
+                    id = null;
+                }
+                var isUnchanged = (id == originalBlobId);
+                result = {
+                    "id": (isUnchanged ? null : id),
+                    "deleted": (id == null),
+                    "unchanged": isUnchanged
+                };
+            }
+            return result;
+        },
+
+        /**
+         * Restores a BLOB.
+         * @param {String} url The URL of the servlet
+         * @param {String} undoDataPath The path to the undo data to be restored; null if
+         *        existing data should be removed
+         * @param {String} parPath The paragraph's path
+         * @param {String} subPath The sub path where the binary data gets restored
+         * @param {Boolean} isGlobal True if the restore is a global restore (deleting
+         *        BLOBs will be handled differently)
+         * @return {Boolean} True if the restore operation succeeded
+         */
+        restoreBinary: function(url, undoDataPath, parPath, subPath, isGlobal) {
+            // Using POST, as we're actually changing something in the repository
+            var resp = CQ.HTTP.post(url, null, {
+                "operation": "restore",
+                "srcPath": (undoDataPath != null ? undoDataPath : ""),
+                "par": parPath,
+                "targetPath": subPath,
+                "global": (isGlobal === true ? "true" : "false")
+            }, null, true);
+            return CQ.HTTP.isOk(resp);
+        },
+
+        /**
+         * Deletes one or more undo binaries.
+         * @param {String} url The URL of the servlet
+         * @param {Array} undoDataPaths The paths of the undo snapshots to be deleted
+         * @return {Boolean} True if the delete operation succeeded
+         */
+        deleteBinaries: function(url, undoDataPaths) {
+            undoDataPaths = CQ.Ext.isArray(undoDataPaths) ? undoDataPaths
+                    : [ undoDataPaths ];
+            if (undoDataPaths.length == 0) {
+                return true;
+            }
+            var resp = CQ.HTTP.post(url, null, {
+                "operation": "delete",
+                "deletePaths": undoDataPaths
+            }, null, true);
+            return CQ.HTTP.isOk(resp);
+        },
+
+        /**
+         * Creates an array with serializable blob data.
+         * @param {Array} blobs The blobs
+         * @return {Array} The list of serializable blob data
+         */
+        createSerializableBlobs: function(blobs) {
+            var serializableBlobs = [ ];
+            if (blobs) {
+                var blobCnt = blobs.length;
+                for (var b = 0; b < blobCnt; b++) {
+                    serializableBlobs.push(blobs[b].createSerializable());
+                }
+            }
+            return serializableBlobs;
+        },
+
+        /**
+         * Creates a list of blob objects from their serialized form.
+         * @param {Array} serialized The list of serialized blob data
+         * @return {Array} The blobs
+         */
+        createBlobsFromSerialized: function(serialized) {
+            var blobs = [ ];
+            if (serialized) {
+                var blobCnt = serialized.length;
+                for (var b = 0; b < blobCnt; b++) {
+                    blobs.push(new CQ.undo.util.Blob(serialized[b]));
+                }
+            }
+            return blobs;
+        },
+
+        /**
+         * <p>Creates the changed state BLOBs from the specified list of original BLOBs by
+         * saving them and evaluating the results.</p>
+         * <p>Note that BLOBs that remain unchanged get removed from the list of original
+         * BLOBs as well.</p>
+         * @param {Array} originalBlobs The list of original BLOBs (may be modified)
+         * @param {String} servletUrl The URL of the binary value management servlet
+         * @param {String} parPath The paragraph's path
+         * @return {Array} The list of changed BLOBs
+         */
+        createChangedBlobs: function(originalBlobs, servletUrl, parPath) {
+            var changedBlobs = [ ];
+            if (originalBlobs && (originalBlobs.length > 0)) {
+                var blobCnt = originalBlobs.length;
+                for (var b = 0; b < blobCnt; b++) {
+                    var blobToUpdate = originalBlobs[b];
+                    changedBlobs.push(blobToUpdate.saveCloned(servletUrl, parPath));
+                }
+                for (b = (blobCnt - 1); b >= 0; b--) {
+                    if (changedBlobs[b].unchanged) {
+                        changedBlobs.splice(b, 1);
+                        originalBlobs.splice(b, 1);
+                    } else {
+                        originalBlobs[b].unchanged = false;
+                    }
+                }
+            }
+            return changedBlobs;
+        },
+
+        /**
+         * <p>Moves the specified paragraph.</p>
+         * <p>This is a low-level implementation of {@link CQ.wcm.EditBase#moveParagraph},
+         * which cannot be used for undo as it cannot handle moving an paragraph to another
+         * page than the one that is currently displayed in the browser.</p>
+         * @param {String} src The source path
+         * @param {String} dest The path where the moved paragraph has to be inserted before
+         * @param {String} resourceType The resource type of the paragraph to be moved
+         * @return {String} The new path of the moved paragraph
+         */
+        moveParagraph: function(src, dest, resourceType) {
+            var newPath = null;
+            var parentPath = dest;
+            var pathSep = dest.lastIndexOf("/");
+            var name = "*";
+            if (pathSep >= 0) {
+                parentPath = dest.substring(0, pathSep + 1);
+                name = dest.substring(pathSep + 1, dest.length);
+            } else {
+                parentPath = "/";
+            }
+            var params = {
+                "_charset_": "utf-8",
+                "./sling:resourceType": resourceType,
+                "./jcr:lastModified": "",
+                "./jcr:lastModifiedBy": "",
+                "./jcr:created": "",
+                "./jcr:createdBy": "",
+                "parentResourceType": ""
+            };
+            params["./" + CQ.Sling.MOVE_SUFFIX] = src;
+            params[CQ.Sling.ORDER] = (name == "*" ? CQ.wcm.EditBase.INSERT_LAST
+                    : CQ.wcm.EditBase.INSERT_BEFORE + " " + name);
+            if (resourceType) {
+                params[":nameHint"] = resourceType.substring(resourceType.lastIndexOf('/')
+                        + 1);
+            }
+            var serverResponse = CQ.utils.HTTP.post(parentPath, null, params, null, true);
+            if (CQ.utils.HTTP.isOk(serverResponse) && serverResponse.headers) {
+                newPath = serverResponse.headers["Path"];
+            }
+            return newPath;
+        },
+
+        /**
+         * Determines the path of the page the component at the specified absolute path
+         * @param {String} path The absolute path of the component
+         * @return {String} The page path; null if the path does not point to a page
+         */
+        getPagePath: function(path) {
+            var pageSepPos = path.indexOf(pageMarker);
+            if (pageSepPos < 0) {
+                return null;
+            }
+            return path.substring(0, pageSepPos);
+        },
+
+        /**
+         * Determines the path of a component from its absolute path
+         * @param {String} path The absolute path of the component
+         * @return {String} The component path; null if the component path could not be
+         *         determined
+         */
+        getComponentPath: function(path) {
+            var pageSepPos = path.indexOf(pageMarker);
+            if (pageSepPos < 0) {
+                return null;
+            }
+            return path.substring(pageSepPos + pageMarker.length);
+        },
+
+        /**
+         * <p>Invalidates the specified (absolute) path in the respective page's undo
+         * history. The respective page's history gets persisted after the invalidation.</p>
+         * <p>This can be used to prevent undoing for components that have been moved to
+         * another page.</p>
+         * @param {String} path The path
+         * @param {Number} step The step; if undefined, the currently active step is used
+         * @return {Object} The blocking definition (containing path and step properties)
+         */
+        blockPath: function(path, step) {
+            var pagePath = CQ.undo.util.UndoUtils.getPagePath(path);
+            if (!pagePath) {
+                throw new Error("Could not determine page for path '" + pagePath + "'.");
+            }
+            var cfg = CQ.undo.UndoManager.getOriginalConfig();
+            var pageHistory = new CQ.undo.UndoHistory(cfg);
+            pageHistory.loadHistory(pagePath);
+            var blockDef = pageHistory.blockPath(path, step);
+            pageHistory.saveHistory(pagePath);
+            return blockDef;
+        },
+
+        /**
+         * <p>Revalidates the specified (absolute) path in the respective page's undo
+         * history. The respective page's history gets persisted after the revalidation.</p>
+         * <p>This can be used to reenable undoing for components that have been moved to
+         * another page if the move operation gets undone.</p>
+         * @param {String} path The path
+         * @param {Number} step The step; if undefined, the currently active step is used
+         */
+        unblockPath: function(path, step) {
+            var pagePath = CQ.undo.util.UndoUtils.getPagePath(path);
+            if (!pagePath) {
+                throw new Error("Could not determine page for path '" + pagePath + "'.");
+            }
+            var cfg = CQ.undo.UndoManager.getOriginalConfig();
+            var pageHistory = new CQ.undo.UndoHistory(cfg);
+            pageHistory.loadHistory(pagePath);
+            pageHistory.unblockPath(path, step);
+            pageHistory.saveHistory(pagePath);
+        },
+
+        /**
+         * <p>Shows a message box.</p>
+         * @param title The title
+         * @param msg The message
+         * @param listener (optional) The listener; default: none
+         * @param buttons (optional) The buttons; default: OK
+         * @param width (optional) The width; default: 400
+         * @param icon (optional) The icon to use; default: none
+         */
+        messageBox: function(title, msg, listener, buttons, width, icon) {
+            var isDefaultBox = true;
+            if (!buttons) {
+                buttons = CQ.Ext.MessageBox.OK;
+            } else if (buttons["_customized"]) {
+                buttons = buttons["_customized"];
+                isDefaultBox = false;
+            }
+            var cfg = {
+                "title": title,
+                "msg": msg,
+                "buttons": buttons,
+                "width": !isNaN(width) ? width : 400
+            };
+            if (listener) {
+                cfg["fn"] = listener;
+            }
+            if (icon) {
+                cfg["icon"] = icon;
+            }
+            if (isDefaultBox) {
+                CQ.Ext.MessageBox.show(cfg);
+            } else {
+                buttons = cfg.buttons;
+                var btnCnt = buttons.length;
+                var handleButton = function(button) {
+                    var b;
+                    if (CQ.Ext.isObject(button)) {
+                        cfg.fn(button.id);
+                    } else if (CQ.Ext.isString(button)) {
+                        if (button == "ok") {
+                            for (b = 0; b < btnCnt; b++) {
+                                if (buttons[b].defaultOk) {
+                                    cfg.fn(buttons[b].id);
+                                }
+                            }
+                        } else if (button == "cancel") {
+                            for (b = 0; b < btnCnt; b++) {
+                                if (buttons[b].defaultCancel) {
+                                    cfg.fn(buttons[b].id);
+                                }
+                            }
+
+                        }
+                    }
+                    dlg.hide();
+                };
+                // adjusted ExtJS code; taken from MessageBox#getDialog
+                var items = [ ];
+                for (var b = 0; b < btnCnt; b++) {
+                    var button = buttons[b];
+                    items.push(new CQ.Ext.Button({
+                        text: button.text,
+                        handler: handleButton.createCallback(button),
+                        hideMode: 'offsets'
+                    }));
+                }
+                var dlg = new CQ.Ext.Window({
+                    autoCreate: true,
+                    title: (title ? title : "&nbsp;"),
+                    resizable: false,
+                    id: CQ.Util.createId("cq-msgbox"),
+                    minimizable: false,
+                    maximizable: false,
+                    stateful: false,
+                    modal: true,
+                    shim: true,
+                    buttonAlign: "center",
+                    width: cfg.width,
+                    minHeight: 80,
+                    plain: true,
+                    footer: true,
+                    closable: true,
+                    close: function(){
+                        handleButton("cancel");
+                    },
+                    fbar: new CQ.Ext.Toolbar({
+                        items: items,
+                        enableOverflow: false
+                    }),
+                    "center": function() {
+                        var xy = this.el.getAlignToXY(CQ.Ext.getBody(), 'c-c');
+                        this.setPagePosition(xy[0], xy[1] - 40);
+                        return this;
+                    }
+                });
+                dlg.render(CQ.Util.getRoot());
+                dlg.getEl().addClass('x-window-dlg');
+                dlg.body.createChild({
+                    html: "<div class=\"ext-mb-content\" style=\"padding: 4px 8px 4px 4px; \">"
+                            + "<span class=\"ext-mb-text\">" + cfg.msg + "</span>"
+                            + "</div>"
+                });
+                dlg.show();
+                dlg.center();
+            }
+        }
+    };
+
+}();

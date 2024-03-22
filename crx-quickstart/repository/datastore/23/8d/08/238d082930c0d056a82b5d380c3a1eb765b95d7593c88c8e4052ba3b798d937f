@@ -1,0 +1,722 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+
+    /**
+     * The emulator bar visibility has been toggled
+     *
+     * @event Document#cq-emulatorbar-toggle
+     */
+
+    var emulatorElementsInitialized,
+        emulatorBar,
+        emulatorBarRuler,
+        normalBar,
+        rotatedBar,
+        emulatorDeviceList,
+        emulatorWidthLine,
+        emulatorHeightLine;
+    var liveAreaDelay=100;
+    const ariaLiveRegion=$("#ariaLiveRegion");
+    const emulatorDeviceTrigger='.js-EmulatorDeviceTrigger';
+    const ariaPressedAttribute = "aria-pressed";
+
+    function initEmulatorElements() {
+        if (emulatorElementsInitialized) {
+            return;
+        }
+
+        emulatorBar = $('.editor-EmulatorBar');
+        // return without initializing if emulatorBar element doesn't exist
+        if (!(emulatorBar[0])) {
+            return;
+        }
+
+        emulatorElementsInitialized = true;
+
+        emulatorBarRuler = $('.editor-EmulatorBar-ruler');
+        normalBar = $('.editor-EmulatorBar-switcher--width');
+        rotatedBar = $('.editor-EmulatorBar-switcher--height');
+        emulatorDeviceList = document.querySelector('.js-editor-EmulatorDeviceList');
+        $('.editor-EmulatorBar-switcher-device--desktop').attr("data-maxsize",`${parseInt(window.innerWidth, 10)}`);
+        $(emulatorDeviceTrigger).attr(ariaPressedAttribute, "false");
+
+        if (emulatorDeviceList) {
+            emulatorDeviceList.addEventListener('coral-selectlist:change', function(event) {
+                // When an item is unselected, selectedItem is undefined
+                // @See updateDeviceList
+                if (!event || !event.target || !event.target.selectedItem) {
+                    return;
+                }
+
+                var deviceName = event.target.selectedItem.value;
+
+                // rewrite url in case the device group changes
+                _rewriteUrl(deviceName);
+
+                if (deviceName === 'native') {
+                    ns.ui.emulator.reset();
+                } else {
+                    // To avoid an infinite loop, be sure not to set a configuration object as the 2nd parameter
+                    ns.ui.emulator.applyDevice(deviceName, false);
+                }
+            });
+        }
+    }
+
+    function updateDeviceList(device) {
+        if (emulatorDeviceList) {
+            var items = emulatorDeviceList.items.getAll();
+
+            // Avoid infinite loop of coral-selectlist:change
+            requestAnimationFrame(function() {
+                for (var i = 0; i < items.length; i++) {
+                    items[i].selected = (device === items[i].value);
+                }
+            });
+        }
+    }
+
+    /**
+     * Controls the UI for the Emulator options
+     *
+     * @namespace
+     * @alias Granite.author.ui.emulator
+     */
+    ns.ui.emulator = {
+        /**
+         * All devices available
+         */
+        deviceMap: null,
+
+        /**
+         * Currently applied device or null
+         *
+         * @memberOf Granite.author.ui.emulator
+         * @type {object}
+         */
+        currentDevice: null,
+
+        /**
+         * Currently applied devicegroup(s)
+         *
+         * @memberOf Granite.author.ui.emulator
+         * @type {object}
+         */
+        currentDeviceGroup: null,
+        currentDeviceGroups: null,
+        defaultGroup: "responsive",
+
+        /**
+         * Currently applied config or null
+         *
+         * @memberOf Granite.author.ui.emulator
+         * @type {object}
+         */
+        currentConfig: null,
+
+        /**
+         * @memberOf Granite.author.ui.emulator
+         * @private
+         */
+        breakpoints: null,
+
+        isVisible: function(){
+            return $('.editor-EmulatorBar').hasClass('is-visible');
+        },
+
+        /**
+         * Show/hide the emulator bar
+         *
+         * @memberOf Granite.author.ui.emulator
+         * @fires Document#cq-emulatorbar-toggle
+         */
+        toggle: function (condition) {
+            var hasClass = $('.editor-EmulatorBar').toggleClass('is-visible', condition).hasClass('is-visible');
+
+            if (hasClass) { // find the breakpoints
+                this.updateEmulatorBar();
+
+                $(window).on('resize.emulator-observe', $.throttle(50, this.updateEmulatorBar.bind(this)));
+            } else {
+                $(window).off('resize.emulator-observe');
+            }
+
+            channel.trigger('cq-emulatorbar-toggle', {
+                isOpen: hasClass
+            });
+
+            ns.ContentFrame.resetContentHeight();
+            ns.ContentFrame.updateTopOffset();
+        },
+
+        /**
+         *
+         * @memberOf Granite.author.ui.emulator
+         */
+        showWidthLine: function () {
+            if (emulatorWidthLine) {
+                emulatorWidthLine.remove();
+            }
+
+            emulatorWidthLine = $('<div/>', {
+                'class': 'js-editor-EmulatorBar-toolbar-currentWidth editor-EmulatorBar-toolbar-currentWidth'
+            }).css({
+                'left': this.currentConfig ? this.currentConfig.width : '100%'
+            }).appendTo(emulatorBar.find('.editor-EmulatorBar-toolbar'));
+        },
+
+        /**
+         *
+         * @memberOf Granite.author.ui.emulator
+         */
+        showHeightLine: function () {
+            if (emulatorHeightLine) {
+                emulatorHeightLine.remove();
+            }
+
+            emulatorHeightLine = $('<div/>', {
+                'class': 'js-editor-EmulatorBar-toolbar-currentHeight editor-EmulatorBar-toolbar-currentHeight'
+            }).css({
+                'top': this.currentConfig ? this.currentConfig.height : 0,
+                'width': this.currentConfig ? this.currentConfig.width : 0
+            }).appendTo(emulatorBar.find('.editor-EmulatorBar-toolbar'));
+        },
+
+        /**
+         * shows the breakpoints of the page info
+         *
+         * @memberOf Granite.author.ui.emulator
+         */
+        resetBreakpoints: function () {
+            var breakpoints = ns.pageInfo.responsive && ns.pageInfo.responsive.breakpoints ?
+                    ns.pageInfo.responsive.breakpoints :
+                    {},
+                barWidth = emulatorBar[0].clientWidth;
+
+            emulatorBar.find('.js-editor-EmulatorBar-breakpoint').remove();
+
+            for (var bp in breakpoints) {
+                var isActive = bp === ns.responsive.getCurrentBreakpoint(),
+                    variant = isActive ? 'info' : 'inspect',
+                    outOfScreen = barWidth <= breakpoints[bp].width,
+                    placement = isActive && outOfScreen ? 'left' : 'top',
+                    my, at, tooltip;
+
+                my = isActive && outOfScreen ? 'right-5 bottom-6' : 'center bottom-6';
+                at = isActive && outOfScreen ? 'left+' + barWidth + ' bottom' : 'left+' + breakpoints[bp].width + ' bottom';
+
+                tooltip = new Coral.Tooltip().set({
+                    variant: variant,
+                    placement: placement,
+                    content: {
+                        innerHTML: Granite.I18n.getVar(breakpoints[bp].title) || bp
+                    },
+                    open: true
+                });
+
+                tooltip.classList.add('js-editor-EmulatorBar-breakpoint', 'editor-EmulatorBar-breakpoint');
+                $(tooltip).data('breakpoint', bp);
+                $(tooltip).appendTo(emulatorBar).position({
+                    my: my,
+                    at: at,
+                    of: emulatorBarRuler,
+                    collision: 'none'
+                });
+            }
+        },
+
+        /**
+         * shows the device which is currently chosen as a tooltip
+         *
+         * @memberOf Granite.author.ui.emulator
+         */
+        showCurrentDeviceTooltip: function () {
+            var deviceToolbar = emulatorBar.find('.editor-EmulatorBar-toolbar');
+
+            emulatorBar.find('.js-editor-EmulatorBar-switcher-currentDevice').remove();
+
+            if (this.currentConfig) {
+                var tooltip = new Coral.Tooltip().set({
+                  variant: "inspect",
+                  placement: "left",
+                  content: {
+                    innerHTML: ns.pageInfo.emulators.groups[this.currentDeviceGroup][this.currentDevice].text
+                  },
+                  open: true
+                });
+
+                tooltip.classList.add('js-editor-EmulatorBar-switcher-currentDevice', 'editor-EmulatorBar-switcher-currentDevice');
+
+                $(tooltip).appendTo(deviceToolbar).position({
+                    my: 'right-6 center',
+                    at: 'left+'+ this.currentConfig.width,
+                    of: deviceToolbar,
+                    collision: 'none'
+                });
+            }
+        },
+
+        /**
+         * updates the UI state of the bar
+         *
+         * @memberOf Granite.author.ui.emulator
+         */
+        updateEmulatorBar: function () {
+            // rerenders the breakpoint
+            this.resetBreakpoints();
+
+            // shows the current device tooltip
+            this.showCurrentDeviceTooltip();
+
+            // updates the current width line
+            this.showWidthLine();
+            this.showHeightLine();
+        },
+
+
+        /**
+         * Applies a device based on the name which has to be part of the page info
+         * Or a forced config
+         *
+         * @memberOf Granite.author.ui.emulator
+         *
+         * @param devicename {String}
+         * @param [config] {}
+         */
+        applyDevice: function (devicename, config) {
+            var cfg = config || ns.ui.emulator.getDeviceByName(devicename),
+                appliedCfg, self = this;
+
+            if (cfg) {
+                this.currentDevice = devicename;
+                this.currentDeviceGroups = cfg.groups;
+                this.currentDeviceGroup = cfg.groups[0];
+
+                cfg.name = devicename;
+                cfg.rotated = this.rotated;
+
+                $.cookie('emulator', JSON.stringify({
+                    rotated: this.rotated,
+                    device: cfg
+                }), {
+                    path: Granite.HTTP.externalize('/'),
+                    expires: 7
+                });
+
+                updateDeviceList(devicename);
+
+                ns.overlayManager.setOverlaysVisible(false);
+
+                ns.ContentFrame.executeCommand(null, 'emulate', cfg).then(function (req, res) {
+                    appliedCfg = res.data;
+                    self.currentConfig = appliedCfg;
+
+                    ns.ContentFrame.setWidth(appliedCfg.width);
+                    ns.responsive.setDeviceBreakpoint(appliedCfg.width);
+
+                    ns.ui.emulator.updateEmulatorBar();
+
+                    setTimeout(function () {
+                        ns.overlayManager.reposition(true);
+                        ns.overlayManager.setOverlaysVisible(true);
+                        ns.ContentFrame.resetContentHeight();
+                    }, 500);
+                });
+            }
+        },
+
+        /**
+         * Resets the Emulator to its native state
+         *
+         * @memberOf Granite.author.ui.emulator
+         */
+        reset: function() {
+            var self = this;
+
+            $.removeCookie('emulator', {
+                path: Granite.HTTP.externalize('/')
+            });
+
+            updateDeviceList('native');
+
+            ns.ContentFrame.setWidth('');
+            ns.ContentFrame.executeCommand(null, 'resetEmulate').then(function () {
+                self.currentConfig = null;
+                self.currentDevice = null;
+                self.currentDeviceGroups = null;
+
+                ns.ContentFrame.resetContentHeight();
+
+                ns.responsive.setDeviceBreakpoint();
+
+                ns.ui.emulator.updateEmulatorBar();
+            });
+        },
+
+        /**
+         * Init all devices which are defined in the current emulatorbar incl.
+         * some additional information (name, groups)
+         *
+         * @memberOf Granite.author.ui.emulator
+         * @returns {Array} of all devices
+         */
+        initDevices: function() {
+            var devices = [];
+            if (emulatorDeviceList && (ns.pageInfo && ns.pageInfo.emulators && ns.pageInfo.emulators.groups)) {
+                // get all devices and check if they are part of the groups
+                var items = emulatorDeviceList.items.getAll();
+
+                for (var i = 0; i < items.length; i++) {
+                    var devicename = items[i].value;
+                    if (devicename === "native") {
+                        continue;
+                    }
+
+                    // get the groups the device is part of
+                    var devicegroups = [];
+                    for (var group in ns.pageInfo.emulators.groups) {
+                        if (ns.pageInfo.emulators.groups[group][devicename]) {
+                            devicegroups.push(group);
+                        }
+                    }
+
+                    // add the device to the device map
+                    if (devicegroups.length) {
+                        var device = ns.pageInfo.emulators.groups[devicegroups[0]][devicename];
+                        // additional information
+                        device.name = devicename;
+                        device.groups = devicegroups;
+                        devices.push(device);
+                    }
+                }
+            }
+            return devices;
+        },
+
+
+        /**
+         * Get the device configuration based on the name
+         *
+         * @memberOf Granite.author.ui.emulator
+         * @param devicename {String}
+         * @returns [device configuration] {Object}
+         */
+        getDeviceByName: function(devicename) {
+            return this.deviceMap.find(_findByDevice(devicename));
+        },
+
+        /**
+         * Get the first device configuration which fulfills all given groups
+         *
+         * @memberOf Granite.author.ui.emulator
+         * @param devicegroups {Array}
+         * @returns [device configuration] {Object}
+         */
+        getDeviceByGroup: function(devicegroups) {
+            return this.deviceMap.find(_findByGroups(devicegroups));
+        },
+
+        /**
+         * Get the device config depending on the URL and the cookie
+         * @private
+         */
+        getDeviceConfig: function () {
+            // check the selectors
+            var groupsFromSelector = _getGroupsFromSelector();
+            var cfg = JSON.parse($.cookie('emulator'));
+
+            if (!groupsFromSelector.length) {
+                if (cfg) {
+                    // if cookie is set and no selector is set, show device from cookie
+                    return cfg;
+                } else {
+                    // if no cookie and no selector is set, show default page (device = 'native')
+                    return null;
+                }
+            } else {
+                if (cfg && _deviceHasGroup(groupsFromSelector, cfg.device)) {
+                    // if cookie is set and device matches ANY group provided in the selector, show device from cookie
+                    return cfg;
+                } else {
+                    // reload page with a new device config
+                    cfg = null;
+                    // Get the first device which fulfills ALL groups provided in the selector
+                    var device = ns.ui.emulator.getDeviceByGroup(groupsFromSelector);
+                    if (device) {
+                        cfg = {};
+                        cfg.device = device;
+                    }
+                    return cfg;
+                }
+            }
+        }
+
+    };
+
+    /**
+     * @property {boolean} rotated - allows to rotate the device
+     */
+    Object.defineProperty(ns.ui.emulator, 'rotated', {
+        set: function (val)  {
+            var button = $('.editor-EmulatorDeviceRotate')[0];
+
+            this._rotated = !!val;
+
+            $('.js-EmulatorDeviceRotate').attr(
+                'aria-label',
+                `${Granite.I18n.get(
+                  'Rotate device',
+                  'aria-label for accesibillity fix',
+                )} to ${
+                  !this._rotated
+                    ? Granite.I18n.get('landscape')
+                    : Granite.I18n.get('portrait')
+                }`,
+            );
+
+            if (this._rotated) {
+                button.icon = "deviceRotateLandscape";
+                rotatedBar.addClass('is-visible');
+                normalBar.removeClass('is-visible');
+            } else {
+                button.icon = "deviceRotatePortrait";
+                normalBar.addClass('is-visible');
+                rotatedBar.removeClass('is-visible');
+            }
+        },
+        get: function () {
+            return !!this._rotated;
+        }
+    });
+
+    function _rewriteUrl(devicename) {
+        var selectorInURL = _getSelectorFromURL();
+        var path = Granite.HTTP.getPath(window.location.href);
+        var extension = window.location.pathname.substring(window.location.pathname.lastIndexOf(".") + 1);
+        var selectorForDevice = (devicename === "native") ? "" // remove all selectors
+            : _getSelectorForDevice(ns.ui.emulator.getDeviceByName(devicename));
+        if (selectorInURL != selectorForDevice) {
+            if (selectorForDevice.length) selectorForDevice = "." + selectorForDevice;
+            var url = path + selectorForDevice + "." + extension +
+                window.location.hash +
+                window.location.search;
+            // set history, don't make a reload of the whole page
+            History.pushState(null, null, Granite.HTTP.externalize(url));
+        }
+    }
+
+    /**
+     * Find device in known devices
+     * @param devicename {String}
+     * @returns {boolean}
+     */
+    function _findByDevice(devicename) {
+        return function (device) {
+            return device.name === devicename;
+        }
+    }
+
+    /**
+     * Find device with valid groups from known devices
+     * @param groups {Array}
+     * @returns {boolean}
+     */
+    function _findByGroups(groups) {
+        return function (device) {
+            if (!groups.length) return false;
+            for (var i = 0; i < groups.length; i++) {
+                if (!device.groups.includes(groups[i])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /**
+     * Get the selector from URL
+     * @param devicename
+     * @private
+     */
+    function _getSelectorFromURL() {
+        var path = Granite.HTTP.getPath(window.location.href);
+        var selector = window.location.pathname.substring(path.length);
+        var start = selector.indexOf(".");
+        var end = selector.lastIndexOf(".");
+        if (start  > -1 && end > start) {
+            selector = selector.substring(start + 1, end);
+        } else {
+            selector = "";
+        }
+        return selector;
+    }
+
+    /**
+     * Get the selector based on the groups of a device
+     * A device can belong to multiple device groups.
+     * These groups will influence the selector of the page
+     * In case the group is part of the responsive group, the selector stays empty
+     *
+     * @memberOf Granite.author.ui.emulator
+     *
+     * @param device {String}
+     */
+    function _getSelectorForDevice(device) {
+        var devicegroups = [];
+        for (var i = 0; i < device.groups.length; i++) {
+            var group = device.groups[i];
+            // In case the group is part of the responsive group, remove the responsive group,
+            // but leave the other groups
+            if (group !== ns.ui.emulator.defaultGroup) {
+                devicegroups.push(group);
+            }
+        }
+        return devicegroups.join(".");
+    }
+
+    /**
+     * Get the device groups provided in the url
+     *
+     * @return {Array} groups
+     */
+    function _getGroupsFromSelector() {
+        var groups = [];
+
+        var selectorInURL = _getSelectorFromURL();
+        if (selectorInURL.length) {
+            groups = selectorInURL.split(".");
+        }
+        return groups;
+    }
+
+    /**
+     * Check if device is part of ANY provided group
+     *
+     * @param groups {Array}
+     * @param device {Object}
+     * @returns {boolean}
+     * @private
+     */
+    function _deviceHasGroup(groups, device) {
+        var devicegroups = (device.groups || [ns.ui.emulator.defaultGroup]);
+        return devicegroups.some(function(devicegroup) {
+            return groups.includes(devicegroup);
+        });
+    }
+
+    channel.on('cq-editor-loaded', function () {
+        try {
+            initEmulatorElements();
+            // init all devices
+            ns.ui.emulator.deviceMap = ns.ui.emulator.initDevices();
+            if (ns.ui.emulator.deviceMap.length) {
+                var cfg = ns.ui.emulator.getDeviceConfig();
+
+                if (cfg) {
+                    ns.ui.emulator.rotated = cfg.rotated;
+                    ns.ui.emulator.applyDevice(cfg.device.name);
+
+                    // sets the initial value of the emulator device Coral.selectList
+                    updateDeviceList(cfg.device.name);
+                }
+
+                // the emulator trigger is displayed in case any emulator is available
+                ns.ui.globalBar.emulatorTrigger.disabled = false;
+            }
+        } catch(ex) {
+            // ignore wrong config
+        }
+
+    });
+
+    $(document).on('click', '.js-editor-EmulatorBar-toggle', ns.ui.emulator.toggle.bind(ns.ui.emulator));
+
+    $(document).on('click', '.js-editor-LayerSwitcherTrigger', function (){
+        ariaLiveRegion.html("");
+        setTimeout(()=>{
+            ariaLiveRegion.html(
+                `${Granite.I18n.get(
+                    "Preview button pressed",
+                    "label used in accesibility to annouce preview button state"
+                )} `
+            );
+        },liveAreaDelay);
+    });
+
+    $(document).on('click', '.js-editor-EmulatorBar-toggle', function (){
+        ariaLiveRegion.html("");
+        setTimeout(()=>{
+           ariaLiveRegion.html(
+                `${Granite.I18n.get(
+                    "Devices emulator button pressed",
+                    "label used in accesibility to annouce emulator button state"
+                )} `
+            );
+        },liveAreaDelay);
+    });
+
+    $(document).on('click', '.js-EmulatorDeviceRotate', function (ev) {
+        ns.ui.emulator.rotated = !ns.ui.emulator.rotated;
+
+        if (ns.ui.emulator.currentDevice) {
+            ns.ui.emulator.applyDevice(ns.ui.emulator.currentDevice);
+        }
+
+        setTimeout(() => {
+            $("#ariaLiveRegion").html(
+                `${Granite.I18n.get(
+                    "device viewport changed to",
+                    "label used in accesibility to annouce viewport change"
+                )} ${
+                    ns.ui.emulator.rotated
+                        ? Granite.I18n.get("landscape")
+                        : Granite.I18n.get("portrait")
+                }`
+            );
+        }, liveAreaDelay);
+    });
+
+    $(document).on('click', emulatorDeviceTrigger, function (ev) {
+        var devicename = $(ev.currentTarget).data('device');
+        var deciveSize = $(ev.currentTarget).attr("data-maxsize");
+
+        setTimeout(() => {
+            $("#ariaLiveRegion").html(
+                `${Granite.I18n.get(
+                    "device viewport changed from 0px to",
+                    "label used in accesibility to annouce dimension of viewport"
+                )} ${deciveSize}${Granite.I18n.get(
+                    "px",
+                    "label used in accesibility for px"
+                )}`
+            );
+        }, liveAreaDelay);
+
+        if($(emulatorDeviceTrigger).attr(ariaPressedAttribute) !== true) {
+            $(emulatorDeviceTrigger).attr(ariaPressedAttribute, "false");
+        }
+
+        $(ev.currentTarget).attr(ariaPressedAttribute,"true");
+
+        // rewrite url in case the device group changes
+        _rewriteUrl(devicename);
+
+        ns.ui.emulator[devicename === 'native' ? 'reset' : 'applyDevice'](devicename);
+    });
+
+}(jQuery, Granite.author, jQuery(document), this));

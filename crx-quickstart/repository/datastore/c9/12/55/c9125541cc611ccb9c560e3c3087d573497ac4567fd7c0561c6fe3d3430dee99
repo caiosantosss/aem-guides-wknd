@@ -1,0 +1,618 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.security.ImportCsvWizard
+ * @extends CQ.Dialog
+ * @since 5.4
+ * The ImportCsvWizard is a step-by-step wizard to import users by comma separated values.
+ * @constructor
+ * Create a new ImportCsvWizard
+ * @param {Object} config The config object
+ */
+CQ.security.ImportCsvWizard = CQ.Ext.extend(CQ.Dialog, {
+
+    dataView: null,
+
+    progressStore: null,
+
+    progressTemplate: null,
+
+    progressPanel: null,
+
+    firstPanel: null,
+
+    lastPanel: null,
+
+    loadMask: null,
+
+    allData: null,
+
+    constructor: function(config) {
+        var dlg = this;
+
+        //----------------------------------------------------------------------
+        // Progress Bar
+        //----------------------------------------------------------------------
+
+        this.activePage = 0;
+
+        this.progressStore = [{
+            idx: 0,
+            title: CQ.I18n.getMessage("Enter Data")
+        },{
+            idx: 1,
+            title: this.getMsg(this.PROGRESS_PREVIEW_USERS)
+        },{
+            idx: 2,
+            title: this.getMsg(this.PROGRESS_SELECT_GROUP)
+        }];
+
+        this.progressTemplate = new CQ.Ext.XTemplate(
+                '<div class="x-toolbar x-small-editor">',
+                    '<table cellspacing="0"><tr>',
+                    '<tpl for=".">',
+                        '<tpl if="values.idx != 0">',
+                            '<td><span class="wiz-sep">&rarr;</span></td>',
+                        '</tpl>',
+                        '<td><span class="wiz-step {[this.isActive(values.idx) ? "wiz-step-active" : ""]}">{#}. {title}</span></td>',
+                    '</tpl>',
+                    '</table>',
+                '</div>',
+                {
+                    isActive: function(idx) {
+                        return idx == dlg.activePage;
+                    }
+                });
+
+        this.progressPanel = new CQ.Ext.Panel({
+            cls: "cq-wizard-progress",
+            border: false,
+            html: this.progressTemplate.apply(this.progressStore)
+        });
+
+
+        //----------------------------------------------------------------------
+        // Hard coded Panels
+        //----------------------------------------------------------------------
+
+        this.firstPanel = new CQ.Ext.Panel({
+            layout: "form",
+            autoScroll: true,
+            header: false,
+            bodyStyle: CQ.themes.Dialog.TAB_BODY_STYLE,
+            labelWidth: CQ.themes.Dialog.LABEL_WIDTH,
+            defaultType: "textfield",
+            "stateful": false,
+            defaults: {
+                msgTarget: CQ.themes.Dialog.MSG_TARGET,
+                anchor: CQ.themes.Dialog.ANCHOR,
+                "stateful": false
+            },
+            "items": [{
+                    "xtype": "static",
+                    "italic": true,
+                    "text": CQ.I18n.getMessage("Enter or paste a comma, tab or semicolon separated value ...")
+                },
+                this.textArea = new CQ.Ext.form.TextArea({
+                    "xtype": "textarea",
+                    "hideLabel": true,
+//                    "height": 90, //height in combination with upload field
+                    "height": 120,
+                    "enableKeyEvents": true,
+                    "listeners": {
+                        "keyup": function() {
+                      var value = this.getValue();
+                      value = value.replace(/^\s+/,'');
+                      	if(value != ''){
+                           dlg.nextButton.enable();
+	                }else{
+		           dlg.nextButton.disable();
+                      	}
+
+                       }
+                    }
+                }),
+
+		{
+                    "xtype": "static",
+                    "html": "<br>"
+                },{
+                    "xtype": "panel",
+                    "layout": "table",
+                    "cls": "cq-importcsv-hints",
+                    "border": false,
+                    "layoutConfig": {
+                        "columns": 2
+                    },
+                    "items": [{
+                        "xtype": "static",
+                        "small": true,
+                        "html": CQ.I18n.getMessage("Sample data:") + "<br>" +
+                                "email,givenName,familyName" + "<br>" +
+                                "claude.johnson@pookmail.com,Claude,Johnson" + "<br>" +
+                                "barbara.smith@spambob.com,Barbara,Smith" + "<br>" +
+                                "henry.jones@dodgit.com,Henry,Jones" + "<br>"
+                    },{
+                        "xtype": "static",
+                        "small": true,
+                        "cellCls": "cq-importcsv-hints-padding",
+                        "html": "- " + CQ.I18n.getMessage("Values must be separated by comma, tab or semicolon") + "<br>" +
+                                "- " + CQ.I18n.getMessage("First row must be a header") + "<br>" +
+                                "- " + this.getMsg(this.FIRST_COLUMN_IS_HEADER)
+                    }]
+                },
+
+               {
+                    "name": "separator",
+                    "xtype": "hidden",
+                    "value": ",",
+                    "ignoreData": true
+                },{
+                    "name": "delimiter",
+                    "xtype": "hidden",
+                    "value": "\"",
+                    "ignoreData": true
+                },{
+                    "name": "category",
+                    "xtype": "hidden",
+                    "value": "mcm",
+                    "ignoreData": true
+                },
+                this.valueField = new CQ.Ext.form.Hidden({
+                    //todo: re-use textarea?
+                    "name": "csv",
+                    "ignoreData": true
+                })
+            ]
+        });
+
+        this.secondPanel = new CQ.Ext.Panel({
+            layout: "fit",
+            autoScroll: true,
+            header: false,
+            bodyStyle: "padding:0;",
+            border: false,
+            labelWidth: CQ.themes.Dialog.LABEL_WIDTH,
+            "stateful": false,
+            defaults: {
+                msgTarget: CQ.themes.Dialog.MSG_TARGET,
+                anchor: CQ.themes.Dialog.ANCHOR,
+                "stateful": false
+            }
+        });
+
+        this.thirdPanel = new CQ.Ext.Panel({
+            isLast: true,
+            layout: "form",
+            bodyStyle: CQ.themes.Dialog.TAB_BODY_STYLE,
+            labelWidth: CQ.themes.Dialog.LABEL_WIDTH,
+            defaultType: "textfield",
+            "stateful": false,
+            defaults: {
+                msgTarget: CQ.themes.Dialog.MSG_TARGET,
+                "hideLabel": true,
+                "stateful": false
+            },
+            items: [{
+                "xtype": "static",
+                "bottommargin": true,
+                "text": this.getMsg(this.ADD_USERS_TO_FOLLOWING)
+            },
+            this.groupIdField = new CQ.Ext.form.TextField({
+                "name": "groupId",
+                "width": 300,
+                "value": ""
+            }),{
+                "xtype": "static",
+                "small": true,
+                "bottommargin": true,
+                "topmargin": true,
+                "text": this.getMsg(this.LEAVE_EMPTY)
+            }
+            ],
+            listeners: {
+                beforeShow: function() {
+                    // todo: group name from file name
+                    var groupName = CQ.I18n.getMessage("List", [], "marketing terminology") + " " + CQ.wcm.SiteAdmin.formatDate(new Date());
+                    dlg.groupIdField.setValue(groupName);
+                }
+            }
+        });
+
+
+        var nextStep = function() {
+            dlg.navHandler.call(dlg, 1);
+        };
+        var prevStep = function() {
+            dlg.navHandler.call(dlg, -1);
+        };
+
+        //----------------------------------------------------------------------
+        // Wizard Panel
+        //----------------------------------------------------------------------
+
+        this.wizPanel = new CQ.Ext.Panel({
+            layout:'card',
+            deferredRender: false,
+            plain: CQ.themes.Dialog.TABPANEL_PLAIN,
+            border: false,
+            "stateful": false,
+            activeItem: 0, // make sure the active item is set on the container config!
+            bbar: this.progressPanel,
+            defaults: {
+                // applied to each contained panel
+                border:false
+            },
+            items: [this.firstPanel, this.secondPanel, this.thirdPanel]
+        });
+
+        //----------------------------------------------------------------------
+        // Dialog Panel
+        //----------------------------------------------------------------------
+
+        this.prevButton = new CQ.Ext.Button({
+            "text": CQ.I18n.getMessage("Prev"),
+            "cls": "cq-btn-prev",
+            "handler": prevStep,
+            "disabled": true,
+            "minWidth": CQ.themes.Dialog.MIN_BUTTON_WIDTH
+        });
+
+        this.nextButton = new CQ.Ext.Button({
+            "text": CQ.I18n.getMessage("Next"),
+            "cls": "cq-btn-next",
+            "handler": nextStep,
+            "disabled": true,
+            "minWidth": CQ.themes.Dialog.MIN_BUTTON_WIDTH
+        });
+
+        config = CQ.Util.applyDefaults(config, {
+            "title":CQ.I18n.getMessage("Import Comma Separated Values"),
+            "formUrl":"/bin/security/csvimporter.json",
+            "width": 780,
+            "height": 376,
+            "params": {
+                "_charset_":"utf-8"
+            },
+            "items": [this.wizPanel],
+            "buttons": [
+                this.prevButton,
+                this.nextButton,
+                CQ.Dialog.CANCEL
+            ]
+        });
+
+        CQ.security.ImportCsvWizard.superclass.constructor.call(this, config);
+    },
+
+    /**
+     * Masks the wizard.
+     */
+    mask: function() {
+        // todo: try to mask entire dialog instead of inner body
+         if (!this.loadMask) {
+            this.loadMask = new CQ.Ext.LoadMask(this.body, {
+                "msg": CQ.I18n.getMessage("Loading...")
+            });
+        }
+        this.loadMask.show();
+    },
+
+    /**
+     * Unmasks the wizard.
+     */
+    unmask: function() {
+        if (!this.loadMask) return;
+        this.loadMask.hide();
+    },
+
+
+    loadData: function(max) {
+        if (!max || max < 0) max = 0; // load all
+
+        // todo: error handling
+	var v = this.textArea.getValue();
+
+        // split rows
+        v = v.split("\n");
+
+        var header = v.splice(0, 1);
+        // header: ["email, firstName, ..."]
+
+        //pull separator from header
+         var sep = header[0].indexOf("\t") != -1 ? "\t" : (header[0].indexOf(";") != -1 ? ";" : ",");
+		//this.separator.setValue(sep);
+        header = header[0].split(sep);
+        // header: ["email", "firstName", ...]
+
+        for (var i = 0; i < header.length; i++) {
+            header[i] = header[i].replace(/\W/g, "");
+        }
+
+        if (!this.previewStore) {
+            // initial config
+            this.previewStore = new CQ.Ext.data.ArrayStore({
+                fields: header
+            });
+
+            var columns = [];
+            for (var i = 0; i < header.length; i++) {
+                columns.push({
+                    "id": header[i],
+                    "header": header[i],
+                    "dataIndex": header[i],
+                    "editor": new CQ.Ext.form.TextField(),
+                    "renderer": CQ.shared.XSS.getXSSValue
+                });
+            }
+
+            this.previewColumnModel = new CQ.Ext.grid.ColumnModel({
+                // specify any defaults for each column
+                defaults: {
+                    sortable: true // columns are not sortable by default
+                },
+                columns: columns
+            });
+        }
+
+
+        // split cols
+        var data = [];
+        this.allData = [];
+        for (var i = 0; i < v.length; i++) {
+      //Start - handle tab and comma inside double quoted fields like aboutMe, Address
+            var indexOfDoubleQuote = v[i].indexOf("\"");
+            if(indexOfDoubleQuote != -1){
+                var matchQuotedStrings = v[i].match(/\"[A-Za-z ,';0-9-@#]+\"/g);
+                if(!matchQuotedStrings){
+			//TODO: error handing
+					//CQ.MessageBox.alert(CQ.I18n.getMessage("Error"), CQ.I18n.getMessage("Invalid format, double quotes must be ended properly"));
+                	return;
+                }
+				for (var j = 0; j < matchQuotedStrings.length; j++) {
+
+           			 var encodedString = escape(matchQuotedStrings[j]);
+                    v[i] = v[i].replace(matchQuotedStrings[j],encodedString );
+        		}
+
+
+            }
+            v[i] = v[i].split(sep);
+			for (var k = 0; k < v[i].length; k++) {
+				v[i][k] = unescape(v[i][k]).replace(/"/g,"");
+            }
+	//End - ab and comma handling
+            this.allData.push(v[i]);
+            if (i < max) {
+                data.push(v[i]);
+            }
+        }
+        if (max == 0) {
+            data = this.allData;
+        }
+
+        this.previewStore.loadData(data);
+        return v.length;
+    },
+
+
+    createGrid: function() {
+        this.previewStore = null;
+        this.previewColumnModel = null;
+
+        var max = 10;
+        var length = this.loadData(max);
+
+        // paging toolbar
+        // todo: see bug #31190
+//        var ptCfg = CQ.Util.applyDefaults(this.initialConfig.pagingToolbar, {
+//            "xtype": "paging",
+//            "pageSize": 10,
+//            "store": store,
+//            "displayInfo": true,
+//            "displayMsg": CQ.I18n.getMessage("{2} results"),
+//            "emptyMsg": "",
+//            "beforePageText": CQ.I18n.getMessage("Page"),
+//            "afterPageText": CQ.I18n.getMessage("of {0}"),
+//            "firstText": CQ.I18n.getMessage("First Page"),
+//            "prevText": CQ.I18n.getMessage("Previous Page"),
+//            "nextText": CQ.I18n.getMessage("Next Page"),
+//            "lastText": CQ.I18n.getMessage("Last Page"),
+//            "refreshText": CQ.I18n.getMessage("Refresh")
+//        });
+//
+//        var pagingToolbar = CQ.Util.build(ptCfg, true);
+
+
+        var tbar;
+        if (length > max) {
+            tbar = [
+                new CQ.Ext.Button({
+                    "text": CQ.I18n.getMessage("Preview All ({0})", [length]),
+                    "scope": this,
+                    "handler": function() {
+                        this.mask();
+                        var wiz = this;
+                        window.setTimeout(function(){
+                            // use timeout in order to mask the wizard
+                            wiz.loadData();
+                            wiz.resultsMessage.updateText(CQ.I18n.getMessage("{0} of {1}", [length, length]));
+                            wiz.unmask();
+                        }, 1);
+                    }
+                }),
+                "->",
+                this.resultsMessage = new CQ.Static({
+                    "text": CQ.I18n.getMessage("{0} of {1}", [max, length])
+                }),
+                "&nbsp;"
+            ]
+        }
+
+
+        this.grid = new CQ.Ext.grid.EditorGridPanel({
+            "store": this.previewStore,
+            "cm": this.previewColumnModel,
+            "stripeRows": true,
+            "stateful": false,
+            "stateId": "grid",
+            "clicksToEdit": 1,
+//            "bbar": pagingToolbar,
+            "tbar": tbar,
+            "viewConfig": new CQ.Ext.grid.GridView({
+                "forceFit":true
+            })
+        });
+
+//        pagingToolbar.bindStore(store);
+
+        this.secondPanel.doLayout();
+    },
+
+
+    ok: function() {
+        var cols = this.previewColumnModel.columns;
+
+        // create header
+        var value = "";
+        for (var i = 0; i < cols.length; i++) {
+            value += '"' + cols[i]["id"] + '"';
+            value += (i == cols.length - 1) ? '\n' : ',';
+        }
+
+        // create values
+        this.previewStore.each(function(record) {
+            for (var i = 0; i < cols.length; i++) {
+                value += '"' + record.get(cols[i]["id"]) + '"';
+                value += (i == cols.length - 1) ? '\n' : ',';
+            }
+        }, this);
+
+        // add invisible users that are not previewed from allData
+        for (var i = this.previewStore.getTotalCount(); i < this.allData.length; i++) {
+            for (var j = 0; j < cols.length; j++) {
+                var v = this.allData[i][j];
+                value += '"' + (v ? v : "") + '"';
+                value += (j == cols.length - 1) ? '\n' : ',';
+            }
+        }
+
+        this.valueField.setValue(value);
+
+        this.textArea.disable();
+
+        var groupName = this.groupIdField.getValue();
+        var groupId = CQ.Ext.form.VTypes.makeAuthorizableId(groupName);
+        if (groupName != groupId) {
+            // assumption: free text entry: use value as name and generate compliant id
+            this.addParams({
+                "groupName": groupName
+            });
+            this.groupIdField.setValue(groupId);
+        }
+        // else: id probably selected from list or compoliant id entered
+
+        CQ.security.ImportCsvWizard.superclass.ok.call(this);
+    },
+
+    navHandler: function(d) {
+        var num = this.wizPanel.items.getCount();
+        var idx = this.activePage + d;
+        if (idx == num) {
+            this.ok();
+        } else if (idx >= 0 && idx < num) {
+            this.activePage = idx;
+            this.wizPanel.layout.setActiveItem(idx);
+            this.updateButtons();
+            if (idx == 1 && d > 0) {
+                this.mask();
+                var wiz = this;
+                window.setTimeout(function() {
+                    // use timeout in order to mask the wizard
+                    wiz.secondPanel.removeAll();
+                    wiz.createGrid();
+                    wiz.secondPanel.add(wiz.grid);
+                    wiz.unmask();
+                    wiz.doLayout();
+                }, 1);
+            }
+        }
+    },
+
+    updateProgressBar: function() {
+        // update the bottom steps
+        var infos = [];
+        var idx = 0;
+        this.wizPanel.items.each(function(){
+           infos.push({ title: this.title, idx: idx++ });
+        });
+        this.progressStore = infos;
+    },
+
+    updateButtons: function() {
+        var num = this.wizPanel.items.getCount();
+        if (this.activePage < num) {
+            this.nextButton.enable();
+            if (this.activePage == num-1) {
+                this.nextButton.setText(CQ.I18n.getMessage("Import"));
+            } else {
+                this.nextButton.setText(CQ.I18n.getMessage("Next"));
+            }
+        } else {
+            this.nextButton.disable();
+            this.nextButton.setText(CQ.I18n.getMessage("Next"));
+        }
+        if (this.activePage > 0) {
+            this.prevButton.enable();
+        } else {
+            this.prevButton.disable();
+        }
+        // update toolbar buttons
+        this.progressTemplate.overwrite(this.progressPanel.body, this.progressStore);
+    },
+
+    // private
+    getMsg: function(msg, snippets) {
+        switch(msg) {
+            case this.TITLE:                    return CQ.I18n.getMessage("Import Users");
+
+            case this.PROGRESS_PREVIEW_USERS:   return CQ.I18n.getMessage("Preview Users");
+            case this.PROGRESS_SELECT_GROUP:    return CQ.I18n.getMessage("Select Group");
+
+            case this.FIRST_COLUMN_IS_HEADER:   return CQ.I18n.getMessage("First column will be used to create the user IDs");
+
+            case this.ADD_USERS_TO_FOLLOWING:   return CQ.I18n.getMessage("Add the imported users to the following group:");
+            case this.LEAVE_EMPTY:              return CQ.I18n.getMessage("If empty the imported users will not be added to any group.");
+
+            default: return "";
+        }
+    },
+
+    TITLE: 0,
+
+    // progress bar
+    PROGRESS_PREVIEW_USERS: 10,
+    PROGRESS_SELECT_GROUP: 11,
+
+    // 1st panel
+    FIRST_COLUMN_IS_HEADER: 100,
+
+    // 3rd panel ("select group")
+    ADD_USERS_TO_FOLLOWING: 300,
+    LEAVE_EMPTY: 301
+});
+
+
+CQ.Ext.reg("importcsvwizard", CQ.security.ImportCsvWizard);
+
+

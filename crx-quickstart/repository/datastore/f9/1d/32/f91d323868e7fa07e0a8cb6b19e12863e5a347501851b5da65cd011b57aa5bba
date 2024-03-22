@@ -1,0 +1,507 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+
+    /**
+     * Triggered when an Inspectable/Editable is added to the {@link Granite.author.editables} store
+     * Please use "cq-editable-added" instead
+     *
+     * @deprecated
+     * @event Document#cq-inspectable-added
+     * @type {object}
+     *
+     * @property {Granite.author.Inspectable|Granite.author.Editable} inspectable - The added item
+     */
+
+    /**
+     * Triggered when an Editable is added to the {@link Granite.author.editables} store
+     *
+     * @event Document#cq-editable-added
+     * @type {object}
+     *
+     * @property {Granite.author.Editable} editable - The added item
+     */
+
+    /**
+     * Triggered when the {@link Granite.author.editables} store is updated
+     *
+     * @event Document#cq-editables-updated
+     * @type {object}
+     *
+     * @property {Granite.author.Editable} editable - The added item
+     */
+
+    /**
+     * Triggered when the given {@link Granite.author.Editable}s must be updated
+     *
+     * @event Document#cq-editables-update
+     * @type {object}
+     *
+     * @property {Granite.author.Editable[]} editables - The editables to be updated
+     * @property {Granite.author.Editable[][]} [children] - The two dimensional list of child editables to also be updated. One list of children for each provided editable.
+     */
+
+    /**
+     * The Editable Store (array based) that contains all the [Editable]{@link Granite.author.Editable}s available on the page.
+     * The store is sorted based on the content resource structure.
+     *
+     * Initialized by {@link Document#event:cq-editables-loaded}; available on {@link Document#event:cq-editor-loaded}
+     *
+     * @namespace
+     * @alias Granite.author.editables
+     */
+    ns.editables = (function () {
+        var self = [];
+
+        /**
+         * Map of "path -> listener"
+         */
+        var onReadyListeners = {};
+
+        /**
+         * Map of "type -> listener"
+         */
+        var onTypeReadyListeners = {};
+
+        /**
+         * Destroys all Editables from the store, and empties the store
+         *
+         * @memberof Granite.author.editables
+         * @alias clean
+         * @fires Document#cq-editables-updated
+         */
+        self.clean = function () {
+            self.forEach(function (e) {
+                e.destroy();
+            });
+
+            self.length = 0;
+
+            channel.trigger($.Event('cq-editables-updated', {
+                editables: self
+            }));
+        };
+
+        /**
+         * Adds the passed Editables to the store
+         *
+         * @memberof Granite.author.editables
+         * @alias add
+         * @fires Document#cq-editable-added
+         * @fires Document#cq-editables-updated
+         *
+         * @param {Array.<Granite.author.Editable>} editables - Editables to be added to the store (replaces if already existing)
+         * @param {Object} config - Configuration object that specifies the position where the editables should be added
+         * @param {string} config.insertBehavior - Order in which the component must be inserted {@see Granite.author.persistence.PARAGRAPH_ORDER}
+         * @param {Granite.author.Editable} config.editableNeighbor - The targeted {@link Granite.author.Editable} neighbor
+         */
+        self.add = function (editables, config) {
+            // Wrap into array in case
+            editables = $.isArray(editables) ? editables : [editables];
+
+            editables.forEach(function (editable) {
+
+                // If it already exists in the store, delete
+                var existing = self.find(editable.path);
+                if (existing.length !== 0) {
+                    existing.forEach(function (e) {
+                        self.remove(e);
+                        e.destroy();
+                    });
+                }
+
+                editable.updateConfig();
+
+                if (!config || !config.insertBehavior || !config.editableNeighbor) {
+                    // Push to the end of the array
+                    self.push(editable);
+                } else {
+                    var index = self.indexOf(config.editableNeighbor);
+
+                    if (config.insertBehavior === "before") {
+                        self.splice(index, 0, editable);
+
+                    } else if (config.insertBehavior === "after") {
+                        index += 1;
+                        self.splice(index, 0, editable);
+
+                    } else {
+                        // TODO Fallback to "last", but relative to the parent
+                        self.push(editable);
+                    }
+                }
+
+                // @deprecated, use "cq-editable-added" instead
+                channel.trigger($.Event('cq-inspectable-added', {
+                    inspectable: editable
+                }));
+                channel.trigger($.Event('cq-editable-added', {
+                    editable: editable
+                }));
+            });
+
+            channel.trigger($.Event('cq-editables-updated', {
+                editables: self
+            }));
+        };
+
+        /**
+         * Removes the passed Editables from the store
+         *
+         * @memberof Granite.author.editables
+         * @alias remove
+         * @fires Document#cq-editables-updated
+         *
+         * @param {Array.<Granite.author.Editable>|Granite.author.Editable} editable  - The Editables to remove
+         * @param {Boolean} removeChildren - Indicates if it should remove the children of the Editables too
+         */
+        self.remove = function (editable, removeChildren) {
+            var affected = $.isArray(editable) ? editable : [editable],
+                toRemove = [];
+            // Collect the elements to delete
+            $.each(affected, function (i, e) {
+                if (e instanceof ns.Inspectable) { // FIXME
+                    toRemove.push(e);
+                    if(removeChildren) {
+                        // Add all the children to remove list
+                        toRemove = toRemove.concat(self.getChildren(e, true));
+                    }
+                } else { // Plain search advice
+                    self.find(e).forEach(function (e) {
+                        toRemove.push(e);
+                        if(removeChildren) {
+                            // Add all the children to remove list
+                            toRemove = toRemove.concat(self.getChildren(e, true));
+                        }
+                    });
+                }
+            });
+            // Really delete them from array
+            for(var i=0; i<self.length;){
+                if ($.inArray(self[i], toRemove) > -1) {
+                    self.splice(i, 1);
+                } else {
+                    i++;
+                }
+            }
+
+            channel.trigger($.Event('cq-editables-updated', {
+                editables: self
+            }));
+        };
+
+        /**
+         * Move the passed Editable to another position in the store
+         *
+         * @memberof Granite.author.editables
+         * @alias move
+         * @fires Document#cq-editables-updated
+         *
+         * @param {Granite.author.Editable} editable - Editable to be moved
+         * @param {Object} config - Configuration object that specifies the new position where the editable should be moved
+         * @param {string} config.insertBehavior - Order in which the component must be inserted {@see Granite.author.persistence.PARAGRAPH_ORDER}
+         * @param {Granite.author.Editable} config.editableNeighbor - The targeted {@link Granite.author.Editable} neighbor
+         */
+        self.move = function (editable, config) {
+            if (!config || !config.insertBehavior || !config.editableNeighbor) {
+                // No-op (new position not clearly specified)
+                return;
+            } else {
+                var oldIndex = self.indexOf(editable);
+                var newIndex = self.indexOf(config.editableNeighbor);
+
+                if(oldIndex !== -1) {
+                    self.splice(oldIndex, 1);
+                }
+
+                if (config.insertBehavior === "before") {
+                    self.splice(newIndex, 0, editable);
+
+                } else if (config.insertBehavior === "after") {
+                    newIndex += 1;
+                    self.splice(newIndex, 0, editable);
+
+                } else {
+                    self.push(editable);
+                }
+            }
+
+            channel.trigger($.Event('cq-editables-updated', {
+                editables: self
+            }));
+        };
+
+        /**
+         * Initializes the store with the passed Editables (cleans the store first)
+         *
+         * @memberof Granite.author.editables
+         * @alias set
+         * @fires Document#cq-editables-updated
+         *
+         * @param {Array.<Granite.author.Editable>} editables - The ordered (parent to children) Editables to be added in the store.
+         */
+        self.set = function (editables) {
+            self.clean();
+            self.add(editables);
+        };
+
+        /**
+         * Returns the stored Editables according to the search parameter
+         *
+         * @memberof Granite.author.editables
+         * @alias find
+         *
+         * @param {Object|String} search - Either a complex search or the path as a string
+         * @return {Array.<Granite.author.Editable>} Returns an array of found Editables
+         */
+        self.find = function (search) {
+            var result = [];
+
+            if ($.type(search) === "string") { // then we
+                search = {
+                    path: search
+                };
+            }
+
+            if (search.path) {
+                $.each(self, function (i, e) {
+                    // path searching
+                    if (search.path instanceof RegExp ? search.path.test(e.path) : e.path === search.path) {
+                        result.push(e);
+                    }
+                });
+            } else if (search.type) {
+                $.each(self, function (i, e) {
+                    // path searching
+                    if (search.type instanceof RegExp ? search.type.test(e.type) : e.type === search.type) {
+                        result.push(e);
+                    }
+                });
+            }
+
+            return result;
+        };
+
+        /**
+         * Returns the root of the tree of Editables
+         *
+         * @memberof Granite.author.editables
+         * @alias getRoot
+         *
+         * @return {Granite.author.Editable} Returns the root of the tree of Editables
+         */
+        self.getRoot = function () {
+            var editable = self[0],
+                test = editable ? self.getParent(editable) : editable;
+
+            while (test) {
+                editable = test;
+                test = self.getParent(editable);
+            }
+
+            return editable;
+        };
+
+        /**
+         * Is the given {@link Granite.author.Editable} a root container
+         *
+         * @param {Granite.author.Editable} editable
+         * @returns {boolean}
+         */
+        self.isRootContainer = function (editable) {
+            return (editable && editable.config && editable.config.isContainer && !self.getParent(editable));
+        };
+
+        /**
+         * Returns the parent of the passed Editable
+         *
+         * @memberof Granite.author.editables
+         * @alias getParent
+         *
+         * @param {Granite.author.Editable} editable - The Editable child
+         * @param {Boolean} [all] - Indicates if we want to receive an array of all parents
+         * @return {Granite.author.Editable|Array.<Granite.author.Editable>} Returns the parent(s) of the given Editable or null
+         */
+        self.getParent = function (editable, all) {
+            var parentPath = editable.getParentPath();
+            var parent = self.find(parentPath)[0];
+
+            while (!parent && parentPath !== "") {
+                // Compute the next parent path and check if it resolves to an editable in the store
+                parentPath = ns.Inspectable.prototype.getParentPath.call({ // FIXME
+                    path: parentPath
+                });
+
+                parent = self.find(parentPath)[0];
+            }
+
+            if (all) {
+                // Compute all parents
+                var parents = [];
+
+                while (parent) {
+                    parents.push(parent);
+                    parent = self.getParent(parent);
+                }
+
+                return parents;
+            } else {
+                // Just return current parent
+                return parent;
+            }
+        };
+
+        /**
+         * Returns the selectable parents (= those with actions available on them) of the passed Editable
+         *
+         * @memberof Granite.author.editables
+         * @alias getSelectableParents
+         *
+         * @param {Granite.author.Editable} editable - The Editable child
+         * @return {Array.<Granite.author.Editable>} Returns all the selectable parents of the Editable or null
+         */
+        self.getSelectableParents = function (editable) {
+            var allParents = self.getParent(editable, true),
+                selectableParents = [];
+
+            allParents.forEach(function (parent) {
+                if (parent.hasActionsAvailable()) {
+                    selectableParents.push(parent);
+                }
+            });
+
+            return selectableParents;
+        };
+
+        /**
+         * Returns the children of the passed Editable
+         *
+         * @memberof Granite.author.editables
+         * @alias getChildren
+         *
+         * @param {Granite.author.Editable} editable - The Editable parent
+         * @param {Boolean} all - All the children or only the direct descendant
+         * @return {Array.<Granite.author.Editable>} Returns all the children of the Editable
+         */
+        self.getChildren = function (editable, all) {
+            var path = editable.path.replace("\*", "\\*"),
+                // All the children or only the direct descendant
+                scope = all ? '/.+' : '/[^/]+$';
+
+            return self.find({
+                path: new RegExp('^' + path + scope)
+            });
+        };
+
+        /**
+         * Registers a listener that would be executed when the Editable (at the given path) is ready
+         *
+         * @memberof Granite.author.editables
+         * @alias onReady
+         *
+         * @param {String} path - The path of the Editable
+         * @param {Function} listener - The listener function
+         */
+        self.onReady = function (path, listener) {
+            onReadyListeners[path] = listener;
+        };
+
+        /**
+         * Registers a listener that would be executed when the Editable (of the given type) is ready
+         *
+         * @memberof Granite.author.editables
+         * @alias onTypeReady
+         *
+         * @param {String} type - The type (sling resource type) of the Editable
+         * @param {Function} listener - The listener function
+         */
+        self.onTypeReady = function (type, listener) {
+            onTypeReadyListeners[type] = listener;
+        };
+
+        /**
+         * Executes the corresponding listeners when an Editable is added (depending on its path/type)
+         */
+        channel.on("cq-editable-added", function (event) {
+            var editable = event.editable,
+                onReadyListener = onReadyListeners[editable.path],
+                onTypeReadyListener = onTypeReadyListeners[editable.type];
+
+            if (onReadyListener) {
+                onReadyListener(editable);
+            }
+
+            if (onTypeReadyListener) {
+                onTypeReadyListener(editable);
+            }
+        });
+
+        return self;
+    }());
+
+    /**
+     * The Editable store is initialized on {@link Document#event:cq-editables-loaded} (when the editables are loaded/read from the content frame)
+     */
+    channel.on("cq-editables-loaded", function (event) {
+        ns.editables.set(event.editables);
+    });
+
+    /**
+     * Updates the store with the provided
+     */
+    channel.on("cq-editables-update", function (event) {
+        if (!event || !event.editables) {
+            return;
+        }
+
+        var editables = event.editables;
+
+        for (var i = 0, length = editables.length; i < length; i++) {
+            var editable = editables[i];
+            // Update the store
+            // Remove children currently in the store
+            ns.editables.remove(ns.editables.getChildren(editable));
+
+            // Add the new children
+            if (event.children && event.children.length > i) {
+                var children = event.children[i];
+
+                if (children) {
+                    ns.editables.add(children, {
+                        editableNeighbor: editable // neighbor means parent here
+                    });
+                }
+            }
+        }
+    });
+
+    /**
+     * @deprecated Use {@link Granite.author.editables} instead
+     */
+    Object.defineProperty(ns,'store',{
+
+        get: function () {
+            Granite.author.util.deprecated('Use Granite.author.editables instead');
+            return ns.editables;
+        },
+        set: function (value) {
+            Granite.author.util.deprecated('Use Granite.author.editables instead');
+            ns.editables = value;
+        }
+    });
+
+}(jQuery, Granite.author, jQuery(document), this));

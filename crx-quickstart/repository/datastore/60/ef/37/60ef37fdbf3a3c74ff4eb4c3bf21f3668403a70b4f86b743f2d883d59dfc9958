@@ -1,0 +1,779 @@
+/*******************************************************************************
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ * Copyright 2023 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ ******************************************************************************/
+(function ($, ns, window, Granite) {
+  "use strict";
+
+  if (!Granite.Toggles.isEnabled("FT_SITES-10308")) {
+    return;
+  }
+
+  const COMMANDS = {
+    CANCEL_INHERITANCE: "cancelPropertyInheritance",
+    REENABLE_INHERITANCE: "reenablePropertyInheritance",
+  };
+
+  const SELECTORS = {
+    CODE_MIRROR: ".CodeMirror",
+    MULTIEDITOR_ROOT: ".cfm-multieditor",
+    MULTIEDITOR_TOOLBAR_PARENT: ".cfm-multieditor-toolbar-parent",
+    MULTIEDITOR_CONTAINER: ".cfm-multieditor-richtext-container",
+    MULTIEDITOR_DIV_EDITOR: "div.cfm-multieditor-richtext-editor",
+    DISABLED_LINK: "disabled-link",
+    CORAL_FORM: ".coral-Form",
+    CORAL_RADIO_GROUP: ".coral-RadioGroup",
+    CORAL_FORM_FIELDWRAPPER: ".coral-Form-fieldwrapper",
+    CORAL_FORM_FIELD_UNDER_FIELDWRAPPER: ".coral-Form-fieldwrapper .coral-Form-field",
+    CORAL_CHECKBOX: "coral-checkbox",
+    CORAL_RADIO: "coral-radio",
+    CF_CANCEL_INHERITANCE: ".cf-cancel-inheritance",
+    CF_REENABLE_INHERITANCE: ".cf-reenable-inheritance",
+    CORAL_ACTIONBAR: "coral-actionbar",
+    CFM_MULTIEDITOR_INPUTFIELD: "cfm-multieditor-inputfield",
+    DIV_LABEL_WRAPPER: "div.label-wrapper",
+    CF_BUTTONS: ".cf-reenable-inheritance, .cf-cancel-inheritance",
+    CF_REENABLE_VARIATION_INHERITANCE_UNDER_IS_ACTIVE: ".is-active .cf-reenable-variation-inheritance",
+    CF_CANCEL_VARIATION_INHERITANCE_UNDER_IS_ACTIVE: ".is-active .cf-cancel-variation-inheritance"
+  };
+
+  const CLASSES = {
+    HIDDEN_CLASS: "foundation-collection-action-hidden",
+  };
+
+  const DATA_ATTRS = {
+    DISABLED_FIELD: "data-disabled-field",
+    DATA_ELEMENT: "data-element"
+  };
+
+  const DATA_FIELDS = {
+    MSM_SOURCE_PATH: "msm:sourcePath",
+    MSM_TARGET_PATH: "msm:targetPath",
+    MSM_STATUS: "msm:status",
+    MSM_IS_CANCELLED: "msm:isCancelled",
+    MSM_CANCELLED_PROPERTIES: "msm:cancelledProperties",
+    MSM_IS_SOURCE_EXISTING: "msm:isSourceExisting",
+    MSM_IS_TARGET_MANUALLY_CREATED: "msm:isTargetManuallyCreated"
+  };
+
+  const JCR_CONTENT = "/jcr:content";
+
+  let blueprintPath;
+  let liveCopyPath;
+  let path;
+  let variation;
+  let isVarCancelled;
+  let isCancelledInheritanceForCF;
+  let isSourceExisting;
+  let isTargetManuallyCreated;
+
+  $(document).ready(function () {
+    variation = window.Dam.CFM.state.fragment.variation || window.Dam.CFM.state.request.params.variation || "master";
+    path = window.Dam.CFM.state.fragment.path;
+
+    const fieldWrappersTopLevel = getFieldWrappersTopLevel();
+    createComponentInheritanceBtns(fieldWrappersTopLevel);
+    getMSMConfigForVariation(fieldWrappersTopLevel);
+    getMSMConfigForCF();
+
+    $(SELECTORS.CF_CANCEL_INHERITANCE).on("click", function (event) {
+      showConfirmationDialog(event, COMMANDS.CANCEL_INHERITANCE);
+    });
+
+    $(SELECTORS.CF_REENABLE_INHERITANCE).click(function (event) {
+      showConfirmationDialog(event, COMMANDS.REENABLE_INHERITANCE);
+    });
+  });
+
+  function buildSyncCheckboxOnReenableInheritance() {
+    var $optionsSection = $(document.createElement("p"));
+    var checkbox = new Coral.Checkbox().set({
+      innerHTML: Granite.I18n.get(
+        "Synchronize element after reverting inheritance"
+      ),
+      name: "syncElement",
+      value: "true",
+      checked: false,
+    });
+
+    return $(checkbox).appendTo($optionsSection);
+  }
+
+  function checkIfSourceExist(data) {
+    isSourceExisting = data[DATA_FIELDS.MSM_STATUS][DATA_FIELDS.MSM_IS_SOURCE_EXISTING];
+    if (!isSourceExisting) {
+      $(SELECTORS.CF_CANCEL_INHERITANCE).removeClass(CLASSES.HIDDEN_CLASS);
+      $(SELECTORS.CF_CANCEL_INHERITANCE).attr("disabled", true);
+    }
+  }
+
+  function isRenderAsTextAreaField() {
+    return $(this).find(
+            `input[data-content-type='text/x-markdown'],input[data-content-type='text/plain']`).length > 0 &&
+            $(this).find("coral-actionbar-secondary")[1] &&
+            $(this).find("coral-multifield").length === 0;
+  }
+
+  function createComponentInheritanceBtns(fieldWrappersTopLevel) {
+    const labels = [];
+    const actionBarItems = [];
+    fieldWrappersTopLevel.each(function() {
+      if (isRenderAsTextAreaField.call(this)) {
+        actionBarItems.push($(this).find("coral-actionbar-secondary")[1]);
+      } else {
+        labels.push($(this).find(`label`).first());
+      }
+    });
+    $(labels).wrap('<div class="label-wrapper"></div>');
+
+    const inheritanceBtn =
+     `<button title="Cancel inheritance" class="cf-cancel-inheritance _coral-Button _coral-Button--primary _coral-Button--quiet cq-editable-action ${CLASSES.HIDDEN_CLASS}">
+        <coral-icon size="XS" class="_coral-Icon--sizeXS _coral-Icon" role="img" icon="link"></coral-icon>
+      </button>
+      <button title="Re-enable inheritance" class="cf-reenable-inheritance _coral-Button _coral-Button--primary _coral-Button--quiet cq-editable-action ${CLASSES.HIDDEN_CLASS}">
+        <coral-icon size="XS" class="_coral-Icon--sizeXS _coral-Icon" role="img" icon="linkOff"></coral-icon>
+      </button>`;
+
+    $(inheritanceBtn).insertAfter(labels);
+    $(actionBarItems).append(inheritanceBtn);
+  }
+
+  function getFieldWrappersTopLevel() {
+    const fieldWrapperTopLevel = [];
+    const fieldWrapper = $(`${SELECTORS.CORAL_FORM_FIELDWRAPPER}, coral-checkbox[data-cfminput='true']`);
+    fieldWrapper.each(function() {
+      if ($(this).parents(`${SELECTORS.CORAL_FORM_FIELDWRAPPER}`).length === 0) {
+        fieldWrapperTopLevel.push($(this));
+      }
+    });
+    return $(fieldWrapperTopLevel);
+  }
+
+  function displayCancelInheritanceBtn(cancelInheritance, reenableInheritance) {
+    cancelInheritance.removeClass(CLASSES.HIDDEN_CLASS);
+    reenableInheritance.addClass(CLASSES.HIDDEN_CLASS);
+  }
+
+  function displayReenableInheritanceBtn(cancelInheritance, reenableInheritance) {
+    cancelInheritance.addClass(CLASSES.HIDDEN_CLASS);
+    reenableInheritance.removeClass(CLASSES.HIDDEN_CLASS);
+  }
+
+  function getMSMConfigForVariation(fieldWrappersTopLevel) {
+    $.ajax({
+      type: "GET",
+      url: `${path}/jcr:content/data/${variation}.msm.conf`,
+      data: "advancedStatus=true",
+      traditional: true,
+      cache: false,
+    })
+      .done((data) => {
+            handleMSMConfigSuccess(fieldWrappersTopLevel, data);
+            waitForSidepanel();
+          }
+      )
+      .error(handleMSMConfigError);
+  }
+
+  function getMSMConfigForCF() {
+    $.ajax({
+      type: "GET",
+      url: `${path}.msm.conf`,
+      data: "advancedStatus=true",
+      traditional: true,
+      cache: false,
+    }).done((data) => {
+      isCancelledInheritanceForCF = data[DATA_FIELDS.MSM_STATUS][DATA_FIELDS.MSM_IS_CANCELLED];
+    });
+  }
+
+  function updateElementValueForField(fieldWrapper, newValue, cqTags) {
+    const multifield = fieldWrapper.find("coral-multifield");
+    if (multifield.length > 0) {
+      $(multifield[0]).find("coral-multifield-item").remove();
+
+      const noOfValues = newValue ? newValue.length : 0;
+      for (let i = 0; i < noOfValues; i++) {
+        const newItem = new Coral.Multifield.Item();
+
+        const observer = new MutationObserver(function (mutationList) {
+          for (const mutation of mutationList) {
+            if ($(mutation.target).is("coral-multifield-item")) {
+              Coral.commons.nextFrame(function () {
+                $(mutation.target).find(
+                    "coral-multifield-item-content > input, coral-multifield-item-content > coral-numberinput > input, input.coral-InputGroup-input").val(
+                    newValue[i]);
+                $(mutation.target).find(`div[data-editor-type=\"text\"].is-edited`).html(
+                    newValue[i]);
+                $(mutation.target).find(
+                    "div.markdown:not(.hidden) > textarea, div.plaintext:not(.hidden) > textarea").val(
+                    newValue[i]);
+              });
+              return;
+            }
+          }
+        });
+
+        observer.observe(newItem, {
+          attributes: false,
+          childList: true,
+          characterData: false,
+          subtree: false,
+        });
+
+        multifield[0].items.add(newItem);
+      }
+      return;
+    }
+
+    const taglist = fieldWrapper.find("foundation-autocomplete[valuedisplaymode=\"block\"] > coral-taglist");
+    if (taglist.length > 0) {
+      $(taglist[0]).find("coral-tag").remove();
+
+      const noOfValues = newValue ? newValue.length : 0;
+      for (let i = 0; i < noOfValues; i++) {
+        const newTag = new Coral.Tag().set({
+          value: newValue[i],
+          label: {
+            innerHTML: cqTags ? cqTags[newValue[i]] : newValue[i]
+          }
+        });
+        taglist[0].items.add(newTag);
+      }
+      return;
+    }
+
+    const jsonEditor = fieldWrapper.find(SELECTORS.CODE_MIRROR);
+    if (jsonEditor.length > 0) {
+      jsonEditor[0].CodeMirror.setValue(newValue);
+      return;
+    }
+
+    const textarea = fieldWrapper.find("textarea");
+    if (textarea.length > 0) {
+      textarea.val(newValue);
+      return;
+    }
+
+    const select = fieldWrapper.find("coral-select");
+    if (select.length > 0) {
+      const buttonLabel = select.find("coral-button-label");
+
+      let selectItemValue;
+      if (newValue) {
+        selectItemValue = select.find(`coral-select-item[value=${newValue}]`).html();
+      } else {
+        selectItemValue = "";
+      }
+
+      buttonLabel.html(selectItemValue);
+      return;
+    }
+
+    const radioButtons = fieldWrapper.find("coral-radio");
+    if (radioButtons.length > 0) {
+      radioButtons.filter(`[value=${newValue}]`).prop('checked', true);
+      return;
+    }
+
+    const datePicker = fieldWrapper.find("coral-datepicker");
+    if (datePicker.length > 0) {
+      if (!newValue) {
+        datePicker.val("");
+      } else {
+        datePicker.val(new Date(newValue).toISOString());
+      }
+      return;
+    }
+
+    const radioGroup = fieldWrapper.find("div.coral-RadioGroup");
+    if (radioGroup.length > 0) {
+      radioGroup.find("coral-checkbox").each(function() {
+          $(this).prop("checked", newValue.includes($(this).attr("value")));
+      });
+      return;
+    }
+
+    if (fieldWrapper.is("coral-checkbox")) {
+      if (!newValue) {
+        fieldWrapper.prop("checked", false);
+      } else {
+        fieldWrapper.prop("checked", newValue);
+      }
+      return;
+    }
+
+    const input = fieldWrapper.find("input");
+    if (input.length > 0) {
+      if (newValue instanceof Array) {
+        input.val(newValue[0]);
+      } else {
+        input.val(newValue);
+      }
+    }
+
+  }
+
+  function getResourceJSONModel() {
+    return $.ajax({
+      type: "GET",
+      url: `${path}.cfm.msm.content.json?variation=${variation}`,
+      traditional: true,
+      cache: false,
+    });
+  }
+
+  function handleFieldConfirmationDialogCallback(event, cmd, actionId) {
+    const fieldName = $(event.currentTarget).data("fieldname");
+    if (actionId === "OK") {
+      makeInheritanceCmdCall(fieldName, cmd);
+
+      let fieldWrapper = $(event.currentTarget).parents(".coral-Form-fieldwrapper");
+      if (fieldWrapper.length === 0) {
+        fieldWrapper = $(event.currentTarget).parents("coral-checkbox");
+      }
+
+      if (cmd === COMMANDS.REENABLE_INHERITANCE) {
+        const syncCompBtnChecked = $("[name=syncElement]").is(":checked");
+        if (syncCompBtnChecked) {
+          rollout({
+            liveCopyPath,
+            blueprintPath: blueprintPath,
+            successHandler: () => _showRolloutResultNotification(1, 0, 1),
+            errorhandler: () => _showRolloutResultNotification(1, 1, 0),
+            isVariation: false,
+            fieldName,
+          });
+
+          getResourceJSONModel().done(function (resourceModelJSON) {
+            const resourceModel = $.parseJSON(resourceModelJSON);
+            const newValue = resourceModel[getFieldName(fieldWrapper)];
+            updateElementValueForField(fieldWrapper, newValue, resourceModel["cq:tags"]);
+            Coral.commons.nextFrame(function() {
+              enableOrDisableFieldElements(fieldWrapper, false);
+            });
+          });
+        } else {
+          enableOrDisableFieldElements(fieldWrapper, false);
+        }
+      }
+
+      if (cmd === COMMANDS.CANCEL_INHERITANCE) {
+        enableOrDisableFieldElements(fieldWrapper, true);
+      }
+    }
+  }
+
+  function handleMSMConfigError() {
+    const inheritanceBtns = $(
+      SELECTORS.CF_BUTTONS
+    );
+
+    inheritanceBtns.remove();
+
+    const targetNode = $("#SidePanel");
+
+    // Callback function to execute when mutations are observed
+    const callback = (mutationList) => {
+      for (const mutation of mutationList) {
+        if ($(mutation.addedNodes).is("div.sidepanel-content")) {
+          const varButtons = $(
+            `${SELECTORS.CF_CANCEL_VARIATION_INHERITANCE_UNDER_IS_ACTIVE}, ${SELECTORS.CF_REENABLE_VARIATION_INHERITANCE_UNDER_IS_ACTIVE}`
+          );
+          varButtons.attr("disabled", "");
+        }
+      }
+    };
+
+    // Create an observer instance linked to the callback function
+    const observer = new MutationObserver(callback);
+
+    // Start observing the target node for configured mutations
+    const config = {
+      attributes: false,
+      childList: true,
+      characterData: false,
+      subtree: false,
+    };
+    observer.observe(targetNode[0], config);
+  }
+
+  // covers action bar, input, buttons, textarea, text divs
+  function enableOrDisableFieldElements(fieldWrapper, isCancelled) {
+
+    if (!isRenderAsTextAreaField.call(fieldWrapper)) {
+      fieldWrapper.find(SELECTORS.CORAL_ACTIONBAR).attr(DATA_ATTRS.DISABLED_FIELD, !isCancelled);
+    }
+    fieldWrapper.find("input").attr("disabled", !isCancelled);
+    fieldWrapper.find("button:not(.cf-cancel-inheritance,.cf-reenable-inheritance)").attr("disabled", !isCancelled);
+    if (isCancelled) {
+      fieldWrapper.find("textarea").removeAttr("disabled");
+    } else {
+      fieldWrapper.find("textarea").attr("disabled", "");
+    }
+    fieldWrapper.find(SELECTORS.CODE_MIRROR).attr(DATA_ATTRS.DISABLED_FIELD, !isCancelled);
+    fieldWrapper.find(`div[data-editor-type="text"]`).attr(DATA_ATTRS.DISABLED_FIELD, !isCancelled);
+    let anchorButtons = fieldWrapper.find(`a[is="coral-anchorbutton"]`);
+    let currentElement = fieldWrapper.next();
+    while (currentElement.is(`a[is="coral-anchorbutton"]`)) {
+      anchorButtons = anchorButtons.add(currentElement);
+      currentElement = currentElement.next();
+    }
+    anchorButtons.each(function () {
+      if (isCancelled) {
+        $(this).removeClass(SELECTORS.DISABLED_LINK);
+        $(this).find("coral-icon").removeClass(SELECTORS.DISABLED_LINK);
+      } else {
+        $(this).addClass(SELECTORS.DISABLED_LINK);
+        $(this).find("coral-icon").addClass(SELECTORS.DISABLED_LINK);
+      }
+    });
+  }
+
+  function handleMSMConfigSuccess(fieldWrappersTopLevel, data) {
+    checkIfSourceExist(data);
+    isTargetManuallyCreated = data[DATA_FIELDS.MSM_STATUS][DATA_FIELDS.MSM_IS_TARGET_MANUALLY_CREATED];
+    blueprintPath = data[DATA_FIELDS.MSM_SOURCE_PATH].split(JCR_CONTENT)[0];
+    liveCopyPath = data[DATA_FIELDS.MSM_TARGET_PATH].split(JCR_CONTENT)[0];
+    isVarCancelled = data[DATA_FIELDS.MSM_STATUS][DATA_FIELDS.MSM_IS_CANCELLED];
+    const cancelledProps = data[DATA_FIELDS.MSM_STATUS][DATA_FIELDS.MSM_CANCELLED_PROPERTIES];
+
+    fieldWrappersTopLevel.each(function () {
+      const cancelInheritance = $(this).find(SELECTORS.CF_CANCEL_INHERITANCE);
+      const reenableInheritance = $(this).find(SELECTORS.CF_REENABLE_INHERITANCE);
+      if (!cancelInheritance.is( ":button") || !reenableInheritance.is(":button")) {
+        // continue
+        return true;
+      }
+      setInheritanceBtnsAttr(cancelInheritance, reenableInheritance, $(this));
+      const isCancelled = cancelledProps.includes(getFieldName($(this)));
+      if (isCancelled) {
+        displayReenableInheritanceBtn(cancelInheritance, reenableInheritance);
+      } else {
+        displayCancelInheritanceBtn(cancelInheritance, reenableInheritance);
+      }
+    });
+
+    fieldWrappersTopLevel.each(function() {
+      const isCancelled = cancelledProps.includes(getFieldName($(this)));
+      enableOrDisableFieldElements($(this), isCancelled);
+    });
+
+    if (isVarCancelled) {
+      revertDisableBtnsStatus();
+    }
+
+    if (!isSourceExisting || isTargetManuallyCreated) {
+      revertDisableBtnsStatus();
+      displayReenableInheritanceBtn(
+        $(SELECTORS.CF_CANCEL_INHERITANCE),
+        $(SELECTORS.CF_REENABLE_INHERITANCE)
+      );
+    }
+  }
+
+  function handlePostNewConfigError() {
+    const ui = $(window).adaptTo("foundation-ui");
+    const action = COMMANDS.CANCEL_INHERITANCE ? "cancelling" : "reverting";
+    ui.alert(
+      Granite.I18n.get("Error"),
+      Granite.I18n.get(`An error occurred while ${action} the inheritance.`),
+      "error"
+    );
+  }
+
+  function handleVariationConfirmationDialogCallback(event, cmd, actionId) {
+    const variationName = $(event.target).data("variationname");
+    if (actionId === "OK") {
+      makeInheritanceCmdCall(variationName, cmd, true);
+
+      if (cmd === COMMANDS.REENABLE_INHERITANCE) {
+        const syncVariationCheckboxChecked =
+          $("[name=syncElement]").is(":checked");
+        if (syncVariationCheckboxChecked) {
+          const variationLiveCopyPath = $(event.target).data("livecopypath");
+          const variationBlueprintPath = $(event.target).data("blueprintpath");
+
+          rollout({
+            liveCopyPath: variationLiveCopyPath,
+            blueprintPath: variationBlueprintPath,
+            successHandler: () => _showRolloutResultNotification(1, 0, 1),
+            errorhandler: () => _showRolloutResultNotification(1, 1, 0),
+            isVariation: true,
+          });
+        }
+
+        getResourceJSONModel().done(function (resourceModelJSON) {
+          const resourceModel = $.parseJSON(resourceModelJSON);
+          const fields = getFieldWrappersTopLevel();
+          if (syncVariationCheckboxChecked) {
+            fields.each(function() {
+              const newValue = resourceModel[getFieldName($(this))];
+              updateElementValueForField($(this), newValue, resourceModel["cq:tags"]);
+            });
+          }
+
+          const cancelledProps = resourceModel["cq:propertyInheritanceCancelled"] ? resourceModel["cq:propertyInheritanceCancelled"] : [];
+          Coral.commons.nextFrame(function() {
+            fields.each(function () {
+              const isCancelled = cancelledProps.includes(getFieldName($(this)));
+              enableOrDisableFieldElements($(this), isCancelled);
+            });
+          });
+
+          const btns = $(SELECTORS.CF_BUTTONS);
+          btns.attr("disabled", false);
+        });
+      }
+    }
+  }
+
+  function makeInheritanceCmdCall(name, cmd, isVariation) {
+    const data = new FormData();
+
+    if (isVariation) {
+      if (cmd === COMMANDS.CANCEL_INHERITANCE) {
+        data.append(`${DATA_FIELDS.MSM_STATUS}/${DATA_FIELDS.MSM_IS_CANCELLED}`, true);
+        revertDisableBtnsStatus();
+      }
+
+      postNewConfig(data, name, true);
+    } else {
+      data.append("cmd", cmd);
+      data.append("msm:propertyName", name);
+
+      postNewConfig(data, name);
+    }
+  }
+
+  function postNewConfig(data, name, isVariation) {
+    $.ajax({
+      type: "POST",
+      url: `${path}/jcr:content/data/${variation}.msm.conf`,
+      data: data,
+      async: false,
+      processData: false,
+      contentType: false,
+    })
+      .done(() => toggleFieldInheritanceButton(name, isVariation))
+      .error(() => handlePostNewConfigError);
+  }
+
+  function revertDisableBtnsStatus() {
+    const btns = $(SELECTORS.CF_BUTTONS);
+    btns.attr("disabled", true);
+
+    getFieldWrappersTopLevel().each(function() {
+      enableOrDisableFieldElements($(this), true);
+    });
+  }
+
+  function rollout(config) {
+    const params = new Map();
+
+    params["cmd"] = "rollout";
+    params["path"] = config.isVariation
+      ? config.blueprintPath.split(JCR_CONTENT)[0]
+      : config.blueprintPath;
+    params[DATA_FIELDS.MSM_TARGET_PATH] = config.isVariation
+      ? config.liveCopyPath.split(JCR_CONTENT)[0]
+      : config.liveCopyPath;
+    params["_charset_"] = "utf-8";
+
+    if (config.isVariation) {
+      params["paras"] = config.blueprintPath;
+    } else {
+      params[
+        "fields"
+      ] = `${blueprintPath}/jcr:content/data/${variation}/${config.fieldName}`;
+    }
+
+    $.ajax({
+      type: "POST",
+      url: Granite.HTTP.externalize("/bin/wcmcommand"),
+      traditional: true,
+      async: false,
+      data: params,
+    })
+      .done(config.successHandler)
+      .fail(config.errorHandler);
+  }
+
+  function setInheritanceBtnsAttr(
+    cancelInheritance,
+    reenableInheritance,
+    field
+  ) {
+    const fieldName = getFieldName(field);
+    cancelInheritance.attr("data-fieldname", fieldName);
+    cancelInheritance.attr("data-variationname", variation);
+    reenableInheritance.attr("data-fieldname", fieldName);
+    reenableInheritance.attr("data-variationname", variation);
+  }
+
+  function getFieldName(field) {
+    let fieldName = field.attr(DATA_ATTRS.DATA_ELEMENT);
+
+    if (!fieldName) {
+      fieldName = field.find(".coral-Form-field").attr(DATA_ATTRS.DATA_ELEMENT);
+    }
+    // enumeration data type exceptions
+    if (!fieldName) {
+      fieldName = field.find(SELECTORS.CORAL_FORM).attr(DATA_ATTRS.DATA_ELEMENT);
+    }
+    if (!fieldName) {
+      fieldName = field.find(SELECTORS.CORAL_RADIO_GROUP).attr(DATA_ATTRS.DATA_ELEMENT);
+    }
+    return fieldName;
+  }
+
+  function showConfirmationDialog(event, cmd, isVariation) {
+    event.preventDefault();
+    const modalHeader =
+      cmd === COMMANDS.CANCEL_INHERITANCE
+        ? Granite.I18n.get("Cancel inheritance")
+        : Granite.I18n.get("Revert inheritance");
+    const modalMessage =
+      cmd === COMMANDS.CANCEL_INHERITANCE
+        ? Granite.I18n.get("Do you really want to cancel the inheritance?")
+        : Granite.I18n.get("Do you really want to revert the inheritance?");
+
+    const $message = $(document.createElement("div"));
+    $(document.createElement("p")).text(modalMessage).appendTo($message);
+
+    if (cmd === COMMANDS.REENABLE_INHERITANCE) {
+      buildSyncCheckboxOnReenableInheritance().appendTo($message);
+    }
+
+    const promptConfig = {
+      title: modalHeader,
+      message: $message.html(),
+      type: ns.ui.helpers.PROMPT_TYPES["NOTICE"],
+      actions: [
+        {
+          id: "OK",
+          text: Granite.I18n.get("Yes"),
+          primary: true,
+        },
+        {
+          id: "CANCEL",
+          text: Granite.I18n.get("No"),
+          primary: false,
+        },
+      ],
+      callback: function (actionId) {
+        if (isVariation) {
+          handleVariationConfirmationDialogCallback(event, cmd, actionId);
+          return;
+        }
+        handleFieldConfirmationDialogCallback(event, cmd, actionId);
+      },
+    };
+    ns.ui.helpers.prompt(promptConfig);
+  }
+
+  function toggleFieldInheritanceButton(name, isVariation) {
+    const cancelInheritanceButton = $(
+      `button.cf-cancel-${isVariation ? "variation-" : ""}inheritance[data-${
+        isVariation ? "variation" : "field"
+      }name=${name}]`
+    );
+    const reenableInheritanceButton = $(
+      `button.cf-reenable-${isVariation ? "variation-" : ""}inheritance[data-${
+        isVariation ? "variation" : "field"
+      }name=${name}]`
+    );
+
+    if (
+      cancelInheritanceButton.hasClass(CLASSES.HIDDEN_CLASS) &&
+      !reenableInheritanceButton.hasClass(CLASSES.HIDDEN_CLASS)
+    ) {
+      cancelInheritanceButton.removeClass(CLASSES.HIDDEN_CLASS);
+      reenableInheritanceButton.addClass(CLASSES.HIDDEN_CLASS);
+    } else if (
+      !cancelInheritanceButton.hasClass(CLASSES.HIDDEN_CLASS) &&
+      reenableInheritanceButton.hasClass(CLASSES.HIDDEN_CLASS)
+    ) {
+      reenableInheritanceButton.removeClass(CLASSES.HIDDEN_CLASS);
+      cancelInheritanceButton.addClass(CLASSES.HIDDEN_CLASS);
+    }
+  }
+
+  function waitForSidepanel() {
+    // Select the node that will be observed for mutations
+    const targetNode = $("#SidePanel");
+
+    // Callback function to execute when mutations are observed
+    const callback = (mutationList) => {
+      for (const mutation of mutationList) {
+        if ($(mutation.addedNodes).is("div.sidepanel-content")) {
+
+          if (!isCancelledInheritanceForCF && !isTargetManuallyCreated && isSourceExisting) {
+            $(SELECTORS.CF_REENABLE_VARIATION_INHERITANCE_UNDER_IS_ACTIVE).removeAttr("disabled");
+            $(SELECTORS.CF_CANCEL_VARIATION_INHERITANCE_UNDER_IS_ACTIVE).removeAttr("disabled");
+          }
+
+          $(SELECTORS.CF_CANCEL_VARIATION_INHERITANCE_UNDER_IS_ACTIVE).click(function (
+            event
+          ) {
+            showConfirmationDialog(event, COMMANDS.CANCEL_INHERITANCE, true);
+          });
+
+          $(SELECTORS.CF_REENABLE_VARIATION_INHERITANCE_UNDER_IS_ACTIVE).click(function (
+            event
+          ) {
+            showConfirmationDialog(event, COMMANDS.REENABLE_INHERITANCE, true);
+          });
+        }
+      }
+    };
+
+    // Create an observer instance linked to the callback function
+    const observer = new MutationObserver(callback);
+
+    // Start observing the target node for configured mutations
+    const config = {
+      attributes: false,
+      childList: true,
+      characterData: false,
+      subtree: false,
+    };
+    observer.observe(targetNode[0], config);
+  }
+
+  function _showRolloutResultNotification(total, error, success) {
+    if (error + success >= total) {
+      MSM.MSMCommons.updateSelection([]);
+      if (error === 0) {
+        ns.ui.helpers.notify({
+          type: "success",
+          content: Granite.I18n.get(
+            "Rollout operation was executed successfully"
+          ),
+        });
+      } else {
+        ns.ui.helpers.notify({
+          type: "error",
+          content: Granite.I18n.get("{0} Rollout operation failed", [error]),
+        });
+      }
+
+      $(".msm-rollout-dialog").trigger("dialog-beforeclose");
+      $(".msm-rollout-dialog").trigger("foundation-form-submitted", [
+        error === 0,
+      ]);
+    }
+  }
+})(jQuery, Granite.author, window, Granite);

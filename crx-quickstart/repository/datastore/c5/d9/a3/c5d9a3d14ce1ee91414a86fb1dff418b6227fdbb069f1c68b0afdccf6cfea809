@@ -1,0 +1,635 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (window, document, Granite, $) {
+    "use strict";
+
+    console.warn("The clientlib used here has been DEPRECATED.");
+
+    var rel = ".foundation-content-current", assetPickerRel = ".assetpicker-content", postDataRel = ".asset-picker-done", clearRel = ".asset-picker-clear",
+        rel_selection_count = ".assetpicker-selection-count", rel_filters = ".assetpicker-filters-bar .coral-TagList", isAllDataLoaded = false, cardView,
+        spinnerVisible, spinner, rel_sort = ".assetpicker-sortinfo", relToggleLayout = ".assetpicker-togglelayout",
+        startLimit = 0, endLimit = 20, dataSize = 20, defaultLimit = 40,
+        browseInActivator = ".dam-assetpicker-browse-in-activator", browseUpActivator = ".dam-assetpicker-browse-up-activator",
+        boardActivator = ".dam-assetpicker-board-activator", elContent, offscrollTimer = null, fullTextSearch = '', xhr, textFilterObject = {},
+        mimetypeFilterRel = ".assetpicker-mimetype-predicate", assetPickerDefaultContent = ".assetpicker-default-content";
+
+    $.assetpicker = {};
+    $.assetpicker.searchRoot = "/content/dam";
+    $.assetpicker.collection = "";
+    $.assetpicker.dispalyMode = "card";
+    $.assetpicker.send = [];
+    $.assetpicker.sort = false;
+    $.assetpicker.filters = [];
+    $.assetpicker.allTags = false;
+    $.assetpicker.requests = $(assetPickerRel).queue();
+
+    $(document).on("foundation-contentloaded", function () {
+        $(".rail").addClass("closed");
+        spinner = $(rel).find(".resultspinner");
+        elContent = $(rel).find('.assetfinder-content-container');
+
+        showSpinner();
+        reset();
+
+        $(rel).find('.assetpicker-content').on('scroll', onScroll);
+
+        cardView = CUI.CardView.get(elContent);
+
+        $(".toolbar a:not(.active) ").addClass("disabled");
+        var $contextNode = $(assetPickerRel);
+        setContext($contextNode.attr("mode"), $contextNode.attr("type"), $contextNode.attr("orderBy"), $contextNode.attr("itemResourceType"),
+            $contextNode.attr("mimeType"), $contextNode.attr("typeFilters"), $contextNode.attr("root"), $contextNode.attr("allTags"));
+        $.assetpicker.invoke(false);
+    });
+
+    function setContext(mode, type, orderBy, itemResourceType, mimeType, mimeTypeFilters, root, allTags) {
+
+        if (mode && mode.trim() != "" && mode === "single" && cardView) {
+            cardView.setSelectionModeCount(CUI.CardView.SELECTION_MODE_COUNT_SINGLE);
+        }
+
+        $.assetpicker.contentFinderType = type || "asset";
+
+        $.assetpicker.orderBy = orderBy || "jcr:content/jcr:lastModified";
+
+        $.assetpicker.itemResourceType = itemResourceType || "dam/gui/components/admin/assetpicker/asset";
+
+        if (mimeType && mimeType.trim() != "") {
+            $.assetpicker.mimetype = mimeType;
+            var mandatoryFilter = {};
+            mandatoryFilter.text = mimeType;
+            mandatoryFilter.id = "mandatory_type_filter_" + mimeType;
+            mandatoryFilter.isMandatory = true;
+            $.assetpicker.filters = [];
+            $.assetpicker.filters.push(mandatoryFilter);
+            $.enableMandatoryType(mimeType);
+        }
+
+        if (mimeTypeFilters && mimeTypeFilters === "disable") {
+            $(mimetypeFilterRel).addClass("disable-mimetype-filters");
+            $(mimetypeFilterRel + " input").attr('disabled', 'disabled');
+        }
+
+        if (allTags) {
+            $.assetpicker.allTags = true;
+        }
+
+        if (root) {
+            $.assetpicker.searchRoot = root;
+        }
+
+    }
+
+    $(document).on("click." + postDataRel, postDataRel, function (e) {
+        e.stopImmediatePropagation();
+        exportAssetInfo(e);
+    });
+
+    $(document).on("click." + relToggleLayout, relToggleLayout, function (e) {
+        cardView.setDisplayMode(CUI.CardView.DISPLAY_LIST);
+        $(relToggleLayout + " > i").toggle();
+        var layout = $(relToggleLayout + " > i:visible").data("value");
+        if (layout === "list") {
+            cardView.setDisplayMode(CUI.CardView.DISPLAY_LIST);
+            cardView.setGridSelectionMode(true);
+            $.assetpicker.dispalyMode = "list";
+        } else {
+            cardView.setDisplayMode(CUI.CardView.DISPLAY_GRID);
+            cardView.setGridSelectionMode(true);
+            $.assetpicker.dispalyMode = "card";
+        }
+
+    });
+
+
+    $(document).on("click." + rel_sort, rel_sort, function (e) {
+        $(".assetpicker-sortinfo > .option_one").toggle();
+        $(".assetpicker-sortinfo > .option_two").toggle();
+        $.assetpicker.sort = $(".assetpicker-sortinfo > span:visible").data("value");
+        $.assetpicker.invoke(false, true);
+    });
+
+    $(document).on("click." + clearRel, clearRel, function (e) {
+
+        if (currentDisplayCount() === 0) {
+            loadData(true, $.getSelectedMimeType(), fullTextSearch);
+        }
+
+        var config = {
+            'action':'close'
+        };
+
+        $.assetpicker.send = {
+            'config':config
+        };
+        getParent().postMessage(JSON.stringify($.assetpicker.send), elContent.data("targetorigin"));
+    });
+
+    $(document).on('click', '.search input[name=\'fulltext\'] ~ button', function (e) {
+        $(".search input[name='fulltext']").val('');
+    });
+
+    //--- patch for IE11 (part 1 of 2)
+    $(document).on('keypress', '.search input[name=\'fulltext\']', function (e) {
+        var $fulltext = $(".search input[name='fulltext']");
+        if ( e.which === 13 && $fulltext.val() !== $fulltext.data("store_value") ) {
+            $fulltext.trigger('change');
+        }         
+    });    
+    
+    $(document).on('change', '.search input[name=\'fulltext\']', function (e) {
+        var $fulltext = $(".search input[name='fulltext']");
+        fullTextSearch = $fulltext.val();
+        $fulltext.data("store_value", fullTextSearch);  //--- patch for IE11 (part 2 of 2)
+        if (fullTextSearch && fullTextSearch.trim() != '') {
+
+            if (textFilterObject && textFilterObject != {}) {
+                var pos = $.assetpicker.filters.indexOf(textFilterObject);
+                if (pos > -1) {
+                    $.assetpicker.filters.splice(pos, 1);
+                }
+            }
+            textFilterObject.text = fullTextSearch;
+            textFilterObject.callback = function () {
+                reset();
+                $(".search input[name='fulltext']").val('');
+                fullTextSearch = '';
+                textFilterObject = {};
+                $.assetpicker.invoke(false);
+            };
+
+            $.assetpicker.filters.push(textFilterObject);
+        }
+        reset();
+        $.assetpicker.invoke(true);
+    });
+
+    $(document).on("change:selection", ".assetfinder-content-container.foundation-collection", function (e) {
+        if (cardView.getSelection().length > 0) {
+            $(".asset-picker-done").removeAttr("disabled");
+        } else {
+            $(".asset-picker-done").attr("disabled", "disabled");
+        }
+    });
+
+    $(document).on("click" + ".toolbar a", function (e) {
+        if (e.target.className.indexOf("icon-") === 0) {
+            $(".toolbar a").addClass("disabled");
+            $(e.target.parentElement).removeClass("disabled");
+
+            /*  if($(e.target.parentElement).data("view") !== "browse") {
+             $.assetpicker.searchRoot = "/content/dam";
+             changeLevel("/content/dam", "Assets");
+             }*/
+        }
+    });
+
+    $(document).on("click." + rel_filters + "i", rel_filters, function (e) {
+        var filterObject = $.data(document.body, $(e.target).parents('li').data("id"));
+        if (filterObject) {
+
+            //Cleanup the filter set first
+            var pos = $.assetpicker.filters.indexOf(filterObject);
+            if (pos > -1) {
+                $.assetpicker.filters.splice(pos, 1);
+            }
+
+            //Callback to cleanup specific stuff related to filter container, for e.g. checkboxes etc.
+            filterObject.callback(e);
+        }
+
+    });
+
+	function updateAssetUsedInformation() {
+		var params = new Object();
+		var collection = $(".assetfinder-content-container article.selected.card-asset");
+		 
+		var assetSelected = [];
+		for(var i =0; i<collection.length;i++){
+			assetSelected[i] = collection[i].getAttribute("data-path");
+		}
+
+        if (assetSelected.length == 0) {
+            return;
+        }
+
+		params[":applyTo"]  = decodeURIComponent(assetSelected);
+		params[":operation"]  = "add-asset-usage-record";
+		params["usage-type"]  = $(assetPickerRel).attr("solution");
+		 $.ajax({
+					type:"POST",
+					url:document.location.origin+"/content/dam",
+					data:params
+				}).done(function (response) {
+					});
+	}
+
+    function exportAssetInfo(event) {
+		updateAssetUsedInformation();
+        var host = document.location.origin;
+        var collection = $(".assetfinder-content-container article.selected");
+        var data = new Array();
+        collection.map(function () {
+            var asset = new Object();
+            asset.path = decodeURIComponent($(this).data("path"));
+            asset.url = host + $(this).data("path");
+            asset.type = $(this).data("assetMimetype");
+            asset.title = $(this).data("title");
+            asset.size = $(this).find(".size").text();
+            asset.img = host + $(this).find("img.show-grid:not(.multiplied)").attr("src");
+            data.push(asset);
+        });
+        $.assetpicker.send = {
+            'data':data,
+            'config':{
+                'action':'done'
+            }
+        };
+
+        getParent().postMessage(JSON.stringify($.assetpicker.send), elContent.data("targetorigin"));
+    }
+
+
+    function loadData(append, mimetype, filter, rangePredicates, tags, solutions, sort, collectionPath, root) {
+
+        var servlet = "/bin/wcm/contentfinder/" + $.assetpicker.contentFinderType + "/view.html",
+            itemResourceType = $.assetpicker.itemResourceType;
+
+        showSpinner();
+        var statement = "";
+        if (tags) {
+            $.each(tags, function (index, val) {
+                if (index > 0 && !$.assetpicker.allTags) {
+                    statement = statement.concat("OR ");
+                }
+                statement = statement.concat("tags:\"" + val + "\" ");
+            });
+        }
+		
+		if (solutions) {
+            $.each(solutions, function (index, val) {
+                if (index > 0 ) {
+                    statement = statement.concat("OR ");
+                }
+                statement = statement.concat("\"jcr:content/usages/usedBy\":" + val + " ");
+            });
+        }
+
+        if (filter) {
+            statement = statement.concat(filter+ " ");
+        }
+
+        //default is newest to oldest
+        var order = $.assetpicker.sort;
+        if (sort) {
+            order = sort;
+        }
+        if (order) {
+            statement = statement.concat("order:\"+" + $.assetpicker.orderBy + "\" ");
+        } else {
+            statement = statement.concat("order:\"-" + $.assetpicker.orderBy + "\" ");
+        }
+
+        if (rangePredicates) {
+            statement = statement.concat(rangePredicates + " ");
+        }
+        var searchRoot = $.assetpicker.searchRoot;
+        if (root) {
+            searchRoot = root;
+        }
+
+        loadAssets(servlet, itemResourceType, statement, mimetype, collectionPath, searchRoot, startLimit, endLimit)
+            .done(function (htmlResponse) {
+                // results found
+                hideSpinner();
+
+                insertDataToGrid(htmlResponse, append);
+
+                setCardView();
+            })
+            .fail(function (req, status, error) {
+                console.log("Error while getting assets", req, status, error);
+            })
+
+    }
+
+    function loadAssets(servlet, itemResourceType, query, mimetype, collectionPath, searchRoot, lowerLimit, upperLimit) {
+
+        var imageServlet = Granite.HTTP.externalize(servlet),
+            param = {
+                '_dc':new Date().getTime(), // cache killer
+                'query':query,
+                'mimeType':mimetype,
+                'itemResourceType': itemResourceType, // single item rendering (cards)
+                'memberOf':collectionPath,
+                'limit':lowerLimit + ".." + upperLimit,
+                '_charset_':'utf-8'
+                // 'type' : 'dam:Asset'
+            };
+        if (xhr && lowerLimit===0) { // abort previous call irrespective if it is completed readyState = 4
+            xhr.abort();
+        }
+
+        xhr = $.ajax({
+            type:'GET',
+            //async:false,
+            dataType:'html',
+            url:imageServlet + searchRoot,
+            data:param
+        });
+
+        return xhr;
+    }
+
+    function showSpinner() {
+        spinnerVisible = true;
+        spinner.show();
+        $(assetPickerDefaultContent).css("display", "none");
+    }
+
+    function hideSpinner() {
+        spinnerVisible = false;
+        spinner.hide();
+    }
+
+    function insertDataToGrid(htmlResponse, append) {
+        var $elData = $(htmlResponse).filter("article").toArray();
+        // set flag if all data has been loaded
+        isAllDataLoaded = ($elData.length < (endLimit - startLimit));
+
+        // FixMe: Relayouting on 'smartresize.cui.gridlayout' event fetches the old content. Use of CUI.GridView.destruct should fix this.
+        $(window).off('smartresize.cui.gridlayout');
+        if (!append) {
+            CUI.CardView.get(elContent).removeAllItems();
+        }
+
+        if ($elData.length) {
+            // results found
+            if (isAllDataLoaded) {//todo
+                $(rel_selection_count).text(startLimit + $elData.length);
+            } else {
+                $(rel_selection_count).text(endLimit);
+            }
+            CUI.CardView.get(elContent).append($elData);
+        }
+
+        if (elContent.find("article").length === 0) {
+            $(assetPickerDefaultContent).css("display", "");
+        } else {
+            $(assetPickerDefaultContent).css("display", "none");
+        }
+    }
+
+    /**
+     * Set card view: Handle correct distribution of cards
+     */
+    function setCardView() {
+        if ($.assetpicker.dispalyMode === "list") {
+            cardView.setDisplayMode(CUI.CardView.DISPLAY_LIST);
+        } else {
+            cardView.setDisplayMode(CUI.CardView.DISPLAY_GRID);
+        }
+        cardView.setGridSelectionMode(true);
+    }
+
+
+    /**
+     * handle infinity scroll
+     */
+
+    function onScroll(event) {
+        var elem = $(event.currentTarget),
+            scrollTop = elem.scrollTop(),
+            scrollHeight = elem.get(0).scrollHeight,
+            height = elem.height();
+
+        //while scrolling, disable all other events
+        //ipad scroll issue: gives the wrong target object in the event (swipe origin instead of touch that stopped
+        //the scroll. see #CQ5-32293
+        $.toe.off();
+
+        if (offscrollTimer) {
+            clearTimeout(offscrollTimer);
+        }
+
+        offscrollTimer = setTimeout(function () {
+            //restore events
+            $.toe.on();
+
+            offscrollTimer = null;
+        }, 500);
+
+        if (!spinnerVisible && (scrollTop > 0 && (scrollHeight - (scrollTop + height )) < 20)) {
+            if (!isAllDataLoaded) {
+                // set new boundries
+                startLimit = endLimit;
+                endLimit = endLimit + dataSize;
+
+                // load data
+                loadData(true, $.getSelectedMimeType(), fullTextSearch);
+            }
+        }
+    }
+
+    /**
+     * reset the status params
+     */
+    function resetParam() {
+        startLimit = 0;
+        endLimit = defaultLimit;
+        isAllDataLoaded = false;
+    }
+
+    /**
+     * reset params and UI
+     */
+    function reset() {
+        resetParam();
+        CUI.CardView.get(elContent).removeAllItems();
+    }
+
+    function resetState() {
+        changeLevel("", $(".dam-assetpicker-browse-up-activator").data("title"));
+        $(boardActivator).removeClass("selected");
+        $.assetpicker.collection = "";
+    }
+
+    function currentDisplayCount() {
+        return $(".assetpicker-content article").length;
+    }
+
+    function clearRailInput() {
+        $(".search input[name='fulltext']").val('');
+        fullTextSearch = '';
+        $.clearTypeFilters();
+    }
+
+    $.assetpicker.invoke = function (append, preserveState, preserveCount) {
+        if (!preserveState) {
+            resetState();
+        }
+
+        if (!preserveCount) {
+            resetParam();
+        }
+
+//Process Filters
+        $(rel_filters + " li").remove();
+        $.each($.assetpicker.filters, function (index, val) {
+            var id = addFilter(val.text, val.id, val.isMandatory);
+            $.data(document.body, id, val);
+        });
+
+        loadData(append, $.getSelectedMimeType(), fullTextSearch,  $.getRangePredicates(), $.getSelectedTags(),$.getSelectedSolutions(), $.assetpicker.sort, $.assetpicker.collection);
+    };
+
+    function getParent() {
+        if (window.opener) {
+            return window.opener;
+        }
+        return parent;
+    }
+
+    function addFilter(text, id, mandatory) {
+        var random;
+        if (id) {
+            random = id;
+        } else {
+            random = text + "_" + Math.round(Math.random() * 1000000);
+        }
+
+        var display = "";
+        if (mandatory) {
+            display = "style=display:none;";
+        }
+
+        var filterTemplate =
+            "<li class=\"coral-TagList-tag\" data-id=\"" + random + "\">"
+            +    "<button class=\"coral-MinimalButton coral-TagList-tag-removeButton\" type=\"button\" title=\"" + Granite.I18n.get("Remove") + "\">"
+            +        "<i class=\"coral-Icon coral-Icon--close coral-Icon--sizeXS\" data-dismiss=\"filter\" " + display + "></i>"
+            +    "</button>"
+            +    "<span class=\"coral-TagList-tag-label\">" + _g.shared.XSS.getXSSValue(Granite.I18n.getVar(text)) + "</span>"
+            + "</li>";
+
+        $(rel_filters).append(filterTemplate);
+        return random;
+    }
+
+
+    //Browse
+
+    function changeLevel(path, title) {
+        if (path) {
+            $.assetpicker.searchRoot = path;
+        }
+        if (title) {
+            title = Granite.I18n.getVar(title);
+        } else {
+            title = Granite.I18n.get("Unable to resolve");
+        }
+        $(".assetpicker-levelinfo > .level").text(title);
+    }
+
+    $(document).on("click" + browseUpActivator, browseUpActivator, function (e) {
+        var activator = $(this);
+        var key = activator.data("path");
+        var url = activator.data("href");
+        var content = $("#assetpicker-header-browse");
+        var parent = $.data(document.body, key + ".parent");
+        if (parent) {
+            content.html(parent);
+            changeLevel($(parent).data("path"), $(parent).data("title"));
+        } else {
+            $.ajax({
+                type:"GET",
+                url:url,
+                async:false
+            }).done(function (response) {
+                    $.data(document.body, key + ".parent", response);
+                    $.data(document.body, key + ".child", content.html());
+                });
+            content.html($.data(document.body, key + ".parent"));
+            changeLevel(activator.data("parent-path"), activator.data("parent-title"));
+
+        }
+        reset();
+        //fire query
+        $.assetpicker.invoke(false);
+
+    });
+
+
+    $(document).on("click" + browseInActivator, browseInActivator, function (e) {
+        var activator = $(this);
+        var url = activator.data("href");
+        var key = activator.data("path");
+        var content = $("#assetpicker-header-browse");
+        if (!$.data(document.body, key + ".child")) {
+            $.ajax({
+                type:"GET",
+                url:url,
+                async:false
+            }).done(function (response) {
+                    $.data(document.body, key + ".child", response);
+                    $.data(document.body, key + ".parent", content.html());
+                });
+        }
+        content.html($.data(document.body, key + ".child"));
+
+        //fire query
+        changeLevel(activator.data("path"), activator.data("title"));
+        reset();
+        $.assetpicker.invoke(false);
+
+    });
+
+    $(document).on("click" + boardActivator, boardActivator, function (e) {
+        var activator = $(this);
+        changeLevel("", Granite.I18n.get("Collection: ") + activator.data("title"));
+        activator.siblings().removeClass("selected");
+        activator.addClass("selected");
+        $.assetpicker.collection = activator.data("path");
+        reset();
+        loadData(false, $.getSelectedMimeType(), fullTextSearch,  $.getRangePredicates(), $.getSelectedTags(),$.getSelectedSolutions(), $.assetpicker.sort, $.assetpicker.collection, "/content/dam");
+
+    });
+	
+	var SHOW_STATISTIC_VIEW_ACTION_BAR_BUTTON = ".endor-Panel-header .show-statistic-button";
+	var LAYOUT_TOGGLE_SELECTOR = ".endor-Panel-header .assetpicker-togglelayout";  
+	
+	$(document).on("click", LAYOUT_TOGGLE_SELECTOR, function(event) {
+        var target = $(event.target);
+        var layoutChangeButton = $(".endor-Panel-header .assetpicker-togglelayout i").filter(":visible");
+        var layout = layoutChangeButton.attr("data-value");
+        if(layout) {
+            if(layout == "card") {
+                showStatisticViewButton(true);
+            } else if(layout == "list") {
+                showStatisticViewButton(false);
+            } 
+        }
+    })
+	
+	function showStatisticViewButton(toShow) {
+        if(toShow) {
+            $(SHOW_STATISTIC_VIEW_ACTION_BAR_BUTTON).show();
+        } else {
+            $(SHOW_STATISTIC_VIEW_ACTION_BAR_BUTTON).hide();
+        }
+    }
+	
+})(window, document, Granite, Granite.$);

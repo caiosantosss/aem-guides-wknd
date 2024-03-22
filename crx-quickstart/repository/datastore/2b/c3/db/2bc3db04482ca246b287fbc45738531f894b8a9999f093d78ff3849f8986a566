@@ -1,0 +1,427 @@
+<%--
+    ADOBE CONFIDENTIAL
+
+    Copyright 2013 Adobe Systems Incorporated
+    All Rights Reserved.
+
+    NOTICE:  All information contained herein is, and remains
+    the property of Adobe Systems Incorporated and its suppliers,
+    if any.  The intellectual and technical concepts contained
+    herein are proprietary to Adobe Systems Incorporated and its
+    suppliers and may be covered by U.S. and Foreign Patents,
+    patents in process, and are protected by trade secret or copyright law.
+    Dissemination of this information or reproduction of this material
+    is strictly forbidden unless prior written permission is obtained
+    from Adobe Systems Incorporated.
+
+
+    The script to render a single version event.
+
+--%><%@page session="false" import="java.util.Locale,
+                                    java.awt.Dimension,
+                                    java.io.InputStream,
+                                    java.net.URI,
+                                    java.util.ResourceBundle,
+                                    java.util.Date,
+                                    java.util.Calendar,
+                                    java.util.regex.Pattern,
+                                    java.text.SimpleDateFormat,
+                                    java.text.ParseException,
+                                    javax.jcr.Node,
+                                    javax.jcr.PathNotFoundException,
+                                    javax.jcr.Session,
+                                    javax.jcr.version.Version,
+                                    javax.jcr.version.VersionHistory,
+                                    javax.jcr.version.VersionManager,
+                                    org.apache.jackrabbit.JcrConstants,
+                                    org.apache.jackrabbit.api.security.user.Authorizable,
+                                    org.apache.commons.lang.StringUtils,
+                                    org.apache.jackrabbit.util.Text,
+                                    com.adobe.granite.timeline.TimelineEvent,
+                                    com.day.cq.dam.api.Asset,
+                                    com.day.cq.dam.api.Rendition,
+                                    com.day.cq.dam.api.checkout.AssetCheckoutService,
+                                    com.day.cq.dam.commons.util.DamUtil,
+                                    com.day.cq.dam.commons.util.UIHelper,
+                                    com.adobe.granite.security.user.UserProperties,
+                                    com.adobe.granite.security.user.UserPropertiesManager,
+                                    static com.day.cq.dam.api.DamConstants.ORIGINAL_FILE,
+                                    com.adobe.granite.security.user.UserPropertiesService"%>
+<%
+%><%@include file="/libs/granite/ui/global.jsp" %><%
+
+    UserPropertiesManager userPropertiesManager = resourceResolver.adaptTo(UserPropertiesManager.class);
+    TimelineEvent event = (TimelineEvent) request.getAttribute("cq.gui.common.admin.timeline.event");
+    boolean isCurrent = false;
+    if ("jcr:rootVersion".equals(event.getDescription())) {
+       isCurrent = true;
+    }
+
+    Session session = resourceResolver.adaptTo(Session.class);
+    String path = slingRequest.getRequestParameter("item").getString("UTF-8");
+    if (path == null) {
+        log.warn("Unable to display event {}, missing content path", event);
+    }
+    Node node = session.getNode(path);
+    Resource rsc = resourceResolver.getResource(path);
+    Asset asset = rsc.adaptTo(Asset.class);
+    String mimeType = asset.getMimeType();
+    String versionablePath = path; // the versionable path
+
+    // determine if node itself (e.g. asset) or jcr:content (e.g. page) is versionable
+    if (!node.isNodeType(JcrConstants.MIX_VERSIONABLE)) {
+        try {
+            if (node.getNode(JcrConstants.JCR_CONTENT).isNodeType(JcrConstants.MIX_VERSIONABLE)) {
+                versionablePath += "/" + JcrConstants.JCR_CONTENT;
+            } else {
+                // resource not versionable
+                return;
+            }
+        } catch (PathNotFoundException e) {
+            return;
+        }
+    }
+    String imgPath = "/libs/cq/ui/widgets/themes/default/icons/240x180/page.png";
+    String preview = null;
+    Resource previewVersionRenditions = null;
+    Date date = new Date();
+    String label = null;
+    boolean scheduled = false;
+    String creator = null;
+    String userName = null;
+    String comment = null;
+    String dateText = null;
+    Version version = null;
+    Resource versionedResource = null;
+
+    if (isCurrent) {
+        label = "Current";
+        Resource renditionResource = resourceResolver.getResource(path + "/jcr:content/renditions/cq5dam.thumbnail.48.48.png");
+        if (renditionResource != null) {
+            imgPath = renditionResource.getPath();
+        }
+        previewVersionRenditions = resourceResolver.getResource(path + "/jcr:content/renditions/");
+        Resource jcrContent = resourceResolver.getResource(path + "/jcr:content");
+        ValueMap properties = jcrContent.adaptTo(ValueMap.class);
+        if (properties != null) {
+            Calendar lastModified = properties.get(JcrConstants.JCR_LASTMODIFIED, Calendar.class);
+            if (lastModified != null) {
+                dateText = new Date(lastModified.getTimeInMillis()).toInstant().toString();
+                dateText = "<foundation-time type=\"datetime\" value='" + dateText + "'/>";
+            }
+
+            creator = properties.get("cq:versionCreator", String.class);
+
+            //Fallback to jcr:lastModifiedBy if cq:versionCreator isn't present
+            if(creator == null) {
+                creator = properties.get("jcr:lastModifiedBy", String.class);
+            }
+
+            comment = properties.get("cq:versionComment", String.class);
+        }
+
+    } else {
+        VersionManager versionManager = session.getWorkspace().getVersionManager();
+        VersionHistory versionHistory = versionManager.getVersionHistory(versionablePath);
+        version = versionHistory.getVersion(event.getDescription());
+
+        String[] labels = versionHistory.getVersionLabels(version);
+        if (labels.length > 0) {
+            label = labels[0];
+            Pattern p = Pattern.compile("Scheduled Activation Time is \\d\\d\\d\\d\\.[0-2]\\d\\.[0-3]\\d [0-2]\\d\\.[0-5]\\d\\.[0-5]\\d");
+            if (p.matcher(label).find()) {
+                // default version label when scheduling activation: translate text and date separately
+                try {
+                    SimpleDateFormat dateFormatIn = new SimpleDateFormat("yyyy.MM.dd HH.mm.ss");
+                    date = dateFormatIn.parse(label.replace("Scheduled Activation Time is ", ""));
+                    label = i18n.get("Scheduled Activation Time is ");
+                    scheduled = true;
+                }
+                catch (ParseException e) {
+                    // no valid date format: keep label as is
+                }
+            }
+        }
+
+        Locale locale = slingRequest.getLocale();
+
+        Node nd = version.getNode("jcr:frozenNode"+"/"+"jcr:content");
+        if (nd.hasProperty("cq:versionCreator")) {
+            creator = nd.getProperty("cq:versionCreator").getString();
+        }
+        if (nd.hasProperty("cq:versionComment"))  {
+            comment =nd.getProperty("cq:versionComment").getString();
+        }
+
+        ResourceBundle resourceBundle = slingRequest.getResourceBundle(locale);
+        dateText = new Date(event.getTime()).toInstant().toString();
+        dateText = "<foundation-time type=\"datetime\" value='" + dateText + "'/>";
+        versionedResource = resourceResolver.getResource(version.getPath());
+        Node versionedNode = versionedResource.adaptTo(Node.class);
+
+        if (versionedNode.hasNode("./jcr:frozenNode/jcr:content/renditions/cq5dam.thumbnail.48.48.png")) {
+            Node versionedRenditionNode = versionedNode.getNode("./jcr:frozenNode/jcr:content/renditions/cq5dam.thumbnail.48.48.png/jcr:content");
+            imgPath = version.getPath() + "/jcr:frozenNode/jcr:content/renditions/cq5dam.thumbnail.48.48.png";
+        }
+        previewVersionRenditions = resourceResolver
+                .getResource(version.getPath()
+                        + "/jcr:frozenNode/jcr:content/renditions/");
+    }
+    UserProperties profile = null;
+    if (creator != null) {
+        profile = userPropertiesManager.getUserProperties(creator, UserPropertiesService.PROFILE_PATH);
+    }
+
+    // CQ-58641:Timeline comments - users aren't able to see the names of the other people who add comments.
+    // If failed to read profile node, try the profile-cc(for CCEP) node instead.
+    // Temporary solution before GRANITE-8412
+    if (profile == null && creator != null) {
+        profile = userPropertiesManager.getUserProperties(creator, "profile-cc");
+    }
+
+    userName = creator;
+    if(profile != null) {
+        String firstName = profile.getProperty(UserProperties.GIVEN_NAME);
+        String lastName = profile.getProperty(UserProperties.FAMILY_NAME);
+        if(firstName != null && lastName !=null) {
+            userName = i18n.get("{0} {1}","name display order: {0} is the given (first) name, {1} the family (last) name",firstName,lastName);
+        } else {
+            userName = profile.getDisplayName();
+        }
+    } else {
+        userName = i18n.get("External User");
+    }
+
+    int previewHeight = -1;
+    int previeWidth = -1;
+    if (previewVersionRenditions != null) {
+        Resource previewResource = getPreviewVersionRendition(previewVersionRenditions, false);
+        if (previewResource != null) {
+            preview = request.getContextPath() + previewResource.getPath();
+            try {
+                Rendition rendition = previewResource.adaptTo(Rendition.class);
+                Dimension dim = DamUtil.getImageDimension(rendition);
+                previeWidth = dim.width;
+                previewHeight = dim.height;
+            } catch (Exception e) {
+                //eat it;
+            }
+        }
+    }
+
+    // Permissions to administer versions (vs checkout status)
+    Authorizable currentUser = resourceResolver.adaptTo(Authorizable.class);
+    AssetCheckoutService assetCheckoutService = sling.getService(AssetCheckoutService.class);
+    boolean isCheckedOut = false;
+    boolean isCheckedOutByCurrentUser = false;
+    boolean isSubAsset = false;
+    boolean isParentAssetCheckedOut = false;
+    boolean isParentAssetCheckedOutByCurrentUser = false;
+    boolean canAdministerVersions;
+    String selfId = currentUser.getID();
+
+    if (asset != null && asset.isSubAsset()) {
+      isSubAsset = true;
+    }
+    if (!isSubAsset && asset != null && assetCheckoutService != null) {
+      isCheckedOut = assetCheckoutService.isCheckedOut(asset);
+    }
+    if (isCheckedOut) {
+      String checkedOutBy = assetCheckoutService.getCheckedOutBy(asset);
+      isCheckedOutByCurrentUser = selfId.equals(checkedOutBy);
+    }
+
+    if (isSubAsset && assetCheckoutService != null) {
+        Resource parentResource = rsc.getParent().getParent(); //since immediate parent is subaasets
+        Asset parentAsset = parentResource.adaptTo(Asset.class);
+        isParentAssetCheckedOut = assetCheckoutService.isCheckedOut(parentAsset);
+
+        if (isParentAssetCheckedOut) {
+          String parentAssetCheckedOutBy = assetCheckoutService.getCheckedOutBy(parentAsset);
+          isParentAssetCheckedOutByCurrentUser = selfId.equals(parentAssetCheckedOutBy);
+        }
+    }
+    String altText = UIHelper.getAltText(rsc);
+    canAdministerVersions = isSubAsset ? (!isParentAssetCheckedOut || isParentAssetCheckedOutByCurrentUser) : (!isCheckedOut || isCheckedOutByCurrentUser);
+
+    final String eventIconId = "UID-timeline-event-icon_" + event.getDescription();
+    final String eventVersionLabelId = "UID-timeline-event-version-label_" + event.getDescription();
+    final String eventVersionValueId = "UID-timeline-event-version-value_" + event.getDescription();
+    final String eventCommentLabelId = "UID-timeline-event-comment-label_" + event.getDescription();
+    final String eventCommentValueId = "UID-timeline-event-event-comment-value_" + event.getDescription();
+    final String eventAddedLabelId = "UID-timeline-event-added-label_" + event.getDescription();
+    final String eventAddedValueId = "UID-timeline-event-added-value_" + event.getDescription();
+    final String eventVersionScheduledLabelId = "UID-timeline-event-version-scheduled-label_" + event.getDescription();
+    final String eventVersionScheduledValueId = "UID-timeline-event-version-scheduled-value_" + event.getDescription();
+
+    final StringBuilder versionSectionMenuControllerAriaLabelledBy = new StringBuilder();
+    versionSectionMenuControllerAriaLabelledBy.append(eventVersionLabelId + " ");
+    versionSectionMenuControllerAriaLabelledBy.append(eventVersionValueId + " ");
+    versionSectionMenuControllerAriaLabelledBy.append(eventCommentLabelId + " ");
+    versionSectionMenuControllerAriaLabelledBy.append(eventCommentValueId + " ");
+    versionSectionMenuControllerAriaLabelledBy.append(eventAddedLabelId + " ");
+    versionSectionMenuControllerAriaLabelledBy.append(eventAddedValueId + " ");
+    if(scheduled) {
+        versionSectionMenuControllerAriaLabelledBy.append(eventVersionScheduledLabelId +" ");
+        versionSectionMenuControllerAriaLabelledBy.append(eventVersionScheduledValueId +" ");
+    }
+
+    final String formId = "UID-timeline-event-form_" + event.getDescription();
+    final String formContainerId = "UID-timeline-event-form-container_" + event.getDescription();
+    final String versionLabelId = "cq-common-admin-timeline-events-version-label-text" + event.getDescription();
+    final String versionCommentId = "cq-common-admin-timeline-events-version-comment-text" + event.getDescription();
+
+    final String sectionId = "UID-timeline-version-section-id_" + event.getDescription();
+%>
+<div class="cq-common-admin-timeline-event version-section-container"
+<%if (preview != null) { %>  
+            data-preview="<%= xssAPI.encodeForHTMLAttr(request.getContextPath()+ preview) %>"
+        <%} %>
+            data-preview-width=<%= xssAPI.encodeForHTMLAttr(String.valueOf(previeWidth)) %> 
+            data-preview-height=<%= xssAPI.encodeForHTMLAttr(String.valueOf(previewHeight)) %>
+        <%if (StringUtils.isNotBlank(mimeType)){ %>
+            data-asset-mime-type="<%= xssAPI.encodeForHTMLAttr(mimeType) %>"
+        <%} %>
+        <% if(isCurrent) { %>
+            iscurrentversion = "true"
+        <% } else { %>
+            iscurrentversion = "false"
+        <% } %>
+
+>
+    <section
+        class="version-section"
+        id="<%= sectionId %>"
+        tabIndex="0"
+        aria-labelledBy="<%= versionSectionMenuControllerAriaLabelledBy.toString() %>"
+
+        <%if (preview != null) { %>
+            data-alt="<%=xssAPI.encodeForHTMLAttr(altText)%>"
+            data-preview="<%= xssAPI.encodeForHTMLAttr(request.getContextPath()+ preview) %>"
+        <%} %>
+
+        <% if(!isCurrent) { %>
+            role="button"
+            aria-expanded="false"
+            aria-controls="<%= formContainerId %>"
+        <% } else { %>
+            iscurrentversion = "true"
+        <% } %>
+
+
+        data-preview-width=<%= xssAPI.encodeForHTMLAttr(String.valueOf(previeWidth)) %>
+        data-preview-height=<%= xssAPI.encodeForHTMLAttr(String.valueOf(previewHeight)) %>
+
+        <%if (StringUtils.isNotBlank(mimeType)){ %>
+            data-asset-mime-type="<%= xssAPI.encodeForHTMLAttr(mimeType) %>"
+        <%} %>
+        >
+        <div class="cq-common-admin-timeline-event-icon">
+           <img class="version-img" src="<%= xssAPI.getValidHref(Text.escapePath(imgPath))%>" alt="<%=xssAPI.encodeForHTMLAttr(altText)%>"></img>
+        </div>
+        <div class="cq-common-admin-timeline-event-text version-text">
+            <div id="<%= eventVersionLabelId %>" hidden><%= xssAPI.encodeForHTML(i18n.get(", Version, ")) %></div>
+            <% if (label != null) {
+                if (isCurrent) { %>
+                    <div id="<%= eventVersionValueId %>" class="main"><%= xssAPI.encodeForHTML(i18n.get("Current")) %></div>
+                <% } else if (scheduled) { %>
+                    <div id="<%= eventVersionValueId %>" class="main"><%= xssAPI.encodeForHTML(i18n.get("New Version {0}", "example: New Version 1.1", label)) %>
+                        <div id="<%= eventVersionScheduledLabelId %>" hidden><%= xssAPI.encodeForHTML(i18n.get(", Scheduled, ")) %></div>
+                        <foundation-time id="<%= eventVersionScheduledValueId %>" type="datetime" value="<%= xssAPI.encodeForHTMLAttr(date.toInstant().toString()) %>"></foundation-time>
+                    </div>
+                <% } else { %>
+                    <div id="<%= eventVersionValueId %>" class="main"><%= xssAPI.encodeForHTML(i18n.get("New Version {0}", "example: New Version 1.1", label)) %></div>
+                <% }
+            } else { %>
+                <div class="main"><%= xssAPI.encodeForHTML(i18n.get("New Version {0}", "example: New Version 1.1", event.getDescription())) %></div>
+            <% } %>
+            <% if (comment != null) { %>
+                <div id="<%= eventCommentLabelId %>" hidden><%= xssAPI.encodeForHTML(i18n.get(", Comment, ")) %></div>
+                <div id="<%= eventCommentValueId %>"><%= xssAPI.encodeForHTML(comment) %></div>
+            <% } %>
+            <%
+            if(dateText != null) {%>
+                <div id="<%= eventAddedLabelId %>" hidden>, Added, </div>
+                <%
+                if (userName != null) { %>
+                    <div id="<%= eventAddedValueId %>"><%= xssAPI.filterHTML(i18n.get("{0} by {1} ", "example: New Version 1.1", dateText, userName)) %></div>
+            <%  } else { %>
+                    <div id="<%= eventAddedValueId %>"><%= xssAPI.filterHTML(i18n.get("{0}", "example: New Version 1.1", dateText)) %></div>
+            <%  }
+            }
+            %>
+        </div>
+    </section>
+
+    <div id="<%= formContainerId %>"
+        class="cq-common-admin-timeline-event is-active cq-common-admin-timeline-event-expanded cq-common-admin-timeline-item version-form-container"
+        role="region"
+        aria-labelledBy="<%= sectionId %>"
+        <%if (preview != null) { %>
+            data-alt="<%=xssAPI.encodeForHTMLAttr(altText)%>"
+            data-preview="<%= xssAPI.encodeForHTMLAttr(request.getContextPath()+ preview) %>"
+        <%} %>
+        data-preview-width=<%= xssAPI.encodeForHTMLAttr(String.valueOf(previeWidth)) %>
+        data-preview-height=<%= xssAPI.encodeForHTMLAttr(String.valueOf(previewHeight)) %>
+        style="padding-top:0px;">
+      <% if (canAdministerVersions && !isCurrent) { %>
+        <form action="<%= request.getContextPath() + xssAPI.encodeForHTMLAttr(versionablePath) %>.version.html" x-cq-linkchecker="skip" type = "POST">
+            <input type="hidden" name="cmd" value="restoreVersion">
+            <input type="hidden" name="_charset_" value="utf-8">
+            <input type="hidden" name=":status" value="browser">
+            <input type="hidden" name="id" value="<%= version.getIdentifier() %>">
+            <input type="hidden" name="path" value="<%= xssAPI.encodeForHTMLAttr(path) %>">
+            <label for="<%= versionLabelId %>" ><%= xssAPI.encodeForHTML(i18n.get("Label")) %></label>
+            <input type="text" is="coral-textfield" id="<%= versionLabelId %>" class="version-label-expanded" style="margin-top:0px;" name="label">
+            <label for="<%= versionCommentId %>" ><%= xssAPI.encodeForHTML(i18n.get("Comment")) %></label>
+            <input type="text" is="coral-textfield" id="<%= versionCommentId %>" class="version-comment-expanded" name="comment">
+            <button is="coral-button" class="cq-common-admin-timeline-event-button cq-common-admin-timeline-event-action-ok foundation-collection-action" type="button"><%= i18n.get("Revert to this Version") %></button>
+            <% if (!isContentFragment(versionedResource)) { %>
+            <button is="coral-button" class="cq-common-admin-timeline-event-action-preview" type="button"><%= i18n.get("Preview Version") %></button>
+            <% } else { %>
+            <button is="coral-button" class="cq-common-admin-timeline-event-action-compare" type="button"><%= i18n.get("Compare to Current") %></button>
+            <% } %>
+       </form>
+      <% } %>
+    </div>
+</div>
+
+<%!
+Resource getPreviewVersionRendition(Resource previewRenditions, boolean preferOriginal) {
+    Resource maxResRendition = null;
+    if (preferOriginal && null != previewRenditions.getChild(ORIGINAL_FILE)) {
+        return previewRenditions.getChild(ORIGINAL_FILE);
+    }
+    int maxTillNow = 0;
+    for (Resource r : previewRenditions.getChildren()) {
+        String name = r.getName();
+        String tokens[] = name.split("\\.");
+        if (tokens.length > 2) {
+            try {
+                int current = Integer.parseInt(tokens[2]);
+                if (current > maxTillNow) {
+                    maxTillNow = current;
+                    maxResRendition = r;
+                }
+            } catch (Exception e) {
+            }
+        }
+    }
+    if (maxResRendition == null && null != previewRenditions.getChild(ORIGINAL_FILE)) {
+        return previewRenditions.getChild(ORIGINAL_FILE);
+    }
+    return maxResRendition;
+}
+
+private boolean isContentFragment(Resource resource) {
+    Resource contentResource = resource.getChild(
+            JcrConstants.JCR_FROZENNODE + "/" + JcrConstants.JCR_CONTENT);
+    boolean isFragment = false;
+    if (contentResource != null) {
+        ValueMap contentProps = contentResource.adaptTo(ValueMap.class);
+        isFragment = contentProps.get("contentFragment", false);
+    }
+    return isFragment;
+}
+
+%>

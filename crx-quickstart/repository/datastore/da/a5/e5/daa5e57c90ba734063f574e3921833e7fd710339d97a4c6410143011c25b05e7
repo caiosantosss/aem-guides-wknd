@@ -1,0 +1,1150 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.Annotation
+ * @extends CQ.Dialog
+ * The Dialog is a special kind of window with a form in the body
+ * and a button group in the footer. It is typically used to edit
+ * content, but can also just display information.
+ * @constructor
+ * Creates a new Dialog.
+ * @param {Object} config The config object
+ */
+CQ.wcm.Annotation = CQ.Ext.extend(CQ.Ext.Window, {
+
+    minimized: false,
+
+    /**
+     * @cfg {Number} saveDelay
+     * The delay in milliseconds for save calls after resize, changing the color, minimize/maximize
+     * and drag and drop (defaults to 1000).
+     */
+
+    /**
+     * @cfg {Number} exitSketchDelay
+     * The delay in millisecondsto exit the sketch tool after a sketch has
+     * been finished (defaults to 1200).
+     */
+
+    // private
+    // timeout IDs (to be able to clear timeouts)
+    colorTimeout: 0,
+    toggleTimeout: 0,
+    resizeTimeout: 0,
+    ddTimeout: 0,
+
+    // private
+    referencePoint: null,
+
+    isUnsaved: false,
+
+    /**
+     * The most current undo snapshot
+     * @private
+     * @type Object
+     */
+    currentUndoSnapshot: null,
+
+    suppressUpdate: false,
+
+    /**
+     *
+     */
+    post: function(params, preventUndo, preventParamProcessing) {
+        if (!params) params = {};
+        var path = this.path;
+        if (this.isUnsaved && (preventParamProcessing !== true)) {
+            params = CQ.Util.merge(params, this.getOffsetParams());
+            params = CQ.Util.merge(params, {
+                "./jcr:lastModified": "",
+                "./jcr:lastModifiedBy": ""
+            });
+        }
+        var isDeleted = false;
+        var deleteSnapshot;
+        if (params[CQ.Sling.OPERATION] == CQ.Sling.OPERATION_DELETE) {
+            isDeleted = true;
+            // the snapshot must be talen before the annotation gets removed
+            deleteSnapshot = this.createUndoSnapshot();
+            this.editComponent.removeAnnotation(this.id);
+        }
+
+        var pResp = CQ.HTTP.post(path, null, params);
+        var isSuccess = CQ.HTTP.isOk(pResp);
+        if (isSuccess) {
+            var undoHistory, undoStep;
+            // isDeleted && this.isUnsaved is handled outside, so we don't have to care
+            // about this here
+            if (this.isUnsaved) {
+                this.path = pResp.headers[CQ.HTTP.HEADER_PATH];
+                this.isUnsaved = false;
+                // create undo step (create annotation)
+                if ((preventUndo !== true) && CQ.undo.UndoManager.isEnabled()) {
+                    undoHistory = CQ.undo.UndoManager.getHistory();
+                    undoStep = undoHistory.createUndoStep(undoHistory.createStepConfig());
+                    this.currentUndoSnapshot = this.createUndoSnapshot();
+                    undoStep.addUndoAction(new CQ.undo.actions.CreateAnnotationAction(
+                            this.editComponent, undoHistory.getIdManager(), this,
+                            this.currentUndoSnapshot));
+                    undoStep.commit();
+                }
+            } else if (isDeleted) {
+                // create undo step (remove annotation)
+                if ((preventUndo !== true) && CQ.undo.UndoManager.isEnabled()) {
+                    undoHistory = CQ.undo.UndoManager.getHistory();
+                    undoStep = undoHistory.createUndoStep(undoHistory.createStepConfig());
+                    this.currentUndoSnapshot = null;
+                    undoStep.addUndoAction(new CQ.undo.actions.RemoveAnnotationAction(
+                            this.editComponent, undoHistory.getIdManager(), this,
+                            deleteSnapshot));
+                    for (var sketchName in this.sketches) {
+                        var sketch = this.sketches[sketchName];
+                        var sketchData = sketch.createUndoSnapshot();
+                        undoStep.addUndoAction(new CQ.undo.actions.RemoveSketchAction(
+                                this.editComponent, undoHistory.getIdManager(), sketch,
+                                sketchData));
+                    }
+                    undoStep.commit();
+                }
+            } else {
+                // create undo step (update annotation)
+                if ((preventUndo !== true) && CQ.undo.UndoManager.isEnabled()) {
+                    var uu = CQ.undo.util.UndoUtils;
+                    undoHistory = CQ.undo.UndoManager.getHistory();
+                    // we need a Sling-compatible way for the original state of the
+                    // component before the first update
+                    var newSnapshot = this.createUndoSnapshot();
+                    var diffObj = uu.diffObject(this.currentUndoSnapshot, newSnapshot);
+                    if ((diffObj.changeCnt > 0) || (diffObj.addCnt > 0)) {
+                        this.currentUndoSnapshot = newSnapshot;
+                        undoStep = undoHistory.createUndoStep(
+                                undoHistory.createStepConfig());
+                        undoStep.addUndoAction(new CQ.undo.actions.UpdateAnnotationAction(
+                                this.editComponent, undoHistory.getIdManager(), this,
+                                diffObj));
+                        undoStep.commit();
+                    }
+                }
+            }
+            if (params["./jcr:lastModified"] != undefined) {
+                var gResp = CQ.HTTP.eval(this.path + CQ.HTTP.EXTENSION_JSON);
+                this.modInfo.updateHtml(
+                        this.buildModInfo(gResp["jcr:lastModifiedBy"], gResp["jcr:lastModified"]));
+            }
+        }
+        return isSuccess;
+    },
+
+    getOffsetParams: function() {
+        var eXY = this.editComponent.element.getXY();
+        var xy = this.hidden ? this.mini.getPosition() : this.getPosition();
+        this.offsetX = Math.round(xy[0] - eXY[0]);
+        this.offsetY = Math.round(xy[1] - eXY[1]);
+        return {
+            "./x": this.offsetX,
+            "./y": this.offsetY,
+            "./x@TypeHint": "Long",
+            "./y@TypeHint": "Long"
+        };
+    },
+
+    align: function() {
+        if (!this.hidden && this.rendered) {
+            this.alignTo(this.editComponent.element, "tl", [this.offsetX, this.offsetY]);
+            for (var name in this.sketches) {
+                this.sketches[name].align();
+            }
+        }
+        if (!this.mini.hidden && this.mini.rendered) {
+            var offsetX = this.offsetX;
+            this.mini.alignTo(this.editComponent.element, "tl", [offsetX, this.offsetY]);
+        }
+    },
+
+    show: function(focus) {
+        if (this.minimized) {
+            if (!this.mini.hidden) return;
+            this.mini.show();
+        }
+        else {
+            if (!this.hidden) return;
+            CQ.wcm.Annotation.superclass.show.call(this);
+            if (focus) {
+                this.field.focus(false, 200);
+            }
+            for (var name in this.sketches) {
+                this.sketches[name].show();
+            }
+        }
+        this.align();
+    },
+
+    hide: function() {
+        if (this.minimized) {
+            if (this.mini.hidden) return;
+            this.mini.hide();
+        }
+        else {
+            if (this.hidden) return;
+            CQ.wcm.Annotation.superclass.hide.call(this);
+        }
+        for (var name in this.sketches) {
+            this.sketches[name].hide();
+        }
+    },
+
+    destroy: function() {
+        this.mini.destroy();
+        for (var name in this.sketches) {
+            this.sketches[name].destroy();
+        }
+        CQ.wcm.Annotation.superclass.destroy.call(this);
+    },
+
+    minimize: function() {
+        this.toggle(true);
+    },
+
+    toggle: function(minimize, suppressUpdate) {
+        if (this.minimized = minimize) {
+            this.mini.show();
+            CQ.wcm.Annotation.superclass.hide.call(this);
+            this.align();
+            for (var name in this.sketches) {
+                this.sketches[name].hide();
+            }
+        }
+        else {
+            CQ.wcm.Annotation.superclass.show.call(this);
+            this.mini.hide();
+            this.align();
+            this.field.focus(false, 200);
+            for (var name in this.sketches) {
+                this.sketches[name].show();
+            }
+        }
+        if (suppressUpdate !== true) {
+            window.clearTimeout(this.toggleTimeout);
+            this.toggleTimeout = window.setTimeout(this.post.createDelegate(this, [{
+                "./minimized": this.minimized,
+                "./minimized@TypeHint": "Boolean"
+            }]), this.saveDelay);
+        }
+    },
+
+    rotateColor: function() {
+        this.removeClass("cq-annotation-" + this.color);
+        this.mini.removeClass("cq-annotation-mini-" + this.color);
+
+        var i = this.colors.indexOf(this.color);
+        this.color = this.colors[i + 1 == this.colors.length ? 0 : i + 1];
+
+        this.addClass("cq-annotation-" + this.color);
+        this.mini.addClass("cq-annotation-mini-" + this.color);
+
+        for (var name in this.sketches) {
+            this.sketches[name].clearCanvas();
+            this.sketches[name].drawData();
+        }
+
+        window.clearTimeout(this.colorTimeout);
+        this.colorTimeout = window.setTimeout(this.post.createDelegate(this, [{
+            "./color": this.color
+        }]), this.saveDelay);
+    },
+
+    addSketch: function(additionalCfg) {
+        if (this.isUnsaved) {
+            this.post();
+        }
+        var cfg = {
+            "annotation": this,
+            "path": this.path + "/sketches/",
+            "id": CQ.Util.createId()
+        };
+        if (additionalCfg) {
+            CQ.Ext.apply(cfg, additionalCfg);
+        }
+        var sketch = new CQ.wcm.Annotation.Sketch(cfg);
+        sketch.show();
+        return sketch;
+    },
+
+    getSketch: function(id) {
+        return this.sketches[id];
+    },
+
+    getSketchAt: function(path) {
+        for (var id in this.sketches) {
+            if (this.sketches[id].path == path) {
+                return this.sketches[id];
+            }
+        }
+        return null;
+    },
+
+    /**
+     * @param {String} id
+     * @private
+     */
+    removeSketch: function(id) {
+        this.sketches[id].destroy();
+        delete this.sketches[id];
+    },
+
+    // private
+    initTools : function(){
+        if (!CQ.Ext.isOldIE && this.sketchable) {
+            this.addTool({
+                id: 'sketch',
+                // use a function, as addSketch might know take an additional parameter
+                // (which is invalidly the event if used as handler directly)
+                handler: function() {
+                    this.addSketch();
+                }.createDelegate(this)
+            });
+        }
+
+        if (this.colors.length > 1) {
+            this.addTool({
+                id: 'color',
+                handler: this.rotateColor.createDelegate(this)
+            });
+        }
+
+        if (this.minimizable){
+            this.addTool({
+                id: 'minimize',
+                handler: this.minimize.createDelegate(this, [])
+            });
+        }
+
+        if (this.closable){
+            this.addTool({
+                id: 'close',
+                handler: this[this.closeAction].createDelegate(this, [])
+            });
+        }
+    },
+
+    // private - used for dragging
+    ghost : function(cls){
+        return CQ.wcm.Annotation.superclass.ghost.call(this, "cq-annotation cq-annotation-" + this.color);
+    },
+
+    // overrides CQ.Ext.Window#alignTo (to avoid position < 0)
+    alignTo : function(element, position, offsets){
+        return CQ.wcm.Annotation.alignTo(this, element, position, offsets);
+    },
+
+    // private
+    buildModInfo: function(user, date) {
+        var fd = ""; // formatted date string
+        var title = "";
+        try {
+            var d = new Date(date);
+            var isNewAnnotation = !date && isNaN(d.getTime());
+            var now = new Date();
+            if (isNewAnnotation || CQ.Date.isToday(d, now)) fd = CQ.Date.TODAY;
+            else if (CQ.Date.isYesterday(d, now)) fd = CQ.Date.YESTERDAY;
+            else if (CQ.Date.isThisWeek(d, now)) fd = CQ.Date.THIS_WEEK;
+            else if (CQ.Date.isLastWeek(d, now)) fd = CQ.Date.LAST_WEEK;
+            else if (CQ.Date.isThisMonth(d, now)) fd = CQ.Date.THIS_MONTH;
+            else if (CQ.Date.isThisYear(d, now)) fd = d.format("F d");
+            else fd = d.format("d-M-Y");
+
+            fd = " (" + fd + ")";
+            title = ' title="' + CQ.wcm.SiteAdmin.formatDate(d) + '"';
+        }
+        catch (e) {
+            // invalid date, e.g. new annotation
+        }
+        return "<span" + title + ">" + user + fd + "</span>";
+    },
+
+    constructor: function(config) {
+        var a = this;
+
+        this.field = new CQ.Ext.form.TextArea({
+            "name": "./annotation",
+            "xtype": "textarea",
+            "value": config.text ? config.text : "",
+            "flex": 1,
+            "listeners": {
+                "change": function() {
+                    a.post({
+                        "./text": this.getValue(),
+                        "./jcr:lastModified": "",
+                        "./jcr:lastModifiedBy": "",
+                        "_charset_": "utf-8"
+                    });
+                }
+            }
+        });
+
+        var user = config.lastModifiedBy ? config.lastModifiedBy : CQ.User.getCurrentUser().getUserName();
+        this.modInfo = new CQ.Static({
+            "html": this.buildModInfo(user, config.lastModified)
+
+        });
+
+        CQ.Util.applyDefaults(config, {
+            "cls": "cq-annotation",
+            "height": CQ.themes.wcm.Annotation.HEIGHT,
+            "width": CQ.themes.wcm.Annotation.WIDTH,
+            "minWidth": CQ.themes.wcm.Annotation.MINWIDTH,
+            "minHeight": CQ.themes.wcm.Annotation.MINHEIGHT,
+            "minimizable": true,
+            "minimized": false,
+            "sketchable": CQ.themes.wcm.Annotation.SKETCHABLE,
+            "shadow": "frame",
+            "resizeHandles": "se",
+            "color": CQ.themes.wcm.Annotation.COLOR,
+            "colors": CQ.themes.wcm.Annotation.COLORS,
+            "saveDelay": CQ.themes.wcm.Annotation.SAVE_DELAY,
+            "exitSketchDelay": CQ.themes.wcm.Annotation.EXIT_SKETCH_DELAY,
+            "layout": {
+                "type": "vbox",
+                "align": "stretch"
+            },
+            "listeners": {
+                "resize": function(comp, w, h) {
+                    if ((w == this.width && h == this.height) || this.suppressUpdate) {
+                        return;
+                    }
+                    window.clearTimeout(a.resizeTimeout);
+                    // we'll have to reset width/height here for making the above condition
+                    // work correctly
+                    this.width = (w != undefined ? w : this.width);
+                    this.height = (h != undefined ? h : this.height);
+                    a.resizeTimeout = window.setTimeout(a.post.createDelegate(a, [{
+                        "./w": Math.round(w),
+                        "./h": Math.round(h),
+                        "./w@TypeHint": "Long",
+                        "./h@TypeHint": "Long"
+                    }]), this.saveDelay);
+                },
+                "beforeclose": function() {
+                    if (this.isUnsaved) {
+                        // unsaved annotation: unregister (includes destroy/close)
+                        this.editComponent.removeAnnotation(this.id);
+                        return false;
+                    }
+                    var msg = CQ.I18n.getMessage("Do you really want to delete the selected annotation and the associated sketches?");
+                    CQ.Ext.Msg.confirm(
+                        CQ.I18n.getMessage("Delete Annotation"),
+                        msg,
+                        function(btnId) {
+                            if (btnId == "yes") {
+                                var params = {};
+                                params[CQ.Sling.OPERATION] = CQ.Sling.OPERATION_DELETE;
+                                this.post(params);
+                            }
+                        },
+                        this
+                    );
+                    // do not close annotation; will be destroyed later
+                    return false;
+                },
+                "render": function(){
+                    // to be on top of any sketches
+                    this.setActive();
+                }
+            },
+            "items": [
+                this.field,
+                this.modInfo
+            ]
+        });
+
+        CQ.wcm.Annotation.superclass.constructor.call(this, config);
+    },
+
+    initComponent: function() {
+        CQ.wcm.Annotation.superclass.initComponent.call(this);
+
+        this.isUnsaved = this.path.charAt(this.path.length - 1) == "/";
+
+        this.mini = new CQ.wcm.Annotation.Mini({
+            "annotation": this
+        });
+
+        this.addClass("cq-annotation-" + this.color);
+        this.mini.addClass("cq-annotation-mini-" + this.color);
+
+        var a = this;
+        this.on("render", function() {
+            a.el.disableShadow = function() {};
+            a.el.enableShadow();
+        });
+
+        var s = {};
+        if (!CQ.Ext.isOldIE) {
+            // sketches are not available in IE (uses canvas)
+            for (var name in this.sketches) {
+                if (name == "jcr:primaryType") continue;
+                var id = CQ.Util.createId();
+                var config = {
+                    "name": name,
+                    "id": id,
+                    "path": this.path + "/sketches/" + name,
+                    "annotation": this,
+                    "data": this.sketches[name].data,
+                    "offsetX": this.sketches[name].x,
+                    "offsetY": this.sketches[name].y,
+                    "width": this.sketches[name].w,
+                    "height": this.sketches[name].h,
+                    "hidden": this.minimized
+                };
+                s[id] = new CQ.wcm.Annotation.Sketch(config);
+            }
+        }
+        this.sketches = s;
+
+        this.currentUndoSnapshot = this.createUndoSnapshot();
+    },
+
+    initDraggable : function(){
+        /**
+         * If this Window is configured {@link #draggable}, this property will contain
+         * an instance of {@link CQ.Ext.dd.DD} which handles dragging the Annotation's DOM Element.
+         * @type CQ.Ext.dd.DD
+         * @property dd
+         */
+        this.dd = new CQ.wcm.Annotation.DD(this);
+    },
+
+    /**
+     * Creates a "snapshot" of the current state of the annotation on a parametric
+     * level as required for undoing any change.
+     * @return {Object} The snapshot (as Sling parameters)
+     */
+    createUndoSnapshot: function() {
+        var snapshot = { };
+        var addParameter = function(name, propName, isField) {
+            if (!propName) {
+                propName = name;
+            }
+            if (!CQ.undo.util.UndoUtils.strStartsWith(name, "jcr:")) {
+                name = "./" + name;
+            }
+            snapshot[name] = (isField ? this[propName].getValue() : this[propName]);
+        }.createDelegate(this);
+        addParameter("text", "field", true);
+        addParameter("x", "offsetX");
+        addParameter("y", "offsetY");
+        addParameter("w", "width");
+        addParameter("h", "height");
+        addParameter("minimized");
+        addParameter("color");
+        return snapshot;
+    },
+
+    /**
+     * Sets the annotation's text.
+     * @param {String} text The text
+     */
+    setText: function(text) {
+        this.field.setValue(text);
+    },
+
+    /**
+     * Sets the offsets of the annotation.
+     * @param {Number} offsX The horizontal offset; undefined to keep the current offset
+     * @param {Number} offsY The vertical offset; undefined to keep the current offset
+     */
+    setOffset: function(offsX, offsY) {
+        if (offsX != null) {
+            this.offsetX = offsX;
+        }
+        if (offsY != null) {
+            this.offsetY = offsY;
+        }
+        this.align();
+    },
+
+    setWidth: function(width, suppressUpdate) {
+        this.suppressUpdate = suppressUpdate;
+        CQ.wcm.Annotation.superclass.setWidth.call(this, width);
+        this.suppressUpdate = false;
+    },
+
+    setHeight: function(height, suppressUpdate) {
+        this.suppressUpdate = suppressUpdate;
+        CQ.wcm.Annotation.superclass.setHeight.call(this, height);
+        this.suppressUpdate = false;
+    },
+
+    setColor: function(color) {
+        if (color != this.color) {
+            this.removeClass("cq-annotation-" + this.color);
+            this.mini.removeClass("cq-annotation-mini-" + this.color);
+            this.addClass("cq-annotation-" + color);
+            this.mini.addClass("cq-annotation-mini-" + color);
+            this.color = color;
+            for (var name in this.sketches) {
+                this.sketches[name].clearCanvas();
+                this.sketches[name].drawData();
+            }
+        }
+    },
+
+    setMinimized: function(minimized) {
+        if (this.minimized != minimized) {
+            this.toggle(minimized, true);
+        }
+    }
+
+});
+
+CQ.Ext.reg("annotation", CQ.wcm.Annotation);
+
+CQ.wcm.Annotation.alignTo = function(comp, element, position, offsets) {
+    // avoid placing of annotations at y < 0 - else dragging and tools would no longer be reachable
+    var xy = comp.el.getAlignToXY(element, position, offsets);
+    if (xy[1] < 0) xy[1] = 3;
+    comp.setPosition(xy[0], xy[1]);
+    return this;
+};
+
+/**
+ * the currently selected sketch (only one sketch for all annotations)
+ * @private
+ */
+CQ.wcm.Annotation.selectedSketch = null;
+
+/**
+ * Removes the currently selected sketch.
+ */
+CQ.wcm.Annotation.removeSelectedSketch = function() {
+    // called by WCM#processKeyDown after the delete key has been hit
+    if (CQ.wcm.Annotation.selectedSketch) {
+        if (CQ.wcm.Annotation.selectedSketch.isDragging) return;
+        window.clearTimeout(CQ.wcm.Annotation.selectedSketch.ddTimeout);
+        var params = {};
+        params[CQ.Sling.OPERATION] = CQ.Sling.OPERATION_DELETE;
+        CQ.wcm.Annotation.selectedSketch.post(params);
+    }
+};
+
+// -----------------------------------------------------------------------------
+/**
+ * The minimized annotation is a reduced window. The only visible item is
+ * the minimize button - which is used to expand the annotation.
+ * @param {Window} win
+ */
+CQ.wcm.Annotation.Mini = CQ.Ext.extend(CQ.Ext.Window, {
+
+    post: function() {
+        var params = this.win.getOffsetParams();
+        this.annotation.post(params);
+        window.clearTimeout(this.annotation.ddTimeout);
+        this.win.ddTimeout = window.setTimeout(this.win.post.createDelegate(this.win, [params]), this.win.saveDelay);
+
+    },
+
+    minimize: function() {
+        this.annotation.toggle(false);
+    },
+
+    // private - used for dragging
+    ghost : function(cls){
+        return CQ.wcm.Annotation.superclass.ghost.call(this, "cq-annotation-mini cq-annotation-mini-" + this.annotation.color);
+    },
+
+    // overrides CQ.Ext.Window#alignTo (to avoid position < 0)
+    alignTo : function(element, position, offsets){
+        return CQ.wcm.Annotation.alignTo(this, element, position, offsets);
+    },
+
+    constructor: function(config) {
+        CQ.Util.applyDefaults(config, {
+            "cls": "cq-annotation-mini",
+            "closable": false,
+            "shadow": false,
+            "resizable": false,
+            "minimizable": true
+        });
+        CQ.wcm.Annotation.Mini.superclass.constructor.call(this, config);
+    },
+
+    initDraggable : function(){
+        /**
+         * If this Window is configured {@link #draggable}, this property will contain
+         * an instance of {@link CQ.Ext.dd.DD} which handles dragging the Annotation's DOM Element.
+         * @type CQ.Ext.dd.DD
+         * @property dd
+         */
+        this.dd = new CQ.wcm.Annotation.Mini.DD(this);
+    }
+
+});
+
+
+
+// -----------------------------------------------------------------------------
+/**
+ * Skteches
+ * AdobePatentID="B1439US01"
+ */
+CQ.wcm.Annotation.Sketch = CQ.Ext.extend(CQ.Ext.Window, {
+
+    // private
+    exitTimeout: 0,
+    ddTimeout: 0,
+
+    minWidth: 16,
+
+    currentUndoSnapshot: null,
+
+    constructor: function(config) {
+        var w = config.width ? config.width + 2 : CQ.Ext.lib.Dom.getViewWidth() - 20;
+        var h = config.height ? config.height + 2 : CQ.Ext.lib.Dom.getViewHeight();
+        this.minY = h;
+        this.maxY = 0;
+        this.minX = w;
+        this.maxX = 0;
+        this.scrollProp = CQ.Ext.isWebKit ? document.body : document.documentElement;
+
+        config = CQ.Util.applyDefaults(config, {
+            "renderTo": CQ.Util.ROOT_ID,
+            "cls": "cq-annotation-sketch",
+            "resizable": false,
+            "shadow": false,
+            "width": w,
+            "height": h,
+            "x": this.scrollProp.scrollLeft,
+            "y": this.scrollProp.scrollTop,
+            "lineWidth": CQ.themes.wcm.Annotation.LINE_WIDTH,
+            "items": [
+                new CQ.Static({
+                    "html": '<canvas width="' + w + '" height="' + h + '"></canvas>'
+                }),
+                this.tlAngle =new CQ.Static({
+                    "cls": "cq-annotation-angle-tl",
+                    "text": ""
+                }),
+                this.trAngle = new CQ.Static({
+                    "cls": "cq-annotation-angle-tr",
+                    "text": ""
+                }),
+                this.blAngle = new CQ.Static({
+                    "cls": "cq-annotation-angle-bl",
+                    "text": ""
+                }),
+                this.brAngle = new CQ.Static({
+                    "cls": "cq-annotation-angle-br",
+                    "text": ""
+                })
+            ],
+            "listeners": {
+                "afterrender": this.initCanvas
+            }
+        });
+
+        CQ.wcm.Annotation.Sketch.superclass.constructor.call(this, config);
+
+        this.currentUndoSnapshot = this.createUndoSnapshot();
+    },
+
+    initActivation: function() {
+        this.on("activate", function() {
+            this.addClass("cq-annotation-active");
+            CQ.wcm.Annotation.selectedSketch = this;
+        });
+        this.on("deactivate", function() {
+            this.removeClass("cq-annotation-active");
+            CQ.wcm.Annotation.selectedSketch = null;
+        });
+    },
+
+    initCanvas: function() {
+        this.canvas = this.body.dom.getElementsByTagName("canvas")[0];
+        this.context = this.canvas.getContext("2d");
+
+        if (this.data) {
+            this.drawData();
+            this.initActivation();
+            this.canvas.setAttribute("class", "cq-cursor-move");
+        }
+        else {
+            // new sketch: drawing mode
+            this.coords = [];
+            this.canvas.setAttribute("class", "cq-cursor-crosshair");
+
+            this.mousedownHandler = this.start.createDelegate(this);
+            this.mousemoveHandler = this.draw.createDelegate(this);
+            this.mouseupHandler = this.stop.createDelegate(this);
+            this.doubleclickHandler = this.stopDoubleclick.createDelegate(this);
+
+            this.canvas.addEventListener("mousedown", this.mousedownHandler, true);
+            this.canvas.addEventListener("mousemove", this.mousemoveHandler, true);
+            this.canvas.addEventListener("mouseup", this.mouseupHandler, true);
+            this.canvas.addEventListener("dblclick", this.doubleclickHandler, true);
+        }
+
+    },
+
+    align: function() {
+        if (this.rendered) {
+            this.alignTo(this.annotation.editComponent.element, "tl", [this.offsetX, this.offsetY]);
+        }
+    },
+
+    show: function() {
+        if (this.hidden) CQ.wcm.Annotation.Sketch.superclass.show.call(this);
+    },
+
+    /**
+     *
+     */
+    post: function(params, preventUndo, preventParamProcessing) {
+        if (!params) params = {};
+        var isUnsaved = this.path.charAt(this.path.length - 1) == "/";
+        var path = this.path;
+        
+        var isDeleted = false;
+        var deleteSnapshot;
+        if (params[CQ.Sling.OPERATION] == CQ.Sling.OPERATION_DELETE) {
+            deleteSnapshot = this.createUndoSnapshot();
+            this.annotation.removeSketch(this.id);
+            isDeleted = true;
+        }
+        else if (preventParamProcessing !== true) {
+            params = CQ.Util.merge(params, this.getOffsetParams());
+        }
+
+        var pResp = CQ.HTTP.post(path, null, params);
+        var isSuccess = CQ.HTTP.isOk(pResp);
+        if (isSuccess) {
+            var undoHistory, undoStep;
+            if (isUnsaved) {
+                this.path = pResp.headers[CQ.HTTP.HEADER_PATH];
+                this.annotation.sketches[this.id] = this;
+                // create undo step (create sketch)
+                if ((preventUndo !== true) && CQ.undo.UndoManager.isEnabled()) {
+                    undoHistory = CQ.undo.UndoManager.getHistory();
+                    undoStep = undoHistory.createUndoStep(undoHistory.createStepConfig());
+                    this.currentUndoSnapshot = this.createUndoSnapshot();
+                    undoStep.addUndoAction(new CQ.undo.actions.CreateSketchAction(
+                            this.annotation.editComponent, undoHistory.getIdManager(), this,
+                            this.currentUndoSnapshot));
+                    undoStep.commit();
+                }
+            } else if (isDeleted) {
+                // create undo step (remove sketch)
+                if ((preventUndo !== true) && CQ.undo.UndoManager.isEnabled()) {
+                    undoHistory = CQ.undo.UndoManager.getHistory();
+                    undoStep = undoHistory.createUndoStep(undoHistory.createStepConfig());
+                    this.currentUndoSnapshot = null;
+                    undoStep.addUndoAction(new CQ.undo.actions.RemoveSketchAction(
+                            this.annotation.editComponent, undoHistory.getIdManager(), this,
+                            deleteSnapshot));
+                    undoStep.commit();
+                }
+            } else {
+                // create undo step (update sketch)
+                if ((preventUndo !== true) && CQ.undo.UndoManager.isEnabled()) {
+                    var uu = CQ.undo.util.UndoUtils;
+                    undoHistory = CQ.undo.UndoManager.getHistory();
+                    var newSnapshot = this.createUndoSnapshot();
+                    var diffObj = uu.diffObject(this.currentUndoSnapshot, newSnapshot);
+                    if ((diffObj.changeCnt > 0) || (diffObj.addCnt > 0)) {
+                        this.currentUndoSnapshot = newSnapshot;
+                        undoStep = undoHistory.createUndoStep(
+                                undoHistory.createStepConfig());
+                        undoStep.addUndoAction(new CQ.undo.actions.UpdateSketchAction(
+                                this.annotation.editComponent, undoHistory.getIdManager(),
+                                this, diffObj));
+                        undoStep.commit();
+                    }
+                }
+            }
+        }
+        return isSuccess;
+    },
+
+    getOffsetParams: function() {
+        var eXY = this.annotation.editComponent.element.getXY();
+        var xy = this.getPosition();
+        this.offsetX = Math.round(xy[0] - eXY[0]);
+        this.offsetY = Math.round(xy[1] - eXY[1]);
+        return {
+            "./x": this.offsetX,
+            "./y": this.offsetY,
+            "./x@TypeHint": "Long",
+            "./y@TypeHint": "Long"
+        };
+    },
+
+    getMouseXY: function(e) {
+        // mouse pos relative to canvas
+        var xy;
+        if (CQ.Ext.isIE || navigator.userAgent.match(/Trident\/7.0/)) {
+            xy = [e.offsetX, e.offsetY];
+        } else if (e.layerX != undefined) {
+            // firefox
+            xy = [e.layerX, e.layerY];
+        } else if (e.offsetX != undefined) {
+            // opera
+            xy = [e.offsetX, e.offsetY];
+        }
+        // set min/max for later cropping
+        if (xy[0] < this.minX) this.minX = xy[0];
+        if (xy[0] > this.maxX) this.maxX = xy[0];
+        if (xy[1] < this.minY) this.minY = xy[1];
+        if (xy[1] > this.maxY) this.maxY = xy[1];
+        this.coords.push(xy[0] + this.scrollProp.scrollLeft, xy[1] + this.scrollProp.scrollTop);
+        return xy;
+    },
+
+    start: function(e, xy, context) {
+        context = context || this.context;
+        // clear the timeout of the sketch that has been created on stop
+        window.clearTimeout(this.exitTimeout);
+        if (e) e.stopPropagation();
+        if (this.doDraw) return; // drawing straight lines with [alt]
+        if (!xy) xy = this.getMouseXY(e);
+        this.doDraw = true;
+        context.strokeStyle = CQ.themes.wcm.Annotation.STROKE_STYLES[this.annotation.color];
+        context.lineWidth = this.lineWidth;
+        this.formerXY = xy;
+    },
+
+    stopDoubleclick: function(e) {
+        var xy = this.getMouseXY(e);
+        this.stop(null, xy);
+    },
+
+    stop: function(e, xy) {
+        if (!xy) xy = this.getMouseXY(e);
+        this.context.beginPath();
+        this.context.moveTo(this.formerXY[0], this.formerXY[1]);
+        this.context.lineTo(xy[0], xy[1]);
+        this.context.stroke();
+        this.context.closePath();
+        if (e) {
+            e.stopPropagation();
+            if (e.altKey) {
+                this.formerXY = xy;
+                return;
+            }
+        }
+        this.doDraw = false;
+        this.canvas.setAttribute("class", "");
+
+        this.canvas.removeEventListener("mousedown", this.mousedownHandler, true);
+        this.canvas.removeEventListener("mousemove", this.mousemoveHandler, true);
+        this.canvas.removeEventListener("mouseup", this.mouseupHandler, true);
+        this.canvas.removeEventListener("dblclick", this.doubleclickHandler, true);
+        this.crop();
+        this.initActivation();
+        this.setActive();
+        this.canvas.setAttribute("class", "cq-cursor-move");
+
+        // create new sketch which will be removed if drawing did not start after a delay (or with [esc])
+        var s = new CQ.wcm.Annotation.Sketch({
+            "annotation": this.annotation,
+            "path": this.annotation.path + "/sketches/",
+            "id": CQ.Util.createId()
+        });
+        s.show();
+        s.exitTimeout = window.setTimeout(s.destroy.createDelegate(s), this.annotation.exitSketchDelay);
+
+        this.post({
+            "./data": this.coords.join(","),
+            "./w": this.canvas.getAttribute("width"),
+            "./h": this.canvas.getAttribute("height"),
+            "./w@TypeHint": "Long",
+            "./h@TypeHint": "Long"
+        });
+    },
+
+    draw: function(e, xy, context) {
+        context = context || this.context;
+        if (e) {
+            e.stopPropagation();
+            if (e.altKey) return;
+        }
+        if (this.doDraw || xy) {
+            if (!xy) xy = this.getMouseXY(e);
+            context.beginPath();
+            context.moveTo(this.formerXY[0], this.formerXY[1]);
+            context.lineTo(xy[0], xy[1]);
+            context.stroke();
+            context.closePath();
+            this.formerXY = xy;
+        }
+    },
+
+    drawData: function(coords, context) {
+        if (!coords) coords = this.data.split(",");
+        this.start(null, [coords[0], coords[1]], context);
+        for (var i = 2; i < coords.length; i = i + 2) {
+            this.draw(null, [coords[i], coords[i+1]], context);
+        }
+        this.doDraw = false;
+    },
+
+    clearCanvas: function() {
+        this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    },
+
+    crop: function() {
+        // crop image
+        var margin = Math.ceil(this.context.lineWidth / 2);
+        var w = this.maxX - this.minX + 2*margin;
+        var h = this.maxY - this.minY + 2*margin;
+        if (w < this.minWidth) w = this.minWidth;
+        if (h < this.minWidth) h = this.minWidth;
+        this.clearCanvas();
+        this.canvas.setAttribute("width", w);
+        this.canvas.setAttribute("height", h);
+        this.setPosition(this.minX - margin + this.scrollProp.scrollLeft, this.minY - margin + this.scrollProp.scrollTop);
+        this.setWidth(w);
+        this.setHeight(h);
+        var pos = this.getPosition();
+        for (var i = 0; i < this.coords.length; i = i + 2) {
+            // calculate relative coordinates
+            this.coords[i] = this.coords[i] - pos[0];
+            this.coords[i+1] = this.coords[i+1] - pos[1];
+        }
+        this.drawData(this.coords);
+        this.data = this.coords.join(",");
+    },
+
+    // private
+    onEsc : function(k, e){
+        e.stopEvent();
+        if (this.coords.length == 0) {
+            // delete blank sketches (which exist after hitting the sketch button
+            // or after finishing a sketch)
+            window.clearTimeout(this.exitTimeout);
+            this.destroy();
+        }
+    },
+
+    initDraggable : function(){
+        /**
+         * If this Window is configured {@link #draggable}, this property will contain
+         * an instance of {@link CQ.Ext.dd.DD} which handles dragging the Annotation's DOM Element.
+         * @type CQ.Ext.dd.DD
+         * @property dd
+         */
+        this.dd = new CQ.wcm.Annotation.Sketch.DD(this);
+    },
+
+    // private
+    createGhost : function(){
+        var el = document.createElement('div');
+        el.className = 'x-panel-ghost cq-annotation-sketch';
+        var canvas = this.canvas.cloneNode(true);
+        var context = canvas.getContext("2d");
+        this.drawData(null, context);
+        el.appendChild(canvas);
+        el.appendChild(this.tlAngle.el.dom.cloneNode(true));
+        el.appendChild(this.trAngle.el.dom.cloneNode(true));
+        el.appendChild(this.blAngle.el.dom.cloneNode(true));
+        el.appendChild(this.brAngle.el.dom.cloneNode(true));
+        el.style.width = this.el.dom.offsetWidth + 'px';
+        el.style.height = this.bwrap.getHeight() + "px";
+        this.container.dom.appendChild(el);
+        return new CQ.Ext.Element(el);
+    },
+
+    /**
+     * Sets the offsets of the sketch.
+     * @param {Number} offsX The horizontal offset; undefined to keep the current offset
+     * @param {Number} offsY The vertical offset; undefined to keep the current offset
+     */
+    setOffset: function(offsX, offsY) {
+        if (offsX != null) {
+            this.offsetX = offsX;
+        }
+        if (offsY != null) {
+            this.offsetY = offsY;
+        }
+        this.align();
+    },
+
+    /**
+     * Creates a "snapshot" of the current state of the sketch on a parametric
+     * level as required for undoing any change.
+     * @return {Object} The snapshot (as Sling parameters)
+     */
+    createUndoSnapshot: function() {
+        return {
+            "./data": (this.coords ? this.coords.join(",") : this.data),
+            "./w": parseInt(this.canvas.getAttribute("width")),
+            "./h": parseInt(this.canvas.getAttribute("height")),
+            "./x": this.offsetX,
+            "./y": this.offsetY
+        };
+    }
+
+});
+
+
+// -----------------------------------------------------------------------------
+// private - custom Annotation DD implementation
+CQ.wcm.Annotation.DD = function(win){
+    CQ.wcm.Annotation.DD.superclass.constructor.call(this, win);
+};
+
+CQ.Ext.extend(CQ.wcm.Annotation.DD, CQ.Ext.Window.DD, {
+    endDrag : function(e){
+        this.win.unghost();
+        var params = this.win.getOffsetParams();
+        window.clearTimeout(this.win.ddTimeout);
+        this.win.ddTimeout = window.setTimeout(this.win.post.createDelegate(this.win, [params]), this.win.saveDelay);
+    }
+});
+
+
+// private - custom Annotation.Mini DD implementation
+CQ.wcm.Annotation.Mini.DD = function(win){
+    CQ.wcm.Annotation.Mini.DD.superclass.constructor.call(this, win);
+};
+
+CQ.Ext.extend(CQ.wcm.Annotation.Mini.DD, CQ.Ext.Window.DD, {
+    endDrag : function(e){
+        this.win.unghost();
+        var params = this.win.annotation.getOffsetParams();
+        window.clearTimeout(this.win.annotation.ddTimeout);
+        this.win.annotation.ddTimeout = window.setTimeout(this.win.annotation.post.createDelegate(this.win.annotation, [params]), this.win.annotation.saveDelay);
+    }
+});
+
+
+// private - custom Annotation.Sketch DD implementation
+CQ.wcm.Annotation.Sketch.DD = function(win){
+    this.win = win;
+    CQ.Ext.Window.DD.superclass.constructor.call(this, win.el.id, 'WindowDD-'+win.id);
+    this.setHandleElId(win.body.id);
+    this.scroll = false;
+};
+
+CQ.Ext.extend(CQ.wcm.Annotation.Sketch.DD, CQ.Ext.Window.DD, {
+    startDrag : function(e) {
+        this.win.isDragging = true;
+        CQ.wcm.Annotation.Sketch.DD.superclass.startDrag.call(this, e);
+    },
+
+    endDrag : function(e){
+        this.win.unghost();
+        this.win.isDragging = false;
+        var params = this.win.getOffsetParams();
+        window.clearTimeout(this.win.ddTimeout);
+        this.win.ddTimeout = window.setTimeout(this.win.post.createDelegate(this.win, [params]), this.win.annotation.saveDelay);
+    }
+});

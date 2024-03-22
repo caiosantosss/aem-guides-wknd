@@ -1,0 +1,472 @@
+(function(Granite, $) {
+    "use strict";
+
+    var options;
+    var $form;
+    var actErrModal;
+
+    var ASSET = "asset";
+    var S7SET = "s7set";
+    var TAG = "tag";
+    var PRESET = "preset";
+    var COLLECTION = "collection";
+    var CF_MODEL = "contentfragmentmodel";
+    var TYPES = [ ASSET, S7SET, TAG, PRESET, COLLECTION, CF_MODEL ];
+    var BATCH_COLLECTION_URL = "/content/dam/dam:batch.collection.json";
+    var WIZARD_SELECTOR = ".cq-damadmin-admin-publishasset.foundation-wizard";
+
+    function prepareThumbnails(data) {
+        if (data.data) {
+            var ck = new Date().getTime();
+            prepareThumbnailsFor(data.data.asset, ck, ASSET);
+            prepareThumbnailsFor(data.data.preset, ck, PRESET);
+            prepareThumbnailsFor(data.data.contentfragmentmodel, ck, CF_MODEL);
+        }
+
+        function prepareThumbnailsFor(assets, ck, type) {
+            if (!assets) {
+                return;
+            }
+            for (var a = 0; a < assets.length; a++) {
+                var asset = assets[a];
+                var suffix;
+                if (type === PRESET) {
+                    asset.thumbnail =
+                        Granite.HTTP.externalize("/libs/dam/widgets/themes/default/icons/configuration.png");
+                } else if (type === CF_MODEL) {
+                    suffix = options.cfmThumbnailSuffix.replace(/\{\{ck\}\}/gi, ck);
+                    asset.thumbnail = Granite.HTTP.externalize(asset.path + "/" + suffix);
+                } else {
+                    // all other assets
+                    suffix = options.thumbSuffix.replace(/\{\{ck\}\}/gi, ck);
+                    asset.thumbnail = Granite.HTTP.externalize(asset.path + "." + suffix);
+                }
+            }
+        }
+    }
+
+    function createSortedData(json) {
+        var types = [ ];
+        var byType = { };
+        var assets = json["assets"];
+        var hasReferences = false;
+        for (var a = 0; a < assets.length; a++) {
+            var asset = assets[a];
+            var type = asset.type;
+            if (TYPES.indexOf(type) === -1) {
+                continue;
+            }
+            var typeSlot = byType[type];
+            if (!typeSlot) {
+                typeSlot = [ ];
+                byType[type] = typeSlot;
+                types.push(type);
+            }
+            typeSlot.push(asset);
+            hasReferences = true;
+        }
+        // TODO correct/additional sorting ...?
+        types.sort();
+        return {
+            "types": types,
+            "data": byType,
+            "hasReferences": hasReferences
+        };
+    }
+
+    function getItemHtml(item) {
+        return $("<tr>").attr("is", "coral-table-row").attr("class", "foundation-collection-item " +
+            "foundation-collection-navigator").attr("data-path", item.path).attr("data-type", item.type).append(
+            $("<td>").attr("is", "coral-table-cell").attr("coral-table-rowselect", "")
+                .attr("alignment", "center").append(
+                    (item.thumbnail
+                        ? $("<img>").attr("src", item.thumbnail).attr("class",
+                            "foundation-collection-item-thumbnail").attr("alt", item.name)
+                        : "")
+                )
+        ).append(
+            $("<td>").attr("is", "coral-table-cell").attr("style", "width:60%")
+                .attr("class", "foundation-collection-item-name").attr("role", "rowheader").append(
+                    item.name
+                )
+        ).append(
+            $("<td>").attr("is", "coral-table-cell").append(item.status)
+        )[0].outerHTML;
+    }
+
+    function getSectionHtml(section) {
+        return $("<table>").attr("is", "coral-table").attr("selectable", "").attr("multiple", "")
+            .attr("variant", "list").attr("class", "foundation-collection foundation-layout-table " +
+            "coral-Table-wrapper coral-Table-wrapper--list coral-Table-wrapper--sticky").append(
+                $("<colgroup>").append(
+                    $("<col>").attr("is", "coral-table-column").attr("fixedwidth", "")
+                ).append(
+                    $("<col>").attr("is", "coral-table-column").attr("fixedwidth", "")
+                ).append(
+                    $("<col>").attr("is", "coral-table-column").attr("alignment", "left")
+                ).append(
+                    $("<col>").attr("is", "coral-table-column").attr("fixedwidth", "").attr("alignment", "right")
+                )
+            ).append(
+                $("<thead>").attr("is", "coral-table-head").append(
+                    $("<tr>").attr("is", "coral-table-row").append(
+                        $("<th>").attr("is", "coral-table-headercell").attr("class", "select")
+                            .attr("alignment", "center").append(
+                                $("coral-checkbox").attr("coral-table-select")
+                            )
+                    ).append(
+                        $("<th>").attr("is", "coral-table-headercell").attr("style", "width:60%").append(section.type)
+                    ).append(
+                        $("<th>").attr("is", "coral-table-headercell")
+                    )
+                )
+            ).append(
+                $("<tbody>").attr("is", "coral-table-body").append(
+                    $("<td>").attr("is", "coral-table-cell").attr("style", "display:none")
+                        .attr("class", "coral-Table-cell").attr("value", "").attr("role", "gridcell")
+                        .attr("alignment", "center").attr("aria-selected", "false")
+                ).append(
+                    section.itemHtml
+                )
+            )[0].outerHTML;
+    }
+
+    function buildTable(data) {
+        prepareThumbnails(data);
+        var types = data.types;
+        var html = "";
+        for (var t = 0; t < types.length; t++) {
+            var itemHtml = "";
+            var items = data.data[types[t]];
+            for (var i = 0; i < items.length; i++) {
+                var itemData = items[i];
+                // i18n
+                if (itemData.status) {
+                    if (itemData.status === "not available") {
+                        itemData.status = "";
+                    } else {
+                        itemData.status = Granite.I18n.getVar(itemData.status);
+                    }
+                }
+                itemHtml += getItemHtml(itemData);
+            }
+            html += getSectionHtml({
+                "type": options.texts.types[types[t]],
+                "itemHtml": itemHtml
+            });
+        }
+        var $cont = $($form.find(".list"));
+        $cont.find("coral-table").remove();
+        $(html).appendTo($cont);
+        $cont.find(".foundation-collection-item-name").off("click.wizard").on("click.wizard",
+            function(e) {
+                var $article = $(e.target).parents("tr");
+                if ($article.data("type") === ASSET) {
+                    var path = $article.data("path");
+                    if (path) {
+                        window.open(Granite.HTTP.externalize(path));
+                    }
+                }
+                e.stopPropagation();
+                e.preventDefault();
+            });
+    }
+
+    function referencesRetrieved(xhr, status) {
+        if (status === "success") {
+            var json = $.parseJSON(xhr.responseText);
+            var tableData = createSortedData(json);
+            if (tableData.hasReferences && !options.isFolder) {
+                buildTable(tableData);
+
+                // var $tables = $("#references .list coral-table");
+                var $tables = $("#references .list.hidden table");
+
+                Coral.commons.nextFrame(function() {
+                    $.each($tables, function(i, table) {
+                        Coral.commons.ready(table, initTableHtml);
+                    });
+                });
+            } else if (options.schedule || !options.hasReplicationRights) {
+                $("#references").hide();
+            }
+            if ($(".publish-wizard-config").length > 0) {
+                sessionStorage.setItem("stored-publish-wizard-config",
+                    JSON.stringify($(".publish-wizard-config").data("config")));
+            }
+        } else {
+            // error handling
+            var errMsg = Granite.I18n.get("Failed to retrieve references.");
+            actErrModal = document.querySelector("#activation-error");
+            actErrModal.content.textContent = errMsg;
+            actErrModal.show();
+            var wiz = $(WIZARD_SELECTOR).adaptTo("foundation-wizard");
+            wiz.toggleNext(true);
+            wiz.toggleCancel(true);
+        }
+
+        $(window).adaptTo("foundation-ui").clearWait();
+    }
+
+    function initTableHtml(el) {
+        if (el.items) {
+            var isOdinCfFeatureEnabled = Granite.Toggles.isEnabled("ft-cq-4306119");
+            el.items.getAll().forEach(function(item) {
+                item.setAttribute("selected", true);
+
+                // Disable possibility to unselect CF models because unpublished models can break GraphQL
+                if (isOdinCfFeatureEnabled && item.dataset.type === CF_MODEL) {
+                    item.querySelector("coral-checkbox").setAttribute("disabled", true);
+                }
+            });
+        }
+    }
+
+    function replicationStarted(xhr, status) {
+        if (status === "success") {
+            var message = "The asset has been published";
+            if ($("input[name='activationDate']").val()) {
+                // message changes if activation date has been specified
+                message = "The asset has been scheduled for publication";
+            }
+            // store message so that it can be displayed after the redirect
+            sessionStorage.setItem("cq-asset-published-message", message);
+
+
+            location.href =
+                $(".foundation-wizard-control[data-foundation-wizard-control-action='cancel']").attr("href");
+        } else {
+            $(window).adaptTo("foundation-ui").clearWait();
+            var errorMsg = "";
+            if (options.hasReplicationRights && options.schedule) {
+                errorMsg = Granite.I18n.get("Failed to schedule the selected asset(s).");
+            } else if (!options.hasReplicationRights) {
+                errorMsg = Granite.I18n.get("Failed to request publishing for the selected asset(s).");
+            }
+            actErrModal = document.querySelector("#activation-error");
+            actErrModal.content.textContent = errorMsg;
+            actErrModal.show();
+            var wiz = $(WIZARD_SELECTOR).adaptTo("foundation-wizard");
+            wiz.toggleNext(true);
+            wiz.toggleCancel(true);
+        }
+    }
+
+
+    $.fn.CqUiDamadminActivate = function(opts) {
+        $(window).adaptTo("foundation-ui").wait();
+
+        $form = $(WIZARD_SELECTOR);
+        options = opts;
+        var url = Granite.HTTP.externalize(opts.referencesUrl);
+        var prm = opts.urlParam;
+        var data = { };
+        data[prm] = opts.toActivate;
+
+        if (!options.hasReplicationRights || options.schedule) {
+            $form.find("#schedule").show();
+            if (!options.hasReplicationRights) {
+                $form.find("#workflow").show();
+            } else {
+                $form.find("#workflow").hide();
+            }
+        } else {
+            $form.find("#schedule").hide();
+        }
+
+        $.ajax(url, {
+            "type": "POST",
+            "data": data,
+            "cache": false,
+            "dataType": "json",
+            "complete": referencesRetrieved
+        });
+    };
+
+    $.fn.CqUiDamadminStartReplication = function() {
+        $(window).adaptTo("foundation-ui").wait();
+        var collectionPaths = [];
+        var paths = [];
+
+        var tables = $(".list.hidden table");
+        $.each(tables, function(i, table) {
+            var selected = table.selectedItems;
+            if (selected) {
+                for (var s = 0; s < selected.length; s++) {
+                    var $item = $(selected[s]);
+                    var path = $item.data("path");
+                    var type = $item.data("type");
+
+                    if (type === "campaign") {
+                        $.ajax(Granite.HTTP.externalize(path) + "/jcr:content.references.json", {
+                            "async": false,
+                            "success": function(references) {
+                                references.map(function(ref) {
+                                    paths.push(ref);
+                                });
+                            }
+                        });
+                    }
+                    paths.push(path);
+                    if (type === COLLECTION) {
+                        collectionPaths.push(path);
+                    }
+                }
+            }
+        });
+
+
+        for (var c = 0; c < options.toActivate.length; c++) {
+            paths.push(options.toActivate[c]);
+        }
+
+        if (collectionPaths.length) {
+            addCollectionMembers(collectionPaths, paths);
+        } else {
+            triggerReplication(paths);
+        }
+    };
+
+    function addCollectionMembers(collectionPaths, assetPaths) {
+        var batchCollectionUrl = Granite.HTTP.externalize(BATCH_COLLECTION_URL);
+        var memberPaths = [];
+        var settings = {
+            "type": "POST",
+            "data": {
+                "_charset_": "utf-8",
+                "path": collectionPaths
+            }
+        };
+        $.ajax(batchCollectionUrl, settings)
+            .then(function success(data, status, xhr) {
+                if (!data || !data.summary || !data.summary.found) {
+                    triggerReplication(assetPaths);
+                    return;
+                }
+                data.collections.forEach(function(collection) {
+                    if (!collection["sling:members"] || !collection["sling:members"].length) {
+                        return;
+                    }
+                    collection["sling:members"].forEach(function(member) {
+                        if (member["sling:resourceType"] === "dam:Asset" &&
+                            (member["cq:lastReplicatedTS"] === -1 ||
+                             member["jcr:lastModifiedTS"] > member["cq:lastReplicatedTS"])) {
+                            memberPaths.push(member.path);
+                        }
+                    });
+                });
+                triggerReplication(assetPaths.concat(memberPaths));
+            });
+    }
+
+    function triggerReplication(paths) {
+        paths = paths || [];
+        if (!paths.length) {
+            return;
+        }
+        var url = null;
+        var settings = null;
+        var uniquePaths = paths.reduce(function(arr, el) {
+            if (arr.indexOf(el) === -1) {
+                arr.push(el);
+            }
+            return arr;
+        }, []);
+
+        var datepicker;
+        var absTime;
+
+        if (options.hasReplicationRights) {
+            if (options.schedule) {
+                url = Granite.HTTP.externalize(options.workflowUrl);
+                datepicker = $("input[name='activationDate']");
+                absTime = new Date().getTime();
+                if (datepicker && datepicker.val().length > 0) {
+                    absTime = Date.parse(datepicker.val());
+                }
+                settings = {
+                    "type": "POST",
+                    "data": {
+                        "_charset_": "UTF-8",
+                        "model": options.workflowModel,
+                        "absoluteTime": absTime,
+                        "payload": uniquePaths,
+                        "payloadType": "JCR_PATH"
+                    },
+                    "complete": replicationStarted
+                };
+            } else {
+                url = Granite.HTTP.externalize(options.replicationUrl);
+                var cmd = encodeURI(options.activationCommand);
+                settings = {
+                    "type": "POST",
+                    "data": {
+                        "_charset_": "utf-8",
+                        "cmd": cmd,
+                        "path": uniquePaths
+                    },
+                    "complete": replicationStarted
+                };
+            }
+        } else {
+            // request for activation
+            url = Granite.HTTP.externalize(options.workflowUrl);
+            datepicker = $("input[name='activationDate']");
+            absTime = new Date().getTime();
+            var commentField = $("#comment");
+            var comment = "";
+            if (commentField) {
+                comment = commentField.val();
+            }
+            if (datepicker && datepicker.val().length > 0) {
+                absTime = Date.parse(datepicker.val());
+            }
+            settings = {
+                "type": "POST",
+                "data": {
+                    "_charset_": "UTF-8",
+                    "model": options.workflowModel,
+                    "absoluteTime": absTime,
+                    "startComment": comment,
+                    "payload": uniquePaths,
+                    "payloadType": "JCR_PATH"
+                },
+                "complete": replicationStarted
+            };
+        }
+        $.ajax(url, settings);
+    }
+
+    $(document).on("submit.publishWizard", ".cq-damadmin-admin-publishasset-form", function(e) {
+        e.preventDefault();
+        $("#references").CqUiDamadminStartReplication();
+    });
+
+
+    $(document).off("foundation-contentloaded.publishWizard").on("foundation-contentloaded.publishWizard", function(e) {
+        var configOptions = $(".publish-wizard-config").data("config");
+
+        if (configOptions === undefined) {
+            if (sessionStorage.length > 0 && sessionStorage.getItem("stored-publish-wizard-config")) {
+                // check if the config is available from local session store..
+                configOptions = JSON.parse(sessionStorage.getItem("stored-publish-wizard-config"));
+            }
+        }
+
+        if (configOptions === undefined) {
+            // to handle the manual refresh of wizard page gracefully, as wizard would not have required
+            // data if refreshed manually or opened from a bookmark
+            $(".foundation-wizard-step-active").hide();
+            $(".cq-damadmin-admin-publishasset-form").html("<p style='text-align: center;'>" +
+                "There is no content to display. <br> If you have manually refreshed the page, <br>" +
+                " please go back and select asset/s to be published.</p>");
+        } else {
+            // change text of Publish button based on replication rights
+            $(".foundation-wizard-control:submit").text(configOptions.publishLabel);
+            $.extend(configOptions, {
+                "activationCommand": "Activate"
+            });
+            $("#references").CqUiDamadminActivate(configOptions);
+        }
+    });
+})(Granite, Granite.$);

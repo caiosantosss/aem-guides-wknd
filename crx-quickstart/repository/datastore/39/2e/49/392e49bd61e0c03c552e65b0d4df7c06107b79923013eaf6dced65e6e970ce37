@@ -1,0 +1,1296 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;
+/**
+ * Core script of the Target Editor.
+ * Implements the behavior of the Target Editor. This is strictly tied to the UI script (ui.TargetedContentManagerUI.js)
+ */
+(function(ns, channel, window) {
+
+    var targetedContentManager = function(ns) {
+
+        var debugMode = window.location.href.indexOf("?debug-target-mode=true") >= 0
+            || window.location.href.indexOf("&debug-target-mode=true") >= 0;
+
+        var CAMPAIGN_PROP = "campaign/path", // client context properties
+            EXPERIENCE_PROP = "campaign/recipe/path",   // client context properties
+            OFFER_INNER_PATH = "jcr:content/par",
+            DEFAULT_COMPONENT = "default",
+            DEFAULT_EXPERIENCE = DEFAULT_COMPONENT.toUpperCase(),
+            DEFAULT_ACTIVITY_TYPE = "landingPage",
+            LOCATION_NAME_PARAM = "location",
+            COMMAND_SERVLET = "/bin/wcmcommand",
+            CMD_DELETE_OP = "deletePage",
+            campaignStore;  // keep a reference for the campaign store.
+
+        // END private variables
+
+        var instance = {};
+
+        // reference to the client context kernel.
+        // this is injected by the targeteditorloader script.
+        /**
+         * @deprecated since 6.2, use ContextHub instead
+         */
+        instance.ClientContext = null;
+
+        instance.ContextHub = null;
+
+        if (this.constructor == targetedContentManager.prototype) {
+            throw "This is a singleton!";
+        }
+
+        if (targetedContentManager.instance) {
+            return targetedContentManager.instance;
+        }
+
+        /**
+         * Builds a "no-cache" URL by adding a timestamp parameter
+         * @param url
+         * @returns {string}
+         */
+        var noCache = function(url) {
+            return url + "?ck=" + new Date().getTime();
+        }
+
+        var startWith = function(str, prefix) {
+            return (str.indexOf(prefix) === 0);
+        }
+
+        var debug = function() {
+            if (debugMode) {
+                console.log.apply(console, arguments);
+            }
+        };
+
+        var _isEditMode = function() {
+            return Granite.author.layerManager.getCurrentLayerName() === "Edit";
+        };
+
+        var _isTargetMode = function() {
+            return Granite.author.layerManager.getCurrentLayerName() === "Targeting";
+        };
+
+        var getElementName = function(path) {
+            var pathElements = path.split("/");
+            return pathElements[pathElements.length - 1];
+        }
+
+        var getExperienceName = function(experience) {
+            return getElementName(experience[ns.ExperienceFactory.props.PATH]);
+        }
+
+        // Removes an editable for the internal store.
+        var forgetEditable = function(forgettable) {
+
+            var keyToRemove = "",
+                offerToRemove;
+            $.each(instance.editables, function(key, editable) {
+                if (forgettable.path === editable.path) {
+                    keyToRemove = key;
+                }
+            });
+            if (instance.offers.hasOwnProperty(forgettable.path)) {
+                offerToRemove = forgettable.path;
+            }
+
+            delete instance.editables[keyToRemove];
+            delete instance.offers[offerToRemove];
+        }
+
+        // Loads the content in the editable
+        // The content  is loaded from the specified URL
+        var loadContent = function(editable, url, createEditables) {
+
+            debug("[TargetedContentManager] Loading content of " + editable.path + " from " + url);
+
+            Granite.author.edit.actions.loadContent(editable, url)
+                .done(function() {
+                    if (!createEditables) {
+                        return;
+                    }
+                    // find the editable node for this target editable
+                    var parentDiv = Granite.author.ContentFrame.getEditableNode(editable.path),
+                        newOnes = [];
+                    // iterate through any config nodes under this and
+                    // create editables as necessary
+                    $.each(parentDiv.find("cq"), function(i, configNode) {
+                        var newEditable = Granite.author.edit.createEditable(configNode);
+                        // skip the "end" of the target parsys
+                        // and our own editable
+                        if (newEditable.type !== CQ.TargetingConstants.TARGET_PARSYS_END_RTYPE
+                            && newEditable.path !== editable.path) {
+                            newOnes.push(newEditable);
+                        }
+                    });
+
+                    //sometimes the inner editable gets added to the store before the outer editable
+                    //this causes error in retreiving allowed components for the inner editable
+                    //therefore sorting the new editables so that outer ones are added first
+                    newOnes.sort(function(editable1, editable2){
+                        return editable1.path.localeCompare(editable2.path);
+                    });
+
+                    $.each(newOnes, function(i, newEditable) {
+                        Granite.author.store.add(newEditable);
+                    });
+
+                    $.each(newOnes, function(i, newEditable) {
+                        Granite.author.overlayManager.create(newEditable);
+                    });
+
+                    // remove the drop target from the target component
+                    if(editable.overlay != null) {
+                        editable.overlay.removeDropTarget();
+                    }
+                });
+        }
+
+        // removes the children editables
+        // from the store
+        var destroyChildren = function(editable) {
+            //remove the children editables, if any.
+            var kids = editable.getChildren();
+            if (kids && kids.length > 0) {
+                $.each(kids, function(i, k) {
+                    debug("[TargetedContentManager] Destroying " + k.path);
+                    k.destroy();
+                    Granite.author.store.remove(k);
+                });
+            }
+
+        };
+
+        var getContentPolicyDelegatePath = function (teasers){
+            if(teasers.XF)
+                return encodeURIComponent(teasers.XF);
+            else
+                return encodeURIComponent(teasers.DEFAULT)
+        };
+
+        var _applyOverlayStyling = function(editable) {
+            if (editable && editable.overlay
+                    && (CQ.TargetedContentManager.isTargetComponent(editable.type)
+                            || CQ.TargetedContentManager.isTargetedContainerComponent(editable.type))) {
+
+                var $overlayDom = $(editable.overlay.dom);
+                $overlayDom.toggleClass("targeted", true);
+
+                // build a visual "tab" to show Targeted content
+                var icon = new Coral.Icon().set({
+                    icon: 'targeted'
+                });
+                var $tabLabel = $("<div class='targeting-icon-overlay targeting-icon-overlay--top'></div>");
+                $tabLabel.append(icon);
+
+                $overlayDom.append($tabLabel);
+            }
+        };
+
+        var _removeChildren = function(editable) {
+            var children = editable.getChildren();
+            if (children.length > 0) {
+                debug("[TargetedContentManager] Removing children of component at " + editable.path);
+                $.each(children, function(idx, editable){
+                    editable.destroy();
+                });
+            }
+        };
+
+        var _prepareEditMode = function () {
+            var editables = Granite.author.editables;
+            $.each(editables, function(idx, editable){
+                if (CQ.TargetedContentManager.isTargetComponent(editable.type)) {
+                    _removeChildren(editable);
+                    _applyOverlayStyling(editable);
+                }
+            });
+        };
+
+        /*
+         * Loads the experiences for an activity
+         */
+        var _loadExperiences = function(activity, callback) {
+
+            debug("[TargetedContentManager] Loading experiences for campaign " + activity);
+            var self = this,
+                defaultExperience = ns.ExperienceFactory.getExperience(Granite.I18n.get("DEFAULT"), "DEFAULT", "DEFAULT", null);
+
+            defaultExperience.audience = {
+                path: "DEFAULT",
+                name: Granite.I18n.get("DEFAULT")
+            };
+
+
+            //retrieve the experiences from the server
+            $.ajax(activity + noCache("/jcr:content.experiences.json"))
+                .done(function(data, jqXHR) {
+
+                    //cleanup
+                    delete instance.experiences;
+                    instance.experiences = new Array();
+
+                    // create the default experience
+                    instance.experiences.push(defaultExperience);
+
+                    var experiences = data;
+                    $.each(experiences, function(path, title) {
+                        var name = path.replace(/^.*\/(.*)$/, "$1");
+                        var newExperience = ns.ExperienceFactory.getExperience(title, name, path, null);
+                        instance.experiences.push(newExperience);
+                    });
+                    debug("[TargetedContentManager] Experiences loaded from server: " + instance.experiences.length);
+                    _updateExperienceAudiences(activity);
+                });
+        };
+
+        /**
+         * Tears down MsmAuthoringHelper for live copies and removes the
+         * decoration on editable actions.
+         */
+        var _tearDownMsmAuthoringHelper = function() {
+            if (Granite && Granite.author && Granite.author.MsmAuthoringHelper) {
+                if (MSM.MSMCommons.isLiveCopyPage(Granite.author)) {
+                    var disableMsmAuthoringHelper = setInterval(function() {
+                        if (Granite.author.MsmAuthoringHelper.isInitialized) {
+                            debug("[TargetedContentManagerUI] Ensure MsmAuthoringHelper tear down");
+                            Granite.author.MsmAuthoringHelper.tearDown();
+                            clearInterval(disableMsmAuthoringHelper);
+                        }
+                    },300);
+                }
+            }
+        };
+
+        channel.on("editor-frame-mode-changed", function() {
+            // Reset the ContextHub in EDIT mode in order to display the default content for targeted components
+            if (_isEditMode()) {
+                // switching modes may result in page reload therefore we need to delay the operation
+                setTimeout(function(){
+                        if (instance.ContextHub) {
+                            try {
+                                instance.ContextHub.resetAllStores();
+                            } catch(error) {
+                                // we may get an exception in case ContextHub is already in the loading process
+                                console.log(error);
+                            }
+                        }
+                        if (instance.ClientContext) {
+                            instance.ClientContext.reset();
+                        }
+                }, 1000);
+            }
+        });
+
+        channel.on("cq-reusableoffer-dropped", function(event) {
+                var editable = event.editable;
+                instance.loadOffers(editable, instance.selectedExperience);
+            });
+
+
+        // Style the targeted content overlay in Edit mode
+
+        // "Undocumented" switch to allow re-styling
+        instance.SHOW_TARGETED_OVERLAY_IN_EDIT_MODE = true;
+        if (instance.SHOW_TARGETED_OVERLAY_IN_EDIT_MODE) {
+            channel
+                .on("cq-editor-loaded", function (event) {
+                    // Hook into the cq-editor-loaded event to detect when the editor was open in Edit mode...
+                    if (Granite.author.layerManager.getCurrentLayerName() === "Edit") {
+                        setTimeout(_prepareEditMode, 500);
+                    }
+                })
+                .on("cq-layer-activated", function (event) {
+                    // ...and hook into the layer activation to re-apply the styling if the layer changed
+                    var currentLayer = event["layer"],
+                        prevLayer = event["prevLayer"];
+
+                    if (currentLayer == "Edit" && prevLayer !== "Edit") {
+                        setTimeout(_prepareEditMode, 500);
+                    }
+
+                    if (currentLayer == "Preview" && prevLayer === "Targeting") {
+                        $.each(instance.editables, function(i, e) {
+                            Granite.author.edit.EditableActions.REFRESH.execute(e);
+                        });
+                    }
+                });
+        }
+        // END styling the overlays in edit mode
+
+        /**
+         * The offers for the currently selected experience.
+         * Entries: editable.path -> offer.path
+         * @type {{}}
+         */
+        instance.offers = {};
+
+        /**
+         * The activity (campaign) currently selected in the UI
+         * @type {}
+         */
+        instance.currentActivity = "";
+
+        /**
+         * Properties of the currently selected activity
+         * @type {Object}
+         */
+        instance.currentActivityProperties = {
+            type: DEFAULT_ACTIVITY_TYPE,
+            engineType: "aem",
+            tntConfigPath: undefined,
+            isLiveCopy: false,
+            inheritanceCancelled: false,
+            inheritancePlus: false
+        }
+
+        /**
+         * The current brand selected in the UI
+         * @type {string}
+         */
+        instance.currentBrand = "";
+
+        /**
+         * The currently selected experience. This impacts all the targeted content on the page.
+         * @type {Object}
+         */
+        instance.selectedExperience = { };
+
+        /**
+         * The list of experiences currently displayed by the manager. This changes when the selected activity changes
+         * @type {Experience}
+         */
+        instance.experiences = [];
+
+        /**
+         * All targeted content on page
+         */
+        instance.editables = {};
+
+        /**
+         * The UI object
+         * @type {ui.TargetedContentManagerUi}
+         */
+        instance.ui = { };
+
+        /**
+         * Stores an editable in the internal editable list
+         * @param editableToStore
+         */
+        instance.rememberEditable = function(editableToStore) {
+            // iterate through the editables we already have
+            // and only add it if necessary
+            if (!instance.editables[editableToStore.path]) {
+                return $.ajax(editableToStore.path + ".json")
+                            .done(function(response, jqXHR) {
+                                var editableKey = response[LOCATION_NAME_PARAM] ? response[LOCATION_NAME_PARAM] : editableToStore.path;
+                                instance.editables[editableKey] = editableToStore;
+                                channel.trigger("targeted-editable-loaded");
+                            });
+            }
+        };
+
+        /**
+         * Flag indicating the state of offer loading
+         */
+        instance.isLoadingOffers = false;
+
+        /**
+         * Flag indicating an ongoing targeting request
+         */
+        instance.isTargetRequest = false;
+
+        $(document).on("editable-refreshed", function(event) {
+           debug("[TargetedContentManager] Editable refreshed after edit " + event["path"]);
+            // request the location name again since it may have been changed
+            var path = event["path"],
+                url = path + ".json";
+
+            if (_isEditMode()) {
+                var editables = Granite.author.store.find(path);
+                if (editables.length > 0) {
+                    // give it some space so the overlay has time to reposition.
+                    setTimeout( function() {
+                        _applyOverlayStyling(editables[0]);
+                    }, 200);
+                }
+                // remove children
+                $.each(editables, function(idx, editable){
+                    if (CQ.TargetedContentManager.isTargetComponent(editable.type)) {
+                        _removeChildren(editable);
+                    }
+                });
+            }
+
+            if (_isTargetMode()) {
+                $.ajax(url)
+                    .done(function (response) {
+                        for (var l in instance.editables) {
+                            if (instance.editables.hasOwnProperty(l)) {
+                                var editable = instance.editables[l];
+                                if (editable.path === path) {
+                                    delete instance.editables[l];
+                                    var editableKey = response[LOCATION_NAME_PARAM] ? response[LOCATION_NAME_PARAM] : editable.path;
+                                    instance.editables[editableKey] = editable;
+                                }
+                                instance.loadOffers(editable, instance.selectedExperience);
+                            }
+                        }
+                    })
+                    .fail(function (response) {
+                        console.error("Error refreshing targeted content: ", response);
+                    });
+            }
+        });
+
+        var _getJsonPageProperty = function(rootJson, propName, defaultValue) {
+            var propValue = defaultValue;
+
+            if (rootJson["jcr:content"] && rootJson["jcr:content"][propName]) {
+                propValue = rootJson["jcr:content"][propName];
+            }
+
+            return propValue;
+        };
+
+        var _updateExperienceAudiences = function(activity) {
+            $.ajax(activity + noCache(".2.json"))
+                .done(function(data, jqXHR) {
+                    var resultJson = data;
+
+                    if (instance.currentActivity != activity) {
+                        // not the data of the currently selected activity, do nothing
+                        return;
+                    }
+
+                    instance.currentActivityProperties.type = _getJsonPageProperty(resultJson, "campaignType", DEFAULT_ACTIVITY_TYPE);
+                    instance.currentActivityProperties.engineType = _getJsonPageProperty(resultJson, "cq:targetEngine", "aem");
+
+                    var cloudConfigs = resultJson["jcr:content"]["cq:cloudserviceconfigs"];
+
+                    if (cloudConfigs) {
+                        if (typeof cloudConfigs == "object" && cloudConfigs.length > 0) {
+                            instance.currentActivityProperties.tntConfigPath = cloudConfigs[0];
+                        } else {
+                            instance.currentActivityProperties.tntConfigPath = cloudConfigs;
+                        }
+                    } else {
+                        instance.currentActivityProperties.tntConfigPath = undefined;
+                    }
+
+                    // update visitor percentage
+                    $.each(instance.experiences, function(index, experience){
+                        var pageName = experience.path.replace(/.*\/(.*$)/i, "$1");
+                        if (resultJson[pageName]
+                            && resultJson[pageName]["jcr:content"]) {
+                            var visitorPercentage = resultJson[pageName]["jcr:content"]["visitorPercentage"];
+                            experience["visitorPercentage"] = visitorPercentage;
+
+                            // check LC mixing marker for all experience pages
+                            // if activity is a LC but the experience has no LC markers -> locally created and editable
+                            var experienceMixins = resultJson[pageName]["jcr:content"]["jcr:mixinTypes"];
+                            var hasLcMarker = false;
+                            if (experienceMixins && experienceMixins.length > 0) {
+                                $.each(experienceMixins, function(mixinIdx, mixin) {
+                                    if (mixin == "cq:LiveRelationship") {
+                                        hasLcMarker = true;
+                                        return false;
+                                    }
+                                });
+                            }
+                            experience["msmIsLocal"] = hasLcMarker ? false : true;
+
+                        } else {
+                            experience["visitorPercentage"] = undefined;
+                        }
+                    });
+
+                    var url = noCache(activity + "/jcr:content.segments.json");
+                    $.ajax(url)
+                        .done(function(data, jqXHR){
+                            $.each(instance.experiences, function(index, experience){
+                                var segmentData = data[experience.path];
+                                if (segmentData) {
+                                    var audienceName = segmentData["title"];
+                                    audienceName = audienceName.replace(/-[0-9]{13}/gi, "");
+                                    experience.audience = {
+                                        path: segmentData["path"],
+                                        name: audienceName,
+                                    };
+                                    experience["visitorPercentage"] = segmentData["visitorPercentage"];
+                                }
+                            });
+
+                            instance.ui.buildExperienceTabs(instance.experiences);
+                            instance.ui.selectExperience(0, instance.experiences[0]);
+                            instance.switchExperience(DEFAULT_EXPERIENCE);
+                        });
+                });
+        };
+
+        /**
+         * Backend functions that handles the selection of an activity (formerly known as campaign)
+         * @param activity
+         * @param callback
+         */
+        instance.onActivitySelected = function(activity, callback) {
+            if (!activity) {
+                debug("[TargetedContentManager] No activity selected");
+                // no activity selected, nothing to do.
+                return;
+            } else {
+                debug("[TargetedContentManager] Activity selected " + activity);
+                this.currentActivity = activity;
+                _loadExperiences(activity, callback);
+            }
+        };
+
+        /**
+         * Returns true if its safe to show offer actions. Offer actions should
+         * not be shown during the target request or during offer loading
+         * request.
+         *
+         * @return true if its safe to show offer actions, false otherwise
+         */
+        instance.showOfferActions = function () {
+            return !instance.isLoadingOffers && !instance.isTargetRequest;
+        };
+
+        /**
+         * Switches the active experience
+         * @param experiencePath {String} the experience to switch to
+         */
+        instance.switchExperience = function(experiencePath, scrollIntoView, forceReload) {
+            if (typeof experiencePath === "undefined") {
+                return;
+            }
+            // avoid switching to the same experience
+            if (experiencePath === instance.selectedExperience.path && !forceReload) {
+                return;
+            }
+
+            debug("[TargetedContentManager] Switching to experience " + experiencePath);
+
+            var experience;
+            $.each(instance.experiences, function(i, o) {
+                if (experiencePath === o.getPath()) {
+                    experience = o;
+                }
+            });
+            if (!experience) {
+                return;
+            }
+
+            this.selectedExperience = experience;
+
+            // ensure MsmAuthoringHelper is teared down, undecorates editable actions
+            _tearDownMsmAuthoringHelper();
+
+            // empty offers because we'll have new ones
+            instance.offers = {};
+            // iterate through editables and refresh target comps
+            $.each(instance.editables, function(index, editable) {
+                instance.loadOffers(editable, experience)
+            });
+
+            // we must find out the index of the experience in our array
+            $.each(instance.experiences, function(i, e) {
+                if (e.path === experiencePath) {
+                    instance.ui.selectExperience(i, e, scrollIntoView);
+                }
+            });
+
+        };
+
+        /**
+         * Converts an editable to a targeted content.
+         * @param editable { Editable } the editable to be targeted
+         * @param revert { Boolean } if <code>true</code> performs "un-target" (disable targeting) on the current editable
+         * @param initialResourceType {String} the initial resource type of the component
+         * @callback postTargetCallback { callback function }
+         */
+        instance.targetComponent = function(editable, revert, initialResourceType, postTargetCallback) {
+
+            // if the targeted editable has children, use the resource type of the child
+            // if no children, must be the default, use the received initialResourceType param
+            var useResourceType = editable && editable.getChildren().length > 0 ?
+                editable.getChildren()[0].type : initialResourceType;
+
+            var url   = editable.path + (revert ? ".untarget" : ".target") + ".json",
+                opMsg = revert
+                        ? Granite.I18n.getMessage("Component is no longer targeted")
+                        : Granite.I18n.getMessage("Component is now targeted"),
+                opMsgError = Granite.I18n.getMessage("An error occurred");
+
+            var createAllOffers = function(editable) {
+                var promises = [];
+                $.each(instance.experiences, function(idx, experience) {
+                    var experienceName = getExperienceName(experience);
+                    if (experienceName !== DEFAULT_EXPERIENCE) {
+                        promises.push(instance.createOffer(editable, null, experience["path"]));
+                    }
+                });
+                return promises;
+            };
+
+            // Temporary fix for CQ-84824
+            // Reloading just the component in a responsive grid loses the "aem-GridColumn*" classes
+            // which damages the overlay.
+            // Since we have no way of refreshing the responsive grid (at least not now)
+            // we'll just re-apply the original classes once the new editable is in place
+            // This is *extremely ugly* and hacky, but it should do until the issue is fixed by the UI team
+
+            var classes = "";
+            if (editable.dom) {
+                classes = $(editable.dom)
+                    .attr("class")
+                    .split(" ")
+                    .filter(function(e) {
+                        return e.startsWith("aem-GridColumn");
+                    });
+            }
+            // end temporary fix
+
+            var doTargetRequest = function(location) {
+                var type = revert
+                               ? useResourceType
+                               : ns.TargetingConstants.TARGET_COMPONENT_RTYPE;
+
+                instance.isTargetRequest = true;
+
+                $.post(url, { "resourceType": type, "location": location || "", "_charset_": "utf-8" })
+                    .done(function(data,status,xhr){
+                        if (!data.success) {
+                            instance.ui.showOperationResult(opMsgError, true, data.error || Granite.I18n.getMessage("Unknown"));
+                            return;
+                        }
+                        editable.type=type;
+                        if (revert) {
+                            debug("[TargetedContentManager] Untargeting editable at ", editable.path);
+                            // forget the editable before reverting
+                            // otherwise we'll have problems after refresh
+                            forgetEditable(editable);
+                            // remove the editable's children from the store,
+                            // because they are not needed anymore
+                            var children = editable.getChildren();
+                            if (children && children.length > 0) {
+                                Granite.author.store.remove(children[0]);
+                            }
+                        }
+                        debug("[TargetedContentManager] Refreshing editable at ", editable.path);
+                        Granite.author.target.TargetingActions.REFRESH.execute(editable)
+                            .done(function() {
+                                if (!revert) {
+                                    // set the no-offer overlay
+                                    // editable.overlay.setTargeted();
+                                    // add the targeted element to the list
+                                    instance.rememberEditable(editable)
+                                            .done(function() {
+                                                // CQ-4306473: do not create default offers for Screens
+                                                if (/^\/content\/screens\//.test(editable.path)) {
+                                                    instance.isTargetRequest = false;
+                                                    return;
+                                                }
+                                                $.when.apply($, createAllOffers(editable))
+                                                .always(function() {
+                                                    debug("[TargetedContentManager] All offers created");
+                                                    instance.isTargetRequest = false;
+                                                });
+                                            });
+
+                                    // load offers from it
+                                    instance.loadOffers(editable, instance.selectedExperience);
+                                    // re-enable the toolbar since opening the dialog disables it
+                                    Granite.author.EditorFrame.editableToolbar.enable();
+                                } else {
+                                    // recreate the overlay, otherwise we get errors
+                                    Granite.author.overlayManager.recreate(editable);
+                                }
+                                // Temporary fix for CQ-84824
+                                // apply the classes
+                                if (editable.dom) {
+                                    $(editable.dom).addClass(classes.join(" "));
+                                }
+                                // end temporary fix
+                            });
+
+                        instance.ui.showOperationResult(opMsg, false);
+                    })
+                    .fail(function(xhr,status,error) {
+                        instance.isTargetRequest = false;
+                        instance.ui.showOperationResult(opsMsgError, true, xhr.statusText);
+                    })
+                    .always(function() {
+                        if(typeof(postTargetCallback) === "function") {
+                            postTargetCallback();
+                        }
+                    });
+            }
+
+            if (!revert) {
+                if (instance.ui.forceLocation === true) {
+                    debug("[TargetedContentManager] Enforcing location");
+                    var dlgUrl = "/libs/cq/personalization/touch-ui/content/v2/commons/targeteddialog.html" + editable.path;
+                        dlgUrl = Granite.HTTP.externalize(dlgUrl);
+
+                    var dlg = new Granite.author.ui.Dialog({
+                        getConfig: function() {
+                            return {
+                                src: dlgUrl,
+                                loadingMode: 'auto',
+                                layout: 'auto'
+                            }
+                        }
+                    });
+                    Granite.author.DialogFrame.openDialog(dlg);
+
+                    // register submit handler
+                    $(document).on("click", "form.cq-dialog .cq-dialog-submit", function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+
+                        // validate form
+                        var $form = $(e.target).closest("form");
+                        $.each($("input, textarea, select", $form), function(k,v) {
+                            var el = $(v);
+                            el.checkValidity();
+                            el.updateErrorUI();
+                        });
+                        if ($.validator.isValid($form)) {
+                            var location = $form ? $("input[name='location']", $form).val() : "";
+                            doTargetRequest.call(this, location);
+                            Granite.author.DialogFrame.closeDialog();
+                        }
+                    });
+                } else {
+                    var location = ns.TargetedDialogHelper.generateUUID();
+                    doTargetRequest.call(this, location);
+                }
+            } else {
+                doTargetRequest.call(this);
+            }
+
+        };
+
+        /**
+         * Opens a dialog for converting a component to experience fragment and calls targetComponent() on success
+         * @param editable { Editable } the editable to be targeted
+         * @param revert { Boolean } if <code>true</code> performs "un-target" (disable targeting) on the current editable
+         * @param initialResourceType {String} the initial resource type of the component
+         */
+        instance.convertToXfAndTargetComponent = function(editable, revert, initialResourceType) {
+            CQ.XF.convertToXf();
+            var originalOnSuccess = Granite.author.DialogFrame.currentDialog.onSuccess;
+            //override original onSuccess() and call it after targeting is completed
+            Granite.author.DialogFrame.currentDialog.onSuccess = function () {
+                instance.targetComponent(editable, revert, initialResourceType, originalOnSuccess);
+            }
+        }
+
+        /**
+         * Adds an experience to this components' experience list. Also, it automatically creates offers in the campaign for the new experience.                                                                                     `
+         * @param {Object} an Experience object.
+         *
+         * @return {Array} an array of Promise objects for the "create offer" operations.
+         */
+        instance.addExperience = function(addedExperience) {
+            instance.experiences.push(addedExperience);
+            var promises = [];
+            // create the default offer for each editable in the array
+            $.each(instance.editables, function(location, editable) {
+                promises.push(instance.createOffer(editable, null, addedExperience["path"]));
+            });
+            return promises;
+        };
+
+        /**
+         * Deletes the experience
+         * @param path { String } the path of the experience page
+         * @param callback { Function } callback to be executed after the deletion had taken place
+         * @param scope
+         */
+        instance.deleteExperience = function(path, callback, scope) {
+            $.post(COMMAND_SERVLET, {"path": path, "cmd": CMD_DELETE_OP})
+                .done(function(data, jqXHR) {
+                    var indexToRemove = -1;
+                    $.each(instance.experiences, function(index, experience) {
+                        if (experience[ns.ExperienceFactory.props.PATH] === path) {
+                            indexToRemove = index;
+                        }
+                    });
+                    if (indexToRemove > -1) {
+                        instance.experiences.splice(indexToRemove, 1);
+                    }
+                    if (callback && typeof callback == "function") {
+                        callback(instance.experiences, scope);
+                    }
+                });
+        };
+
+        /**
+         * Determines the URL of an offer from an experience
+         * @param editable { Editable } the editable we want the offer for
+         * @param experience { Experience } the experience
+         * @returns { String } the offer path. This is one of the following:
+         * <ul><li><code> &lt;editable path&gt;.default if the experience is the default</li>
+         * <li>the offer path from the offers l ist</li>
+         * <li><code>null</code> if we have no offer for that editable path</li>
+         * </ul>
+         */
+        instance.getOfferUrl = function(editable, experience) {
+            var offerPath = null;
+            var experienceName = getExperienceName(experience);
+
+            if (experienceName === DEFAULT_EXPERIENCE) {
+                offerPath = editable.path + "." + DEFAULT_COMPONENT + ".html";
+            } else if (instance.offers[editable.path]) {
+
+                var path = instance.offers[editable.path];
+                // if the offer is from the offer library
+                // then the element is <proxy_path|real_offer_path>
+                // so we need to split by the |
+                if (path.indexOf("|") !== -1) {
+                    offerPath = path.split("|")[1] + "/" + OFFER_INNER_PATH + ".html";
+                }  else {
+                    offerPath = instance.offers[editable.path] + "/" + OFFER_INNER_PATH + ".html";
+                }
+            }
+
+            return offerPath;
+        }
+
+        /**
+         * Loads the offers for an editable and refresh that editable to the offer corresponding to the experience
+         * @param editable
+         * @param currentExperience
+         */
+        instance.loadOffers = function(editable, currentExperience) {
+
+            debug("[TargetedContentManager] Loading offers for " + editable.path);
+
+            if (instance.currentActivity === "") {
+                return;
+            }
+
+            //1. retrieve the teasers available for this editable
+            var teasersUrl = editable.path + ".teasers.json" + instance.currentActivity,
+                editableName = getElementName(editable.path),
+                currentExperienceName = getExperienceName(currentExperience);
+
+            instance.isLoadingOffers = true;
+
+            $.ajax(teasersUrl)
+                .done(teasersUrl, function(teasers, jqXHR) {
+                    //iterate throught the teasers and see if we have any
+                    // for this experience
+                    var refreshUrl, // the url from which we'll refresh the content
+                        createEditables = false,
+                        contentPolicyDelegatePath;
+
+                    Granite.author.selection.deselectAll();
+                    destroyChildren(editable);
+                    if (teasers[currentExperienceName]) {
+                        //found an offer!
+                        instance.offers[editable.path] = teasers[currentExperienceName];
+                        refreshUrl = instance.getOfferUrl(editable, currentExperience);
+                        contentPolicyDelegatePath = getContentPolicyDelegatePath(teasers);
+                        refreshUrl += (refreshUrl.indexOf("?") < 0 ? "?" : "&") + "contentPolicyDelegatePath=" + contentPolicyDelegatePath;
+
+                        if (currentExperienceName !== DEFAULT_EXPERIENCE) {
+                            if (teasers[currentExperienceName].indexOf("|") === -1) {
+                                createEditables = true;
+                            }
+                        } else {
+                            createEditables = true;
+                        }
+                    } else {
+                        refreshUrl = editable.path + ".default.html";
+                    }
+                    loadContent(editable, refreshUrl, createEditables);
+                    setTimeout(function(){
+                        if (teasers[currentExperienceName]) {
+                            if (currentExperienceName !== DEFAULT_EXPERIENCE) {
+                                if (editable.overlay && teasers[currentExperienceName].indexOf("|") !== -1) {
+                                    editable.overlay.setLockedOffer(true);
+                                } else {
+                                    var showCustomOffer = (!Granite.Toggles.isEnabled(CQ.TargetingConstants.FEATURE_TOGGLE_ENABLE_XF_OFFERS))
+                                        || (!instance.hasExperienceFragment(editable));
+                                    if(showCustomOffer) {
+                                        editable.overlay.setLockedOffer(false);
+                                    }
+                                }
+                            } else {
+                                if (editable.overlay) {
+                                    editable.overlay.toggleOverlayIcon(false);
+                                }
+                            }
+                            if (editable.overlay) {
+                                editable.overlay.setEmptyOverlay(false);
+                            }
+                        } else {
+                            // offer not found
+                            if (editable.overlay && editable.overlay.toggleOverlayIcon) {
+                                editable.overlay.toggleOverlayIcon(false);
+                            }
+
+                            if (editable.overlay && editable.overlay.setEmptyOverlay) {
+                                editable.overlay.setEmptyOverlay(true);
+                            }
+                        }
+                    }, 200);
+                })
+                .always(function(data,status,xhr){
+                    instance.isLoadingOffers = false;
+                });
+
+        };
+
+        //todo optimize, is not cool to search for it every time.
+        instance.getTargetParent = function(editable) {
+
+            var targetEditable = editable;
+            while (targetEditable && !CQ.TargetedContentManager.isTargetComponent(targetEditable.type)) {
+                targetEditable = targetEditable.getParent();
+            }
+
+            return targetEditable;
+        };
+
+        /**
+         * Adds an offer to the current editable for the selected experience
+         * @param editable { Editable }
+         */
+        instance.createOffer = function(editable, location, selectedExperience) {
+            var self = this;
+            var selectedExperience = (typeof selectedExperience !== "undefined") ? selectedExperience : instance.selectedExperience[ns.ExperienceFactory.props.PATH];
+
+            // search for the location in the inner obj
+            if (typeof location === "undefined" || location === null) {
+                $.each(instance.editables, function (k, e) {
+                    if (e.path === editable.path) {
+                        location = k;
+                    }
+                });
+            }
+
+            var params = {
+                "experiencePath":selectedExperience,
+                "jcr:content/location": location,
+            };
+
+            $.post(editable.path + ".createoffer.json", params)
+                .done(function(response) {
+                    // we switch to the current experience so to trigger refreshing and all
+                    instance.switchExperience(instance.selectedExperience[ns.ExperienceFactory.props.PATH], undefined, true);
+                })
+                .fail(function(response) {
+                    instance.ui.showOperationResult("Adding the offer failed", 1, response.statusText);
+                });
+        };
+
+        /**
+         * Deletes the current offer associated with an editable for the current experience
+         * @param editable { Editable }
+         */
+        instance.deleteOffer = function(editable) {
+
+            var path = instance.offers[editable.path];
+            if (path.indexOf("|") !== -1) {
+                path = path.split("|")[0];
+            }
+            if (typeof path === "undefined"
+                    || path === null) {
+                return;
+            }
+            var params = {
+               "path": path,
+               "cmd": CMD_DELETE_OP
+            };
+
+            $.post(COMMAND_SERVLET, params)
+                .done(function(response) {
+                    // null the offer in the offers cache
+                    instance.offers[editable.path] = null;
+                    instance.ui.showOperationResult(Granite.I18n.get("The offer was deleted successfully"), 0);
+                    instance.loadOffers(editable, instance.selectedExperience);
+                })
+                .fail(function(response) {
+                    instance.ui.showOperationResult("An error occured while deleting the offer", 1, response.statusText);
+                })
+
+        };
+
+        /**
+         * Returns <code>true</code> if the DEFAULT experience is selected by the editor.
+         * This is useful for rendering the buttons of the toolbar
+         * @returns {boolean}
+         */
+        instance.isDefaultExperienceSelected = function() {
+            var experienceName = getExperienceName(instance.selectedExperience);
+            return (experienceName === DEFAULT_EXPERIENCE);
+        };
+
+        /**
+         * Checks if the editable has an offer associated in the offers cache
+         * @param editable {Editable}
+         * @returns {boolean} <code>true</code> if the editable has an offer for the current experience, <code>false</code> otherwise
+         */
+        instance.hasOffer = function(editable) {
+            var refEditable;
+            if (this.isTargetedContainerComponent(editable.type)) {
+                refEditable = editable;
+            } else {
+                refEditable = instance.getTargetParent(editable);
+            }
+            var hasOffer = instance.offers.hasOwnProperty(refEditable.path)
+                && instance.offers[refEditable.path] !== null;
+
+            return hasOffer;
+        };
+
+        /**
+         * Checks if specified type matches a supported target component type.
+         * Current supported types include
+         * - CQ.TargetingConstants.TARGET_COMPONENT_RTYPE
+         * - CQ.TargetingConstants.TARGET_RESPONSIVEGRID_COMPONENT_RTYPE
+         *
+         * @param {string} type Resource Type
+         */
+        instance.isTargetComponent = function(type) {
+            return (type === CQ.TargetingConstants.TARGET_COMPONENT_RTYPE
+                        || type === CQ.TargetingConstants.TARGET_RESPONSIVEGRID_COMPONENT_RTYPE);
+        };
+
+        /**
+         * Checks if specified type matches a supported targeted container type.
+         * Current supported types include
+         * - CQ.TargetingConstants.TARGET_PARSYS_RTYPE
+         * - CQ.TargetingConstants.TARGET_RESPONSIVEGRID_RTYPE
+         *
+         * @param {string} type Resource Type
+         */
+        instance.isTargetedContainerComponent = function(type) {
+            return (type === CQ.TargetingConstants.TARGET_PARSYS_RTYPE
+                        || type === CQ.TargetingConstants.TARGET_RESPONSIVEGRID_RTYPE);
+        };
+
+        /**
+         * Checks if specified type matches a supported parsys type.
+         * Current supported types include
+         * - CQ.TargetingConstants.PARSYS_RT
+         * - CQ.TargetingConstants.PARSYS_NEW_RT
+         * - CQ.TargetingConstants.RESPONSIVEGRID_RT
+         * - CQ.TargetingConstants.RESPONSIVEGRID_NEW_RT
+         *
+         * @param {string} type Resource Type
+         */
+        instance.isParSys = function(type) {
+            return (type === CQ.TargetingConstants.PARSYS_RT
+                        || type === CQ.TargetingConstants.PARSYS_NEW_RT
+                        || type === CQ.TargetingConstants.RESPONSIVEGRID_RT
+                        || type === CQ.TargetingConstants.RESPONSIVEGRID_NEW_RT);
+        };
+
+        /**
+         * Checks if an editable is in a targeted parsys.
+         * @param editable
+         */
+        instance.isInParsys = function(editable) {
+            if (this.isTargetComponent(editable.type)
+                    || this.isTargetedContainerComponent(editable.type)) {
+                return false;
+            }
+            var parentEditable = editable.getParent();
+
+            // checking if the editable is within another container component added into the target parsys
+            // that is the target parsys might not necessarily be the immediate parent but rather
+            // an ancestor
+            while (parentEditable) {
+                if (this.isTargetedContainerComponent(parentEditable.type)) {
+                    break;
+                }
+                parentEditable = parentEditable.getParent();
+            }
+
+            return (parentEditable && this.isTargetedContainerComponent(parentEditable.type));
+        };
+
+        /**
+         * Resets everything (used for cleanup)
+         */
+        instance.reset = function() {
+            debug("[TargetedContentManager][reset] Starting reset...");
+            // reset the client context
+            if (ns.TargetedContentManager.ClientContext) {
+                var campaignStore = ns.TargetedContentManager.ClientContext.get("campaign");
+                if (campaignStore) {
+                    debug("[TargetedContentManager][reset] Removing ClientContext campaign update listener!");
+                    campaignStore.setCampaign("");
+                }
+            }
+
+            // refresh the editables
+            if (instance.currentActivity !== "") {
+                // refresh the editables to let the engine kick in
+                // but only do this if we're not simulating already
+                var targetedEditables = typeof instance.editables !== "undefined" ?
+                    Object.keys(instance.editables).length : 0;
+                debug("[TargetedContentManager][reset] Resetting " + targetedEditables + " editables...");
+                if (targetedEditables > 0) {
+                    $.each(instance.editables, function(i, e) {
+                        var editableRefreshPromise = Granite.author.target.TargetingActions.REFRESH.execute(e);
+                        editableRefreshPromise.done(function() {
+                            targetedEditables--;
+                            if (targetedEditables == 0) {
+                                debug("[TargetedContentManager][reset] All editables were reset, triggering 'targeted-editables-reset' event!");
+                                channel.trigger("targeted-editables-reset");
+                            }
+                        });
+                    });
+                } else {
+                    debug("[TargetedContentManager][reset] No targeted editables to reset, triggering 'targeted-editables-reset' event!");
+                    channel.trigger("targeted-editables-reset");
+                }
+            } else {
+                debug("[TargetedContentManager][reset] Not simulating, triggering 'targeted-editables-reset' event!");
+                channel.trigger("targeted-editables-reset");
+            }
+
+            // reinitialize the objects
+            instance.offers = {};
+            instance.currentActivity = "";
+            instance.selectedExperience = { };
+            instance.experiences = [];
+            debug("[TargetedContentManager][reset] Reset done.");
+        }
+
+        /**
+         * Retrieves the location name for the given editable
+         * @param {Editable} editable
+         */
+        instance.getEditableLocationName = function(editable) {
+            // search for the location in the inner obj
+            var location = "";
+            $.each(instance.editables, function(k, e) {
+                if (e.path === editable.path) {
+                    location = k;
+                }
+            });
+            return location;
+        }
+
+        /**
+         * Checks if this editable has a "locked" offer (i.e. from the offer library)
+         * @param editable
+         * @return {Boolean} false if the offer is inline (in the campaign tree) or true if it's proxied.
+         */
+        instance.hasLockedOffer = function(editable) {
+            if (instance.offers && instance.offers[editable.path]) {
+                if (instance.offers[editable.path].indexOf("|") !== -1) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        instance.convertInlineOffer = function(editable) {
+            var offerPath = instance.offers[editable.path],
+                offers = offerPath.split("|"),
+                url= offers[0]+"/jcr:content.fromreusable.json";
+
+            $.post(url, { source: offers[1] })
+                .done(function(data, status, xhr){
+                    instance.loadOffers(editable, instance.selectedExperience);
+                })
+                .fail(function(data){
+                    instance.ui.showOperationResult("Error converting to inline offer", 1, data["message"]);
+                });
+        }
+
+        instance.editOfferNewTab = function(editable) {
+            var offerPath = instance.offers[editable.path],
+                offers = offerPath.split("|"),
+                urlToOpen = Granite.HTTP.externalize("/editor.html"+offers[1]+".html");
+
+            window.open(urlToOpen);
+        }
+
+        instance.getCurrentBrand = function() {
+            if (instance.currentBrand === "") {
+                return instance.ui.getCurrentBrand();
+            }
+
+            return instance.currentBrand;
+        }
+
+        instance.isSimulation = function() {
+             return (instance.currentActivity === "")
+        }
+
+        instance.targetedContentMoved = function() {
+            debug("[TargetedContentManager] Targeted component moved: " + this.path);
+            var editable = this;
+            _removeChildren(editable);
+            setTimeout(function() {
+                _applyOverlayStyling(editable)
+            },100);
+        }
+
+        instance.hasExperienceFragment = function(editable) {
+            var result = false;
+            if (instance.isTargetComponent(editable.type)) {
+                var children = editable.getChildren();
+                if(children.length > 0) {
+                    result = instance.isExperienceFragment(children[0].path, children[0].type);
+                } else {
+                    // Get default experience
+                    var defaultExperiencePath = editable.path + "/default";
+                    var defaultExperienceType = Granite.author.ContentFrame.getEditableConfigNode(defaultExperiencePath).data('config').type;
+                    result = instance.isExperienceFragment(defaultExperiencePath, defaultExperienceType);
+                }
+            } else {
+                result = instance.isExperienceFragment(editable.path, editable.type);
+            }
+            return result;
+        }
+
+        instance.isExperienceFragment = function(editablePath, editableType) {
+            if(editableType === CQ.TargetingConstants.RT_EDITOR_EXPERIENCE_FRAGMENT) {
+                return true;
+            }
+            return Granite.author.ContentFrame.getEditableNode(editablePath).children()
+                .hasClass(CQ.TargetingConstants.BEM_EXPERIENCE_FRAGMENT_CLASS);
+        };
+
+        /**
+         * Checks if the path is in experience fragments root
+         * @param path
+         * @return {Boolean} true if the path is in experience-fragments root, false otherwise.
+         */
+        instance.isExperienceFragmentPage = function(path) {
+            return !!path && typeof path === 'string' && path.startsWith(CQ.TargetingConstants.EXPERIENCE_FRAGMENTS_ROOT);
+        };
+
+        return instance;
+    };
+
+
+    ns.TargetedContentManager = targetedContentManager(ns);
+
+
+}(CQ, jQuery(document), this));

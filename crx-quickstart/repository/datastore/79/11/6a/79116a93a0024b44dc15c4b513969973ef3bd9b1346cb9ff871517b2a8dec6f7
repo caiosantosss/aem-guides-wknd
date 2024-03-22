@@ -1,0 +1,808 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ *
+ * Copyright 2022 Adobe
+ * All Rights Reserved.
+ *
+ * NOTICE: All information contained herein is, and remains
+ * the property of Adobe and its suppliers, if any. The intellectual
+ * and technical concepts contained herein are proprietary to Adobe
+ * and its suppliers and are protected by all applicable intellectual
+ * property laws, including trade secret and copyright laws.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe.
+ *
+ */
+(function(document, Granite, $, window) {
+    "use strict";
+
+    window.ManagePublication = window.ManagePublication || {};
+    var ManagePublication = window.ManagePublication;
+    var constants = ManagePublication.constants || {};
+
+    var ns = constants.ns;
+
+    var WIZARD_SELECTOR = constants.WIZARD_SELECTOR;
+    var DESTINATION_TEXT_SELECTOR = constants.DESTINATION_TEXT_SELECTOR;
+    var TABLE_SELECTOR = constants.TABLE_SELECTOR;
+    var REPLICATION_TYPE_FIELD_SELECTOR = constants.REPLICATION_TYPE_FIELD_SELECTOR;
+    var DESTINATION_FIELD_SELECTOR = constants.DESTINATION_FIELD_SELECTOR;
+    var SUBMIT_BUTTON_SELECTOR = constants.SUBMIT_BUTTON_SELECTOR;
+
+    var REPLICATION_TYPE_ACTIVATE = constants.REPLICATION_TYPE_ACTIVATE;
+    var REPLICATION_TYPE_DEACTIVATE = constants.REPLICATION_TYPE_DEACTIVATE;
+    var DESTINATION_PUBLISH = constants.DESTINATION_PUBLISH;
+    var DESTINATION_PREVIEW = constants.DESTINATION_PREVIEW;
+    var SCHEDULING_NOW = constants.SCHEDULING_NOW;
+
+    var NUM_CHILDREN_CHECK = constants.NUM_CHILDREN_CHECK;
+
+    var DESTINATION_DYNAMICMEDIA = "dynamicmedia";
+    var DESTINATION_MEDIAPORTAL = "mediaportal";
+    var ACTION_TEXT_PUBLISH = "Publish";
+    var ACTION_TEXT_DYNAMICMEDIA = "Dynamic Media";
+    var ACTION_TEXT_BRANDPORTAL = "Brand Portal";
+    var ADDCONTENT_SELECTOR = ".foundation-collection-action-addcontent";
+
+    var DM_UNPUBLISH_REL = "cq-damadmin-admin-actions-dmunpublish-activator";
+
+    var shouldShowDestination = false;
+
+    var DM_PUBLISH_REL = "cq-damadmin-admin-actions-dmpublish-activator";
+    var SCHEDULING_LATER = constants.SCHEDULING_LATER;
+
+    var $document = $(document);
+    var $window = $(window);
+    var ui = $window.adaptTo("foundation-ui");
+    var registry = $window.adaptTo("foundation-registry");
+    var messenger = $window.adaptTo("foundation-util-messenger");
+    var table;
+    var form;
+    var wizard;
+
+    function _getDisplayPublishTarget(mode, destination, type) {
+        if (!mode) {
+            return Granite.I18n.get("AEM");
+        }
+        if (mode === "selective") {
+            if (destination === DESTINATION_PUBLISH || destination === DESTINATION_PREVIEW) {
+                return Granite.I18n.get("AEM");
+            } else {
+                if (type === "directory") {
+                    return Granite.I18n.get("None");
+                } else {
+                    return Granite.I18n.get("Dynamic Media");
+                }
+            }
+        } else {
+            if (destination === DESTINATION_PUBLISH || destination === DESTINATION_PREVIEW) {
+                if (type === "directory") {
+                    return Granite.I18n.get("AEM");
+                } else {
+                    return Granite.I18n.get("AEM & Dynamic Media");
+                }
+            } else {
+                return Granite.I18n.get("None");
+            }
+        }
+    }
+
+    function _adjustPublishTarget() {
+        $(".foundation-collection-item-publish-target").each(function() {
+            var itemPath = $(this).parent().data("foundationCollectionItemId");
+            $(this).text(_getDisplayPublishTarget(_getDMPublishMode(itemPath),
+                wizard.destination, _getItemType(itemPath)));
+        });
+    }
+
+    function _getDMPublishMode(path) {
+        return $('.aem-assets-dmpublish-mode[data-path="' + path + '"]').data("dmpublishMode");
+    }
+
+    function _getItemType(path) {
+        return $('.aem-assets-dmpublish-mode[data-path="' + path + '"]').data("type");
+    }
+
+    /**
+     * Check whether there are published but active references of the asset
+     */
+    function checkAssetReferences(items) {
+        return $.ajax({
+            url: Granite.HTTP.externalize("/libs/wcm/asset/active/reference.json"),
+            data: {
+                path: items
+            },
+            "type": "POST",
+            cache: false,
+            dataType: "json"
+        });
+    }
+
+    function isHiddenAsset(path) {
+        if (path.startsWith("/content/dam/_VTT") ||
+            path.startsWith("/content/dam/_CSS")) {
+            return true;
+        }
+        return false;
+    }
+
+    function appendDestinationTextToElement(destination, element) {
+        if (!shouldShowDestination) {
+            return;
+        }
+        if (!element) {
+            return;
+        }
+
+        var destinationTextEl = element.querySelector(DESTINATION_TEXT_SELECTOR);
+
+        if (!destinationTextEl) {
+            destinationTextEl = document.createElement("span");
+            destinationTextEl.className = DESTINATION_TEXT_SELECTOR.substring(1);
+            element.appendChild(destinationTextEl);
+        }
+
+        var destinationText;
+        if (destination === DESTINATION_DYNAMICMEDIA) {
+            destinationText = ACTION_TEXT_DYNAMICMEDIA;
+        } else if (destination === DESTINATION_MEDIAPORTAL) {
+            destinationText = ACTION_TEXT_BRANDPORTAL;
+        } else {
+            destinationText = ACTION_TEXT_PUBLISH;
+        }
+
+        destinationTextEl.innerText = " (" + destinationText + ")";
+    }
+
+    function appendDestinationTextToWizardTitle(destination) {
+        var wizardTitle = document.querySelector(WIZARD_SELECTOR + " .coral-Heading");
+        appendDestinationTextToElement(destination, wizardTitle);
+    }
+
+    function getRequestActionText(config) {
+        var actionToRequest = config.replicationType === REPLICATION_TYPE_DEACTIVATE ? "unpublication" : "publication";
+
+        return "Request " + actionToRequest;
+    }
+
+    function _publishToBrandPortal(paths) {
+        var url;
+        var settings;
+        var datepicker = form[0].elements.activationDate.parentElement;
+        var absTime = datepicker.valueAsDate !== null ? datepicker.valueAsDate
+            .getTime() : new Date().getTime();
+        var workflowUrl = form.data("workflowurl");
+        if (!datepicker.disabled) {
+            if (paths.length >= 1) {
+                url = Granite.HTTP.externalize(workflowUrl);
+                settings = {
+                    "type": form.attr("method") || "POST",
+                    "data": {
+                        "_charset_": "UTF-8",
+                        "model": "/var/workflow/models/dam/scheduled_publish_bp",
+                        "workflowTitle": form[0].elements.requestWorkflowTitle.value,
+                        "absoluteTime": absTime,
+                        "payload": paths,
+                        "payloadType": "JCR_PATH"
+                    }
+                };
+            }
+        } else {
+            if (paths.length > 0) {
+                url = Granite.HTTP.externalize(paths[0]);
+                settings = {
+                    "type": "POST",
+                    "data": {
+                        "_charset_": "utf-8",
+                        ":operation": "dam.mac.sync",
+                        "type": "mediaportal",
+                        "path": paths
+                    },
+
+                    "beforeSend": function() {
+                        ui.wait();
+                    },
+
+                    "complete": function() {
+                        ui.clearWait();
+                    }
+                };
+            }
+        }
+        $.ajax(url, settings).done(function(data, textStatus, jqXHR) {
+            var formResponse = form.find(".foundation-form-response-ui-success")
+                .data("foundationFormResponseUiSuccess");
+            // store message so that it can be displayed
+            // after the redirect
+            try {
+                messenger.put(null, "" || Granite.I18n.get("The form has been submitted successfully"), "success");
+                location.href = formResponse.redirect;
+            } catch (e) {
+                // show error
+            }
+        }).fail(function(jqXHR, textStatus, errorThrown) {
+            // show the error
+            var formResponse = form.find(".foundation-form-response-ui-success")
+                .data("foundationFormResponseUiSuccess");
+            // store message so that it can be displayed
+            // after the redirect
+            try {
+                messenger.put(null, "" || Granite.I18n.get("An error occurred while publishing assets to Brand Portal.")
+                    , "error");
+                location.href = formResponse.redirect;
+            } catch (e) {
+                // show error
+            }
+        });
+    }
+
+    function _unpublishFromBrandPortal(paths) {
+        var url;
+        var settings;
+        var datepicker = form[0].elements.activationDate.parentElement;
+        var absTime = datepicker.valueAsDate !== null ? datepicker.valueAsDate
+            .getTime() : new Date().getTime();
+        var workflowUrl = form.data("workflowurl");
+        if (!datepicker.disabled) {
+            if (paths.length >= 1) {
+                url = Granite.HTTP.externalize(workflowUrl);
+                settings = {
+                    "type": form.attr("method") || "POST",
+                    "data": {
+                        "_charset_": "UTF-8",
+                        "model": "/var/workflow/models/dam/scheduled_unpublish_bp",
+                        "workflowTitle": form[0].elements.requestWorkflowTitle.value,
+                        "absoluteTime": absTime,
+                        "payload": paths,
+                        "payloadType": "JCR_PATH"
+                    }
+                };
+            }
+        } else {
+            if (paths.length > 0) {
+                url = Granite.HTTP.externalize(paths[0]);
+                settings = {
+                    "type": "POST",
+                    "data": {
+                        "_charset_": "utf-8",
+                        ":operation": "dam.mac.sync",
+                        "type": "mediaportal",
+                        "path": paths,
+                        "disable": "true"
+                    },
+                    "beforeSend": function() {
+                        ui.wait();
+                    },
+                    "complete": function() {
+                        ui.clearWait();
+                    }
+                };
+            }
+        }
+        $.ajax(url, settings).done(function(data, textStatus, jqXHR) {
+            var formResponse = form.find(".foundation-form-response-ui-success")
+                .data("foundationFormResponseUiSuccess");
+            // store message so that it can be displayed after the redirect
+            try {
+                messenger.put(null, "" || Granite.I18n.get("The form has been submitted successfully")
+                    , "success");
+                location.href = formResponse.redirect;
+            } catch (e) {
+                // show error
+            }
+        }).fail(function(jqXHR, textStatus, errorThrown) {
+            // show the error
+            var formResponse = form.find(".foundation-form-response-ui-success")
+                .data("foundationFormResponseUiSuccess");
+            // store message so that it can be displayed after the redirect
+            try {
+                messenger.put(null, "" || Granite.I18n.get("An error occurred while removing assets from Brand Portal.")
+                    , "error");
+                location.href = formResponse.redirect;
+            } catch (e) {
+                // show error
+            }
+        });
+    }
+
+
+    // Override getRow function of Sites managepublication.js
+    ManagePublication.getRow = function(data) {
+        data.path = data.path || "";
+        data.cache = data.cache || {};
+        data.cache.thumbnailurl = data.cache.thumbnailurl || "";
+        data.cache.title = data.cache.title
+            ? data.cache.title.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/&/g, "&amp;") : "";
+        var timePublished = data.cache.isPublished
+            ? $("<foundation-time>").attr("value", data.cache.published) : data.cache.published;
+        var timePreviewed = data.cache.isPreviewed
+            ? $("<foundation-time>").attr("value", data.cache.previewed) : data.cache.previewed;
+        var description = data.cache.references ? data.cache.references.description : Granite.I18n.get("Not gathered.");
+        var destination = $(DESTINATION_FIELD_SELECTOR).val() || DESTINATION_PUBLISH;
+        var publishTarget = _getDisplayPublishTarget(_getDMPublishMode(data.path), destination,
+            _getItemType(data.path));
+
+        return $("<tr>").attr("is", "coral-table-row").attr("class", "foundation-collection-item")
+            .attr("itemprop", "item").attr("data-foundation-collection-item-id", data.path).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "select").attr("coral-table-rowselect", "")
+                    .append(
+                        $("<img>").attr("class", "foundation-collection-item-thumbnail")
+                            .attr("src", data.cache.thumbnailurl).attr("alt", "")
+                    )
+            ).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "foundation-collection-item-title")
+                    .attr("alignment", "column").append(
+                        $("<span>").text(data.cache.title)
+                    ).append(
+                        $("<div>").attr("class", "foundation-layout-util-subtletext").text(data.path)
+                    )
+            ).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "foundation-collection-item-modified")
+                    .attr("alignment", "column").attr("value", data.cache.modifieddate).append(
+                        $("<foundation-time>").text(data.cache.modified)
+                    ).append(
+                        $("<div>").attr("class", "foundation-layout-util-subtletext " +
+                        "foundation-collection-item-user-info")
+                            .attr("user-info-id", data.cache.modifiedbyuser).text(
+                                data.cache.modifiedby
+                            )
+                    )
+            ).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "foundation-collection-item-published")
+                    .attr("alignment", "column").attr("value", data.cache.publisheddate).append(
+                        timePublished
+                    ).append(
+                        $("<div>").attr("class", "foundation-layout-util-subtletext " +
+                        "foundation-collection-item-user-info")
+                            .attr("user-info-id", data.cache.publishedbyuser).text(
+                                data.cache.publishedby
+                            )
+                    )
+            ).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "foundation-collection-item-previewed")
+                    .attr("alignment", "column").attr("value", data.cache.previeweddate).append(
+                        timePreviewed
+                    ).append(
+                        $("<div>").attr("class", "foundation-layout-util-subtletext " +
+                        "foundation-collection-item-user-info")
+                            .attr("user-info-id", data.cache.previewedbyuser).text(
+                                data.cache.previewedby
+                            )
+                    )
+            ).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "foundation-collection-item-references")
+                    .attr("alignment", "column").append(
+                        $("<span>").text(description)
+                    )
+            ).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "foundation-collection-item-publish-target")
+                    .attr("alignment", "column").append(
+                        $("<span>").text(publishTarget)
+                    )
+            )[0].outerHTML;
+    };
+
+    ManagePublication.setSubmitButtonLabel = function(config) {
+        var $submitBtn = $(SUBMIT_BUTTON_SELECTOR);
+        var attrJson = $submitBtn.get(0).getAttribute("data-foundation-tracking-event");
+        var jsonObj = JSON.parse(attrJson);
+        var actionText;
+        jsonObj.attributes = {};
+        if (config.hasReplicationRights) {
+            if (config.isScheduled) {
+                if (config.replicationType === REPLICATION_TYPE_ACTIVATE) {
+                    actionText = "Publish later";
+                } else {
+                    actionText = "Unpublish later";
+                }
+            } else if (config.destination === DESTINATION_DYNAMICMEDIA) {
+                jsonObj.feature = "aem:assets:asset:dynamicmedia:managepublication";
+                if (config.replicationType === REPLICATION_TYPE_ACTIVATE) {
+                    $submitBtn.removeClass(DM_UNPUBLISH_REL);
+                    $submitBtn.addClass((DM_PUBLISH_REL));
+                    actionText = "Publish to Dynamic Media";
+                    jsonObj.attributes["publishOrUnpublish"] = "publish";
+                } else {
+                    $submitBtn.removeClass(DM_PUBLISH_REL);
+                    $submitBtn.addClass((DM_UNPUBLISH_REL));
+                    actionText = "Unpublish from Dynamic Media";
+                    jsonObj.attributes["publishOrUnpublish"] = "unpublish";
+                }
+            } else if (config.destination === DESTINATION_MEDIAPORTAL) {
+                jsonObj.feature = "aem:assets:asset:brandportal:managepublication";
+                if (config.replicationType === REPLICATION_TYPE_ACTIVATE) {
+                    $submitBtn.removeClass(DM_PUBLISH_REL).removeClass(DM_UNPUBLISH_REL);
+                    actionText = "Publish to Brand Portal";
+                    jsonObj.attributes["publishOrUnpublish"] = "publish";
+                } else {
+                    $submitBtn.removeClass(DM_PUBLISH_REL).removeClass(DM_UNPUBLISH_REL);
+                    actionText = "Unpublish from Brand Portal";
+                    jsonObj.attributes["publishOrUnpublish"] = "unpublish";
+                }
+            } else {
+                $submitBtn.removeClass(DM_PUBLISH_REL).removeClass(DM_UNPUBLISH_REL);
+                jsonObj.feature = "aem:assets:asset:publication:manage";
+                if (config.replicationType === REPLICATION_TYPE_ACTIVATE) {
+                    actionText = "Publish";
+                    jsonObj.attributes["publishOrUnpublish"] = "publish";
+                } else {
+                    actionText = "Unpublish";
+                    jsonObj.attributes["publishOrUnpublish"] = "unpublish";
+                }
+            }
+            $submitBtn.text(Granite.I18n.get(actionText));
+            $submitBtn.get(0).setAttribute("data-foundation-tracking-event", JSON.stringify(jsonObj));
+        } else {
+            var requestText = getRequestActionText(config);
+            $submitBtn.text(Granite.I18n.get(requestText));
+        }
+    };
+
+    ManagePublication._updateIncludeChildrenParams = function(wizard, params) {
+        params = params || {};
+        var onlyDirectChildren = params.onlydirect || "false";
+        var includeChildren = params.includeChildren || "false";
+
+        // Currenlty no filter is supported for Asset
+        var filters = "";
+        ManagePublication._updateHiddenField(wizard, "onlyDirectChildren", "", onlyDirectChildren);
+        ManagePublication._updateHiddenField(wizard, "includeChildren", "", includeChildren);
+        ManagePublication._updateHiddenField(wizard, "filters", "", filters);
+    };
+
+    ManagePublication.manageReplicationAction = function(replicationType, destination, items) {
+        // Unpublish warning when page is referenced from somewhere else
+        // or it has published children
+        if (replicationType === REPLICATION_TYPE_DEACTIVATE && (destination === DESTINATION_PUBLISH ||
+            destination === DESTINATION_PREVIEW)) {
+            // check for references and children of the selected paths
+            var countChildrenPromise = ManagePublication.countChildren(items);
+            var countRefsPromise = ManagePublication.countReferences(items);
+            var checkRefsPromise = checkAssetReferences(items);
+
+            var countAssetRefsPromise = checkRefsPromise.then(function(json) {
+                var assets = json["assets"];
+                for (var a = 0; a < assets.length; a++) {
+                    var asset = assets[a];
+                    if (asset && asset.path && isHiddenAsset(asset.path)) {
+                        items.push(asset.path);
+                    }
+                }
+                return assets;
+            });
+
+            checkRefsPromise.fail(function() {
+                ui.clearWait();
+
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Failed to retrieve references of selected items.");
+                ui.alert(title, message, "error");
+            });
+
+
+            countChildrenPromise.fail(function() {
+                ui.clearWait();
+
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Failed to retrieve child items for selected items.");
+                ui.alert(title, message, "error");
+            });
+
+            countRefsPromise.fail(function() {
+                ui.clearWait();
+
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Failed to retrieve references for selected items.");
+                ui.alert(title, message, "error");
+            });
+
+            $.when(countChildrenPromise, countRefsPromise, countAssetRefsPromise).then(function(countChildren, countRefs, countCheckRefs) { // eslint-disable-line max-len
+                if (countRefs === 0 && countChildren === 0 && countCheckRefs.length === 0) {
+                    ManagePublication.startReplication(items);
+                    return;
+                }
+
+                ui.clearWait();
+
+                if (countChildren > NUM_CHILDREN_CHECK) {
+                    countChildren = NUM_CHILDREN_CHECK + "+";
+                }
+
+                var totalRefCount = countRefs + countCheckRefs.length;
+                var messageRefs = totalRefCount === 0
+                    ? "" : Granite.I18n.get("Selected items are referenced by {0} item(s).", totalRefCount);
+                var messageChildren = countChildren === 0
+                    ? "" : Granite.I18n.get("Upon unpublishing, other {0} child item(s) will get unpublished.",
+                        countChildren);
+                var message = messageRefs + " <br> " + messageChildren;
+
+                ui.prompt(Granite.I18n.get("Unpublish"), message, "notice", [{
+                    text: Granite.I18n.get("Cancel")
+                }, {
+                    text: Granite.I18n.get("Continue"),
+                    warning: true,
+                    handler: function() {
+                        ui.wait();
+                        ManagePublication.startReplication(items);
+                    }
+                }]);
+            });
+        } else if (form[0].elements.activationCommand.value === REPLICATION_TYPE_ACTIVATE &&
+            (destination === DESTINATION_PUBLISH || destination === DESTINATION_PREVIEW)) {
+            ManagePublication.startReplication(items);
+        } else if (destination === DESTINATION_MEDIAPORTAL && replicationType === REPLICATION_TYPE_ACTIVATE) {
+            _publishToBrandPortal(items);
+        } else if (destination === DESTINATION_MEDIAPORTAL && replicationType === REPLICATION_TYPE_DEACTIVATE) {
+            _unpublishFromBrandPortal(items);
+        } else {
+            // dm publish client lib to take over
+        }
+    };
+
+    ManagePublication.loadMissingItemsConf = function(missingItems) {
+        var dmPublishConfPath = "/libs/dam/gui/coral/components/admin/managepublication/dmpublishconfig/" +
+            "dmpublishmode.html";
+        var deferred = $.Deferred();
+        var query = "?_charset_=utf-8";
+        missingItems.forEach(function(item) {
+            if ($('.aem-assets-dmpublish-mode[data-path="' + item + '"]').length === 0) {
+                query += "&item=" + item;
+            }
+        });
+        var url = Granite.HTTP.externalize(dmPublishConfPath + query);
+        $.ajax({
+            url: url,
+            type: "GET"
+        }).done(function(response) {
+            $(".aem-assets-dmpublish-mode:last").after(response);
+            deferred.resolve();
+        }).fail(function() {
+            ui.clearWait();
+
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Failed to retrieve dm publish mode");
+            ui.alert(title, message, "error");
+            deferred.reject();
+        });
+        return deferred.promise();
+    };
+
+    var _getReferencesInfo = ManagePublication._getReferencesInfo;
+
+    ManagePublication._getReferencesInfo = function(currentItem) {
+        var lastStepControls = $(wizard).find(".foundation-layout-wizard2-controls > coral-panel").last();
+        var nextControl = lastStepControls.find(".foundation-wizard-control" +
+            "[data-foundation-wizard-control-action='next']")[0];
+        if (!currentItem.cache || !currentItem.cache.references) {
+            nextControl.disabled = true;
+            return Granite.I18n.get("Not gathered.");
+        }
+        nextControl.disabled = false;
+        return _getReferencesInfo(currentItem);
+    };
+
+    ManagePublication._updateReferenceInfo = function(currentItem) {
+        var referencesColumn = wizard.find("[data-foundation-collection-item-id='" +
+            Dam.Util.escapeSelector(currentItem.path) + "']" +
+            " .foundation-collection-item-references");
+        Coral.commons.ready(referencesColumn[0], function(el) {
+            window.requestAnimationFrame(function() {
+                if (referencesColumn.length) {
+                    referencesColumn.text(ManagePublication._getReferencesInfo(currentItem));
+                }
+            });
+        });
+    };
+
+    ManagePublication._showOrHideCollectionAction = function(el) {
+        $(el).closest(".foundation-wizard-step-active")
+            .find(".dam-collection-action-wait-references")
+            .addClass("foundation-collection-action-hidden");
+    };
+
+    function _checkReplicationPrivilege(assetPath) {
+        var servletUrl = Granite.HTTP.externalize(assetPath + ".permissions.json");
+        var hasRights = false;
+        $.ajax({
+            url: servletUrl,
+            async: false,
+            type: "GET",
+            dataType: "json",
+            data: {
+                "privileges": "crx:replicate"
+            }
+        }).done(function(responseJson) {
+            if (responseJson.hasOwnProperty("crx:replicate")) {
+                hasRights = responseJson["crx:replicate"] || false;
+            }
+            wizard.hasReplicationRights = hasRights;
+        });
+    }
+
+    function _updateWizardSteps(wizard) {
+        var workflowsStep = $(".cq-common-admin-publication-workflows");
+        if (workflowsStep.length > 0 && !wizard.workflowsStepDetached &&
+            ((wizard.hasReplicationRights && !wizard.schedule) || wizard.destination === DESTINATION_DYNAMICMEDIA)) {
+            ManagePublication.removeWorkflowsStep(wizard, workflowsStep);
+            wizard.workflowsStepDetached = true;
+        } else if (wizard.workflowsStepDetached &&
+            ((!wizard.hasReplicationRights && wizard.destination !== DESTINATION_DYNAMICMEDIA) ||
+                (wizard.schedule && wizard.destination !== DESTINATION_DYNAMICMEDIA))) {
+            ManagePublication.appendWorkflowsStep(wizard, wizard.workflowsStep);
+            wizard.workflowsStepDetached = false;
+        }
+    }
+
+    $document.ready(function() {
+        form = $(".cq-sites-managepublication-form");
+        wizard = form.find(WIZARD_SELECTOR);
+        table = $(TABLE_SELECTOR)[0];
+
+        var destinationFieldRendered = document.querySelector(DESTINATION_FIELD_SELECTOR) !== null;
+        shouldShowDestination = destinationFieldRendered;
+
+        wizard.destination = DESTINATION_PUBLISH;
+        wizard.workflowsStepDetached = false;
+        var assetPath = JSON.parse(form.attr("data-requestpaths"))[0];
+        _checkReplicationPrivilege(assetPath);
+        wizard.hasReplicationRights = wizard.hasReplicationRights || false;
+
+        if ($(".aem-assets-dmpublish-mode").length > 0) {
+            table.querySelector("col[data-foundation-layout-table-column-name='publish-target']").hidden = false;
+        }
+        if ($('.aem-assets-dmpublish-mode[data-dmpublish-mode="selective"]').length) {
+            wizard.dmSelectivePublish = true;
+        }
+
+        var $includeChildrenBtnLabel = $(".foundation-collection-action-includechildren[data-includechildren='global'] coral-button-label"); // eslint-disable-line max-len
+        $includeChildrenBtnLabel.text(Granite.I18n.get("Include Folder Settings"));
+
+        // Hiding preview destination for assets
+        var PREVIEW_DESTINATION_SELECTOR = DESTINATION_FIELD_SELECTOR + " coral-radio[value=\"preview\"]";
+        $(PREVIEW_DESTINATION_SELECTOR).hide();
+
+        table.querySelector("col[data-foundation-layout-table-column-name='previewed']").hidden = true;
+
+        // Scheduling: Now vs Later
+        $document.on("change" + ns, ".cq-common-scheduling-time", function(e) {
+            var replicationType = $(REPLICATION_TYPE_FIELD_SELECTOR);
+            var activationDate = form[0].elements.activationDate;
+            var datePickerElem = activationDate.parentElement;
+            var $datePicker = $(datePickerElem);
+
+            var fieldAPI = $datePicker.adaptTo("foundation-field");
+            if (fieldAPI) {
+                var childTarget = e.target.querySelector("coral-radio[checked]");
+                var value = e.target.value !== undefined ? e.target.value
+                    : (childTarget !== null ? childTarget.value : SCHEDULING_NOW);
+                var isScheduled = value === SCHEDULING_LATER;
+                fieldAPI.setDisabled(!isScheduled);
+                fieldAPI.setRequired(isScheduled);
+            }
+
+            wizard.schedule = !datePickerElem.disabled;
+            wizard.useTreeActivation = ManagePublication._shouldUseTreeActivation();
+            form.attr("data-use-tree-activation", wizard.useTreeActivation ? "true" : "");
+            _updateWizardSteps(wizard);
+            ManagePublication._updateWorkflowsInfo();
+
+            if (datePickerElem.disabled) {
+                ManagePublication.defaultClearMessage($datePicker);
+            }
+            ManagePublication.setSubmitButtonLabel({
+                destination: wizard.destination,
+                replicationType: replicationType.val(),
+                hasReplicationRights: wizard.hasReplicationRights,
+                isScheduled: wizard.schedule
+            });
+            ManagePublication.validateHandler(e);
+        });
+
+        // Destination
+        $document.on("change" + ns, DESTINATION_FIELD_SELECTOR, function(e) {
+            var defaultValue = DESTINATION_PUBLISH;
+            var value = defaultValue;
+
+            if (e.target && typeof e.target.value !== "undefined") {
+                value = e.target.value;
+            } else if (e.target) {
+                var checkedRadio = e.target.querySelector("coral-radio[checked]");
+                if (checkedRadio) {
+                    value = checkedRadio.value;
+                }
+            }
+
+            wizard.destination = value;
+
+            if (value === DESTINATION_DYNAMICMEDIA || value === DESTINATION_PUBLISH) {
+                ManagePublication.setScheduling(SCHEDULING_NOW);
+            }
+
+            if (value === DESTINATION_DYNAMICMEDIA || value === DESTINATION_MEDIAPORTAL) {
+                // later is not disabled in order to be sync with current behaviour
+                //ManagePublication.toggleSchedulingLaterRadio(!(value === DESTINATION_DYNAMICMEDIA));
+                appendDestinationTextToWizardTitle(value);
+            }
+
+            // toggle references/publish-target column
+            if (value === DESTINATION_PREVIEW) {
+                table.querySelector("col[data-foundation-layout-table-column-name='column-refrences']").hidden = false;
+                table.querySelector("col[data-foundation-layout-table-column-name='publish-target']").hidden = true;
+            } else if (value === DESTINATION_DYNAMICMEDIA) {
+                table.querySelector("col[data-foundation-layout-table-column-name='column-refrences']").hidden = true;
+                table.querySelector("col[data-foundation-layout-table-column-name='publish-target']").hidden = false;
+                _adjustPublishTarget();
+            } else if (value === DESTINATION_MEDIAPORTAL) {
+                table.querySelector("col[data-foundation-layout-table-column-name='column-refrences']").hidden = true;
+                table.querySelector("col[data-foundation-layout-table-column-name='publish-target']").hidden = true;
+            } else {
+                table.querySelector("col[data-foundation-layout-table-column-name='column-refrences']").hidden = false;
+                if ($(".aem-assets-dmpublish-mode").length > 0) {
+                    table.querySelector("col[data-foundation-layout-table-column-name='publish-target']").hidden = false; // eslint-disable-line max-len
+                    _adjustPublishTarget();
+                }
+            }
+
+            var addContent = $(ADDCONTENT_SELECTOR);
+            if (addContent) {
+                if (value === DESTINATION_DYNAMICMEDIA || value === DESTINATION_MEDIAPORTAL) {
+                    addContent.hide();
+                } else {
+                    addContent.show();
+                }
+            }
+
+            $(wizard.find(TABLE_SELECTOR)).trigger("foundation-selections-change");
+        });
+
+        registry.register("foundation.collection.action.activecondition", {
+            name: "managepublication.action.waitReferences",
+            handler: function(name, el, config, collection, selections) {
+                var isActivate =
+                    document.querySelector(REPLICATION_TYPE_FIELD_SELECTOR).value === REPLICATION_TYPE_ACTIVATE;
+                if (!isActivate) {
+                    return false;
+                }
+                $(el).removeClass("foundation-collection-action-hidden");
+                return true;
+            }
+        });
+
+        registry.register("foundation.collection.action.activecondition", {
+            name: "managepublication.action.globalIncludeChildren",
+            handler: function(name, el, config, collection, selections) {
+                var isActivate = document.querySelector(REPLICATION_TYPE_FIELD_SELECTOR).value === REPLICATION_TYPE_ACTIVATE; // eslint-disable-line max-len
+                var isPublishOrPreview = wizard.destination === DESTINATION_PUBLISH ||
+                    wizard.destination === DESTINATION_PREVIEW;
+                if (!(isActivate && isPublishOrPreview)) {
+                    return false;
+                }
+                var useTreeActivation = form.attr("data-use-tree-activation");
+                var childResourcePageList = ManagePublication.getChildResourcePageList();
+                if (useTreeActivation) {
+                    for (var index = 0; index < childResourcePageList.length; index++) {
+                        var currentItem = childResourcePageList[index];
+                        if (currentItem.info["jcr:primaryType"] !== "dam:AssetContent") {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                return true;
+            }
+        });
+
+        Coral.commons.ready(wizard[0], function() {
+            // Filter to publish All folder content is selected by default
+            var onlyDirectChildren = false;
+            var includeChildren = true;
+            var filters = "";
+
+            ManagePublication._updateHiddenField(wizard, "onlyDirectChildren", "", onlyDirectChildren);
+            ManagePublication._updateHiddenField(wizard, "includeChildren", "", includeChildren);
+            ManagePublication._updateHiddenField(wizard, "filters", "", filters);
+        });
+    });
+})(document, Granite, Granite.$, window);

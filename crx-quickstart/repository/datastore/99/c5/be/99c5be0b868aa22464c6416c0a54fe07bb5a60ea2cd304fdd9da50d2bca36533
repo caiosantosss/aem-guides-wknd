@@ -1,0 +1,471 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2014 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(window, $, CUI, URITemplate, Class) {
+    "use strict";
+
+    var ns = ".foundation-layout-columns";
+
+    function log(message) {
+        if (window.console) {
+            window.console.log(message);
+        }
+    }
+
+    var Context = function(collection, config, columnView) {
+        this.collection = collection;
+        this.config = config;
+        this.columnView = columnView;
+
+        this._beforeCount = 0;
+
+        collection.data("foundation-layout-columns.internal.ctx", this);
+    };
+
+    Context.get = function(collection) {
+        return collection.data("foundation-layout-columns.internal.ctx");
+    };
+
+    Context.prototype.updateSelection = function(selections, force) {
+        this.collection.find(".foundation-selections-item").removeClass("foundation-selections-item");
+        selections.addClass("foundation-selections-item");
+
+        // Change the mode first, then trigger the selections change
+
+        var group = this.collection.data("foundationModeGroup");
+
+        if (group) {
+            var afterCount = selections.length;
+
+            if ((this._beforeCount === 0 || force) && afterCount > 0) {
+                this.collection.trigger("foundation-mode-change", [ "selection", group ]);
+            } else if ((this._beforeCount > 0 || force) && afterCount === 0) {
+                this.collection.trigger("foundation-mode-change", [ "default", group ]);
+            }
+
+            this._beforeCount = afterCount;
+        }
+
+        var folderColumn = this.collection.children(".is-active").first();
+        var activeItem = folderColumn.find(".coral-ColumnView-item.is-active:not(.is-selected)").first();
+
+        if (folderColumn.length > 0 && activeItem.length === 0) {
+            // It means that the item is ".is-active.is-selected" which is not considered as changing folder.
+            // So we have to pick its parent as the actual folder.
+            folderColumn = folderColumn.prev();
+            activeItem = folderColumn.find(".coral-ColumnView-item.is-active").first();
+        }
+
+        this.collection.data("foundationCollectionId", activeItem.data("foundationCollectionItemId"));
+
+        this.collection.trigger("foundation-selections-change");
+    };
+
+    Context.prototype.saveSelections = function() {
+        if (!this.config.stateId) {
+            return;
+        }
+
+        try {
+            var activeColumn = this.collection.children(".is-active").first();
+            var items = activeColumn.find(".coral-ColumnView-item");
+            var selectedItems = items.filter(".is-selected");
+
+            var selectionIds = Array.prototype.map.call(selectedItems, function(v) {
+                return $(v).data("foundationCollectionItemId");
+            });
+
+            window.sessionStorage.setItem(this.config.stateId + ".selections", JSON.stringify(selectionIds));
+
+            if (selectedItems.length === 0) {
+                window.sessionStorage.removeItem(this.config.stateId + ".limit");
+            } else {
+                window.sessionStorage.setItem(this.config.stateId + ".limit", items.length);
+            }
+        } catch (e) {
+            if (window.console) {
+                // eslint-disable-next-line no-console
+                console.warn("Error occur saving selections", e);
+            }
+        }
+    };
+
+    Context.prototype.restoreSelections = function() {
+        if (!this.config.stateId) {
+            return;
+        }
+
+        try {
+            var raw = window.sessionStorage.getItem(this.config.stateId + ".selections");
+            if (!raw) {
+                return;
+            }
+
+            var selectionIds = JSON.parse(raw);
+            if (!selectionIds.length) {
+                return;
+            }
+
+            this.collection.find(".foundation-collection-item").filter(function() {
+                var item = $(this);
+
+                if (selectionIds.indexOf(item.data("foundationCollectionItemId")) < 0) {
+                    return;
+                }
+
+                item.children(".coral-ColumnView-icon").trigger("click");
+            });
+        } catch (e) {
+            if (window.console) {
+                // eslint-disable-next-line no-console
+                console.warn("Error occur restoring selections", e);
+            }
+        }
+    };
+
+    Context.prototype.destroy = function() {
+        this.columnView.destroy();
+        this.collection.removeData("foundation-layout-columns.internal.ctx");
+    };
+
+    var ColumnView = new Class({
+        toString: "foundation-layout-columns.internal.ColumnView",
+        extend: CUI.ColumnView,
+
+        _loadInnerMarkup: function() {
+            if (this.$element.children().length === 0) {
+                return;
+            }
+
+            var self = this;
+            var loadedColumns = this.$element.find(".coral-ColumnView-column");
+
+            // stores the inner html as a the main content
+            this._data = {};
+
+            var activeColumnRequest = ++this._activeColumnRequest;
+
+            if (loadedColumns.length > 1) {
+                // removes all possible is-active classes
+                loadedColumns.removeClass("is-active");
+
+                // Always activate the folder column (i.e. the second last)
+                loadedColumns.eq(-2).addClass("is-active");
+
+                var totalWidth = 0;
+
+                loadedColumns.each(function() {
+                    var $column = $(this);
+
+                    totalWidth += $column.outerWidth();
+
+                    var href = $column.data("src");
+                    var lazyLoad = $column.data("graniteLazyload");
+
+                    if (!lazyLoad || !href) {
+                        // in case the column does not use the lazy load to be initialize, we still need to initialize
+                        // the listeners to handle pagination properly
+                        self._prepareColumn($column, $column.data("next"));
+                        return;
+                    }
+
+                    var setActive = function() {
+                        var activeItemId = $column.data("graniteActiveitem");
+
+                        if (!activeItemId) {
+                            return;
+                        }
+
+                        var activeItem = $column.find(".coral-ColumnView-item")
+                            .filter(function() {
+                                return $(this).data("foundationCollectionItemId") === activeItemId;
+                            })
+                            .addClass("is-active");
+
+                        if (activeItem.length) {
+                            $column.removeData("graniteActiveitem").removeAttr("data-granite-activeitem");
+
+                            if ($column.hasClass("is-active")) {
+                                self.$element.trigger(
+                                    "coral-columnview-item-select",
+                                    [ activeItem.data("data"), activeItem ]
+                                );
+                            }
+                        }
+                    };
+
+                    self._loadData(href, $column).done(function() {
+                        $column.removeData("graniteLazyload").removeAttr("data-granite-lazyload");
+
+                        var $newColumn = self.renderColumn(href);
+                        self._prepareColumn($newColumn, href);
+
+                        $column.empty().append(self._getColumnContent($newColumn));
+                        setActive();
+
+                        self._loadMoreIfNeeded($column).done(function() {
+                            setActive();
+                        });
+                    });
+                });
+
+                // scrolls so that the last column is visible
+                this.$element.scrollLeft(totalWidth);
+            } else {
+                // clears the inner contents to properly initialize the column
+                this.$element.empty();
+                // stores the initial markup as the root
+                this._data["/"] = typeof loadedColumns[0] !== "undefined" ? loadedColumns[0].outerHTML : "";
+
+                this.setNextColumn("/").done(function(data, $column) {
+                    this._setActiveColumn($column, false, activeColumnRequest);
+                }.bind(this));
+            }
+        },
+
+        _loadData: function(href, column) {
+            var self = this;
+            var src;
+            var offset;
+            var limit = this.options.limit;
+
+            if (column && column.data("graniteLazyload")) {
+                src = column.data("src");
+                offset = 0;
+            // next page in the same column
+            } else if (href.indexOf("#col-") === 0) {
+                src = column.data("src");
+                offset = column.find(".coral-ColumnView-item").length;
+            // new column
+            } else {
+                src = this.$element
+                    .find(".coral-ColumnView-item")
+                    .filter(function() {
+                        return $(this).data("href") === href;
+                    })
+                    .data("src");
+
+                offset = 0;
+            }
+
+            var url = URITemplate.expand(src, {
+                offset: offset,
+                limit: limit
+            });
+
+            return $.ajax({
+                url: url,
+                cache: false
+            }).done(function(html) {
+                var newColumn = $(html);
+                if (!newColumn.hasClass("coral-ColumnView-column")) {
+                    newColumn = newColumn.children(".coral-ColumnView-column");
+                }
+
+                if (newColumn.find(".coral-ColumnView-item").length < limit) {
+                    // remove [data-next] to avoid loading next page
+                    newColumn.removeAttr("data-next");
+                }
+
+                html = newColumn.prop("outerHTML");
+                self._data[href] = html;
+
+                self.$element.trigger("coral-columnview-load", [ href, html ]);
+            });
+        }
+    });
+
+    function reload(collection, config) {
+        var limit = (function() {
+            if (config.stateId) {
+                return window.sessionStorage.getItem(config.stateId + ".limit");
+            }
+        })() || config.limit || 20;
+
+        var id = collection.data("foundationCollectionId");
+
+        var url = URITemplate.expand(config.reload, {
+            offset: 0,
+            limit: limit,
+            id: id
+        });
+
+        return $.ajax({
+            url: url,
+            cache: false
+        }).then(function(html) {
+            var deferred = $.Deferred();
+
+            var processed = Granite.UI.Foundation.Utils.processHtml(html, undefined, function() {
+                var el = $(processed);
+
+                var oldEl = collection.closest(".foundation-collection-container");
+                if (!oldEl.length) {
+                    oldEl = collection;
+                }
+
+                el.replaceAll(oldEl);
+
+                if (!el.is(".foundation-collection.foundation-layout-columns")) {
+                    el.trigger("foundation-contentloaded");
+                    deferred.reject(new Error("Invalid content"));
+                    return;
+                }
+
+                // foundation-contentloaded will call the doLayout, so we have to avoid double initialization
+                el.data("foundation-layout-columns.internal.ctx", true);
+                el.trigger("foundation-contentloaded");
+
+                deferred.resolve(el);
+            });
+
+            return deferred.promise();
+        }, function() {
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Fail to load data.");
+
+            var ui = $(window).adaptTo("foundation-ui");
+            ui.alert(title, message, "error");
+        });
+    }
+
+    var registry = $(window).adaptTo("foundation-registry");
+
+    registry.register("foundation.layouts", {
+        name: "foundation-layout-columns",
+        doLayout: function(el, config) {
+            var collection = $(el);
+
+            // foundation-layout-columns can only handle foundation-collection
+            if (!collection.hasClass("foundation-collection")) {
+                return;
+            }
+
+            // the layout is already applied
+            if (Context.get(collection)) {
+                return;
+            }
+
+            var draw = function(collection) {
+                var columnView = new ColumnView({
+                    element: collection,
+                    multiselect: config.multiselect,
+                    limit: config.limit
+                });
+
+                var ctx = new Context(collection, config, columnView);
+
+                var group = collection.data("foundationModeGroup");
+                if (group) {
+                    // Currently using inline style so that it override the display
+                    // but still easily removed without interfering existing classes.
+                    $(".foundation-mode-change[data-foundation-mode-group='" + group + "']").css("display", "none");
+                }
+
+                if (config.reload) {
+                    // Restore the selections before addListener to avoid listening to ColumnView's select event
+                    ctx.restoreSelections();
+                }
+
+                collection.on("coral-columnview-item-select" + ns, function(e, href, item) {
+                    var selections = $(columnView.getSelectedItems().map(function(v) {
+                        return v.item[0];
+                    }));
+                    ctx.updateSelection(selections);
+                });
+
+                var activeColumn = collection.children(".coral-ColumnView-column.is-active");
+                if (
+                    !activeColumn.length ||
+                    !activeColumn.data("graniteLazyload") ||
+                    !activeColumn.data("graniteActiveitem")
+                ) {
+                    var selections = $(columnView.getSelectedItems().map(function(v) {
+                        return v.item[0];
+                    }));
+                    ctx.updateSelection(selections, true);
+                }
+            };
+
+            if (config.reload) {
+                reload(collection, config).done(draw);
+            } else {
+                draw(collection);
+            }
+        },
+        clean: function(el, config) {
+            var collection = $(el);
+            var ctx = Context.get(collection);
+
+            ctx.saveSelections();
+
+            Granite.UI.Foundation.Layouts.clean(el);
+
+            var group = collection.data("foundationModeGroup");
+            if (group) {
+                $(".foundation-mode-change[data-foundation-mode-group='" + group + "']").css("display", "");
+            }
+
+            collection.off(ns);
+
+            ctx.destroy();
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-collection",
+        selector: ".foundation-layout-columns.foundation-collection",
+        adapter: function(el) {
+            return {
+                append: function(items) {
+                    // TODO append to the current column
+                    log("The method is not implemented yet");
+                },
+
+                clear: function() {
+                    log("The method is not implemented yet");
+                }
+            };
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-selections",
+        selector: ".foundation-layout-columns.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+
+            return {
+                count: function() {
+                    return collection.find(".foundation-selections-item").length;
+                },
+
+                clear: function(suppressEvent) {
+                    log("The method is not implemented yet");
+                },
+
+                select: function(el) {
+                    log("The method is not implemented yet");
+                },
+
+                deselect: function(el) {
+                    log("The method is not implemented yet");
+                }
+            };
+        }
+    });
+/* global Class:false */
+})(window, Granite.$, CUI, Granite.URITemplate, Class);

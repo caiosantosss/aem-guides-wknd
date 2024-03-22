@@ -1,0 +1,944 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.security.RightsPanel
+ * @extends CQ.Ext.Panel
+ * @since 5.4
+ * The Rights Panel shows a user's or group's rights per path in a treeGrid.
+ * @constructor
+ * Creates a new Rights Panel.
+ * @param {Object} config The config object
+ */
+CQ.security.RightsPanel = CQ.Ext.extend(CQ.Ext.Panel, {
+
+    /**
+     * The editable treeGrid
+     * @private
+     */
+    tree: null,
+
+    /**
+     * The search component
+     * @param config
+     */
+    search: null,
+
+    /**
+     * Creates a new <code>CQ.security.RightsPanel</code> instance.
+     * @constructor
+     * @param {Object} config The config object
+     */
+    constructor: function(config) {
+
+        var panel = this;
+
+        this.addEvents(
+            /**
+             * @event memberUpdate
+             * Fires after the membership has been saved.
+             * param {PermissionsDetailPanel} this
+             * param {path} the current path
+             * param {record}
+             */
+            'authSaved'
+        );
+
+        this.tree = new CQ.security.RightsPanel.TreeGrid({
+            listeners: {
+                saveChange: function(component, record, field) {
+                    panel.fireEvent('authSaved', panel, record, field);
+                }
+            }
+        });
+
+        this.search = new CQ.security.ClearableSearchField({
+            disabled: true,
+            id: "cq-useadmin-permissions-search",
+            listeners: {
+                select: function(search, record, index) {
+                    this.tree.emptyStore();
+                    this.tree.loadPath(record.id);
+                    return true;
+                },
+                trigger1Click: function() {
+                    this.tree.resetRecords();
+                },
+                scope: this
+            }
+        });
+
+        CQ.Util.applyDefaults(config, {
+            "id": "rights-panel",
+            "cls": "cq-security-rights",
+            "layout":"fit",
+            "border":false,
+            "bodyStyle":"padding:0px;",
+            "layoutConfig": {
+                "autoShow":true
+            },
+            "title": CQ.I18n.getMessage("Permissions"),
+            "tbar":[
+                {
+                    "id":"cq-useadmin-permissions-save",
+                    "text":CQ.I18n.getMessage("Save"),
+                    "handler":this.saveHandler,
+                    "disabled":true,
+                    "title":CQ.I18n.getMessage("Save Changes"),
+                    "tooltip":CQ.I18n.getMessage("Save changes to Permissions"),
+                    "scope":this
+                },
+                {
+                    xtype: 'tbfill'
+                },
+                this.search
+            ],
+            "items": this.tree
+        });
+
+        CQ.security.RightsPanel.superclass.constructor.call(this, config);
+    },
+
+    // init component by calling super constructor
+    initComponent: function() {
+        CQ.security.RightsPanel.superclass.initComponent.call(this);
+
+    },
+
+    /**
+     * Handler to reset the panel.
+     * Initialize the treeGrid
+     * @param record
+     */
+    loadRecord: function(record) {
+        this.tree.loadRecord(record);
+    },
+
+    /**
+     * @param record
+     */
+    onSelectionModfied: function(record) {
+       this.tree.loadRecord(record);
+    },
+
+    /**
+     * Handler to save the changes.
+     */
+    saveHandler: function(){
+        this.tree.saveHandler();
+    }
+});
+
+
+/**
+ * @class CQ.security.RightsPanel.TreeGrid
+ * @extends CQ.Ext.ux.maximgb.tg.EditorGridPanel
+ * @since 5.4
+ * A treeGrid for browsing and editing the hierarchical permissions of a user.
+ * @constructor
+ * Creates a new Rights Panel Tree Grid.
+ * @param {Object} config The config object
+ */
+CQ.security.RightsPanel.TreeGrid = CQ.Ext.extend(CQ.Ext.ux.maximgb.tg.EditorGridPanel, {
+
+    /**
+     * Store of the editable treeGrid
+     * @private
+     */
+    store: null,
+
+    /**
+     * The reader for the cqactions.
+     * @param config
+     */
+    reader: null,
+
+    constructor: function(config) {
+
+        this.reader = new CQ.Ext.data.PermissionReader({
+            id: '_id',
+            totalProperty: "total",
+            root:"entries"
+        }, CQ.security.RightsPanel.RECORD);
+
+        this.store = new CQ.Ext.ux.maximgb.tg.AdjacencyListStore({
+            autoLoad : false,
+            sortInfo: {field: 'name', direction: 'ASC'},
+            proxy: new CQ.Ext.data.HttpProxy({
+                url: CQ.HTTP.externalize("/.cqactions.json"),
+                method: 'GET'
+            }),
+            baseParams: {
+                "_charset_": "utf-8",
+                "predicate": "useradmin",
+                "depth": 1
+            },
+            listeners: {
+                "beforeload": function(store, options) {
+                    options.params.path = options.params.anode || "/";
+                },
+                update: this.storeChanged,
+                scope: this
+            },
+            reader: this.reader
+        });
+
+        var pathStr = CQ.I18n.getMessage("Path");
+        var readStr = CQ.I18n.getMessage("Read");
+        var modifyStr = CQ.I18n.getMessage("Modify");
+        var createStr = CQ.I18n.getMessage("Create");
+        var deleteStr = CQ.I18n.getMessage("Delete");
+        var readAclStr = CQ.I18n.getMessage("Read ACL");
+        var editAclStr = CQ.I18n.getMessage("Edit ACL");
+        var replicateStr = CQ.I18n.getMessage("Replicate");
+
+        var cm = new CQ.Ext.grid.ColumnModel({
+            defaults: {
+                sortable: false,
+                menuDisabled: true,
+                scope: this
+            },
+            columns: [
+                {id: 'path', header: pathStr, width: 160, dataIndex: 'name', renderer: CQ.security.RightsPanel.TreeGrid.renderNodeName, editable: false},
+                {id: 'read', header: readStr, tooltip: readStr, width: 47, dataIndex: 'read', renderer: CQ.security.RightsPanel.TreeGrid.renderCheckbox},
+                {id: 'modify', header: modifyStr, tooltip: modifyStr, width: 47, dataIndex: 'modify', renderer: CQ.security.RightsPanel.TreeGrid.renderCheckbox},
+                {id: 'create', header: createStr, tooltip: createStr, width: 47, dataIndex: 'create', renderer: CQ.security.RightsPanel.TreeGrid.renderCheckbox},
+                {id: 'delete', header: deleteStr, tooltip: deleteStr, width: 47, dataIndex: 'delete', renderer: CQ.security.RightsPanel.TreeGrid.renderCheckbox},
+                {id: 'acl_read', header: readAclStr, tooltip: readAclStr, width: 55, dataIndex: 'acl_read', renderer: CQ.security.RightsPanel.TreeGrid.renderCheckbox},
+                {id: 'acl_edit', header: editAclStr, tooltip: editAclStr, width: 55, dataIndex: 'acl_edit', renderer: CQ.security.RightsPanel.TreeGrid.renderCheckbox},
+                {id: 'replicate', header: replicateStr, tooltip: replicateStr, width: 55, dataIndex: 'replicate', renderer: CQ.security.RightsPanel.TreeGrid.renderCheckbox},
+                {id: 'details', width: 47, renderer: CQ.security.RightsPanel.TreeGrid.renderDetails}
+            ]
+        });
+
+        CQ.Util.applyDefaults(config, {
+            cls: "cq-useradmin-grid",
+            store: this.store,
+            master_column_id : 'path',
+            clicksToEdit: 'auto',
+            cm: cm,
+            stripeRows: true,
+            autoExpandColumn: 'path',
+            enableHdMenu: false,
+            enableColumnResize: true,
+            border: false,
+            viewConfig : {
+                enableRowBody: true,
+                expanded_icon_class : 'ux-maximgb-tg-nl-minus',
+                last_expanded_icon_class : 'ux-maximgb-tg-nl-minus',
+                collapsed_icon_class : 'ux-maximgb-tg-nl-plus',
+                last_collapsed_icon_class : 'ux-maximgb-tg-nl-plus',
+                sortClasses: [] // remove the sort highlight on first column.
+            },
+            listeners: {
+                cellclick: {
+                    fn: function(grid, rowIndex, columnIndex, e) {
+                        var record = grid.getStore().getAt(rowIndex);
+                        if ( ! record.get('canreadac')) {
+                            return false;
+                        }
+                        var columnId = grid.getColumnModel().getColumnId(columnIndex);
+                        if (columnId == 'details') { // path column
+                            var authorizableId = grid.getStore().baseParams.authorizableId;
+                            var p = new CQ.security.PermissionsDetailPanel({
+                                id: "permissions-detail-panel",
+                                path: record.id,
+                                authorizableId: authorizableId,
+                                listeners: {
+                                    memberUpdate: function(component, record, field, path) {
+                                        this.updateNodesSequencially([path]);
+                                        this.fireEvent('saveChange', this, record, field);
+                                    },
+                                    scope: grid
+                                }
+                            });
+                            var dialog = new CQ.Dialog({
+                                "height": 500,
+                                "width": 800,
+                                "modal": true,
+                                "resizable": false,
+                                "title": CQ.I18n.getMessage("Detailed permissions for ") + CQ.shared.XSS.getXSSValue(authorizableId) + CQ.I18n.getMessage(" at path ") + record.id,
+                                "items": [p],
+                                "buttons": [
+                                    {
+                                        id: "cq-useadmin-detailed-permissions-save",
+                                        text: CQ.I18n.getMessage("OK"),
+                                        disabled: true,
+                                        handler: function(){
+                                            p.saveHandler();
+                                        }
+                                    },
+                                    CQ.Dialog.CANCEL
+                                ]});
+                            dialog.show();
+                        } else if (columnId != 'path') { // skip the path column
+                            var fieldName = grid.getColumnModel().getDataIndex(columnIndex);
+                            if ( ! record.get('canwriteac')) {
+                                return false;
+                            }
+                            var newValue = ! record.data[fieldName];
+                            record.set(fieldName, newValue);
+                            grid.getView().refresh();
+                        }
+                    },
+                    scope: this
+                }
+            }
+        });
+        CQ.security.RightsPanel.TreeGrid.superclass.constructor.call(this, config);
+    },
+
+    initComponent: function() {
+        CQ.security.RightsPanel.TreeGrid.superclass.initComponent.call(this);
+        this.getSelectionModel().addListener('cellselect', this.onCellSelect, this);
+        this.getSelectionModel().addListener('beforecellselect', this.onBeforeCellSelect, this);
+    },
+
+    /**
+     * Handler for the store modifications.
+     * Enable the save button.
+     * @param store
+     * @param record
+     * @param operation
+     * @private
+     */
+    storeChanged: function(store, record, operation) {
+        var sBut = CQ.Ext.getCmp("cq-useadmin-permissions-save");
+        if (sBut && CQ.Ext.data.Record.COMMIT != operation) {
+            sBut.enable();
+        }
+    },
+
+    /**
+     * Handler for the pre cell selection.
+     * Remove the selection highlight for all rows.
+     * @param sm selection model
+     * @param rowIndex
+     * @param colIndex
+     */
+    onBeforeCellSelect: function(sm, rowIndex, colIndex) {
+        CQ.Ext.select('.x-grid3-row').removeClass('x-grid3-row-selected');
+    },
+
+    /**
+     * Handler for the cell selection.
+     * Highlight the selected row.
+     * @param sm selection model
+     * @param rowIndex
+     * @param colIndex
+     */
+    onCellSelect: function(sm, rowIndex, colIndex) {
+        var row = this.getView().getRow(rowIndex);
+        CQ.Ext.fly(row).addClass('x-grid3-row-selected');
+    },
+
+    /**
+     * Reset the store and load the intial state for the authorizableId in the record (record.id)
+     * @param record
+     */
+    loadRecord: function(record) {
+        if (record && record.id) {
+            var search = CQ.Ext.getCmp("cq-useadmin-permissions-search");
+            if (search) {
+                search.enable();
+            }
+            this.setAuthorizableId(record.id);
+        }
+        this.resetRecords();
+    },
+
+    /**
+     * @param authorizableId
+     */
+    setAuthorizableId: function(authorizableId) {
+        this.store.baseParams.authorizableId = authorizableId;
+    },
+
+    /**
+     * Empty the store and load the root and the first level of permission in the store.
+     */
+    resetRecords: function() {
+        this.emptyStore();
+        this.loadPath("", true);
+    },
+
+    /**
+     * Load sequentially in the store, each node nodes of the given path.
+     * eg. if path="/libs/test/data" then sequentially: loads("/"), loads("/libs"), loads("/libs/test"), loads("/libs/test/data")
+     * @param path
+     * @param expand if true then the last node  of the path is expanded (extra request).
+     */
+    loadPath: function(path, expand) {
+        // build the list of paths to be loaded sequentially.
+        var paths = [];
+        var tokens = path.split("/");
+        for (var i = 0 ; i < tokens.length ; i++) {
+            if (tokens[i] == "") {
+                paths.push("/");
+            }
+            else {
+                paths.push(tokens.slice(0,i + 1).join("/"));
+            }
+        }
+        this.updateNodesSequencially(paths);
+        var nb = expand ? paths.length : paths.length - 1;
+        for (var i = 0; i < nb ; i++) {
+            var rec = this.store.getById(paths[i]);
+            if (rec) {
+                this.store.expandNode(rec);
+            }
+        }
+    },
+
+    emptyStore: function() {
+        this.store.removeAll();
+        this.store.setActiveNode(null);
+    },
+
+    disable: function() {
+        this.suspendEvents(false);
+    },
+
+
+    /**
+     * @private
+     * @param paths An array of paths to be loaded/updated sequentially
+     */
+    updateNodesSequencially: function(paths) {
+        var params = [];
+        params.push("authorizableId=" + encodeURIComponent(this.store.baseParams.authorizableId));
+        params.push("predicate=useradmin");
+        params.push("depth=0");
+        for (var i = 0; i < paths.length; i++) {
+            params.push("path=" + encodeURIComponent(paths[i]));
+        }
+        //
+        var url = CQ.HTTP.externalize("/.cqactions.json") + "?" + params.join("&");
+        url = CQ.HTTP.addParameter(url, "_charset_", "utf-8");
+        url = CQ.HTTP.noCaching(url);
+        var r = CQ.HTTP.get(url);
+        var r1 = this.reader.read(r);
+        //
+        for (var i = 0; i < paths.length; i++) {
+            var path = paths[i];
+            var index = -1;
+            for (var j = 0 ; j < r1.records.length ; j++) {
+                if (r1.records[j].id == path) {
+                    index = j;
+                    break;
+                }
+            }
+            if (index != -1) {
+                var rec = r1.records[index];
+
+                var oldIndex = this.store.indexOfId(path);
+                if (oldIndex != -1) {
+                    this.store.removeAt(oldIndex);
+                }
+                this.store.addSorted(rec);
+            }
+        }
+    },
+
+    /**
+     * @private
+     * @param record
+     */
+    buildChangeLog: function(record) {
+        var data = record.data;
+        var changes = [
+            "path:" + encodeURIComponent(record.id),
+            "read:" + data['read'],
+            "modify:" + data['modify'],
+            "create:" + data['create'],
+            "delete:" + data['delete'],
+            "acl_read:" + data['acl_read'],
+            "acl_edit:" + data['acl_edit'],
+            "replicate:" + data['replicate']
+        ];
+        return "changelog=" + changes.join(",");
+    },
+
+    /**
+     * Handler for saving the treeGrid changes to the server and updating
+     * the view with the new values.
+     */
+    saveHandler: function(){
+        var modifiedRecords = this.store.getModifiedRecords().sort(function(r1, r2){
+            // Sort the modified record according to their depth in the tree
+            return r1.store.getNodeDepth(r1) < r2.store.getNodeDepth(r2);
+        });
+
+        // Build the parameters
+        var changelogsParam = "";
+        for(var i = 0 ; i < modifiedRecords.length ; i++){
+            modifiedRecord = modifiedRecords[i];
+            changelogsParam += this.buildChangeLog(modifiedRecord);
+            if (i != modifiedRecords.length - 1) {
+                changelogsParam += "&";
+            }
+        }
+        var authorizableIdParam = "authorizableId=" + encodeURIComponent(this.store.baseParams.authorizableId);
+        var charsetParam = "_charset_=utf-8";
+        var params = authorizableIdParam + "&" + changelogsParam + "&" + charsetParam;
+
+        // Post the changes
+        CQ.Ext.getCmp('rights-panel').getEl().mask("Applying changes ...");
+        var sBut = CQ.Ext.getCmp("cq-useadmin-permissions-save");
+        CQ.HTTP.post("/.cqactions.html",
+            function(options, success, xhr, response){
+                if(success) {
+                    this.store.commitChanges();
+                    // Reload the nodes
+                    var paths = [];
+                    for (var i = 0 ; i < modifiedRecords.length ; i++) {
+                        paths.push(modifiedRecords[i].get('_id'));
+                    }
+                    this.updateNodesSequencially(paths);
+                }
+                else {
+                    //TODO warn the user
+                    this.store.rejectChanges();
+                }
+                CQ.Ext.getCmp('rights-panel').getEl().unmask();
+                sBut.disable();
+            },
+            params,
+            this);
+    }
+});
+
+/**
+ * The renderer method for the treeGrid checkbox cells.
+ * It renders a checked/unchecked, inherited/overriden state.
+ * see {@link CQ.Ext.grid.Column#renderer}
+ *
+ * @private
+ * @param {String} value
+ * @param {Object} metaData
+ * @param {Object} record
+ * @param {Number} rowIndex
+ * @param {Number} colIndex
+ * @param {Object} store
+ */
+CQ.security.RightsPanel.TreeGrid.renderCheckbox= function(value, metaData, record, rowIndex, colIndex, store) {
+    // test if the editing session has permission to read the ac info for this node.
+    if ( ! record.get('canreadac')) {
+        // cannot read ac-info for caction at data.id -> hide the checkbox.
+        return "";
+    }
+    var granted = record.get(metaData.id);
+    var authorizableId = record.get("authorizableId");
+    var declared = record.get("declared")[metaData.id];
+    var effective = declared["effective"];
+    var nonEffective = declared["non-effective"];
+
+    var qTips = undefined;
+    if (effective || nonEffective) {
+
+        var tips = [];
+
+        if (effective) {
+            tips.push("<table class='cq-security-qtip-table'>");
+            tips.push("<tr>");
+            tips.push("<th class='status " + (granted ? '' : 'not-') + "allowed-permission'>&nbsp;</th>");
+            tips.push("<th>" + (granted ? CQ.I18n.getMessage("Allowed for") : CQ.I18n.getMessage("Denied for")) + "</th>");
+            tips.push("<th>&nbsp;</th>");
+            tips.push("</tr>");
+            tips.push(CQ.security.RightsPanel.TreeGrid.renderTemplate(effective, function(item){
+                var out = "<tr><td>&nbsp;</td><td>";
+                /* double encode for QTip */
+                out += CQ.shared.XSS.getXSSValue(CQ.shared.XSS.getXSSValue(item));
+                out += "</td><td>";
+                out += "&nbsp;";
+                out += "</td></tr>";
+                return out;
+            }));
+            tips.push("</table>");
+        }
+
+        if (nonEffective) {
+            if (effective) {
+                tips.push("<hr class='cq-security-qtip-separator'/>");
+            }
+            tips.push("<table class='cq-security-qtip-table'>");
+            tips.push("<tr>");
+            tips.push("<th>" + CQ.I18n.getMessage("Noneffective") + "</th>");
+            tips.push("<th>&nbsp;</th>");
+            tips.push("</tr>");
+            tips.push(CQ.security.RightsPanel.TreeGrid.renderTemplate(nonEffective,function(item){
+                var out = "<tr><td>";
+                /* double encode for QTip */
+                out += CQ.shared.XSS.getXSSValue(CQ.shared.XSS.getXSSValue(item));
+                out += "</td></tr>";
+                return out;
+            }));
+            tips.push("</table>");
+        }
+
+        qTips = tips.join('\n');
+        qTips = 'ext:qwidth="auto" ext:qtip="' + qTips + '"';
+
+    }
+
+    var className = ['x-grid3'];
+    className.push(granted ? 'checked' : 'unchecked');
+    className.push((effective || nonEffective) ? 'overriden' : 'inherited');
+    className.push(nonEffective ? 'restriction' : 'norestriction' );
+
+    return '<div ' + (qTips ? qTips : '') + ' class="x-grid3-check-col ' + className.join('-') + (record.get('canwriteac') ? '' : ' x-item-disabled') + '">&nbsp;<div/>';
+};
+
+/**
+ * @param items
+ * @param renderer
+ */
+CQ.security.RightsPanel.TreeGrid.renderTemplate= function(items, renderer) {
+    var out = "";
+    for (var i = 0 ; i < items.length ; i++) {
+        out += renderer.call(renderer, items[i]);
+    }
+    return out;
+};
+
+/**
+ * Renders the nodeName for the record
+ * and display a folder|file icon if the node has children or not.
+ * see {@link CQ.Ext.grid.Column#renderer}
+ *
+ * @param {String} value
+ * @param {Object} metaData
+ * @param {Object} record
+ * @param {Number} rowIndex
+ * @param {Number} colIndex
+ * @param {Object} store
+ */
+CQ.security.RightsPanel.TreeGrid.renderNodeName= function(value, metaData, record, rowIndex, colIndex, store){
+    var isLeaf = record.get('_is_leaf');
+    var out = '<span class="' + (isLeaf ? 'x-tree-node-leaf' : 'x-tree-node-collapsed') + '">';
+    out += '<img unselectable="on" class="x-tree-node-icon ' + (isLeaf ? 'file' : 'folder') + '" style="height:16px;" src="/libs/cq/ui/resources/0.gif"/> ';
+    out += record.get(CQ.shared.XSS.getXSSPropertyName("name"));
+    out += '</span>';
+    return out;
+};
+
+/**
+ * Renders the 'detail' button
+ * see {@link CQ.Ext.grid.Column#renderer}
+ *
+ * @param {String} value
+ * @param {Object} metaData
+ * @param {Object} record
+ * @param {Number} rowIndex
+ * @param {Number} colIndex
+ * @param {Object} store
+ */
+CQ.security.RightsPanel.TreeGrid.renderDetails= function(value, metaData, record, rowIndex, colIndex, store) {
+    // test if the editing session has permission to read the ac info for this node.
+    if ( ! record.get("canreadac")) {
+        // cannot read ac-info for caction at data.id -> hide the detail link.
+        return "";
+    }
+    return '<a href="#">' + CQ.I18n.getMessage("Details") + '</a>';
+};
+
+/**
+ * @class CQ.security.RightsPanel.RECORD
+ * A specific {@link CQ.Ext.data.Record} type that represents a permision entry.
+ * @constructor
+ * @param {Object} config A data object to build the record.
+ */
+CQ.security.RightsPanel.RECORD = CQ.Ext.data.Record.create(
+        [
+            {name: 'name'},
+            {name: CQ.shared.XSS.getXSSPropertyName("name")},
+            {name: 'read'},
+            {name: 'modify'},
+            {name: 'create'},
+            {name: 'delete'},
+            {name: 'acl_read'},
+            {name: 'acl_edit'},
+            {name: 'replicate'},
+            {name: 'canreadac'},
+            {name: 'canwriteac'},
+            {name: 'declared'},
+            {name: '_id'},
+            {name: '_parent'},
+            {name: '_is_leaf', type: 'bool'},
+            {name: 'authorizableId'},
+            {name: 'children'}
+        ]);
+
+/**
+ * @class Ext.data.PermissionReader
+ * @extends Ext.data.JsonReader
+ * @constructor
+ * Create a new PermissionReader
+ * @param {Object} meta Metadata configuration options.
+ * @param {Array/Object} recordType
+ *
+ */
+CQ.Ext.data.PermissionReader = function(meta, recordType){
+    meta = meta || {};
+    CQ.Ext.data.PermissionReader.superclass.constructor.call(this, meta, recordType || meta.fields);
+};
+
+CQ.Ext.extend(CQ.Ext.data.PermissionReader, CQ.Ext.data.JsonReader, {
+
+    /**
+     * Reads the record at the deepest level available.
+     * @param o
+     */
+    readRecords: function(o) {
+        var entries = o[this.meta.root];
+        var subEntries = entries[0];
+        if (subEntries && subEntries[this.meta.root]) {
+             return this.readRecords(subEntries);
+        }
+        else {
+            return CQ.Ext.data.PermissionReader.superclass.readRecords.call(this, o);
+        }
+    }
+});
+
+/**
+ * @private
+ * Implement the search feature of the RightsPanel.
+ * This search component can operate: I. free text search, II. path search.
+ * If the query string starts with a slash then a path search is executed,
+ * a free text search is executed otherwise.
+ */
+CQ.security.ClearableSearchField = CQ.Ext.extend(CQ.Ext.form.ComboBox, {
+
+    /**
+     * @cfg {Number} minQueryLength
+     * The minimal query string length to trigger a search request.
+     * Default to 3.
+     */
+    minQueryLength: 3,
+
+    /**
+     * @param config
+     */
+    isTrigger1Enable: false,
+
+    /**
+     * Template to display the results of the path search
+     * @param config
+     */
+    pathTemplate: new CQ.Ext.XTemplate(
+            '<tpl for=".">',
+            '<div class="search-item" qtip="{path}">',
+            '<div class="search-thumb"',
+            ' style="background-image:url({[CQ.HTTP.externalize(values.path,true)]}.thumb.48.48.png);"></div>' +
+                    '<div class="search-text-wrapper">' +
+                    '<div class="search-title">{name}</div>',
+            '</div>',
+            '<div class="search-separator"></div>',
+            '</div>',
+            '</tpl>'),
+
+    /**
+     * Template to display the results of the free text search
+     * @param config
+     */
+    freeTextTemplate: new CQ.Ext.XTemplate(
+            '<tpl for=".">',
+            '<div class="search-item" qtip="{path}">',
+            '<div class="search-thumb"',
+            ' style="background-image:url({[CQ.HTTP.externalize(values.path,true)]}.thumb.48.48.png);"></div>' +
+                    '<div class="search-text-wrapper">' +
+                    '<div class="search-title">{title}</div>',
+            '<div class="search-excerpt">{excerpt}</div>',
+            '</div>',
+            '<div class="search-separator"></div>',
+            '</div>',
+            '</tpl>'),
+
+    constructor : function(config) {
+
+        CQ.Util.applyDefaults(config, {
+            width: 300,
+            enableKeyEvents: true,
+            hideTrigger1: true,
+            validationEvent: false,
+            trigger1Class: "x-form-clear-trigger",
+            trigger2Class:"x-form-search-trigger",
+            emptyText: CQ.I18n.getMessage("Enter search query"),
+            //
+            pageSize: 6,
+            minChars: 1,
+            typeAhead: true,
+            typeAheadDelay: 100,
+            loadingText: CQ.I18n.getMessage("Searching..."),
+            itemSelector: "div.search-item",
+            store: new CQ.Ext.data.Store({
+                proxy: new CQ.Ext.data.HttpProxy( {
+                    "url" :config.url ? config.url : "/bin/querybuilder.json",
+                    "method" :"GET"
+                }),
+                paramNames: {
+                    start: "p.offset",
+                    limit: "p.limit"
+                },
+                baseParams: {
+                    "_charset_": "utf-8",
+                    "p.limit": "6",
+                    // IsUserAdminPredicate
+                    "0_group.0_type": "nt:hierarchyNode",
+                    "0_group.1_type": "nt:unstructured",
+                    "0_group.2_type": "cq:Console",
+                    "0_group.p.or": "true"
+                },
+                reader: new CQ.Ext.data.JsonReader({
+                    "id":"path",
+                    "root":"hits",
+                    "totalProperty":"total",
+                    "fields" : [
+                        "name",
+                        "path",
+                        "excerpt",
+                        "title"
+                    ]
+                }),
+                listeners: {
+                    // TODO filter on the server.
+                    load: function(store, records, options){
+                        // Filter out the jcr:content nodes
+                        if (options.params.stype == 'path-search') {
+                            store.filterBy(function(record, id){
+                                return record.get('name') != 'jcr:content';
+                            });
+                        }
+                        else if (options.params.stype == 'fulltext-search') {
+                            store.filterBy(function(record, id){
+                                // Leaf nodes jcr:content are not filtered out
+                                return ! /\/jcr:content\//.test(record.get('path'));
+                            });
+                        }
+                    },
+                    scope: this
+                }
+            }),
+            listeners: {
+                keyup : function(textField, e) {
+                    var value = textField.getRawValue();
+                    var trigger = textField.triggers;
+                    if (value.length > 0 || textField.isTrigger1Enable) {
+                        textField.triggers[0].show();
+                    }
+                    else {
+                        textField.triggers[0].hide();
+                    }
+
+                    //
+                    if (e.getKey() == e.RIGHT) {
+                        var index = textField.view.getSelectedIndexes()[0];
+                        var store = textField.store;
+                        var record = store.getAt(index);
+                        if (record) {
+                            textField.setRawValue(record.id);
+                            textField.onTrigger2Click();
+                        }
+                        textField.focus();
+                    }
+                },
+                beforequery: function(qe){
+                    var baseParams = qe.combo.store.baseParams;
+                    if (qe.query.charAt(0) == "/") {
+                        qe.combo.view.tpl = qe.combo.pathTemplate;
+                        // Path search
+                        delete baseParams.fulltext;
+                        baseParams["path.exact"] = "false";
+                        baseParams["path"] = qe.query;
+                        baseParams["path.flat"] = true; // search only one level down
+                        baseParams["stype"] = 'path-search';
+                    }
+                    else {
+                        qe.combo.view.tpl = qe.combo.freeTextTemplate;
+                        // Free text search
+                        // limited to /content sub nodes
+                        // executed only if length of the search string is bigger than minQueryLength
+                        if (qe.query.length >= qe.combo.minQueryLength) {
+                            baseParams.fulltext = qe.query + "*";
+                            baseParams["path.exact"] = "false";
+                            baseParams["path"] = "/content";
+                            baseParams["path.flat"] = false;
+                            baseParams["stype"] = 'fulltext-search';
+                        }
+                        else {
+                            // Cancel the query
+                            qe.cancel = true;
+                        }
+                    }
+                },
+                scope: this
+            },
+
+            onSelect : function(record, index){
+                this.isTrigger1Enable = true;
+                if(this.fireEvent('beforeselect', this, record, index) !== false){
+                    this.collapse();
+                    this.fireEvent('select', this, record, index);
+                }
+            },
+
+            onTypeAhead : function(){
+                // leave this empty to prevent setting field value on search
+            }
+        });
+
+        CQ.security.ClearableSearchField.superclass.constructor.call(this, config);
+    },
+
+    initComponent: function() {
+        this.triggerConfig = {
+            tag:'span', cls:'x-form-twin-triggers', cn:[
+                {tag: "img", src: CQ.Ext.BLANK_IMAGE_URL, cls: "x-form-trigger " + this.trigger1Class},
+                {tag: "img", src: CQ.Ext.BLANK_IMAGE_URL, cls: "x-form-trigger " + this.trigger2Class}
+            ]};
+        this.onTrigger2Click = this.onTrigger2Click.createInterceptor(function() {
+            this.collapse();
+        });
+        this.addEvents("trigger1Click", "trigger2Click");
+        CQ.security.ClearableSearchField.superclass.initComponent.call(this);
+    },
+
+    getTrigger: CQ.Ext.form.TwinTriggerField.prototype.getTrigger,
+
+    initTrigger: CQ.Ext.form.TwinTriggerField.prototype.initTrigger,
+
+    trigger1Class: CQ.Ext.form.ComboBox.prototype.triggerClass,
+
+    onTrigger2Click: function() {
+        this.focus();
+        var value = this.getRawValue();
+        if (value.length > 0) {
+            this.doQuery(value);
+            if ( ! this.isExpanded()) {
+                this.expand();
+            }
+        }
+        this.fireEvent("trigger2Click", this);
+    },
+
+    onTrigger1Click: function() {
+        this.isTrigger1Enable = false;
+        this.clearValue();
+        this.collapse();
+        this.triggers[0].hide();
+        this.fireEvent("trigger1Click", this);
+    }
+
+});
+
+CQ.Ext.reg("rightspanel", CQ.security.RightsPanel);

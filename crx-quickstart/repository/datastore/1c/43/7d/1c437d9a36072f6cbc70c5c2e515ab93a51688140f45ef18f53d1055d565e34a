@@ -1,0 +1,1938 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2015 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(window, jquery, URITemplate) {
+    "use strict";
+
+    /**
+     * It describes the current state of whole columnview
+     * @typedef {Object} State
+     * @property {HTMLElement} collectionEl columnview HTML element
+     * @property {JQuery} collection columnview jquery element
+     * @property {Config} config configuration of columnview
+     * @property {Boolean} bulkSelection <code>true</code> when a bulk selection or unselection is happening
+     * @property {Boolean} reloaded <code>true</code> when a columnview is reloaded.
+     * @property {Boolean} initialLoadEventTriggered <code>true</code> when a columnview initial load is completed.
+     * @property {DelaySelectionEvent} delaySelectionEvent stores the new selected and old selected items.
+     * @property {Array<Function>} stack
+     */
+
+    /**
+     * @typedef {Object} Config
+     * @property {Number} limit
+     * @property {Number} size
+     * @property {String} trackingFeature
+     * @property {String} trackingElement
+     * @property {String} previewSrc
+     * @property {Boolean} previewMaximized
+     */
+
+    /**
+     * It describes the current state of single column in columnview
+     * @typedef {Object} ColumnState
+     * @property {Number} offset
+     * @property {Number} limit
+     * @property {Number} size
+     * @property {Boolean} hasNext
+     * @property {LazyLoader} lazyLoader
+     */
+
+    /**
+     * @typedef {Object} DelaySelectionEvent
+     * @property {Array<HTMLElement>} newSelectedItems
+     * @property {Array<HTMLElement>} oldSelectedItems
+     */
+
+    /**
+     * @typedef {Object} SortConfig
+     * @property {String} sortBy
+     * @property {String} sortOrder
+     */
+
+    /** @type {JQueryStatic} */
+    var $ = jquery;
+
+    var Mode = {
+        SELECTION: "selection",
+        DEFAULT: "default"
+    };
+
+    var stateMap = new WeakMap();
+    var columnStateMap = new WeakMap();
+
+    var registry = $(window).adaptTo("foundation-registry");
+    var COLUMNVIEW_IS_LOADING = "foundation-layout-columnview-isloading";
+
+    /**
+     * Check whether the item is lazy placeholder or pending to be loaded.
+     *
+     * @param {HTMLElement} item collection item
+     * @returns {Boolean} <code>true</code> when item is lazy placeholder or pending
+     * @private
+     */
+    function isLazyPendingItem(item) {
+        return item.matches(".foundation-collection-item.is-lazyLoaded, .foundation-collection-item.is-pending");
+    }
+
+    /**
+     * Checks whether passed item is a valid collection item or not.
+     *
+     * @param {HTMLElement} item collection item element
+     * @returns {Boolean} <code>true</code> when item is a a valid foundation collection item
+     * @private
+     */
+    function isValidItem(item) {
+        return item.classList.contains("foundation-collection-item");
+    }
+
+    /**
+     * Checks whether passed element is a valid foundation collection.
+     *
+     * @param {HTMLElement} collectionEl collection element
+     * @returns {Boolean} <code>true</code> when element is a valid foundation collection
+     **/
+    function isValidCollection(collectionEl) {
+        return collectionEl.classList.contains("foundation-collection");
+    }
+
+    /**
+     * Checks whether all collection items needs to selected.
+     *
+     * @param {HTMLElement} collectionEl collection element
+     * @returns {Boolean} <code>true</code> when collection is in selectall mode
+     * @private
+     */
+    function isSelectAllModeEnabled(collectionEl) {
+        return collectionEl.dataset.foundationSelectionsSelectallMode === "true";
+    }
+
+    /**
+     * Returns all the items of columnview or column depending on passed element.
+     *
+     * @param {HTMLElement} collectionOrColumnEl columnview element or column element
+     * @returns {Array<HTMLElement>} array of items
+     * @private
+     */
+    function getItems(collectionOrColumnEl) {
+        var items = collectionOrColumnEl.querySelectorAll(".foundation-collection-item");
+        return Array.from(items);
+    }
+
+    /**
+     * Returns all the columns of columnview
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @param {Boolean} includePreview <code>true</code> to include preview column in result column array.
+     * @returns {Array<HTMLElement>} array of columns
+     * @private
+     */
+    function getColumns(collectionEl, includePreview) {
+        var selector = "coral-columnview-column";
+
+        if (includePreview) {
+            selector += ", coral-columnview-preview";
+        }
+
+        var columns = collectionEl.querySelectorAll(selector);
+
+        return Array.from(columns);
+    }
+
+    /**
+     * Returns the preview column element of columnview.
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @returns {HTMLElement} preview column element
+     * @private
+     */
+    function getPreview(collectionEl) {
+        return collectionEl.querySelector("coral-columnview-preview");
+    }
+
+    /**
+     * Returns all the lazy columns of columnview, include preview column as well.
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @returns {Array<HTMLElement>} array of columns
+     * @private
+     */
+    function getLazyColumns(collectionEl) {
+        var columns = getColumns(collectionEl, true);
+        var lazyColumns = columns.filter(function(column) {
+            return column.dataset.foundationLayoutColumnviewLazy === "true";
+        });
+        return lazyColumns;
+    }
+
+    /**
+     * Returns all the selected items of columnview or column depending on passed element.
+     *
+     * @param {HTMLElement} collectionOrColumnEl columnview element or column element
+     * @returns {Array<HTMLElement>} selectedItems array
+     * @private
+     */
+    function getSelectedItems(collectionOrColumnEl) {
+        var items = getItems(collectionOrColumnEl);
+        var selectedItems = items.filter(function(item) {
+            return item.classList.contains("foundation-selections-item");
+        });
+        return selectedItems;
+    }
+
+    /**
+     * Returns all the unselected items of columnview or column depending on passed element.
+     * This will include lazy or pending items as well.
+     * To get only loaded unselected item use <code>getUnselectedLoadedItems</code>
+     *
+     * @param {HTMLElement} collectionOrColumnEl columnview element or column element
+     * @returns {Array<HTMLElement>} unselectedItems array(will include lazy or pending Items).
+     * @private
+     */
+    function getUnselectedItems(collectionOrColumnEl) {
+        var items = getItems(collectionOrColumnEl);
+        var unselectedItems = items.filter(function(item) {
+            return !item.classList.contains("foundation-selections-item");
+        });
+        return unselectedItems;
+    }
+
+    /**
+     * Returns all the unselected items of columnview or column depending on passed element.
+     * This will not include lazy or pending item.
+     * To get all unselected item including lazy or pending items use <code>getUnselectedItems</code>
+     *
+     * @param {HTMLElement} collectionOrColumnEl columnview element or column element
+     * @returns {Array<HTMLElement>} unselectedItems array(does not include lazy or pending Items).
+     * @private
+     */
+    function getUnselectedLoadedItems(collectionOrColumnEl) {
+        var unselectedItems = getUnselectedItems(collectionOrColumnEl);
+        var unselectedLoadedItems = unselectedItems.filter(function(item) {
+            return !isLazyPendingItem(item);
+        });
+        return unselectedLoadedItems;
+    }
+
+    /**
+     * Returns all the lazy or pending items present in columnview or column depending on passed element.
+     *
+     * @param {HTMLElement} collectionOrColumnEl columnview element or column element
+     * @returns {Array<HTMLElement>} array of lazy or pending items
+     * @private
+     */
+    function getLazyOrPendingItems(collectionOrColumnEl) {
+        var items = getItems(collectionOrColumnEl);
+        var lazyPendingItems = items.filter(function(item) {
+            return item.matches(".is-lazyLoaded, .is-pending");
+        });
+        return lazyPendingItems;
+    }
+
+    /**
+     * select bulk quantity of items.
+     *
+     * @param {Array<HTMLElement>|NodeList} unselectedItems items needs to be selected
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @private
+     */
+    function selectBulkItems(unselectedItems, silent) {
+        if (unselectedItems.length === 0) {
+            return;
+        }
+
+        Array.prototype.forEach.call(unselectedItems, function(itemEl, index, arr) {
+            if (index !== arr.length - 1 || silent) {
+                // silently update selected property
+                itemEl.set("selected", true, true);
+            } else {
+                // trigger change event when updating last one.
+                itemEl.selected = true;
+            }
+            itemEl.classList.add("foundation-selections-item");
+        });
+    }
+
+    /**
+     * unselect bulk quantity of items.
+     *
+     * @param {Array<HTMLElement>|NodeList} selectedItems items needs to be unselected
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @private
+     */
+    function unselectBulkItems(selectedItems, silent) {
+        if (selectedItems.length === 0) {
+            return;
+        }
+
+        Array.prototype.forEach.call(selectedItems, function(itemEl, index, arr) {
+            if (index !== arr.length - 1 || silent) {
+                // silently update selected property
+                itemEl.set("selected", false, true);
+            } else {
+                // trigger change event for last
+                itemEl.selected = false;
+            }
+            itemEl.classList.remove("foundation-selections-item");
+        });
+    }
+
+    /**
+     * Select all loaded items of columnview column.
+     * This should only be used with column element and not columnview element.
+     * caveat: will never select lazy or pending item.
+     * To Load and select lazy/pending items use <code>selectAllItems</code>
+     *
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} columnEl column element
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @private
+     */
+    function selectAllLoadedItems(state, columnEl, silent) {
+        var unselectedLoadedItems = getUnselectedLoadedItems(columnEl);
+
+        state.bulkSelection = true;
+
+        selectBulkItems(unselectedLoadedItems, silent);
+
+        state.bulkSelection = false;
+    }
+
+    /**
+     * Select all items of a columnview column.
+     * This should only be used with column element and not columnview element.
+     *
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} columnEl column element
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @returns {JQueryPromise} returns a promise will resolved after all items has been selected.
+     * @private
+     */
+    function selectAllItems(state, columnEl, silent) {
+        var lazyPendingItems = getLazyOrPendingItems(columnEl);
+        var promise = $.Deferred().resolve().promise();
+
+        if (lazyPendingItems.length > 0) {
+            // `ui.wait()` cannot be used here.
+            // Lazy loading a large number of items will block the UI thread, freezing the wait animation.
+            // So, just use a plain back drop without animation.
+
+            var mask = $(document.createElement("div"))
+                .addClass("foundation-ui-mask")
+                .append('<coral-wait size="L" centered></coral-wait>')
+                .appendTo(document.body);
+
+            promise = forceLoadLazyItems(columnEl, lazyPendingItems).then(function(newLoadedItems) {
+                state.bulkSelection = true;
+
+                selectBulkItems(newLoadedItems, silent);
+
+                state.bulkSelection = false;
+            }).always(function() {
+                mask.remove();
+            });
+        }
+
+        selectAllLoadedItems(state, columnEl, silent);
+
+        return promise;
+    }
+    /**
+     * Unselect all items of columnview column element.
+     *
+     * @param {HTMLElement} columnEl column element
+     * @param {Boolean} silent <code>true</code> to silently select the items and avoid triggering events.
+     * @private
+     */
+    function unselectAllItems(state, columnEl, silent) {
+        var selectedItems = getSelectedItems(columnEl);
+
+        state.bulkSelection = true;
+
+        unselectBulkItems(selectedItems, silent);
+
+        state.bulkSelection = false;
+    }
+
+    /**
+     * Get the columnview item with corresponding id.
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @param {String} id of collection item which needs to be retrieved.
+     * @returns {HTMLElement} collection item.
+     */
+    function getItemById(collectionEl, id) {
+        var items = getItems(collectionEl);
+
+        return items.find(function(item) {
+            return item.dataset.foundationCollectionItemId === id;
+        });
+    }
+
+    /**
+     * Get the columnview column element with corresponding id.
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @param {String} id of columnview column which needs to be retrieved.
+     * @param {Boolean} includePreview <code>true</code> to check the id with preview column as well.
+     * @returns {HTMLElement} columnview column.
+     * @private
+     */
+    function getColumnById(collectionEl, id, includePreview) {
+        var columns = getColumns(collectionEl, includePreview);
+
+        return columns.find(function(column) {
+            return column.dataset.foundationLayoutColumnviewColumnid === id;
+        });
+    }
+
+    /**
+     * Get the current column element or last column element in columnview.
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @param {Boolean} includePreview <code>true</code> to include preview column as well.
+     * @returns {HTMLElement} columnview column.
+     * @private
+     */
+    function getCurrentColumn(collectionEl, includePreview) {
+        return getColumnById(collectionEl, collectionEl.dataset.foundationCollectionId, includePreview);
+    }
+
+    /**
+     * Removes the preview column element from columnview
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @private
+     */
+    function removePreview(collectionEl) {
+        var previewEl = getPreview(collectionEl);
+        previewEl && previewEl.remove();
+    }
+
+    /**
+     * Sets the foundation collection id of columnview
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @param {String} id new foundation collection id value
+     * @private
+     */
+    function setColumnviewId(collectionEl, id) {
+        collectionEl.dataset.foundationCollectionId = id;
+        // Also remove the jquery data version, otherwise it will have the wrong value.
+        $(collectionEl).removeData("foundationCollectionId");
+    }
+
+    /**
+     * Extract the column element defined by selector from html.
+     * @param {String} html response html recieved from server.
+     * @param {String} selector columnview column selector
+     * @returns {JQueryPromise<HTMLElement>} promise to be resolved with column element
+     */
+    function extractCol(html, selector) {
+        var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+        return parser.parse(html).then(function(fragment) {
+            var children = Array.from(fragment.children);
+
+            var matchedEl = children.find(function(child) {
+                return child.matches(selector);
+            });
+
+            if (matchedEl) {
+                return matchedEl;
+            }
+
+            var matchedEls = Array.from(fragment.querySelectorAll(selector));
+            return matchedEls.length > 0 ? matchedEls[matchedEls.length - 1] : null;
+        });
+    }
+
+    /**
+     * remove the unnecessary element from received server response.
+     * This is done to avoid initialization of unnecesarry element.
+     * Since we only required the last column when server response is received,
+     * we will replace the columnview with last column.
+     *
+     * @param {String} html response received from server.
+     * @param {Boolean} removeLazyItems <code>true</code> to remove lazy items from response html
+     * @returns {String} clean html with required columns/items.
+     */
+    function cleanHTML(html, removeLazyItems) {
+        var domParser = new DOMParser();
+        var doc = domParser.parseFromString(html, "text/html");
+
+        var collectionEl = doc.body.querySelector(".foundation-layout-columnview.foundation-collection");
+
+        if (collectionEl) {
+            var columnEls = collectionEl.querySelectorAll("coral-columnview-column");
+            var columnEl = columnEls.length > 0 ? columnEls[columnEls.length - 1] : null;
+            if (columnEl) {
+                if (removeLazyItems) {
+                    var items = getItems(columnEl);
+                    var loadedItems = items.filter(function(item) {
+                        return !isLazyPendingItem(item);
+                    });
+
+                    var innerHTML = loadedItems.reduce(function(outerHTML, item) {
+                        return outerHTML + item.outerHTML;
+                    }, "");
+
+                    columnEl.innerHTML = innerHTML;
+                }
+                collectionEl.outerHTML = columnEl.outerHTML;
+                html = doc.head.innerHTML + doc.body.innerHTML;
+            }
+        }
+        return html;
+    }
+
+    /**
+     * Extract the preview column element from html.
+     * @param {String} html response html recieved from server.
+     * @returns {JQueryPromise<HTMLElement>} promise to be resolved with preview column element
+     */
+    function extractPreview(html) {
+        return extractCol(html, "coral-columnview-preview");
+    }
+
+    /**
+     * Extract the column element(excludes preview column) from html.
+     * @param {String} html response html recieved from server.
+     * @returns {JQueryPromise<HTMLElement>} promise to be resolved with column element
+     */
+    function extractColumn(html) {
+        return extractCol(cleanHTML(html), "coral-columnview-column");
+    }
+
+    /**
+     * Extract the columnview items from html.
+     * @param {String} html response html recieved from server.
+     * @param {Boolean} removeLazyItems <code>true</code> to remove lazy items from response html
+     * @returns {JQueryPromise<Object>} promise to be resolved with columnview item elements and some more info.
+     */
+    function extractItems(html, removeLazyItems) {
+        var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+        return parser.parse(cleanHTML(html, removeLazyItems)).then(function(fragment) {
+            var children = Array.from(fragment.children);
+
+            var columnEl = children.find(function(child) {
+                return child.matches("coral-columnview-column");
+            });
+
+            if (!columnEl) {
+                var columnEls = fragment.querySelectorAll("coral-columnview-column");
+                columnEl = columnEls[columnEls.length - 1];
+            }
+
+            var hasMore = null;
+            var hasMoreAttr = columnEl.dataset.foundationLayoutColumnviewHasmore;
+
+            if (hasMoreAttr === "true") {
+                hasMore = true;
+            } else if (hasMoreAttr === "false") {
+                hasMore = false;
+            }
+
+            return {
+                items: getItems(columnEl),
+                hasMore: hasMore,
+                meta: columnEl.querySelector(".foundation-collection-meta")
+            };
+        });
+    }
+
+    /**
+     * Triggers the initial load complete event when columnview initial load is finished.
+     * @param {State} state current state of columnview
+     * @emits "granite-columnview:initial-load-completed"
+     */
+    function triggerInitialLoadEvent(state) {
+        var collectionEl = state.collectionEl;
+        var collection = state.collection;
+
+        if (state.initialLoadEventTriggered === false && getLazyColumns(collectionEl).length === 0) {
+            collection.trigger("granite-columnview:initial-load-completed");
+            state.initialLoadEventTriggered = true;
+        }
+    }
+
+    /**
+     * LazyLoaded items are loaded when user scroll to them.
+     * This will force the passed lazy items to be get loaded.
+     *
+     * @param {HTMLElement} columnEl column element
+     * @param {Array<HTMLElement>} itemEls lazy items to be loaded.
+     * @returns {JQueryPromise<Array<HTMLElement>>} promise to be resolved with loadedItems.
+     * @private
+     */
+    function forceLoadLazyItems(columnEl, itemEls) {
+        var lazyLoader = getLazyLoaderFromColumnState(columnEl);
+
+        if (!lazyLoader) {
+            return $.Deferred().resolve([]).promise();
+        }
+        return lazyLoader.loadItems(itemEls);
+    }
+
+    /**
+     * Get the corresponding columnview column lazyLoader stored in columnState.
+     * In case columnState is undefined, will return null.
+     *
+     * @param {HTMLElement} columnEl columnview column element.
+     * @returns {LazyLoader} lazyLoader object corresponding to column element.
+     */
+    function getLazyLoaderFromColumnState(columnEl) {
+        var columnState = columnStateMap.get(columnEl);
+
+        var lazyLoader = columnState && columnState.lazyLoader ? columnState.lazyLoader : null;
+        return lazyLoader;
+    }
+
+    /**
+     * Get the corresponding columnview column lazyLoader.
+     * When no lazyLoader exists for corresponding column, it will
+     * create one and return it.
+     *
+     * @param {State} state current state of columnview.
+     * @param {HTMLElement} columnEl columnview column element.
+     * @returns {LazyLoader} lazyLoader object corresponding to column element.
+     */
+    function getOrCreateLazyLoader(state, columnEl) {
+        var lazyLoader = getLazyLoaderFromColumnState(columnEl);
+
+        if (!lazyLoader) {
+            var collection = state.collection;
+            var collectionEl = state.collectionEl;
+            var src = collectionEl.dataset.foundationCollectionSrc;
+
+            var LazyLoader = $(window).adaptTo("foundation-collection-lazyloader");
+
+            lazyLoader = new LazyLoader({
+                scrollSrc: columnEl.querySelector("coral-columnview-column-content"),
+                getItems: function() {
+                    return getItems(columnEl);
+                },
+                load: function(lazyLoader, config) {
+                    var sortValues = collection.adaptTo("foundation-collection-sort").getSortValues();
+
+                    var url = URITemplate.expand(src, {
+                        offset: config.offset,
+                        limit: config.limit,
+                        size: config.size,
+                        id: columnEl.dataset.foundationLayoutColumnviewColumnid,
+                        sortName: sortValues["sortBy"],
+                        sortDir: sortValues["sortOrder"]
+                    });
+
+                    return $.ajax(url)
+                        .then(function(html) {
+                            return extractItems(html, true);
+                        })
+                        .then(function(result) {
+                            return result.items;
+                        });
+                },
+                onReplace: function() {
+                    $(columnEl).trigger("foundation-contentloaded");
+                }
+            });
+        }
+
+        return lazyLoader;
+    }
+
+    /**
+     * Updates the columnview column state in columnStateMap.
+     *
+     * @param {State} state current state of columnview.
+     * @param {HTMLElement} columnEl columnview column element.
+     * @param {Boolean} hasMore to specify whether column has more items or not.
+     */
+    function updateColumnState(state, columnEl, hasMore) {
+        var config = state.config;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+
+        if (!src) {
+            return;
+        }
+
+        if (typeof hasMore !== "boolean") {
+            hasMore = columnEl.dataset.foundationLayoutColumnviewHasmore !== "false";
+        }
+
+        var lazyLoader = getOrCreateLazyLoader(state, columnEl);
+
+        /** @type {ColumnState} */
+        var columnState = {
+            offset: getItems(columnEl).length,
+            limit: config.limit,
+            size: config.size,
+            hasNext: hasMore,
+            lazyLoader: lazyLoader
+        };
+
+        columnStateMap.set(columnEl, columnState);
+    }
+
+    /**
+     * Changes the mode and triggers the mode change event.
+     *
+     * @param {HTMLElement} collectionEl columnview element
+     * @param {Boolean} force <code>true</code> to force the event to trigger even when mode not changed.
+     * @param {Array<HTMLElement>} selectedItems currently selected items.
+     * @param {Array<HTMLElement>} oldSelectedItems previously selected items.
+     * @emits "foundation-mode-change"
+     * @private
+     */
+    function changeMode(collectionEl, force, selectedItems, oldSelectedItems) {
+        var collection = $(collectionEl);
+        var group = collectionEl.dataset.foundationModeGroup;
+
+        if (!group) {
+            return;
+        }
+
+        var newCount = selectedItems ? selectedItems.length : collection.adaptTo("foundation-selections").count();
+        var oldCount = oldSelectedItems ? oldSelectedItems.length : 0;
+
+        var event = $.Event("foundation-mode-change");
+        // Mark the event so that our own handler can detect if it is triggered by us or not.
+        event._foundationLayoutColumnview = true;
+
+        if ((oldCount === 0 || force) && newCount > 0) {
+            collection.trigger(event, [ Mode.SELECTION, group ]);
+        } else if ((oldCount > 0 || force) && newCount === 0) {
+            collection.trigger(event, [ Mode.DEFAULT, group ]);
+        }
+    }
+
+    /**
+     * Load items of a columnview column
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} columnEl columnview column element.
+     * @param {Number} offset load items after offset entries.
+     * @returns {JQueryPromise} promise which will be fulfilled once items has been loaded.
+     */
+    function loadItems(state, columnEl, offset) {
+        var config = state.config;
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+
+        // eslint-disable-next-line max-len
+        if (!src || columnEl.dataset.foundationLayoutColumnviewHasmore === "false" || columnEl.hasAttribute("is-loading")) {
+            return;
+        }
+
+        offset = offset || 0;
+        var size = config.size;
+        var limit = config.limit || 20;
+        var sortValues = collection.adaptTo("foundation-collection-sort").getSortValues();
+
+        var url = URITemplate.expand(src, {
+            offset: offset,
+            limit: limit,
+            size: size,
+            id: columnEl.dataset.foundationLayoutColumnviewColumnid,
+            sortName: sortValues["sortBy"],
+            sortDir: sortValues["sortOrder"]
+        });
+
+        columnEl.setAttribute("is-loading", "");
+        columnEl.classList.add(COLUMNVIEW_IS_LOADING);
+
+        return $.ajax({
+            url: url,
+            cache: false
+        }).then(function(html) {
+            return extractItems(html).then(function(result) {
+                var activeItemEl = null;
+                var itemEls = result.items;
+
+                // This gets executed on initial load when root columns are lazy
+                if (columnEl.dataset.foundationLayoutColumnviewLazy) {
+                    // removes the wait
+                    while (columnEl.content.firstChild) {
+                        columnEl.content.removeChild(columnEl.content.firstChild);
+                    }
+
+                    delete columnEl.dataset.foundationLayoutColumnviewLazy;
+                    // append the meta data
+                    if (result.meta) {
+                        columnEl.content.appendChild(result.meta);
+                    }
+
+                    // load the initial active item el
+                    columnEl.dataset.foundationLayoutColumnviewLoadActiveItemEl = "" + true;
+                }
+
+                if (columnEl.dataset.foundationLayoutColumnviewLoadActiveItemEl === "true") {
+                    // find the item which needs to be active when initial load completes.
+                    activeItemEl = itemEls.find(function(itemEl) {
+                        // eslint-disable-next-line max-len
+                        return columnEl.dataset.foundationLayoutColumnviewActiveitem === itemEl.dataset.foundationCollectionItemId;
+                    });
+                }
+
+                // append all the responded items to column
+                itemEls.forEach(function(itemEl) {
+                    columnEl.items.add(itemEl);
+                });
+
+                var hasMore = result.hasMore === null ? itemEls.length >= limit : result.hasMore;
+
+                columnEl.dataset.foundationLayoutColumnviewHasmore = "" + hasMore;
+
+                // get the lazyloaded from columnState.
+                var lazyLoader = getLazyLoaderFromColumnState(columnEl);
+
+                // update the columnState for current column
+                updateColumnState(state, columnEl, hasMore);
+
+                if (!lazyLoader) {
+                    // in case the column lazyloader was not setup start the lazyloader.
+                    lazyLoader = getLazyLoaderFromColumnState(columnEl);
+                    lazyLoader.start();
+                }
+
+                // activate the item.
+                if (activeItemEl) {
+                    // delete active item from dataset
+                    delete columnEl.dataset.foundationLayoutColumnviewActiveitem;
+                    // delete load active item boolean as well since we have found active item.
+                    delete columnEl.dataset.foundationLayoutColumnviewLoadActiveItemEl;
+
+                    // function to activate the active item
+                    var activate = function(itemEl) {
+                        /* global CustomElements:false */
+                        CustomElements.upgrade(itemEl);
+                        if (itemEl.variant === "drilldown") {
+                            itemEl.set("active", true, true);
+                            columnEl._oldActiveItem = itemEl;
+                        } else {
+                            itemEl.active = true;
+                        }
+                        itemEl.scrollIntoView();
+                        triggerInitialLoadEvent(state);
+                    };
+                    // in case item is lazy/pending, load the item and then activate it.
+                    if (!isLazyPendingItem(activeItemEl)) {
+                        activate(activeItemEl);
+                    } else {
+                        forceLoadLazyItems(columnEl, [ activeItemEl ]).then(function(loadedItems) {
+                            activate(loadedItems[0]);
+                        });
+                    }
+                }
+
+                // silently auto select all the new loaded collection items on the last column,
+                // when in select all mode
+                if (isSelectAllModeEnabled(collectionEl) && getCurrentColumn(collectionEl) === columnEl) {
+                    selectAllItems(state, columnEl).then(function() {
+                        collection.trigger("foundation-selections-change");
+                        trackEvent("change", collection, config, null, { method: "handlePagination" });
+                    });
+                }
+
+                if (state.reloaded === true && getLazyColumns(collectionEl).length === 0) {
+                    requestAnimationFrame(function() {
+                        // trigger collection event after Coral upgrade
+                        collection.trigger("foundation-collection-navigate");
+                        trackEvent("navigate", collection, config);
+                    });
+                }
+
+                // if this is true means active item not present in initial load
+                // load the next page
+                if (columnEl.dataset.foundationLayoutColumnviewLoadActiveItemEl === "true") {
+                    // if column has no more items to load
+                    // just do nothing
+                    // ideally this should never occur but added as a preventative check
+                    if (columnEl.dataset.foundationLayoutColumnviewHasmore === "false") {
+                        delete columnEl.dataset.foundationLayoutColumnviewActiveitem;
+                        delete columnEl.dataset.foundationLayoutColumnviewLoadActiveItemEl;
+                        triggerInitialLoadEvent(state);
+                        return;
+                    }
+                    // scroll to last item to load next page.
+                    // wait for some time
+                    requestAnimationFrame(function() {
+                        columnEl.querySelector(".foundation-collection-item:last-of-type").scrollIntoView();
+                    });
+                }
+            });
+        }, function() {
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Fail to load data.");
+
+            var ui = $(window).adaptTo("foundation-ui");
+            ui.alert(title, message, "error");
+        }).always(function() {
+            columnEl.classList.remove(COLUMNVIEW_IS_LOADING);
+            columnEl.removeAttribute("is-loading");
+        });
+    }
+
+    /**
+     * Load preview column of a columnview item.
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} itemEl columnview item element whose preview needs to be loaded.
+     * @param {Boolean} refreshPreview <code>true</code> to only refresh the preview column.
+     * @returns {JQueryPromise} promise which will be fulfilled when preview column is loaded.
+     */
+    function loadPreview(state, itemEl, refreshPreview) {
+        var config = state.config;
+        var previewSrc = config.previewSrc;
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+        var columnEl = itemEl.closest("coral-columnview-column");
+
+        if (!src) {
+            return;
+        }
+
+        if (previewSrc) {
+            var id = itemEl.dataset.foundationCollectionItemId;
+            var url = URITemplate.expand(previewSrc, {
+                id: id
+            });
+
+            collectionEl.classList.add(COLUMNVIEW_IS_LOADING);
+
+            return $.ajax({
+                url: url,
+                cache: false
+            }).then(function(html) {
+                return extractPreview(html).then(function(newColumnEl) {
+                    newColumnEl.dataset.foundationLayoutColumnviewColumnid = id;
+
+                    if (config.previewMaximized) {
+                        newColumnEl.classList.add("foundation-layout-columnview-preview-maximized");
+                    }
+
+                    if (refreshPreview) {
+                        collection.children("coral-columnview-preview").replaceWith(newColumnEl);
+                    } else {
+                        collectionEl.setNextColumn(newColumnEl, columnEl);
+                    }
+                    return newColumnEl;
+                });
+            }, function() {
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Fail to load data.");
+
+                var ui = $(window).adaptTo("foundation-ui");
+                ui.alert(title, message, "error");
+            }).always(function() {
+                collectionEl.classList.remove(COLUMNVIEW_IS_LOADING);
+            });
+        } else {
+            // Delete all following columns from the current one
+            var columns = getColumns(collectionEl);
+            var targetIndex = columns.indexOf(columnEl);
+
+            for (var i = columns.length - 1; targetIndex >= 0 && i > targetIndex; i--) {
+                collectionEl.columns.remove(columns[i]);
+            }
+            return $.Deferred().resolve().promise();
+        }
+    }
+
+    /**
+     * Refresh the loaded preview column.
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} itemEl columnview item element whose preview needs to be refreshed.
+     * @returns {JQueryPromise} promise which will be fulfilled when preview column refreshed.
+     */
+    function refreshPreview(state, itemEl) {
+        var config = state.config;
+        var previewSrc = config.previewSrc;
+
+        if (!previewSrc) {
+            return $.Deferred().reject(new Error("previewSrc not available")).promise();
+        }
+
+        return loadPreview(state, itemEl, true);
+    }
+
+    /**
+     * Load the preview column when user navigated to columnview item.
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} itemEl columnview item element whose preview needs to be refreshed.
+     * @returns {JQueryPromise} promise which will be fulfilled when preview column is loaded.
+     */
+    function loadPreviewOnNavigation(state, itemEl) {
+        var config = state.config;
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+
+        return loadPreview(state, itemEl).then(function(newColumnEl) {
+            if (newColumnEl) {
+                if (state.reloaded === true && getLazyColumns(collectionEl).length === 0) {
+                    requestAnimationFrame(function() {
+                        // trigger collection event after Coral upgrade
+                        collection.trigger("foundation-collection-navigate");
+                        trackEvent("navigate", collection, config, null);
+                    });
+                }
+            }
+            return newColumnEl;
+        });
+    }
+
+    /**
+     * Load the preview column when user has selected an item.
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} itemEl columnview item element whose preview needs to be loaded.
+     * @returns {JQueryPromise} promise which will be fulfilled when preview column is loaded.
+     */
+    function loadPreviewOnSelection(state, itemEl) {
+        var config = state.config;
+        var previewSrc = config.previewSrc;
+
+        if (!previewSrc) {
+            return $.Deferred().reject(new Error("previewSrc not available")).promise();
+        }
+
+        return loadPreview(state, itemEl);
+    }
+
+    /**
+     * Load the next column.
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} itemEl columnview item element whose childItems/next column needs to be loaded.
+     * @returns {JQueryPromise} promise which will be fulfilled when column has been loaded.
+     */
+    function loadColumn(state, itemEl) {
+        var config = state.config;
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+
+        var src = collectionEl.dataset.foundationCollectionSrc;
+        var columnEl = itemEl.closest("coral-columnview-column");
+
+        if (!src) {
+            return;
+        }
+
+        var size = config.size;
+        var limit = config.limit || 20;
+
+        var id = itemEl.dataset.foundationCollectionItemId;
+        var sortValues = collection.adaptTo("foundation-collection-sort").getSortValues();
+
+        var url = URITemplate.expand(src, {
+            offset: 0,
+            limit: limit,
+            size: size,
+            id: id,
+            sortName: sortValues["sortBy"],
+            sortDir: sortValues["sortOrder"]
+        });
+
+        collectionEl.classList.add(COLUMNVIEW_IS_LOADING);
+
+        return $.ajax({
+            url: url,
+            cache: false
+        }).then(function(html) {
+            return extractColumn(html).then(function(newColumnEl) {
+                var hasMore;
+                var items = getItems(newColumnEl);
+                var hasMoreAttr = newColumnEl.dataset.foundationLayoutColumnviewHasmore;
+
+                if (hasMoreAttr === "true") {
+                    hasMore = true;
+                } else if (hasMoreAttr === "false") {
+                    hasMore = false;
+                } else {
+                    hasMore = items.length >= limit;
+                }
+
+                updateColumnState(state, newColumnEl, hasMore);
+
+                var lazyLoader = getLazyLoaderFromColumnState(newColumnEl);
+
+                // Need to call `setNextColumn` last as it will trigger navigate event.
+                collectionEl.setNextColumn(newColumnEl, columnEl);
+
+                lazyLoader.start();
+
+                if (state.reloaded === true && getLazyColumns(collectionEl).length === 0) {
+                    // trigger collection event after coral upgrade
+                    requestAnimationFrame(function() {
+                        collection.trigger("foundation-collection-navigate");
+                        trackEvent("navigate", collection, config);
+                    });
+                }
+            });
+        }, function() {
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Fail to load data.");
+
+            var ui = $(window).adaptTo("foundation-ui");
+            ui.alert(title, message, "error");
+        }).always(function() {
+            collectionEl.classList.remove(COLUMNVIEW_IS_LOADING);
+            collectionEl.removeAttribute("is-loading");
+        });
+    }
+
+    /**
+     * Reload the columnview column.
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} id column id which needs to be reloaded.
+     * @returns {JQueryPromise} promise which will be fulfilled when column has been reloaded.
+     */
+    function reloadColumn(state, id) {
+        var config = state.config;
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+
+        var sortValues = collection.adaptTo("foundation-collection-sort").getSortValues();
+
+        var targetColumnEl = getColumnById(collectionEl, id, true);
+
+        var parentOfTargetColumnId = null;
+        var parentActiveItemId = null;
+
+        if (targetColumnEl && targetColumnEl.previousElementSibling) {
+            var prevColumnEl = targetColumnEl.previousElementSibling;
+            parentOfTargetColumnId = prevColumnEl.dataset.foundationLayoutColumnviewColumnid;
+
+            if (prevColumnEl.activeItem) {
+                parentActiveItemId = prevColumnEl.activeItem.dataset.foundationCollectionItemId;
+            }
+        }
+
+        var size;
+        var limit;
+        var columnState = columnStateMap.get(targetColumnEl);
+
+        if (columnState) {
+            size = limit = columnState.offset;
+        } else {
+            limit = config.limit || 20;
+            size = config.size;
+        }
+
+        var src = collectionEl.dataset.foundationCollectionSrc;
+
+        var url = URITemplate.expand(src, {
+            offset: 0,
+            limit: limit,
+            size: size,
+            id: id,
+            sortName: sortValues["sortBy"],
+            sortDir: sortValues["sortOrder"]
+        });
+
+        var promises = [];
+
+        // Update preview when one selection is made
+        var selectedItems = getSelectedItems(collectionEl);
+
+        if (selectedItems.length === 1 && collectionEl.dataset.foundationSelectionsMode !== "single") {
+            promises.push(refreshPreview(state, selectedItems[0]));
+        }
+
+        promises.push($.ajax({
+            url: url,
+            cache: false
+        }).then(function(html) {
+            return extractColumn(html).then(function(newColumnEl) {
+                var newColumnItems = getItems(newColumnEl);
+
+                var oldSelectedItems = getSelectedItems(collectionEl);
+
+                var selectedIds = oldSelectedItems.map(function(selectedItem) {
+                    return selectedItem.dataset.foundationCollectionItemId;
+                });
+
+                var newSelectedItems = newColumnItems.filter(function(newColumnItem) {
+                    return selectedIds.indexOf(newColumnItem.dataset.foundationCollectionItemId) >= 0;
+                });
+
+                selectBulkItems(newSelectedItems);
+
+                var collectionAPI = collection.adaptTo("foundation-collection");
+
+                // We either switch from preview element to a column item
+                // Or we delete the preview item
+                if (parentOfTargetColumnId !== null && parentActiveItemId !== null &&
+                    (targetColumnEl.nodeName !== newColumnEl.nodeName ||
+                    !newColumnEl.querySelector("coral-columnview-item"))) {
+                    // Reload so the chevron is updated
+                    return reloadColumn(state, parentOfTargetColumnId).then(function() {
+                        // Set this to false to we don't double trigger reload
+                        collection.data("foundation-layout-collection.internal.columnviewLoaded", false);
+                        collectionAPI.load(parentActiveItemId);
+
+                        collection.trigger("foundation-collection-reload");
+                        trackEvent("reload", collection, config);
+
+                        collection.trigger("foundation-selections-change");
+                        trackEvent("change", collection, config, null, {
+                            method: "reloadParentColumn",
+                            parentColumnId: parentOfTargetColumnId
+                        });
+                    });
+                } else {
+                    targetColumnEl.replaceWith(newColumnEl);
+                }
+
+                updateColumnState(state, newColumnEl);
+
+                var lazyLoader = getLazyLoaderFromColumnState(newColumnEl);
+
+                lazyLoader.start();
+
+                collection.trigger("foundation-collection-reload");
+                trackEvent("reload", collection, config);
+
+                collection.trigger("foundation-selections-change");
+                trackEvent("change", collection, config, null,
+                    { method: "reloadColumn", parentColumnId: parentActiveItemId });
+
+                changeMode(collectionEl, false, newSelectedItems, oldSelectedItems);
+            });
+        }, function() {
+            var ui = $(window).adaptTo("foundation-ui");
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Fail to load data.");
+
+            ui.alert(title, message, "error");
+        }));
+
+        return $.when.apply(null, promises).then(function() {
+            return collectionEl;
+        });
+    }
+
+    /**
+     * Reload the whole columnview.
+     * @param {State} state current state of columnview
+     * @param {HTMLElement} id columnview id.
+     * @returns {JQueryPromise} promise which will be fulfilled when columnview has been reloaded.
+     */
+    function reloadColumnView(state, id) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+        var sortValues = collection.adaptTo("foundation-collection-sort").getSortValues();
+
+        var url = URITemplate.expand(src, {
+            offset: 0,
+            limit: state.config.limit || 20,
+            size: state.config.size,
+            id: id,
+            sortName: sortValues["sortBy"],
+            sortDir: sortValues["sortOrder"]
+        });
+
+        return $.ajax({
+            url: url,
+            cache: false
+        }).then(function(html) {
+            Granite.UI.Foundation.Layouts.cleanAll(collectionEl);
+
+            var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+            return parser.parse(html).then(function(fragment) {
+                var newCollection = $(fragment).children();
+
+                var newCollectionEl = newCollection[0];
+
+                newCollection.data("foundation-layout-collection.internal.columnviewLoaded",
+                    collection.data("foundation-layout-collection.internal.columnviewLoaded"));
+
+                newCollection.data("foundation-layout-collection.internal.reloaded", true);
+
+                newCollection.replaceAll(collection);
+                newCollection.trigger("foundation-contentloaded");
+
+                return newCollectionEl;
+            });
+        }, function() {
+            var ui = $(window).adaptTo("foundation-ui");
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Fail to load data.");
+            ui.alert(title, message, "error");
+        });
+    }
+
+    /**
+     * Used to track the event performed by user.
+     * This function tracks interactions with columnview layout
+     * OMEGA Implementation
+     *
+     * @param {String} trackAction action performed by user
+     * @param {JQuery} collection columnview collection
+     * @param {Object} config columnview configuration
+     * @param {HTMLElement} collectionItem columnview item with which user interacted
+     * @param {Object} attributes optional extra information that needs to be sent
+     */
+    function trackEvent(trackAction, collection, config, collectionItem, attributes) {
+        var trackElement = config.trackingElement;
+
+        if (trackAction === "navigate" && attributes && attributes.columnId) {
+            trackElement = attributes.columnId;
+        } else if (trackAction === "change") {
+            if (attributes && attributes.parentColumnId) {
+                trackElement = attributes.parentColumnId;
+            }
+        }
+
+        var trackData = {
+            element: trackElement || "No element defined",
+            type: "columnview",
+            action: trackAction,
+            widget: {
+                name: config.trackingElement || config.name || "foundation-layout-columnview",
+                type: "columnview"
+            },
+            feature: config.trackingFeature || "No feature defined",
+            attributes: attributes || {}
+        };
+        $(window).adaptTo("foundation-tracker").trackEvent(trackData);
+    }
+
+    /**
+     * Handles the mode change.
+     * @param {State} state current state of columnview
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleMode(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+
+        var onModeChange = function(e, mode, group) {
+            // eslint-disable-next-line max-len
+            if (e._foundationLayoutColumnview || mode !== Mode.DEFAULT || collectionEl.dataset.foundationModeGroup !== group) {
+                return;
+            }
+
+            unselectAllItems(state, collectionEl);
+
+            removePreview(collectionEl);
+
+            collection.trigger("foundation-selections-change");
+            trackEvent("change", collection, state.config, null, { method: "modeChange" });
+        };
+
+        $(document).on("foundation-mode-change", onModeChange);
+
+        return function() {
+            $(document).off("foundation-mode-change", onModeChange);
+        };
+    }
+
+    /**
+     * Handles the selection change.
+     * @param {State} state current state of columnview
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleSelection(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+
+        var onSelect = function(e) {
+            var newSelectedItems = e.originalEvent.detail.selection ? e.originalEvent.detail.selection : [];
+            var oldSelectedItems = e.originalEvent.detail.oldSelection ? e.originalEvent.detail.oldSelection : [];
+
+            // first unselect then select.
+            unselectBulkItems(oldSelectedItems, true);
+            selectBulkItems(newSelectedItems, true);
+
+            if (!state.bulkSelection) {
+                if (newSelectedItems.length > 0) {
+                    var newId;
+                    var currentId = collectionEl.dataset.foundationCollectionId;
+
+                    if (collectionEl.activeItem) {
+                        newId = collectionEl.activeItem.dataset.foundationCollectionItemId;
+                    } else {
+                        var columns = getColumns(collectionEl);
+                        newId = columns[0].dataset.foundationLayoutColumnviewColumnid;
+                    }
+
+                    // When a selection causes a navigation, we have to trigger `foundation-collection-navigate` event
+                    // first before `foundation-selections-change` event.
+                    // Since Coral triggers its selection event first before its navigation event,
+                    // let's delay triggering the selection event and do it at `handleNavigation`.
+                    if (newId !== currentId) {
+                        state.delaySelectionEvent = {
+                            newSelectedItems: newSelectedItems,
+                            oldSelectedItems: oldSelectedItems
+                        };
+                    } else {
+                        changeMode(collectionEl, false, newSelectedItems, oldSelectedItems);
+                        collection.trigger("foundation-selections-change");
+                        trackEvent("change", collection, state.config, null, { method: "handleSelection" });
+                    }
+                } else {
+                    changeMode(collectionEl, false, newSelectedItems, oldSelectedItems);
+                    collection.trigger("foundation-selections-change");
+                    trackEvent("change", collection, state.config, null, { method: "handleSelection" });
+                }
+
+                if (newSelectedItems.length === 1 && collectionEl.dataset.foundationSelectionsMode !== "single") {
+                    loadPreviewOnSelection(state, newSelectedItems[0]);
+                } else {
+                    removePreview(collectionEl);
+                }
+            }
+        };
+
+        var onEscape = function() {
+            if (document.activeElement === collectionEl || collectionEl.contains(document.activeElement)) {
+                collection.adaptTo("foundation-selections").clear();
+            }
+        };
+
+        collection.on("coral-columnview:change", onSelect);
+        Coral.keys.on("escape", onEscape);
+
+        return function() {
+            collection.off("coral-columnview:change", onSelect);
+            Coral.keys.off("escape", onEscape);
+        };
+    }
+
+    /**
+     * Handles the navigation change.
+     * @param {State} state current state of columnview
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleNavigation(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+
+        var onNavigation = function(e) {
+            var columnEl = e.originalEvent.detail.column;
+
+            setColumnviewId(collectionEl, columnEl.dataset.foundationLayoutColumnviewColumnid);
+
+            collection.trigger("foundation-collection-navigate");
+
+            trackEvent("navigate", collection, state.config);
+
+            collection.trigger("foundation-selections-change");
+
+            trackEvent("change", collection, state.config, null, { method: "handleNavigation" });
+
+            var delayConfig = state.delaySelectionEvent;
+            if (delayConfig) {
+                state.delaySelectionEvent = null;
+                changeMode(collectionEl, false, delayConfig.newSelectedItems, delayConfig.oldSelectedItems);
+            }
+        };
+
+        collection.on("coral-columnview:navigate", onNavigation);
+
+        return function() {
+            collection.off("coral-columnview:navigate", onNavigation);
+        };
+    }
+
+    /**
+     * Handles the pagination.
+     * @param {State} state current state of columnview
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handlePagination(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+
+        triggerInitialLoadEvent(state);
+
+        var onLoadItems = function(e) {
+            var detail = e.originalEvent.detail;
+            var columnEl = detail.column;
+            var parentItemEl = detail.item;
+
+            if (parentItemEl) {
+                if (parentItemEl.variant !== "drilldown") {
+                    // Load preview
+                    loadPreviewOnNavigation(state, parentItemEl);
+                } else {
+                    // load active item column
+                    loadColumn(state, parentItemEl);
+                }
+            } else {
+                // paginate existing column
+                loadItems(state, columnEl, detail.start);
+            }
+        };
+
+
+        if (src) {
+            var columnEl = getCurrentColumn(collectionEl);
+
+            updateColumnState(state, columnEl);
+
+            var lazyLoader = getLazyLoaderFromColumnState(columnEl);
+
+            lazyLoader.start();
+        }
+
+        collection.on("coral-columnview:loaditems", onLoadItems);
+
+        return function() {
+            collection.off("coral-columnview:loaditems", onLoadItems);
+        };
+    }
+
+    /**
+     * Sort the collection based on passed on sortConfig
+     *
+     * @param {State} state of the collection element
+     * @param {SortConfig} sortConfig sorting configuration
+     * @returns {JQueryPromise} promise which will be fulfilled when sorting completes.
+     */
+    function sort(state, sortConfig) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+
+        var sortBy = sortConfig.sortBy;
+        var sortOrder = sortConfig.sortOrder;
+
+        var id = collectionEl.dataset.foundationCollectionId;
+
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+
+        // @todo instead of reloading whole columnview clear and append items like other layouts
+        return reloadColumnView(state, id).always(function() {
+            ui.clearWait();
+            trackEvent("sort", collection, state.config, null, { sortBy: sortBy, sortOrder: sortOrder });
+        });
+    }
+
+    /**
+     * Register the `foundation-layout-columnview` layout
+     */
+    registry.register("foundation.layouts", {
+        name: "foundation-layout-columnview",
+        doLayout: function(collectionEl, cfg) {
+            var collection = $(collectionEl);
+
+            /** @type {Config} */
+            var config = cfg;
+
+            // foundation-layout-columnview is exclusive to manage the layout of foundation-collection only
+            if ((!isValidCollection(collectionEl)) || stateMap.has(collectionEl)) {
+                return;
+            }
+
+            var reloaded = false;
+            if (collection.data("foundation-layout-collection.internal.reloaded")) {
+                reloaded = collection.data("foundation-layout-collection.internal.reloaded");
+            }
+
+            var state = {
+                collectionEl: collectionEl,
+                collection: collection,
+                config: config,
+                bulkSelection: false,
+                reloaded: reloaded,
+                initialLoadEventTriggered: false,
+                stack: []
+            };
+
+            stateMap.set(collectionEl, state);
+
+            trackEvent("init", collection, config);
+
+            // Restore the selections before addListener to avoid listening
+            // to coral-columnview:change event when restoring.
+            var selectionIds = collection.data("foundation-layout-collection-switcher.internal.selectionIds");
+
+            if (selectionIds) {
+                var items = getItems(collectionEl);
+                var selectedItems = items.filter(function(item) {
+                    return selectionIds.indexOf(item.dataset.foundationCollectionItemId) >= 0;
+                });
+
+                selectBulkItems(selectedItems);
+            }
+
+            state.stack.push(handleMode(state));
+            state.stack.push(handleNavigation(state));
+            state.stack.push(handleSelection(state));
+            state.stack.push(handlePagination(state));
+
+            // trigger collection event after Coral upgrade
+            requestAnimationFrame(function() {
+                changeMode(collectionEl, true);
+
+                collection.trigger("foundation-selections-change");
+                trackEvent("change", collection, config, null, { method: "init" });
+                collection.trigger("foundation-collection-sort:changed");
+            });
+        },
+        clean: function(collectionEl, config) {
+            var collection = $(collectionEl);
+            collection.siblings(".granite-collection-loading-title-wrapper").remove();
+
+            var state = stateMap.get(collectionEl);
+
+            if (state) {
+                stateMap.delete(collectionEl);
+
+                Granite.UI.Foundation.Utils.everyReverse(state.stack, function(v) {
+                    if (v) {
+                        v();
+                    }
+                    return true;
+                });
+            }
+
+            Granite.UI.Foundation.Layouts.clean(collectionEl);
+        }
+    });
+
+    /**
+     * Register the `foundation-collection` adapter for columnview layout
+     */
+    registry.register("foundation.adapters", {
+        type: "foundation-collection",
+        selector: ".foundation-layout-columnview.foundation-collection",
+        adapter: function(collectionEl) {
+            var state = stateMap.get(collectionEl);
+            var config = state.config;
+            var collection = state.collection;
+
+            collection.data("foundation-layout-collection.internal.columnviewLoaded", true);
+
+            return {
+                append: function(itemEls) {
+                    var currentColumnEl = getCurrentColumn(collectionEl);
+                    var currentColumn = $(currentColumnEl);
+
+                    if (!currentColumnEl) {
+                        return;
+                    }
+
+                    Array.prototype.forEach.call(itemEls, function(itemEl) {
+                        currentColumnEl.items.add(itemEl);
+                    });
+
+                    currentColumn.trigger("foundation-contentloaded");
+
+                    if (itemEls.length > 0 && isSelectAllModeEnabled(collectionEl)) {
+                        selectAllItems(state, currentColumnEl).then(function() {
+                            collection.trigger("foundation-selections-change");
+                            trackEvent("change", collection, config, null, { method: "append" });
+                        });
+                    }
+                },
+                clear: function() {
+                    var currentColumnEl = getCurrentColumn(collectionEl);
+                    currentColumnEl && currentColumnEl.items.clear();
+                },
+                getPagination: function() {
+                    var currentColumnEl = getCurrentColumn(collectionEl);
+
+                    var columnState = columnStateMap.get(currentColumnEl);
+
+                    if (!columnState) {
+                        return null;
+                    }
+
+                    return {
+                        offset: columnState.offset,
+                        limit: columnState.limit,
+                        hasNext: columnState.hasNext,
+                        guessTotal: -1
+                    };
+                },
+                load: function(id) {
+                    var itemEl = getItemById(collectionEl, id);
+
+                    if (itemEl) {
+                        // Simulate the user click to replicate the loading behaviour
+                        if (collection.data("foundation-layout-collection.internal.columnviewLoaded")) {
+                            collection.trigger("foundation-collection-reload");
+                            trackEvent("reload", collection, config);
+                        } else {
+                            collection.data("foundation-layout-collection.internal.columnviewLoaded", true);
+                        }
+
+                        itemEl.click();
+                    } else {
+                        // If the itemEl is not found and we can find the matching column,
+                        // it means the id is root folder.
+                        var rootColumnEl = getColumnById(collectionEl, id);
+
+                        if (!rootColumnEl) {
+                            return reloadColumnView(state, id);
+                        }
+
+                        state.bulkSelection = true;
+
+                        var rootItems = getItems(rootColumnEl);
+                        var oldSelectedItems = getSelectedItems(collectionEl);
+                        var newSelectedItems = [];
+
+                        rootItems.forEach(function(rootItem) {
+                            rootItem.selected = false;
+                            rootItem.active = false;
+                        });
+
+                        state.bulkSelection = false;
+
+                        if (collection.data("foundation-layout-collection.internal.columnviewLoaded")) {
+                            collection.trigger("foundation-collection-reload");
+                            trackEvent("reload", collection, config);
+                        } else {
+                            collection.data("foundation-layout-collection.internal.columnviewLoaded", true);
+                        }
+
+                        setColumnviewId(collectionEl, id);
+
+                        collection.trigger("foundation-collection-navigate");
+                        trackEvent("navigate", collection, config, null, { columnId: id });
+
+                        collection.trigger("foundation-selections-change");
+                        trackEvent("change", collection, config, null, { method: "load" });
+
+                        changeMode(collectionEl, false, newSelectedItems, oldSelectedItems);
+                    }
+
+                    return $.when(collectionEl);
+                },
+                isAllLoaded: function() {
+                    var pagination = this.getPagination();
+
+                    if (!pagination) {
+                        return true;
+                    }
+
+                    var lazyPendingItems = getLazyOrPendingItems(collectionEl);
+
+                    if (lazyPendingItems.length > 0) {
+                        return false;
+                    }
+
+                    return pagination.hasNext === false; // does not use heuristic
+                },
+                reload: function() {
+                    collection.data("foundation-layout-collection.internal.columnviewLoaded", true);
+                    return reloadColumn(state, collectionEl.dataset.foundationCollectionId);
+                }
+            };
+        }
+    });
+
+    /**
+     * Register the `foundation-collection-meta` adapter for columnview layout
+     */
+    registry.register("foundation.adapters", {
+        type: "foundation-collection-meta",
+        selector: ".foundation-layout-columnview.foundation-collection",
+        adapter: function(collectionEl) {
+            return {
+                getElement: function() {
+                    var currentColumnEl = getCurrentColumn(collectionEl, true);
+                    return currentColumnEl ? currentColumnEl.querySelector(".foundation-collection-meta") : null;
+                },
+                getTitle: function() {
+                    var metaEl = this.getElement();
+                    if (metaEl) {
+                        return metaEl.dataset.foundationCollectionMetaTitle;
+                    }
+                    return null;
+                },
+                getThumbnail: function() {
+                    var metaEl = this.getElement();
+                    if (metaEl) {
+                        // eslint-disable-next-line max-len
+                        return metaEl.querySelector(".foundation-collection-meta > .foundation-collection-meta-thumbnail");
+                    }
+                    return null;
+                },
+                isFolder: function() {
+                    var metaEl = this.getElement();
+                    if (metaEl) {
+                        return metaEl.dataset.foundationCollectionMetaFolder === "true";
+                    }
+                    return false;
+                },
+                getRelationship: function() {
+                    var metaEl = this.getElement();
+                    if (metaEl) {
+                        return metaEl.dataset.foundationCollectionMetaRel;
+                    }
+                    return null;
+                }
+            };
+        }
+    });
+
+    /**
+     * Register the `foundation-selections` adapter for columnview layout
+     */
+    registry.register("foundation.adapters", {
+        type: "foundation-selections",
+        selector: ".foundation-layout-columnview.foundation-collection",
+        adapter: function(collectionEl) {
+            var state = stateMap.get(collectionEl);
+            var config = state.config;
+            var collection = state.collection;
+
+            return {
+                count: function() {
+                    if (isSelectAllModeEnabled(collectionEl)) {
+                        var collectionAPI = collection.adaptTo("foundation-collection");
+                        var paginationAPI = collectionAPI.getPagination();
+
+                        if (paginationAPI && paginationAPI.guessTotal !== -1) {
+                            var currentColumnEl = getCurrentColumn(collectionEl);
+                            var deselectedItemsCount = currentColumnEl ? getUnselectedItems(currentColumnEl) : 0;
+                            return paginationAPI.guessTotal - deselectedItemsCount;
+                        }
+                    }
+                    return getSelectedItems(collectionEl).length;
+                },
+                selectAll: function(suppressEvent) {
+                    var currentColumnEl = getCurrentColumn(collectionEl);
+
+                    if (currentColumnEl) {
+                        var items = getItems(currentColumnEl);
+
+                        selectAllLoadedItems(state, currentColumnEl);
+
+                        if (items.length === 1 && collectionEl.dataset.foundationSelectionsMode !== "single") {
+                            loadPreviewOnSelection(state, items[0]);
+                        } else {
+                            removePreview(collectionEl);
+                        }
+
+                        selectAllItems(state, currentColumnEl).then(function() {
+                            changeMode(collectionEl, false, getSelectedItems(currentColumnEl), []);
+
+                            if (!suppressEvent) {
+                                collection.trigger("foundation-selections-change");
+                                trackEvent("change", collection, config, null, { method: "selectAll" });
+                            }
+                        });
+                    }
+                },
+                isAllSelected: function() {
+                    var currentColumnEl = getCurrentColumn(collectionEl);
+
+                    if (currentColumnEl) {
+                        var itemsCount = getItems(currentColumnEl).length;
+                        var selectedItemsCount = getSelectedItems(collectionEl).length;
+
+                        if (itemsCount > 0 && itemsCount === selectedItemsCount) {
+                            var hasMoreItems = currentColumnEl.dataset.foundationLayoutColumnviewHasmore !== "false";
+                            return isSelectAllModeEnabled(collectionEl) ? true : !hasMoreItems;
+                        }
+                    }
+                    return false;
+                },
+                clear: function(suppressEvent) {
+                    var selectedItems = getSelectedItems(collectionEl);
+
+                    unselectAllItems(state, collectionEl);
+
+                    removePreview(collectionEl);
+
+                    changeMode(collectionEl, false, [], selectedItems);
+
+                    if (!suppressEvent) {
+                        collection.trigger("foundation-selections-change");
+                        trackEvent("change", collection, config, null, { method: "clear" });
+                    }
+                },
+                select: function(itemEl) {
+                    if (isValidItem(itemEl)) {
+                        itemEl.selected = true;
+                    }
+                },
+                deselect: function(itemEl) {
+                    if (isValidItem(itemEl)) {
+                        itemEl.selected = false;
+                    }
+                }
+            };
+        }
+    });
+
+    /**
+     * Register the `foundation-collection-sort` adapter for columnview layout
+     */
+    registry.register("foundation.adapters", {
+        type: "foundation-collection-sort",
+        selector: ".foundation-layout-columnview.foundation-collection",
+        adapter: function(collectionEl) {
+            var state = stateMap.get(collectionEl);
+            var collection = state.collection;
+
+            return {
+                isSorted: function(sortBy, sortOrder) {
+                    var currentSortValues = this.getSortValues();
+                    if (currentSortValues["sortBy"] === sortBy &&
+                        currentSortValues["sortOrder"] === sortOrder) {
+                        return true;
+                    }
+                    return false;
+                },
+                getSortValues: function() {
+                    return {
+                        sortBy: collectionEl.dataset.foundationCollectionSortby || null,
+                        sortOrder: collectionEl.dataset.foundationCollectionSortorder || null
+                    };
+                },
+                doSort: function(sortBy, sortOrder) {
+                    if (!sortBy || !sortOrder) {
+                        sortBy = sortOrder = null;
+                    }
+                    if (!this.isSorted(sortBy, sortOrder)) {
+                        if (sortBy === null && sortOrder === null) {
+                            delete collectionEl.dataset.foundationCollectionSortby;
+                            delete collectionEl.dataset.foundationCollectionSortorder;
+                        } else {
+                            collectionEl.dataset.foundationCollectionSortby = sortBy;
+                            collectionEl.dataset.foundationCollectionSortorder = sortOrder;
+                        }
+
+                        var beforeEvent = $.Event("foundation-collection-sort:beforeChange", {
+                            sortName: sortBy,
+                            sortDir: sortOrder
+                        });
+
+                        collection.trigger(beforeEvent);
+
+                        sort(state, {
+                            sortBy: sortBy,
+                            sortOrder: sortOrder
+                        }).then(function() {
+                            collection.trigger("foundation-collection-sort:changed");
+                        });
+                        return true;
+                    }
+                    return false;
+                }
+            };
+        }
+    });
+})(window, Granite.$, Granite.URITemplate);

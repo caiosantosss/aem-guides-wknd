@@ -1,0 +1,485 @@
+(function(document, $) {
+    "use strict";
+    var subAssetPath = (document.URL).substr((document.URL).lastIndexOf('.html') + 5);
+    var _assetName =  _getAssetName(subAssetPath);
+    var select_pages_step = ".step-select-pages";
+    var select_config_step = ".assemble-brochure-config-step";
+    var preview_reorder_step = ".assemble-brochure-reorder-step";
+    var wizardRel = ".dam-idsprint-addmultiple";
+    var SUBMIT_BUTTON_SELECTOR = 'button[data-foundation-wizard-control-action="submit"]';
+    var BROCHURE_NAME_INPUT = "input[name='name']";
+    var TYPE_CATALOG="catalog";
+    var TYPE_TEMPLATE="template";
+    // this variable decides if this page is for Catalog or Templates
+    var _type =  (document.URL).indexOf('catalog') > -1 ? TYPE_CATALOG : TYPE_TEMPLATE;
+    var MERGE_TYPE="dam:merged-type";
+    var ui = $(window).adaptTo("foundation-ui");
+    var $wizard;
+    var $submitButton;
+    var selecteditems = [];
+    var TABLE_SELECTOR = ".cq-damadmin-idsprint-product-content-pages";
+
+    $(document).on("foundation-wizard-stepchange", function(e, to, from) {
+        if (isStep(from, select_pages_step)) {
+            loadPreviewOfSelectedPages(selecteditems);
+        } else if(!from && isStep(to,preview_reorder_step)){
+            // landed directly to preview reorder step
+            initCarousel();
+        }
+
+        if (isStep(to, select_config_step)) {
+
+            syncSubmitButton("");
+            $('button[data-foundation-wizard-control-action="submit"]').off('click', onSubmit);
+            $('button[data-foundation-wizard-control-action="submit"]').on('click', onSubmit);
+        }
+    });
+
+    $(document).on("foundation-contentloaded", function(e) {
+        $('a[data-foundation-wizard-control-action="cancel"]').attr("href",getBackHref() );
+        //initailly disable the next button
+        syncNext() ;
+        $wizard = $(wizardRel);
+        Coral.commons.ready($wizard[0], function () {
+            if (!$wizard[0].childResourceProductList) {
+                $wizard[0].childResourceProductList = [];
+            }
+        });
+        $submitButton = $(SUBMIT_BUTTON_SELECTOR);
+        $(".cq-damadmin-idsprint-product-content-pages").off("foundation-selections-change",syncDelete).on("foundation-selections-change",syncDelete);
+        $(".cq-damadmin-idsprint-add-multiple-removeselection").off('click',removeSelections).on('click',removeSelections);
+    });
+
+    window.addEventListener("message", handleAssetPickerMessage, false);
+
+    function handleAssetPickerMessage(event) {
+        if (event.origin !== location.origin) {
+            return;
+        }
+
+        var fromDam = JSON.parse(event.data);
+
+        if (fromDam.data) {
+            // get the misisng items to update the references
+            var missingItems = [];
+            $.each(fromDam.data,function(){
+                var path = this.path;
+                var currentItem = _getProductFromPath( path);
+                if (currentItem == null) {
+                    missingItems.push(this);
+                }
+            });
+            missingItems.forEach(function (item, index, arr){
+                _appendTemplate(item);
+            });
+        }
+
+        if (fromDam.config) {
+            var configFromDam = fromDam.config;
+            if (configFromDam.action === 'close' || configFromDam.action === 'done') {
+                $('.assetselector-content-container')[0].hide();
+                syncNext();
+            }
+        }
+
+    }
+
+    function getBackHref(){
+        if(_type == TYPE_CATALOG){
+            return Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/idsprint/catalogs.html') + subAssetPath;
+        }
+        return Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/idsprint/templates.html') + subAssetPath;
+    }
+
+    function getNextHref() {
+        if(_type == TYPE_CATALOG){
+            return Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/idsprint/catalogs.html') + getParentPath();
+        }
+        return Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/idsprint/templates.html') + subAssetPath;
+    }
+
+    function getParentPath(){
+        if(_type == TYPE_CATALOG){
+            return subAssetPath.substr(0,subAssetPath.lastIndexOf(_assetName)-1);
+        }
+        return subAssetPath;
+    }
+
+    function _appendTemplate(tempdata) {
+        var productItem = {};
+        productItem.path = tempdata.path;
+        productItem.title = tempdata.title;
+        productItem.thumbnailurl = tempdata.img;
+        var table = _getTable($wizard);
+        _appendProductRow(table, productItem);
+
+    }
+
+    function _getProductFromPath( resourcePath) {
+        var retVal = null;
+        var $wizard = $(wizardRel);
+        if ($wizard[0].childResourceProductList && $wizard[0].childResourceProductList.length > 0) {
+            for (var index = 0; index < $wizard[0].childResourceProductList.length; index++) {
+                var currentItem = $wizard[0].childResourceProductList[index];
+                if (currentItem.path === resourcePath) {
+                    retVal = currentItem;
+                    break;
+                }
+            }
+        }
+        return retVal;
+    }
+
+    function _getAssetName(subAssetPath){
+        if(subAssetPath.endsWith('/subassets')){
+            var assetPath = subAssetPath.substr(0,subAssetPath.lastIndexOf('/'));
+            return assetPath.substr(assetPath.lastIndexOf('/')+1);
+        }
+        return null;
+    }
+
+    function syncDelete(){
+        var $selections = $(".cq-damadmin-idsprint-product-content-pages .foundation-selections-item");
+        if($selections.length){
+            $(".cq-damadmin-idsprint-add-multiple-removeselection").show();
+        } else {
+            $(".cq-damadmin-idsprint-add-multiple-removeselection").hide();
+        }
+    }
+
+    function removeSelections(){
+        var $selections = $(".cq-damadmin-idsprint-product-content-pages .foundation-selections-item")
+        $.each($selections,function(){
+            var path = $(this).attr("data-foundation-collection-item-id");
+            removeItemByPath(path);
+        });
+        syncNext();
+    }
+
+    function removeItemByPath(path){
+        var index = selecteditems.indexOf(path);
+        if (index > -1) {
+            selecteditems.splice(index, 1);
+        }
+
+        //remove item object from wizard childResourceProductList
+        var product = _getProductFromPath(path);
+        index = $wizard[0].childResourceProductList.indexOf(product);
+        if (index > -1) {
+            $wizard[0].childResourceProductList.splice(index, 1);
+        }
+        $(".cq-damadmin-idsprint-product-content-pages .foundation-selections-item[data-foundation-collection-item-id='"+path+"']").remove();
+    }
+
+    function _getTable(wizard) {
+        if (typeof table === "undefined" || table === null || table.length === 0) {
+            var table = wizard.find(TABLE_SELECTOR);
+            return table[0];
+        } else {
+            return table[0];
+        }
+
+    }
+
+    function _getRowHtml(item) {
+        return $("<tr>").attr("is", "coral-table-row").attr("itemprop", "item")
+            .attr("class", "foundation-collection-item").attr("data-foundation-collection-item-id", item.path).append(
+                $("<td>").attr("is", "coral-table-cell").attr("coral-table-rowselect", "").append(
+                    $("<img>").attr("class", "foundation-collection-item-thumbnail").attr("src", item.thumbnailurl)
+                        .attr("alt", "")
+                )
+            ).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "foundation-collection-item-title").append(
+                    $("<span>").append(item.title)
+                )
+            ).append(
+                $("<td>").attr("is", "coral-table-cell").attr("class", "foundation-collection-item-path").append(
+                    $("<span>").append(item.path)
+                )
+            )[0].outerHTML;
+    }
+
+    function _appendProductRow(table, currentItem) {
+        table.variant = Coral.Table.variant.LIST;
+        table.multiple = true;
+        table.selectable = true;
+        if (table.items.length === 1) {
+            //remove the empty row message
+            table.items.first().hide();
+        }
+        var $table_row = $(_getRowHtml(currentItem));
+        if ($wizard[0].childResourceProductList) {
+            $wizard[0].childResourceProductList.push(currentItem);
+        }
+        table.items.add($table_row[0]);
+        selecteditems.push(currentItem.path);
+    }
+
+//********************************************************************************//
+    function onSubmit() {
+
+        var wizard = $(".cq-damadmin-admin-brochure-assemble");
+        var elements = [];
+        var formData = {};
+        var collection = $('#carousel').children();
+        var formats = [];
+        formats.push('indd');
+        // Export JPG pages only for Template
+        if(_type != TYPE_CATALOG){
+            formats.push('jpg');
+        }
+        formats.push('xml');
+        if($('.export-format-acrobat-checkbox')[0].checked) {
+            formats.push('pdf');
+        }
+        formData["format"] = formats;
+        for (var i = 0; i < collection.length; i++) {
+            var asset = collection[i];
+            elements.push($(asset).attr("data-page-id"));
+        }
+        var title = $("input[name='name']").val();
+        if(title.trim() != "" ) {
+            title = title.trim() + '.indd';
+            formData['title'] = title;
+        }
+        var desc = $('[name="dc:description"]').val().trim();
+        formData.pages = elements;
+        formData[':operation'] = 'createCatalog';
+        formData['name'] = getName();
+        formData["_charset_"] = "utf-8";
+        if(_type) {
+            formData[MERGE_TYPE] = _type;
+        } else{
+            formData[MERGE_TYPE] = TYPE_TEMPLATE;
+        }
+
+        if (getTags().length > 0) {
+            formData['tags'] = getTags();
+        }
+
+        if (desc) {
+            formData['desc'] = desc;
+        }
+        $.ajax({
+            type: wizard.prop("method"),
+            url: Granite.HTTP.externalize(getParentPath() + ".idsprint.html"),
+            contentType: wizard.prop("enctype"),
+            data: formData
+        }).done(function(html) {
+            var $html = $(html);
+            if (loadThumbImg()) {
+                var assetPath = getAssetPath(arguments[0]);
+                uploadFile(loadThumbImg(), Granite.HTTP.externalize(assetPath + '.assetthumbnails.html'));
+            } else {
+                successCallback();
+            }
+
+        }).fail(function(xhr, error, errorThrown) {
+            failCallback();
+        });
+    }
+
+    /**
+     * @return name of the Asset if already created , otherwise user input name field value
+     * */
+    function getName(){
+        if(_type == TYPE_CATALOG){
+            return _assetName;
+        }
+        return $("input[name='name']").val().trim()+'.indd';
+    }
+
+    function getTags() {
+        var wizard = $(".cq-damadmin-admin-brochure-assemble");
+        var formValues = decodeURIComponent(wizard.serialize()).split('&');
+        var tags = [];
+        for (var i = 0; i < formValues.length; i++) {
+            var pair = formValues[i].split('=');
+            if (pair[0] == './jcr:content/metadata/cq:tags') {
+                tags.push(pair[1]);
+            }
+        }
+        return tags;
+    }
+
+    function successCallback() {
+        showSuccessDialog(Granite.I18n.get("{0} Created",getTypeName()), Granite.I18n.get("{0} Created Successfully",getTypeName()));
+    }
+
+    function getTypeName(){
+        if(_type == TYPE_CATALOG){
+            return "Catalog";
+        }
+        return "Template";
+    }
+
+    function failCallback() {
+        showErrorDialog(Granite.I18n.get("Error"), Granite.I18n.get("Error while creating template"));
+    }
+
+    function getAssetPath(response) {
+        var startIndex = response.indexOf('<title>Created ') + '<title>Created '.length;
+        return response.substring(startIndex, response.indexOf('</title>', startIndex));
+    }
+
+    function loadThumbImg() {
+        var input = $(".thumbnail-upload-action > input")[0];
+        var thumbFile = null;
+        if (input.files && input.files[0]) {
+            thumbFile = input.files[0];
+        }
+
+        return thumbFile;;
+    }
+
+    function uploadFile(file, url) {
+        var xhr = new XMLHttpRequest();
+        xhr.addEventListener("load", successCallback);
+        xhr.addEventListener("fail", failCallback);
+        if (window.FormData) {
+            var f = new FormData();
+            // Custom file and file name parameter
+            f.append("image", file);
+            f.append("dimensions", "140,100/48,48/319,319/1280,1280");
+            f.append("_charset_", "utf-8");
+            f.append("ignore-workflowgenerated",true);
+            xhr.open("POST", url + "?:ck=" + new Date().getTime(), true);
+            xhr.send(f);
+        } else {
+            xhr.open("PUT", url + "/" + fileName, true);
+            xhr.send(file);
+        }
+    }
+
+    function isStep(step, rel) {
+        return $(step).hasClass(rel.substr(1));
+    };
+
+    $(document).on("input", BROCHURE_NAME_INPUT, function(e) {
+        var $brochureName = $(BROCHURE_NAME_INPUT);
+        var title = $brochureName.val(); //.trim();
+        //set the brochure name value
+        if(Dam.Util.NameValidation !== undefined) {
+            Dam.Util.NameValidation.handleFileNameValidation($brochureName);
+        } else {
+            // for backward compatibility, fallback to Deprecated API
+            if (Dam.Util.handleRestrictedChars($brochureName)) {
+                $brochureName.val(Dam.Util.replaceRestrictedChars(title)); //.replace(/ /g, '-'));
+            }
+        }
+
+        if (title.trim() === "") {
+            //if title is empty, then add the error classe to the pageName
+            $brochureName.val('');
+            $brochureName.checkValidity();
+            $brochureName.updateErrorUI();
+
+        } else {
+            $brochureName.removeClass("is-invalid");
+        }
+        syncSubmitButton(title);
+    });
+
+    function syncSubmitButton(name){
+        // In catalog merge name id not mandatory so enable submit button
+        if(_type == TYPE_CATALOG){
+            $submitButton.removeAttr('disabled');
+        } else if(name.trim() === ""){
+            $submitButton.attr('disabled', 'disabled');
+        } else {
+            $submitButton.removeAttr('disabled');
+        }
+    }
+
+    function loadPreviewOfSelectedPages(selectedPages) {
+
+        var previewurl = Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/idsprint/templates/mergetemplate/jcr:content/body/items/form/items/wizard/items/previewreorder/items/carousel.html');
+        $.ajax({
+            type: "GET",
+            url: Granite.HTTP.externalize(previewurl),
+            data: {
+                '_charset_': "UTF-8",
+                'path': selectedPages
+            }
+        }).done(function(result) {
+            replacePreviewContent(result);
+        }).fail(function() {
+
+        });
+
+    }
+
+    function syncNext() {
+        if (selecteditems.length) {
+            $('button[data-foundation-wizard-control-action="next"]').removeAttr('disabled');
+        } else {
+            $('button[data-foundation-wizard-control-action="next"]').attr('disabled', 'true');
+        }
+    }
+
+    function replacePreviewContent(html) {
+        var parser = $(window).adaptTo("foundation-util-htmlparser");
+        $('.connected-carousels').remove();
+        var previewContainer = $('.foundation-wizard-step.assemble-brochure-reorder-step.foundation-wizard-step-active')[0];
+
+        parser.parse(html).then(function(fragment) {
+            var el = $(fragment).children()[0];
+            previewContainer.appendChild(el);
+            // reinit the carousel with selected pages
+            initCarousel();
+        });
+    }
+
+    function showSuccessDialog(title, msg) {
+        var successDialog = new Coral.Dialog().set({
+            header: {
+                innerHTML: Granite.I18n.get(title)
+            },
+            content: {
+                innerHTML: '<p>' + msg + '</p>'
+            },
+            variant: 'success',
+            backdrop: Coral.Dialog.backdrop.STATIC
+        });
+        
+        $(successDialog).attr('id', 'successDialog');
+        
+        //Done Button
+        var doneButton = new Coral.Button().set({
+            variant: 'default',
+            innerText: Granite.I18n.get('Done')
+        });
+        successDialog.footer.appendChild(doneButton);
+        
+        doneButton.on('click', function() {
+            window.location = getNextHref();
+        });
+        
+        document.body.appendChild(successDialog);
+        successDialog.show();
+    }
+
+
+    function showErrorDialog(modalTitle, modalContent) {
+        var errorDialog = new Coral.Dialog().set({
+            header: {
+                innerHTML: Granite.I18n.get(modalTitle)
+            },
+            content: {
+                innerHTML: '<p>' + Granite.I18n.get(modalContent) + '</p>'
+            },
+            footer: {
+                innerHTML: '<button is="coral-button" variant="primary" coral-close>Ok</button>'
+            },
+            variant: 'error'
+        });
+
+        document.body.appendChild(errorDialog);
+        errorDialog.show();
+    }
+
+    function initCarousel() {
+        Carousel.Elastislide.init('#carousel', '#preview', '.granite-title');
+    }
+
+})(document, Granite.$);

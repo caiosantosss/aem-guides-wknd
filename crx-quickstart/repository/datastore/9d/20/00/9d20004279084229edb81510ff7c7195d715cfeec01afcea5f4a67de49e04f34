@@ -1,0 +1,3199 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * ___________________
+ *
+ *  Copyright 2014 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ *
+ **************************************************************************/
+
+(function(window, document, exportName, undefined) {
+    'use strict';
+
+/*
+ * Vendor prefixes used for applying prefixed values of CSS properties
+ * programmatically.
+ */
+var VENDOR_PREFIXES = ['', 'webkit', 'moz', 'MS', 'ms', 'o'];
+
+/*
+ * Secret (hidden) map table for recognizer name string to class.
+ */
+var RECOGNIZER_MAP = {};
+
+/******************************************************************************
+ *
+ * Public (exposed) utility functions.
+ *
+ *****************************************************************************/
+
+/**
+ * Performs basic prototypal inheritance from a base "class."
+ *
+ * @param {Object} child
+ * @param {Object} base
+ * @param {Object} properties
+ * @memberof Sistine.Util
+ */
+function inherit(child, base, properties) {
+    var basePrototype = base.prototype,
+        childPrototype;
+
+    childPrototype = child.prototype = Object.create(basePrototype);
+    childPrototype.constructor = child;
+    childPrototype._super = base.prototype;
+
+    if (properties) {
+        _.extend(childPrototype, properties);
+    }
+}
+
+/**
+ * Applies the browser-specific prefix to the given style name (property) and
+ * returns the prefixed style name.
+ *
+ * @param {CSSStyleDeclaration} obj The style declaration for the associated
+ * element for which the prefixed style name will be used.
+ * @param {String} property The style name to prefix.
+ * @returns {String} The prefixed style name.
+ * @memberof Sistine.Util
+ */
+function prefixStyleName(obj, property) {
+    var prefix, prop;
+    var camelProp = property[0].toUpperCase() + property.slice(1);
+
+    var i = 0;
+    while (i < VENDOR_PREFIXES.length) {
+        prefix = VENDOR_PREFIXES[i];
+        prop = (prefix) ? prefix + camelProp : property;
+
+        if (prop in obj) {
+            return prop;
+        }
+        i++;
+    }
+
+    return undefined;
+}
+
+/**
+ * Returns a function that will apply the supplied function if it exists.
+ *
+ * @param {Function} func
+ * @param {*} thisVal
+ * @returns {Function} A function that will apply the supplied function if it
+ * exists.
+ * @memberof Sistine.Util
+ */
+function applyIfExists(func, thisVal) {
+    return function() {
+        if (!_.isUndefined(func) && _.isFunction(func)) {
+           return func.apply(thisVal, arguments);
+        }
+    };
+}
+
+
+/**
+ * Given a list of field names, create simple getter/setter pairs on the provided
+ * object prototype. These getter/setter pairs will act on "hidden" instance
+ * variables inside the prototype.
+ *
+ * @param {Function} prototype
+ * @param {Array} fields
+ */
+function createSimpleMutators(prototype, fields) {
+    prototype.__ = [];
+
+    // Note: JSHint does not like creating functions in a loop, so
+    // ensure this is ignored ...
+    for (var i = 0, len = fields.length; i < len; i++) {
+        var field = fields[i];
+        Object.defineProperty(prototype, field, {
+            get: function() { return this.__[field]; }, // jshint ignore:line
+            set: function(val) { this.__[field] = val; } // jshint ignore:line
+        }); // jshint ignore:line
+    }
+}
+
+/**
+ * Trims all leading and trailing whitespace, and then splits the given
+ * string by whitespace.
+ *
+ * @param {String} str The string to split.
+ * @returns {Array} The newly trimmed and split string.
+ */
+function splitStr(str) {
+    return str.trim().split(/\s+/g);
+}
+
+/**
+ * Trims all leading and trailing whitespace, and then splits the given
+ * string by commas.
+ *
+ * @param {String} str The string to split.
+ * @returns {Array} The newly trimmed and split string.
+ */
+function splitComma(str) {
+    return str.trim().split(/,\s+/g);
+}
+
+/**
+ * Convert a pixel value to metric if the defaults is set to metric units.
+ */
+function toMetric(pixelValue) {
+    if (Sistine.defaults.units === PIXELS) {
+        return pixelValue;
+    }
+
+    return pixelValue / Sistine.defaults.ppcm;
+}
+
+/**
+ * Get the length of a vector [x, y].
+ *
+ * @param {Array} v The vector as a 2-element array.
+ * @returns {Number} The length of the vector.
+ */
+function vectorLength(v) {
+    return Math.sqrt(v[0] * v[0] + v[1] * v[1]);
+}
+
+/**
+ * Create a custom DOM event an initialize it.
+ *
+ * @param {String} eventName
+ * @param {Object} props
+ * @returns {Event} The new DOM event.
+ */
+function createEvent(eventName, props) {
+    var e = document.createEvent('Event');
+    var p = props || {}; 
+
+    e.initEvent(eventName, p.bubbles ? p.bubbles : true, p.cancelable ? p.cancelable : true);
+    return _.extend(e, props);
+}
+
+/**
+ * Works similarly to _.defaults, but operates recursively to set defaults on
+ * nested sub-objects.
+ *
+ * @param {Object} target
+ * @param {Object} source
+ */
+function deepDefaults(target, source) {
+    _.each(_.keys(source), function(k) {
+        if (!_.isUndefined(source[k])) {
+            if (isPlainObject(source[k]) && (_.isUndefined(target[k]) || isPlainObject(target[k]))) {
+                target[k] = target[k] || {};
+                deepDefaults(target[k], source[k]);
+            }
+            else if (_.isUndefined(target[k])) {
+                target[k] = source[k];
+            }
+        }
+    });
+
+    return target;
+}
+
+/******************************************************************************
+ *
+ * Private (non-exposed) utility functions.
+ * 
+ *****************************************************************************/
+
+function isPlainObject(obj) {
+    return obj && typeof obj === 'object' && Object.getPrototypeOf(obj) === Object.prototype;
+}
+
+function registerRecognizer(clazz, friendlyName) {
+    if (!RECOGNIZER_MAP[friendlyName]) {
+        RECOGNIZER_MAP[friendlyName] = clazz;
+    }
+}
+
+function getRecognizer(friendlyName) {
+    return RECOGNIZER_MAP[friendlyName];
+}
+
+function ancestorWithSelector(element, selector) {
+    while (element && element.parentElement) {
+        if (element.matchesSelector(selector)) {
+            return element;
+        }
+
+        element = element.parentElement;
+    }
+
+    return null;
+}
+
+function applyElementPolyfills() {
+    applyMatchesSelectorPolyfill(Element.prototype);
+}
+
+function applyMatchesSelectorPolyfill(proto) {
+    proto.matchesSelector = proto.matches || 
+        proto.matchesSelector ||
+        proto.mozMatchesSelector ||
+        proto.msMatchesSelector ||
+        proto.oMatchesSelector ||
+        proto.webkitMatchesSelector ||
+        function (selector) {
+            var el = this,
+                els = (el.parentNode || el.document).querySelectorAll(selector),
+                i = -1;
+
+            while (els[++i] && els[i] !== el) { }
+
+            return !!els[i];
+        };
+}
+
+function measurePpcm() {
+    var div = document.createElement('div');
+    div.style.width = '1cm';
+
+    var body = document.getElementsByTagName('body')[0];
+    body.appendChild(div);
+
+    var ppcm = document.defaultView
+        .getComputedStyle(div, null)
+        .getPropertyValue('width');
+
+    body.removeChild(div);
+
+    return parseFloat(ppcm);
+}
+
+function throwAbstract(name) {
+    throw new Error('No definition for abstract method ' + name + '. Must be overridden in subclass.');
+}
+
+var POINTER_PROPS = [
+    'altKey',
+    'bubbles',
+    'button',
+    'cancelable',
+    'ctrlKey',
+    'clientX',
+    'clientY',
+    'detail',
+    'fromElement',
+    'isPrimary',
+    'layerX',
+    'layerY',
+    'metaKey',
+    'offsetX',
+    'offsetY',
+    'pageX',
+    'pageY',
+    'pointerId',
+    'pointerType',
+    'pressure',
+    'relatedTarget',
+    'screenX',
+    'screenY',
+    'shiftKey',
+    'target',
+    'tiltX',
+    'tiltY',
+    'timeStamp',
+    'toElement',
+    'type',
+    'view',
+    'x',
+    'y'
+];
+
+/**
+ * The Pointer tracks the entire lifetime of a given pointer through all events 
+ * with the same pointerId. A typical pointer lifetime lasts from the moment the
+ * pointer begins until the moment a pointer ends, plus all movement in-between.
+ *
+ * @param {Number} id
+ * @constructor
+ */
+function Pointer(id) {
+    /**
+     * The unique ID of the pointer. This is set by the Manager when the Pointer
+     * is constructed and should not be changed.
+     *
+     * @type {Number}
+     * @public
+     */
+    this.id = id;
+
+    /**
+     * The array of events (as sanitized Objects) that represent the entire
+     * history of the Pointer.
+     *
+     * @type {Array}
+     * @public
+     */
+    this.events = [];
+}
+
+Pointer.prototype = {
+    /**
+     * The number of events in the pointer's history.
+     * @return {Number} length of the history
+     */
+    length: function() {
+        return this.events.length;
+    },
+
+    /**
+     * Adds a pointer event to the Pointer's history. The event is expected to
+     * be a standard DOM pointer event as dispatched by the browser. Note:
+     * Pointer move events with identical positions as any previous pointer
+     * move event are ignored to avoid unnecessary storage of duplicate 
+     * information. Pointer move events are also ignored if their pressure value
+     * is not greater than 0.
+     *
+     * @param {Event} e The pointer event to add.
+     * @returns {Object} Returns the sanitized event data.
+     */
+    add: function(e) {
+        if (e.type === 'pointermove') {
+            var prevEvent = this.events.length > 0 ? this.events[this.events.length - 1] : null;
+            if (e.pressure === 0 || (prevEvent && prevEvent.type === 'pointermove' && prevEvent.x === e.x && prevEvent.y === e.y)) {
+                return null;
+            }
+        }
+
+        var eventData = sanitizePointerEvent(e);
+        eventData.timeStamp = Date.now();
+        this.events.push(eventData);
+        return eventData;
+    },
+
+    /**
+     * Returns the current position of the pointer as a 2-element array
+     * consisting of the x and y positions, respectively.
+     *
+     * @returns {Array} Returns the current position of the pointer.
+     */
+    position: function() {
+        if (this.length() > 0) {
+            var p = this.events[this.events.length - 1];
+            return [p.x, p.y];
+        }
+
+        return [0, 0];
+    },
+
+    /**
+     * Returns the two-dimensional vector corresponding to the last known
+     * movement of the pointer. The vector consists of a 2-element array with
+     * the x and y values of the vector, respectively.
+     *
+     * @returns {Array} Returns the vector corresponding to the last known
+     * movement of the pointer.
+     */
+    lastVector: function() {
+        if (this.length() > 1) {
+            var p1 = this.events[this.events.length - 1];
+            var p2 = this.events[this.events.length - 2];
+
+            return [p1.x - p2.x, p1.y - p2.y];
+        }
+
+        return [0, 0];
+    },
+
+    /**
+     * Returns the dominant cardinal direction (up, down, left, right) for the
+     * last known movement of the pointer.
+     *
+     * @returns {Number} One of ```Sistine.DIRECTION_UP```, ```Sistine.DIRECTION_DOWN```,
+     * ```Sistine.DIRECTION_RIGHT``` or ```Sistine.DIRECTION_LEFT```.
+     */ 
+    lastDirection: function() {
+        return vectorDirection(this.lastVector());
+    },
+
+    /**
+     * Returns the distance of the last known movement of the Pointer.
+     *
+     * @returns {Number} The distance of the last known movement of the Pointer.
+     */
+    lastDistance: function() {
+        return vectorLength(this.lastVector());
+    },
+
+    /**
+     * Returns the two-dimensional vector corresponding to the movement
+     * of the Pointer between its first position to its most recent position.
+     * The vector consists of a 2-element array with the x and y values of
+     * the vector, respectively.
+     *
+     * @returns {Array} Returns the vector corresponding to the movement of the
+     * Pointer between its first position and its most recent position.
+     */
+    totalVector: function() {
+        if (this.length() > 1) {
+            var p1 = this.events[this.events.length - 1];
+            var p2 = this.events[0];
+
+            return [p1.x - p2.x, p1.y - p2.y];
+        }
+
+        return [0, 0];
+    },
+
+    /**
+     * Returns the dominant cardinal direction (up, down, left, right) for the
+     * total movement of the pointer from its first position to its most
+     * recent position.
+     *
+     * @returns {Number} One of ```Sistine.DIRECTION_UP```, ```Sistine.DIRECTION_DOWN```,
+     * ```Sistine.DIRECTION_RIGHT``` or ```Sistine.DIRECTION_LEFT```.
+     */ 
+    totalDirection: function() {
+        return vectorDirection(this.totalVector());
+    },
+
+    /**
+     * Returns the distance between the first location of the Pointer and its most
+     * recent location.
+     *
+     * @returns {Number} The distance between the first location of the Pointer
+     * and its most recent location.
+     */
+    totalDistance: function() {
+        return vectorLength(this.totalVector());
+    },
+
+    /**
+     * Returns the cumulative sum of the distance between every event from the
+     * Pointer's first event to its most recent.
+     *
+     * @returns {Number} The cumulative distance between the first event to
+     * the most recent.
+     */
+    totalCumulativeDistance: function() {
+        return cumulativeDistance(this.events, 0, this.events.length);
+    },
+
+    /**
+     * Returns the duration of the Pointer, in milliseconds, from pointer down
+     * to its most recent event.
+     *
+     * @returns {Number} The duration of the pointer in milliseconds.
+     */
+    duration: function() {
+        if (this.length() > 1) {
+            var p1 = this.events[0];
+            var p2 = this.events[this.events.length - 1];
+
+            return Math.abs(p2.timeStamp - p1.timeStamp);
+        }
+
+        return 0;
+    },
+
+    /**
+     * Returns the first event in the Pointer's history. Typicall, this is the
+     * pointer down event.
+     *
+     * @returns {Object} The first event in the Pointer's history.
+     */
+    firstEvent: function() {
+        return this.events[0];
+    },
+
+    /**
+     * Returns the last (latest) event in the Pointer history as a sanitized
+     * Object.
+     *
+     * @returns {Object} Returns the latest event in the Pointer history.
+     */
+    lastEvent: function() {
+        return this.events[this.events.length - 1];
+    },
+
+    /**
+     * Returns the event at the given index.
+     *
+     * @param {Number} idx The index.
+     * @returns {Object} The event at the given index.
+     */
+    eventAtIndex: function(idx) {
+        return this.events[idx];
+    },
+
+    /**
+     * Returns the type of the last event in the Pointer history. This corresponds
+     * to one of EVENT_UP, EVENT_DOWN, EVENT_MOVE or EVENT_CANCEL.
+     *
+     * @returns {String} The type of the last even for the Pointer, or null if
+     * there is no last event.
+     */
+    lastEventType: function() {
+        var event = this.lastEvent();
+        
+        if (event) {
+            return event.type.substring(7);
+        }
+
+        return null;
+    },
+
+    /**
+     * Returns the last known velocity of the pointer as a 2-element array
+     * consisting of the x and y components of the velocity, respectively.
+     * Velocity speed units are given in pixels per second (px/s).
+     *
+     * @returns {Array} Returns the last known velocity.
+     */
+    lastVelocity: function() {
+        var len = this.events.length;
+        var isUpPointer = this.lastEventType() === EVENT_UP;
+
+        if (this.length() > 1) {
+            var p1 = this.events[Math.max(0, isUpPointer ? len - 3 : len - 2)];
+            var p2 = this.events[Math.max(0, isUpPointer ? len - 2 : len - 1)];
+            var timeDiff = (p2.timeStamp - p1.timeStamp) / 1000;
+
+            return [(p2.x - p1.x)/timeDiff, (p2.y - p1.y)/timeDiff];
+        }
+
+        return [0, 0];
+    },
+
+    /**
+     * Returns the last known speed of the pointer (a scalar value).
+     *
+     * @returns {Number} Returns the last known speed of the pointer.
+     */
+    lastSpeed: function() {
+        return vectorLength(this.lastVelocity());
+    },
+
+    /**
+     * Clears the Pointer and all pointer history.
+     */
+    clear: function() {
+        this.events.length = 0;
+    },
+
+    /**
+     * Returns the first target of the pointer.
+     *
+     * @returns {HTMLElement} The first target of the pointer, or null if
+     * none exists.
+     */
+    initialTarget: function() {
+        if (this.events.length === 0) {
+            return null;
+        }
+
+        return this.events[0].target;
+    }
+};
+
+function sanitizePointerEvent(event) {
+    var p, data = {};
+
+    for (var i = 0, len = POINTER_PROPS.length; i < len; i++) {
+        p = POINTER_PROPS[i];
+        data[p] = event[p];
+    }
+
+    // Some browsers (Firefox) do not provide X, Y as part of the event so 
+    // default to pageX and pageY
+    if (typeof data.x === 'undefined' || typeof data.y === 'undefined') {
+        data.x = data.pageX;
+        data.y = data.pageY;
+    }
+
+    return data;
+}
+
+function cumulativeDistance(events, startIndex, length) {
+    var totalDistance = 0;
+
+    for (var i = 0; i < length - 1; i++) {
+        var p1 = events[i]; 
+        var p2 = events[i+1];
+
+        totalDistance += vectorLength([p1.x - p2.x, p1.y - p2.y]);
+    }
+
+    return totalDistance;
+}
+
+function vectorDirection(vector) {
+    var x = vector[0];
+    var y = vector[1];
+
+    if (x === 0 && y === 0) {
+        return DIRECTION_NONE;
+    }
+
+    if (Math.abs(x) >= Math.abs(y)) {
+        return x >= 0 ? DIRECTION_RIGHT : DIRECTION_LEFT;
+    }
+    else {
+        return y >= 0 ? DIRECTION_DOWN : DIRECTION_UP;
+    }
+}
+
+/**
+ * The PointerSet contains a set of Pointer objects, and is used primarily for 
+ * tracking clusters of touches in an application. The PointerSet provides 
+ * convenience methods for sub-clustering and filtering the set to facilitate 
+ * searching for certain gestural conditions.
+ *
+ * @constructor
+ * @param {Array} [pointers] An array of Pointers to use when initializing the
+ * set. Omitting this parameter results in an empty set.
+ */
+function PointerSet(pointers) {
+    this.keys = [];
+    this.values = {};
+
+    if (pointers !== undefined && pointers.length > 0) {
+        var i = pointers.length;
+        while (i--) {
+            this.set(pointers[i]);
+        }
+    }
+}
+
+PointerSet.prototype = {
+    /**
+     * Returns the number of pointers in the set.
+     *
+     * @returns {Number} Returns the number of Pointers in the set.
+     */
+    count: function() {
+        return this.keys.length;
+    },
+
+    /**
+     * Returns an array of the IDs of pointers in the set.
+     *
+     * @returns {Array} An array of the IDs of pointers in the set.
+     */
+    pointerIds: function() {
+        return this.keys.slice();
+    },
+
+    /**
+     * A convenience method for adding a pointer event to the correct Pointer 
+     * instance in the set. If the Pointer for ID in the event does not exist
+     * in the set then this method will automatically add a new Pointer instance
+     * to the set with the proper ID.
+     *
+     * @param {Event} pointerEvent The event to add. Should be a DOM event in
+     * its original form as emitted by the browser.
+     * @returns {Object} Returns the event data that was added.
+     */
+    add: function(pointerEvent) {
+        var id = pointerEvent.pointerId,
+            idx = _.indexOf(this.keys, id);
+
+        if (idx > -1) {
+            return this.get(id).add(pointerEvent);
+        }
+        else {
+            var pointer = new Sistine.Pointer(id);
+            this.keys.push(id);
+            this._sortKeys();
+            this.values[id] = pointer;
+            return pointer.add(pointerEvent);
+        }
+    },
+
+    /**
+     * Puts a Pointer in the set. If the set does not have a Pointer with ID
+     * of the Pointer being set, the Pointer is added to the set, otherwise
+     * it will replace the existing Pointer in the set.
+     *
+     * @param {Pointer} pointer The Pointer instance to add to the set.
+     * @returns {Pointer} Returns the set Pointer.
+     */
+    set: function(pointer) {
+        var id = pointer.id;
+
+        if (!this.has(id)) {
+            this.keys.push(id);
+            this._sortKeys();
+        }
+
+        this.values[id] = pointer;
+        return pointer;
+    },
+
+    /**
+     * Removes a Pointer from the set.
+     *
+     * @param {Pointer|Number} pointer The Pointer instance or ID to remove.
+     * @returns {Pointer} Returns the Pointer that was removed. Returns null
+     * otherwise.
+     */
+    remove: function(pointer) {
+        var id = typeof pointer === 'number' ? pointer : pointer.id,
+            idx = _.indexOf(this.keys, id),
+            cache;
+
+        if (idx > -1) {
+            cache = this.values[id];
+
+            this.keys.splice(idx, 1);
+            delete this.values[id];
+            return cache;
+        }
+        
+        return null;
+    },
+
+    /**
+     * Clears the set.
+     */
+    clear: function() {
+        this.keys.length = 0;
+        this.values = {};
+    },
+
+    /**
+     * Gets a Pointer from the set by its ID.
+     *
+     * @param {Number} id The ID of the Pointer.
+     * @returns {Pointer} The Pointer, or null if a Pointer does not exist
+     * in the set with the given ID.
+     */
+    get: function(id) {
+        return this.values[id];
+    },
+
+    /**
+     * Returns true if the PointerSet contains a pointer with the given ID or
+     * IDs. If multiple IDs are provided, the method will return true if ANY
+     * ID matches.
+     *
+     * @param {Number|Array} ids The ID or IDs of the Pointers to check for
+     * set membership.
+     * @returns {Boolean} True if the PointerSet contains any of the IDs
+     * provided.
+     */
+    has: function(ids) {
+        ids = _.isArray(ids) ? ids : [ids];
+
+        for (var i = 0, len = ids.length; i < len; i++) {
+            var id = ids[i];
+            if (_.indexOf(this.keys, id, true) > -1) {
+                return true;
+            }
+        }
+
+        return false;
+    },
+
+    /**
+     * Returns the first Pointer in the set.
+     *
+     * @returns {Pointer} Returns the first Pointer in the set.
+     */
+    first: function() {
+        return this.values[this.keys[0]];
+    },
+
+    /**
+     * Returns the last Pointer in the set.
+     *
+     * @returns {Pointer} Returns the last Pointer in the set.
+     */
+    last: function() {
+        return this.values[this.keys[this.keys.length - 1]];
+    },
+
+    /**
+     * Returns the Pointer at the given index.
+     *
+     * @param {Number} index The index.
+     * @returns {Pointer} Returns the Pointer at the given index.
+     */
+    atIndex: function(index) {
+        return this.values[this.keys[index]];
+    },
+
+    /**
+     * Create a new ```PointerSet``` that is a subset of this set containing 
+     * only ```Pointers``` with IDs in the provided array.
+     *
+     * @param {Array} pointerIds
+     * @returns {PointerSet}
+     */
+    subset: function(pointerIds) {
+        var pointers = _.filter(this.values, function(pointer) {
+            return _.contains(pointerIds, pointer.id);
+        });
+
+        return new PointerSet(pointers);
+    },
+
+    /**
+     * Calculates the average position (centroid) of the set using the latest
+     * position of all Pointers in the set.
+     *
+     * @returns {Number} Returns the average position of the set.
+     */
+    centroid: function() {
+        if (this.keys.length === 0) {
+            return [0, 0];
+        }
+
+        var keys = this.keys;
+        var values = this.values;
+        var pos = [0, 0];
+        var pointerPos = [0, 0];
+
+        var i;
+        var len = keys.length;
+        for (i = 0; i < len; i++) {
+            pointerPos = values[keys[i]].position();
+            pos[0] += pointerPos[0];
+            pos[1] += pointerPos[1];
+        }
+
+        return [pos[0]/keys.length, pos[1]/keys.length];
+    },
+
+    averageDistanceFromPoint: function(point) {
+        if (this.keys.length === 0) {
+            return 0;
+        }
+
+        var keys = this.keys;
+        var values = this.values;
+        var average = 0;
+        var pointerPos = [0, 0];
+
+        var i;
+        var len = keys.length;
+        for (i = 0; i < len; i++) {
+            pointerPos = values[keys[i]].position();
+            average += vectorLength([pointerPos[0] - point[0], pointerPos[1] - point[1]]);
+        }
+
+        return average / keys.length;
+    },
+
+    /**
+     * Filter the PointerSet with a given predicate. The predicate function
+     * should accept a Pointer instance and the PointerSet as arguments, and
+     * return true if the Pointer should be included in the new set, or false
+     * otherwise.
+     *
+     * Pointers in the new PointerSet are NOT copied. This means any Pointers
+     * manipulated after the filter function is called will be manipulated in
+     * all sets in which they are referenced.
+     *
+     * @param {Function} predicate The predicate function to use for filtering.
+     * @returns {PointerSet} Returns a new PointerSet containing the Pointers
+     * from the original set that match the filter.
+     */
+    filter: function(predicate) {
+        return new PointerSet(this._filter(predicate, false));
+    },
+
+    /**
+     * Given a pointer ID for a pointer contained within the set, perform
+     * a "cluster" search for nearby pointers within a radius.
+     *
+     * The cluster search will recursively search for pointers within a radius
+     * of another pointer, add them to the set, and then search for pointers
+     * near those pointers, until all options are exhausted.
+     *
+     * @param {Number} pointerId
+     * @param {Number} radius
+     * @param {Boolean} [excludeUpPointers=true]
+     * @returns {PointerSet} A new PointerSet with the cluster.
+     */
+    cluster: function(pointerId, radius, excludeUpPointers) {
+        var pointer = this.values[pointerId];
+        excludeUpPointers = !_.isUndefined(excludeUpPointers) ? excludeUpPointers : true;
+
+        if (!pointer) {
+            return new PointerSet();
+        }
+
+        var predicate = function(otherPointer) {
+            // Check if the pointer is up and exclude if required
+            if (excludeUpPointers && otherPointer.lastEventType() === EVENT_UP) {
+                return false;
+            }
+
+            // Save some calculation and always return the given pointer
+            if (pointer.id === otherPointer.id) {
+                return true;
+            }
+
+            var p1 = pointer.position();
+            var p2 = otherPointer.position();
+            var v = [p1[0] - p2[0], p1[1] - p2[1]];
+            var distance = toMetric(vectorLength(v));
+
+            return distance <= radius;
+        };
+
+        var candidateIds = [];
+        var clusterIds = this._filter(predicate, true);
+        var unvisitedIds = _.clone(this.keys);
+
+        while (unvisitedIds.length > 0) {
+            pointer = this.values[unvisitedIds.pop()];
+            candidateIds = this._filter(predicate, true);
+
+            if (_.intersection(candidateIds, clusterIds).length > 0) {
+                clusterIds = _.union(candidateIds, clusterIds);
+            }
+        }
+
+        return new PointerSet(this._keysToVals(clusterIds));
+    },
+
+    _filter: function(predicate, returnKeys) {
+        var keys = this.keys;
+        var values = this.values;
+        var arr = [];
+        var key;
+        var val;
+        var i;
+        var len = keys.length;
+
+        for (i = 0; i < len; i++) {
+            key = keys[i];
+            val = values[key];
+
+            if (predicate(val, this)) {
+                returnKeys ? arr.push(key) : arr.push(val);
+            }
+        }
+
+        return arr;
+    },
+
+    _sortKeys: function() {
+        this.keys = this.keys.sort(function(a, b) { return a - b; });
+    },
+
+    _keysToVals: function(keys) {
+        var vals = [];
+        var i;
+        var len = keys.length;
+
+        for (i = 0; i < len; i++) {
+            vals.push(this.values[keys[i]]);
+        }
+
+        return vals;
+    }
+};
+
+/**
+ * @param {String} startState
+ * @param {Array} definition
+ * @param {*} processThisVal
+ */
+function StateMachine(startState, definition, processThisVal) {
+    this.state = this._startState = startState;
+    this._processThisVal = processThisVal;
+    this._populate(definition);
+}
+
+StateMachine.prototype = {
+    process: function(eventType /*, input */) {
+        var rule = this.getRule(eventType, this.state);
+
+        if (!rule) {
+            return;
+        }
+
+        var before = rule.before;
+        var asyncSettings = rule.async;
+        var syncTransitions = rule.transitions;
+        var args = Array.prototype.slice.call(arguments, 1);
+
+        // Always run the before function, even if no transitions are
+        // specified for this condition
+        this._applyMaybe(before, args);
+
+        if (!syncTransitions && !asyncSettings) {
+            return;
+        }
+
+        var retVal = (
+            this._processAsync(asyncSettings, args) || 
+            this._processSync(syncTransitions, args) || 
+            this._returnObject({})
+        );
+
+        if (retVal.state === STATE_ENDED ||
+            retVal.state === STATE_RECOGNIZED ||
+            retVal.state === STATE_CANCELED ||
+            retVal.state === STATE_FAILED) {
+            this.cancelAsync();
+        }
+
+        return retVal;
+    },
+
+    cancelAsync: function() {
+        clearTimeout(this._asyncTimeout);
+        delete this._asyncTimeout;
+    },
+
+    reset: function() {
+        this.state = this._startState;
+        this.cancelAsync();
+
+        return this.state;
+    },
+
+    getRule: function(eventType, fromState) {
+        var rule = this._eventRules[eventType];
+
+        if (rule) {
+            return rule[fromState];
+        }
+
+        return null;
+    },
+
+    _processAsync: function(settings, args) {
+        if (this._asyncTimeout || !settings || !settings.transitions || settings.transitions.length === 0) {
+            return;
+        }
+
+        var guard = settings.guard || function() { return true; };
+        var delay = this._applyMaybe(guard, args);
+
+        if (delay && delay > 0) {
+            this._asyncTimeout = setTimeout(_.bind(this._handleAsyncTimeout, this), delay, settings.transitions, args);
+            return this._returnObject({});
+        }
+    },
+
+    _handleAsyncTimeout: function(transitions, args) {
+        this.cancelAsync();
+        this._processSync(transitions, args);
+    },
+
+    _processSync: function(transitions, args) {
+        if (!transitions || transitions.length === 0) {
+            return;
+        }
+
+        for (var i = 0, len = transitions.length; i < len; i++) {
+            var transition = transitions[i];
+            var toState = transition.to;
+            var after = transition.after;
+            var guard = transition.guard || function() { return true; };
+            var emit = transition.emit || function() { return {}; };
+
+            if (this._applyMaybe(guard, args)) {
+                if (transition.cancelsAsync) {
+                    this.cancelAsync();
+                }
+
+                this.state = toState; 
+                this._applyMaybe(after, args);
+                return this._returnObject(this._applyMaybe(emit, args));
+            }
+        }
+    },
+
+    _applyMaybe: function(func, args) {
+        if (!_.isUndefined(func) && _.isFunction(func)) {
+            return func.apply(this._processThisVal, args);
+        }
+    },
+
+    _populate: function(definition) {
+        this._eventRules = {};
+
+        if (!definition || definition.length === 0) {
+            return;
+        }
+
+        for (var i = 0, len = definition.length; i < len; i++) {
+            var rule = definition[i];
+
+            if (!rule.on || !rule.from) {
+                continue;
+            }
+
+            var eventTypes = _.isArray(rule.on) ? rule.on : [rule.on];
+            var fromStates = _.isArray(rule.from) ? rule.from : [rule.from];
+            var eventType, eventRule, fromState;
+
+            for (var j = 0; j < eventTypes.length; j++) {
+                eventType = eventTypes[j];
+                eventRule = this._eventRules[eventType];
+
+                if (!eventRule) {
+                    eventRule = this._eventRules[eventType] = {};
+                }
+
+                for (var k = 0; k < fromStates.length; k++) {
+                    fromState = fromStates[k];
+                    eventRule[fromState] = rule;
+                }
+            }
+        }
+    },
+
+    _returnObject: function(data) {
+        return {
+            state: this.state,
+            data: data
+        };
+    }
+};
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var STATE_POSSIBLE = 1;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var STATE_STARTED = 2;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var STATE_CHANGED = 4;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var STATE_ENDED = 8;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var STATE_CANCELED = 16;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var STATE_RECOGNIZED = 32;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var STATE_FAILED = 64;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var DIRECTION_NONE = 0;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var DIRECTION_LEFT = 1;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var DIRECTION_RIGHT = 2;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default 3
+ */
+var DIRECTION_HORIZONTAL = DIRECTION_LEFT | DIRECTION_RIGHT; // jshint ignore:line
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var DIRECTION_UP = 4;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default
+ */
+var DIRECTION_DOWN = 8;
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default 12
+ */
+var DIRECTION_VERTICAL = DIRECTION_UP | DIRECTION_DOWN; // jshint ignore:line
+
+/**
+ * @constant
+ * @type {Number}
+ * @memberof Sistine
+ * @default 15
+ */
+var DIRECTION_ANY = DIRECTION_HORIZONTAL | DIRECTION_VERTICAL; // jshint ignore:line
+
+/**
+ * @constant
+ * @type {String}
+ * @memberof Sistine
+ * @default
+ */
+var EVENT_DOWN = 'down';
+
+/**
+ * @constant
+ * @type {String}
+ * @memberof Sistine
+ * @default
+ */
+var EVENT_UP = 'up';
+
+/**
+ * @constant
+ * @type {String}
+ * @memberof Sistine
+ * @default
+ */
+var EVENT_MOVE = 'move';
+
+/**
+ * @constant
+ * @type {String}
+ * @memberof Sistine
+ * @default
+ */
+var EVENT_CANCEL = 'cancel';
+
+/**
+ * The Recognizer is the base class for all gesture recognizers in the library.
+ * You should not instantiate Recognizer directly, but instead inherit from it
+ * for any custom gesture recognizers.
+ * 
+ * @constructor
+ * @param {Object} [options] The options.
+ *     @param {String} [options.delegate=null] The delegate that defines simultaneous
+ *     recognition behavior for multiple recognizers.
+ *     @param {*} [options.delegateScope=this]
+ */
+function Recognizer(options) {
+    // Public properties
+    this.options = _.defaults(options || {}, this.defaults);
+    this.manager = null;
+    this.state = STATE_POSSIBLE;
+}
+
+Recognizer.prototype = {
+    defaults: {
+        delegate: null,
+        delegateScope: this,
+        capturePointers: false
+    },
+
+    /**
+     * The primary function called by the Manager on each Recognizer when a new
+     * event happens for which the Recognizer should be notified.
+     *
+     * @param {String} eventType
+     * @param {Object} eventData
+     * @param {PointerSet} pointerSet
+     * @returns {Number} The new state that the Recognizer is in after processing
+     * the input.
+     */
+    recognize: function(eventType, eventData, pointerSet) {
+        if (this.hasTerminated()) {
+            return;
+        }
+
+        var prevState = this.state;
+        var retVal = this.process(eventType, eventData, pointerSet);
+        var emittingData = {};
+
+        if (typeof retVal === 'undefined') {
+            // No state change occurred, so shortcut further processing.
+            return this.state;
+        }
+        else if (typeof retVal === 'number') {
+            this.state = retVal;
+        }
+        else {
+            this.state = retVal.state;
+            emittingData = retVal.data || {};
+        }
+
+        if (this.state === prevState && this.state !== STATE_CHANGED) {
+            return this.state;
+        }
+        else if (this.state === STATE_FAILED) {
+            this.tryEmitPending();
+        } 
+        else if (prevState === STATE_POSSIBLE && !this.shouldBegin()) {
+            this.fail();
+        }
+        else {
+            this.emit(_.extend(emittingData, {
+                state: this.state,
+                target: eventData.target
+            }));
+        }
+
+        return this.state;
+    },
+
+    /**
+     * Returns true if the Recognizer is allowed to begin (i.e. transition from
+     * STATE_POSSIBLE).
+     *
+     * @returns True if the Recognizer is allowed to begin, false otherwise.
+     */
+    shouldBegin: function() {
+        var delegate = this.options.delegate;
+        return !delegate || 
+               !delegate.recognizerShouldBegin || 
+               (_.isFunction(delegate.recognizerShouldBegin) && delegate.recognizerShouldBegin.call(this.options.delegateScope, this));
+    },
+
+    /**
+     * Called by the Manager when this Recognizer is requested to process
+     * incoming Pointer data. Sub-classes MUST implement this method.
+     *
+     * @param {String} eventType
+     * @param {Object} eventData
+     * @param {PointerSet} pointerSet
+     *
+     * @returns {Number} The new state that the Recognizer is in after
+     * processing.
+     * @abstract
+     */
+    process: function(eventType, eventData, pointerSet) { 
+        return this.state;
+    }, 
+
+    /**
+     * Called by the Manager when this Recognizer needs to be reset to its
+     * starting state. Sub-classes MUST implement this method.
+     *
+     * @abstract
+     */
+    reset: function() { 
+        throwAbstract('reset');
+    },
+
+    /**
+     * Immediately puts the gesture recognizer in a FAILED state if it is tracking
+     * any of the pointer IDs provided.
+     *
+     * @param {Number} pointerIds If the Recognizer is tracking any of the pointer IDs 
+     * in this array, then it should immediately fail.
+     */
+    fail: function(pointerIds) {
+        var trackedPointers = this.trackedPointers();
+
+        if (_.isUndefined(pointerIds) || (trackedPointers && trackedPointers.has(pointerIds))) {
+            this.state = STATE_FAILED;
+            this.emit({state:this.state});
+            this.tryEmitPending();
+        }
+    },
+
+    /**
+     * @abstract
+     */
+    trackedPointers: function() {
+        throwAbstract('trackedPointers');
+    },
+
+    /**
+     * Returns a boolean indicating whether or not the current state
+     * is a terminal state.
+     *
+     * @returns {Boolean} True if the Recognizer is in a failed state, false
+     * otherwise.
+     */
+    hasTerminated: function() {
+        return this.state === STATE_ENDED ||
+               this.state === STATE_RECOGNIZED ||
+               this.state === STATE_CANCELED ||
+               this.state === STATE_FAILED;
+    },
+
+    /**
+     * Returns the Recognizer instance, if any, that must fail before this
+     * Recognizer can start recognizing its own gesture.
+     *
+     * @returns {Recognizer} The instance of the Recognizer that must fail, if
+     * any.
+     */
+    requiresFail: function() {
+        var delegate = this.options.delegate;
+        var delegateScope = this.options.delegateScope;
+
+        if (delegate && _.isFunction(delegate.gestureRequiredToFail)) {
+            return delegate.gestureRequiredToFail.call(delegateScope, this);
+        }
+
+        return null;
+    },
+
+    /**
+     * Returns a boolean indicating whether this gesture recognizer should use
+     * the global set of available pointers instead of the subset of pointers
+     * that only started on the element for which it is being managed.
+     *
+     * @returns {Boolean} True if the Recognizer should use global pointers.
+     */
+    usesGlobalPointers: function() {
+        var delegate = this.options.delegate;
+        var delegateScope = this.options.delegateScope;
+
+        return !delegate || 
+               !delegate.recognizerUsesGlobalPointers || 
+               (_.isFunction(delegate.recognizerUsesGlobalPointers) && delegate.recognizerUsesGlobalPointers.call(delegateScope, this));
+    },
+
+    /**
+     * Returns a boolean indicating whether this Recognizer should capture
+     * pointers.
+     *
+     * @returns {Boolean} True if the Recognizer should capture pointers.
+     */
+    shouldCapturePointers: function() {
+        var delegate = this.options.delegate;
+        var delegateScope = this.options.delegateScope;
+
+        if (!delegate || !delegate.capturePointers || !_.isFunction(delegate.capturePointers)) {
+            return this.options.capturePointers;
+        }
+        else {
+            return delegate.capturePointers.call(delegateScope, this);
+        }
+    },
+
+   /**
+     * Tells the manager to emit pending events and try to reset all the recognizers.
+     * Normally, the manager calls reset when there are no more active pointers, but
+     * we need this additional mechanism for recognizers that fail asynchronously.
+    */
+    recognizerFailedAsynchronously: function() {
+        if (this.manager) {
+            this.manager.tryEmitPending();
+            this.manager.tryReset();
+        }
+    },
+
+   /**
+    * Tells the manager to check if the recognizer captures pointers.
+    * Normally, the manager checks this automatically when the recognizer
+    * transitions to a started/recognized state, but we need this additional
+    * mechanism for recognizers that start asynchronously.
+    */
+    recognizerStartedAsynchronously: function() {
+        if (this.manager) {
+            this.manager.checkCapturePointers(this);
+        }
+    },
+
+   /**
+    * Tells the manager to try to emit any pending events. This is called by the 
+    * Recognizer base class automatically when the state changes to 
+    * STATE_FAILED. If recognizer subclasses manually set their state to 
+    * STATE_FAILED, they should call this explicitly.
+    */
+    tryEmitPending: function() {
+        if (this.manager) {
+            this.manager.tryEmitPending();
+        }
+    },
+
+    /**
+     * Emits event data from the recognizer. If the recognizer is not managed
+     * by any Manager, then this method will have no effect.
+     *
+     * @param {Object} data The data that should be emitted as part of the event.
+     */
+    emit: function(data) { 
+        if (this.manager) {
+            this.manager.tryEmitRecognizerEvent(this, this.options.eventName, data || {});
+        }
+    }
+};
+
+/**
+ * A tap gesture recognizer. This Recognizer supports 1 or more taps consisting
+ * of 1 or more fingers.
+ *
+ * @class Tap
+ * @param {Object} [options] The options.
+ *     @param {String} [options.eventName=tap] The name of the event to emit when
+ *     a tap is detected.
+ *     @param {Number} [options.minPointers=1] The minimum number of pointers
+ *     required for the tap gesture. For instance, a value of 1 here indicates
+ *     a single-finger tap.
+ *     @param {Number} [options.maxPointers=1] The maximum number of pointers
+ *     required for the tap gesture.
+ *     @param {Number} [options.taps=1] The number of taps that should occur
+ *     in sequence for the Recognizer to emit a "recognized" event.
+ *     @param {Number} [options.interval=300] The maximum interval, in milliseconds,
+ *     allowed between taps for multi-tap gesture detection.
+ *     @param {Number} [options.duration=1000] The maximum duration, in milliseconds,
+ *     allowed for an individual tap.
+ *     @param {Number} [options.tolerance=1] The maximum allowed amount of movement
+ *     during a tap before the tap is considered failed. This value is in the units
+ *     specified by the Recognizer's manager (defaults to centimeters).
+ *     @param {Number} [options.radius=7] The radius to search for adjacent
+ *     pointers using pointer clustering within the Pointer Set provided to the
+ *     Recognizer. This value is in the units specified by the Recongizer's
+ *     manager (defaults to centimeters).
+ * @extends Recognizer
+ * @example
+ * new Sistine.Tap().on('tap', function(ev) {
+ *     console.log('Tap event');
+ * });
+ * @example
+ * new Sistine.Tap({eventName:'doubleTap', taps:2}).on('doubleTap', function(ev) {
+ *     console.log('Double tap event');
+ * });
+ * @constructor
+ */
+function Tap() {
+    Recognizer.apply(this, arguments);
+
+    this.reset();
+}
+
+/**
+ * @event Tap#tap
+ * @type {Object}
+ * @property {Number} state The tap recognizer's current state.
+ * @property {Pointer} pointer The master pointer for the tap gesture.
+ * @property {PointerSet} pointerSet The entire pointer set being tracked
+ * by the tap gesture.
+ */
+
+inherit(Tap, Recognizer, {
+    defaults: _.defaults({
+        eventName: 'tap',
+        minPointers: 1,
+        maxPointers: 1,
+        taps: 1,
+        interval: 300,
+        duration: 1000,
+        tolerance: 1,
+        radius: 7
+    }, Recognizer.prototype.defaults),
+
+    /**
+     * Called by the Manager when the tap gesture recognizer is requested to 
+     * process incoming Pointer data.
+     *
+     * @param {String} eventType
+     * @param {Object} eventData
+     * @param {PointerSet} pointerSet
+     * @returns {Number} The new state that the tap recognizer is in after
+     * processing.
+     */
+    process: function(eventType, eventData, pointerSet) {
+        switch (eventType) {
+            case EVENT_DOWN:
+                return this._processDownEvent(eventData, pointerSet);
+
+            case EVENT_UP:
+                return this._processUpEvent(eventData, pointerSet);
+        }
+    },
+
+    /**
+     * Called by the Manager when the tap gesture recognizer should be reset.
+     */
+    reset: function() {
+        this.state = STATE_POSSIBLE;
+
+        clearInterval(this._interval);
+
+        delete this._interval;
+        delete this._masterPointer;
+        delete this._currentPointerSet;
+
+        this._tapCount = 0;
+        this._firstTapPosition = [];
+
+        return this.state;
+    },
+
+    trackedPointers: function() {
+        return this._currentPointerSet;
+    },
+
+    _processDownEvent: function(eventData, pointerSet) {
+        if (!this._masterPointer) {
+            this._masterPointer = pointerSet.get(eventData.pointerId);
+        }
+
+        this._currentPointerSet = pointerSet.cluster(this._masterPointer.id, this.options.radius);
+
+        if (this._tapCount === 0) {
+            this._firstTapPosition = this._currentPointerSet.centroid();
+
+            if (this.options.interval > 0) {
+                clearInterval(this._interval);
+                delete this._interval;
+
+                // Trickery to pass the target into the delayed function call
+                this._interval = setInterval(_.bind(function() {
+                    this._handleInterval(eventData.target);
+                }, this), this.options.interval);
+            }
+        }
+
+        return this.state;
+    },
+
+    _processUpEvent: function(eventData, pointerSet) {
+        if (!this._masterPointer || !this._currentPointerSet || eventData.pointerId !== this._masterPointer.id) {
+            return this.state;
+        }
+
+        var pointerCount = this._currentPointerSet.count();
+        var tapPosition = this._currentPointerSet.centroid();
+        var tapOffset = [this._firstTapPosition[0] - tapPosition[0], this._firstTapPosition[1] - tapPosition[1]];
+        var pointerCountInRange = pointerCount >= this.options.minPointers && pointerCount <= this.options.maxPointers;
+        var durationInRange = this._masterPointer.duration() <= this.options.duration || this.options.duration === 0;
+        var movementInRange = toMetric(this._masterPointer.totalDistance()) <= this.options.tolerance;
+        var multiTapOffsetInRange = this._tapCount === 0 || toMetric(vectorLength(tapOffset)) <= this.options.tolerance;
+
+        if (pointerCountInRange && durationInRange && movementInRange && multiTapOffsetInRange) {
+            return this._handleTap(eventData);
+        }
+        else {
+            return this._returnObject(STATE_FAILED, this._masterPointer, this._currentPointerSet);
+        }
+    },
+
+    _handleTap: function(eventData) {
+        if (++this._tapCount >= this.options.taps) {
+            return this._returnObject(STATE_RECOGNIZED, this._masterPointer, this._currentPointerSet);
+        }
+
+        delete this._masterPointer;
+        delete this._currentPointerSet;
+
+        if (this.options.interval > 0) {
+            clearInterval(this._interval);
+            delete this._interval;
+
+            // Trickery to pass the target into the delayed function call
+            this._interval = setInterval(_.bind(function() {
+                this._handleInterval(eventData.target);
+            }, this), this.options.interval);
+        }
+
+        return this.state;
+    },
+
+    _handleInterval: function(target) {
+        // Normally, the state is returned to the base class, but we
+        // do it manually here because the interval finishes
+        // asynchronously. recognizerFailedAsynchronously is called
+        // to perform any necessary actions on fail.
+        this.state = STATE_FAILED;
+        this.recognizerFailedAsynchronously();
+
+        // Stop the timer since reset may or may not get called
+        // immediately.
+        clearInterval(this._interval);
+        delete this._interval;
+    },
+
+    _returnObject: function(state, pointer, pointerSet) {
+        return {
+            state: state,
+            data: {
+                pointer: pointer,
+                pointerSet: pointerSet
+            }
+        };
+    }
+});
+
+registerRecognizer(Tap, 'tap');
+
+/**
+ * A simple press gesture recognizer. This Recognizer supports press gestures 
+ * of any duration using 1 or more fingers. Events are emitted both on
+ * press start and press end.
+ *
+ * @class Press
+ * @param {Object} [options] The options.
+ *     @param {String} [options.eventName=press] The name of the event to emit when 
+ *     the press is detected.
+ *     @param {Number} [options.minPointers] The minimum number of pointers 
+ *     for the press.
+ *     @param {Number} [options.maxPointers] The maximum number of pointers
+ *     for the press.
+ *     @param {Number} [options.duration] The minimum duration required for
+ *     the press to be recognized. Set to 0 for immediate recognition.
+ *     @param {Number} [options.radius] The 
+ *     @param {Number} [options.threshold] The maximum allowed movement for the
+ *     press while it is being held down (during a long press) for the gesture
+ *     to register.
+ * @extends Recognizer
+ * @constructor
+ */
+function Press() {
+    Recognizer.apply(this, arguments);
+
+    this._stateMachine = new StateMachine(STATE_POSSIBLE, this.definition, this);
+    this.reset();
+}
+
+Press.emitTemplate = function() {
+    return {
+        pointer: this._masterPointer,
+        pointerSet: this._currentPointerSet
+    };
+};
+
+inherit(Press, Recognizer, {
+    defaults: _.defaults({
+        eventName: 'press',
+        minPointers: 1,
+        maxPointers: 1,
+        duration: 0,
+        threshold: 7,
+        radius: 7
+    }, Recognizer.prototype.defaults),
+
+    definition: [
+        {
+            on: EVENT_DOWN,
+            from: STATE_POSSIBLE,
+            before: function(eventData, pointerSet) {
+                this._masterPointer = this._masterPointer || pointerSet.get(eventData.pointerId);
+                this._currentPointerSet = pointerSet.cluster(this._masterPointer.id, this.options.radius);
+            },
+            async: {
+                guard: function() {
+                    var pointerCount = this._currentPointerSet.count();
+                    if (pointerCount >= this.options.minPointers &&
+                        pointerCount <= this.options.maxPointers &&
+                        this.options.duration > 0) {
+                        return this.options.duration;
+                    }
+
+                    return false;
+                },
+                transitions: [
+                    {
+                        to: STATE_STARTED,
+                        guard: function() {
+                            return this.shouldBegin();
+                        },
+                        after: function(eventData, pointerSet) {
+                            this.state = STATE_STARTED;
+                            this.emit({
+                                target: eventData.target,
+                                state: this.state,
+                                pointer: this._masterPointer,
+                                pointerSet: this._currentPointerSet
+                            });
+                            this.recognizerStartedAsynchronously();
+                        }
+                    },
+                    {
+                        to: STATE_FAILED,
+                        guard: function() {
+                            return !this.shouldBegin();
+                        },
+                        after: function() {
+                            this.state = STATE_FAILED;
+                            this.recognizerFailedAsynchronously();
+                        }
+                    }
+                ]
+            },
+            transitions: [
+                {
+                    to: STATE_STARTED,
+                    emit: Press.emitTemplate,
+                    guard: function() {
+                        var pointerCount = this._currentPointerSet.count();
+                        return pointerCount >= this.options.minPointers &&
+                            pointerCount <= this.options.maxPointers &&
+                            this.options.duration === 0;
+                    },
+                },
+                {
+                    to: STATE_FAILED,
+                    emit: Press.emitTemplate,
+                    guard: function() {
+                        return this._currentPointerSet.count() > this.options.maxPointers;
+                    }
+                }
+            ]
+        },
+        {
+            on: EVENT_MOVE,
+            from: STATE_POSSIBLE,
+            transitions: [
+                {
+                    to: STATE_FAILED,
+                    emit: Press.emitTemplate,
+                    guard: function() {
+                        if (!this._masterPointer) {
+                            return false;
+                        }
+
+                        return toMetric(this._masterPointer.totalDistance()) > this.options.threshold;
+                    }
+                }
+            ]
+        },
+        {
+            on: [EVENT_UP, EVENT_CANCEL],
+            from: STATE_POSSIBLE,
+            before: function(eventData, pointerSet) {
+                if (!this._currentPointerSet || !this._masterPointer) {
+                    return;
+                }
+
+                this._currentPointerSet.remove(eventData.pointerId);
+                if (this._currentPointerSet.count() > 0 && eventData.pointerId === this._masterPointer.id) {
+                    this._masterPointer = this._currentPointerSet.first();
+                }
+            },
+            transitions: [
+                {
+                    to: STATE_FAILED,
+                    emit: Press.emitTemplate,
+                    guard: function() {
+                        if (!this._currentPointerSet) {
+                            return false;
+                        }
+
+                        return this._currentPointerSet.count() < this.options.minPointers;
+                    }
+                }
+            ]
+        },
+        {
+            on: EVENT_DOWN,
+            from: STATE_STARTED,
+            before: function(eventData, pointerSet) {
+                this._currentPointerSet = pointerSet.cluster(this._masterPointer.id, this.options.radius);
+            },
+            transitions: [
+                {
+                    to: STATE_FAILED,
+                    emit: Press.emitTemplate,
+                    guard: function() {
+                        return this._currentPointerSet.count() > this.options.maxPointers;
+                    }
+                }
+            ]
+        },
+        {
+            on: [EVENT_UP, EVENT_CANCEL],
+            from: STATE_STARTED,
+            before: function(eventData, pointerSet) {
+                if (!this._currentPointerSet || ! this._masterPointer) {
+                    return;
+                }
+
+                this._currentPointerSet.remove(eventData.pointerId);
+                if (this._currentPointerSet.count() > 0 && eventData.pointerId === this._masterPointer.id) {
+                    this._masterPointer = this._currentPointerSet.first();
+                }
+            },
+            transitions: [
+                {
+                    to: STATE_ENDED,
+                    emit: Press.emitTemplate,
+                    guard: function() {
+                        if (!this._currentPointerSet) {
+                            return false;
+                        }
+
+                        return this._currentPointerSet.count() < this.options.minPointers;
+                    }
+                },
+                {
+                    to: STATE_CHANGED,
+                    emit: Press.emitTemplate
+                }
+            ]
+        }
+    ],
+
+    process: function(eventType, eventData, pointerSet) {
+        return this._stateMachine.process(eventType, eventData, pointerSet);
+    },
+
+    reset: function() {
+        this.state = this._stateMachine.reset();
+
+        delete this._currentPointerSet;
+        delete this._masterPointer;
+    },
+
+    trackedPointers: function() {
+        return this._currentPointerSet;
+    },
+
+    fail: function() {
+        Recognizer.prototype.fail.apply(this, arguments);
+
+        this._stateMachine.cancelAsync();
+    }
+});
+
+registerRecognizer(Press, 'press');
+
+/**
+ * A pinch gesture recognizer. This Recognizer supports pinch gestures
+ * using two or more fingers.
+ *
+ * @class Pinch
+ * @param {Object} [options] The options.
+ *     @param {String} [options.eventName=pinch] The name of the event to emit when
+ *     the pinch is detected.
+ *     @param {Number} [options.scaleThreshold] The minimum scale required for
+ *     the pinch to be recognized. Set to 0 for immediate recognition.
+ * @extends Recognizer
+ * @constructor
+ */
+function Pinch() {
+    Recognizer.apply(this, arguments);
+
+    this._stateMachine = new StateMachine(STATE_POSSIBLE, this.definition, this);
+    this.reset();
+}
+
+Pinch.emitTemplate = function() {
+    return {
+        pointer: this._masterPointer,
+        pointerSet: this._currentPointerSet,
+        scale: this._currentScale
+    };
+};
+
+inherit(Pinch, Recognizer, {
+    defaults: _.defaults({
+        eventName: 'pinch',
+        radius: 7,
+        scaleThreshold: 0.05,
+        minPointers: 2,
+        maxPointers: 2
+    }, Recognizer.prototype.defaults),
+
+    definition: [
+        {
+            on: EVENT_DOWN,
+            from: STATE_POSSIBLE,
+            before: function(eventData, pointerSet) {
+                this._masterPointer = this._masterPointer || pointerSet.get(eventData.pointerId);
+                this._currentPointerSet = pointerSet.cluster(this._masterPointer.id, this.options.radius);
+                this._currentPointerCount = this._currentPointerSet.count();
+            },
+            transitions: [
+                {
+                    to: STATE_FAILED,
+                    guard: function() {
+                        return this._currentPointerCount > this.options.maxPointers;
+                    },
+                    emit: Pinch.emitTemplate
+                }
+            ]
+        },
+        {
+            on: EVENT_DOWN,
+            from: STATE_STARTED,
+            before: function(eventData, pointerSet) {
+                this._currentPointerSet = pointerSet.cluster(this._masterPointer.id, this.options.radius);
+                this._currentPointerCount = this._currentPointerSet.count();
+            },
+            transitions: [
+                {
+                    to: STATE_ENDED,
+                    guard: function() {
+                        return this._currentPointerCount > this.options.maxPointers;
+                    },
+                    emit: Pinch.emitTemplate
+                },
+                {
+                    to: STATE_CHANGED,
+                    emit: Pinch.emitTemplate
+                }
+            ]
+        },
+        {
+            on: EVENT_MOVE,
+            from: STATE_POSSIBLE,
+            before: function(eventData, pointerSet) {
+                var centroid = this._currentPointerSet.centroid();
+
+                var currentAverageDistance = this._currentPointerSet.averageDistanceFromPoint(centroid);
+                this._firstAverageDistance = this._firstAverageDistance || currentAverageDistance;
+                this._currentScale = currentAverageDistance/this._firstAverageDistance;
+            },
+            transitions: [
+                {
+                    to: STATE_STARTED,
+                    guard: function() {
+                        return this._currentPointerCount >= this.options.minPointers &&
+                               Math.abs(1 - this._currentScale) >= this.options.scaleThreshold;
+                    },
+                    emit: Pinch.emitTemplate
+                }
+            ]
+        },
+        {
+            on: EVENT_MOVE,
+            from: [STATE_STARTED, STATE_CHANGED],
+            before: function(eventData, pointerSet) {
+                var centroid = this._currentPointerSet.centroid();
+                var currentAverageDistance = this._currentPointerSet.averageDistanceFromPoint(centroid);
+                this._currentScale = currentAverageDistance/this._firstAverageDistance;
+            },
+            transitions: [
+                {
+                    to: STATE_CHANGED,
+                    emit: Pinch.emitTemplate
+                }
+            ]
+        },
+        {
+            on: EVENT_UP,
+            from: STATE_POSSIBLE,
+            before: function(eventData, pointerSet) {
+                this._currentPointerSet.remove(eventData.pointerId);
+                this._currentPointerCount = this._currentPointerSet.count();
+            },
+            transitions: [
+                {
+                    to: STATE_FAILED,
+                    guard: function() {
+                        return this._currentPointerCount < this.options.minPointers;
+                    },
+                    emit: Pinch.emitTemplate
+                }
+            ]
+        },
+        {
+            on: EVENT_UP,
+            from: [STATE_STARTED, STATE_CHANGED],
+            before: function(eventData, pointerSet) {
+                this._currentPointerSet.remove(eventData.pointerId);
+
+                if (eventData.pointerId === this._masterPointer.id) {
+                    this._masterPointer = this._currentPointerSet.first();
+                }
+
+                this._currentPointerCount = this._currentPointerSet.count();
+            },
+            transitions: [
+                {
+                    to: STATE_ENDED,
+                    guard: function() {
+                        return this._currentPointerCount < this.options.minPointers;
+                    },
+                    emit: Pinch.emitTemplate
+                }
+            ]
+        }
+    ],
+
+    process: function(eventType, eventData, pointerSet) {
+        return this._stateMachine.process(eventType, eventData, pointerSet);
+    },
+
+    reset: function() {
+        this.state = this._stateMachine.reset();
+
+        delete this._masterPointer;
+        delete this._currentPointerSet;
+        this._currentPointerCount = 0;
+        this._currentScale = 0;
+        this._firstAverageDistance = 0;
+
+        return this.state;
+    },
+
+    trackedPointers: function() {
+        return this._currentPointerSet;
+    }
+});
+
+registerRecognizer(Pinch, 'pinch');
+
+/**
+ * A pan gesture recognizer. This Recognizer supports pan gestures
+ * using 1 or more fingers.
+ *
+ * @class Pan
+ * @param {Object} [options] The options.
+ *     @param {String} [options.eventName] The name of the event to emit when
+ *     the pan is detected.
+ *     @param {Number} [options.minPointers] The minimum number of pointers
+ *     for the pan.
+ *     @param {Number} [options.maxPointers] The maximum number of pointers
+ *     for the pan.
+ *     @param {Number} [options.minLockDistance] The minimum distance required for
+ *     the pan to be recognized. Set to 0 for immediate recognition.
+ * @extends Recognizer
+ * @constructor
+ */
+function Pan() {
+    Recognizer.apply(this, arguments);
+
+    this._stateMachine = new StateMachine(STATE_POSSIBLE, this.definition, this);
+    this.reset();
+}
+
+Pan.emitTemplate = function() {
+    return {
+        pointer: this._masterPointer,
+        pointerSet: this._currentPointerSet,
+        translation: this._currentTranslation
+    };
+};
+
+inherit(Pan, Recognizer, {
+    defaults: _.defaults({
+        eventName: 'pan',
+        minPointers: 1,
+        maxPointers: 1,
+        minLockDistance: 1,
+        direction: DIRECTION_ANY,
+        radius: 7,
+        capturePointers: true
+    }, Recognizer.prototype.defaults),
+
+    definition: [
+        {
+            on: EVENT_DOWN,
+            from: STATE_POSSIBLE,
+            before: function(eventData, pointerSet) {
+                this._masterPointer = this._masterPointer || pointerSet.get(eventData.pointerId);
+                this._currentPointerSet = pointerSet.cluster(this._masterPointer.id, this.options.radius);
+                this._currentPointerCount = this._currentPointerSet.count();
+            },
+            transitions: [
+                {
+                    to: STATE_FAILED,
+                    guard: function() {
+                        return this._currentPointerCount > this.options.maxPointers;
+                    },
+                    emit: Pan.emitTemplate
+                }
+            ]
+        },
+        {
+            on: EVENT_DOWN,
+            from: STATE_STARTED,
+            before: function(eventData, pointerSet) {
+                this._currentPointerSet = pointerSet.cluster(this._masterPointer.id, this.options.radius);
+                this._currentPointerCount = this._currentPointerSet.count();
+            },
+            transitions: [
+                {
+                    to: STATE_FAILED,
+                    guard: function() {
+                        return this._currentPointerCount > this.options.maxPointers;
+                    },
+                    emit: Pan.emitTemplate
+                }
+            ]
+        },
+        {
+            on: EVENT_MOVE,
+            from: STATE_POSSIBLE,
+            transitions: [
+                {
+                    to: STATE_STARTED,
+                    guard: function() {
+                        var distance = this._masterPointer.totalCumulativeDistance();
+                        var direction = this._masterPointer.totalDirection();
+                        return (this._currentPointerCount >= this.options.minPointers &&
+                                toMetric(distance) >= this.options.minLockDistance &&
+                                (direction & this.options.direction) === direction); // jshint ignore:line
+                    },
+                    emit: Pan.emitTemplate
+                }
+            ]
+        },
+        {
+            on: EVENT_MOVE,
+            from: [STATE_STARTED, STATE_CHANGED],
+            before: function() {
+                this._currentTranslation = this._masterPointer.totalVector();
+
+                // If the pan is horizontal, ignore y
+                if ((this.options.direction | DIRECTION_HORIZONTAL) === DIRECTION_HORIZONTAL) { // jshint ignore:line
+                    this._currentTranslation[1] = 0;
+                }
+                // If the pan is vertical, ignore x
+                else if ((this.options.direction | DIRECTION_VERTICAL) === DIRECTION_VERTICAL) { // jshint ignore:line
+                    this._currentTranslation[0] = 0;
+                }
+            },
+            transitions: [
+                {
+                    to: STATE_CHANGED,
+                    emit: Pan.emitTemplate
+                }
+            ]
+        },
+        {
+            on: [EVENT_UP, EVENT_CANCEL],
+            from: STATE_POSSIBLE,
+            before: function(eventData, pointerSet) {
+                this._currentPointerSet.remove(eventData.pointerId);
+                this._currentPointerCount = this._currentPointerSet.count();
+
+                if (this._currentPointerCount > 0 && eventData.pointerId === this._masterPointer.id) {
+                    this._masterPointer = this._currentPointerSet.first();
+                }
+            },
+            transitions: [
+                {
+                    to: STATE_FAILED,
+                    guard: function() {
+                        return this._currentPointerCount < this.options.minPointers;
+                    },
+                    emit: Pan.emitTemplate
+                }
+            ]
+        },
+        {
+            on: [EVENT_UP, EVENT_CANCEL],
+            from: [STATE_STARTED, STATE_CHANGED],
+            before: function(eventData, pointerSet) {
+                this._currentPointerSet.remove(eventData.pointerId);
+                this._currentPointerCount = this._currentPointerSet.count();
+
+                if (this._currentPointerCount > 0 && eventData.pointerId === this._masterPointer.id) {
+                    this._masterPointer = this._currentPointerSet.first();
+                }
+            },
+            transitions: [
+                {
+                    to: STATE_ENDED,
+                    guard: function() {
+                        return this._currentPointerCount < this.options.minPointers;
+                    },
+                    emit: Pan.emitTemplate
+                },
+                {
+                    to: STATE_CHANGED,
+                    emit: Pan.emitTemplate
+                }
+            ]
+        }
+    ],
+
+    process: function(eventType, eventData, pointerSet) {
+        return this._stateMachine.process(eventType, eventData, pointerSet);
+    },
+
+    reset: function() {
+        this.state = this._stateMachine.reset();
+
+        delete this._masterPointer;
+        delete this._currentPointerSet;
+        this._currentTranslation = [0, 0];
+
+        return this.state;
+    },
+
+    trackedPointers: function() {
+        return this._currentPointerSet;
+    }
+});
+
+registerRecognizer(Pan, 'pan');
+
+/**
+ * The Manager funnels touch input to Recognizer instances and handles the 
+ * emitting of gesture events to designated event handlers. Multiple managers
+ * may exist in a single application, each manager attached to and listening
+ * for events on a single DOM element.
+ * 
+ * @constructor
+ * @param {HTMLElement} element The DOM element on which to listen for events.
+ * @param {Object} [options] The options.
+ *     @param {Boolean} [options.domEvents=false] Set to true to enable DOM 
+ *     events, in addition to the standard events emitted from the Manager instances.
+ *     DOM events are slower and can introduce issues when multiple Managers
+ *     are used in the same application with DOM events turned on. Typically,
+ *     this means duplicate events for the same gesture across Managers when
+ *     those Managers are attached to elements that are descendants of each
+ *     other.
+ *     @param {Array} [options.recognizers=[]] An array of gesture recognizers
+ *     that should be immediately added to and managed by this Manager.
+ *     @param {Object} [options.cssProps] The collection of default CSS properties
+ *     to apply to the doucment body.
+ *     @param {Number} [options.ppcm=28] The default "points per centimeter" 
+ *     to use for unit conversion. When DOM content is loaded this value will 
+ *     be reset to a calculated value based on values reported by the browser (if it can be calculated).
+ *     @param {String} [options.units=cm] One of PIXELS or CENTIMETERS. The
+ *     default units to use for recognizer options that specify distances.
+ * @see PIXELS
+ * @see CENTIMETERS
+ */
+function Manager(element, options) {
+    this.options = _.defaults(options || {}, Sistine.defaults);
+
+    /**
+     * @public
+     */
+    this.recognizers = [];
+
+    /**
+     * @type {HTMLElement}
+     * @public
+     */
+    this.element = element;
+
+    /**
+     * @type {Array}
+     * @public
+     */
+    this.activePointerIDs = [];
+
+    // _.bind is slow, so we use direct binding for performance reasons here
+    var self = this;
+    this._handlers = {};
+    this._boundHandlePointerDown = function(ev) { self._handlePointerDown.call(self, ev); };
+    this._boundHandlePointerMove = function(ev) { self._handlePointerMove.call(self, ev); };
+    this._boundHandlePointerUp = function(ev) { self._handlePointerUp.call(self, ev); };
+    this._boundHandleCancelEvent = function(ev) { self._handleCancelEvent.call(self, ev); };
+    this._pendingEmits = [];
+
+    element.addEventListener('pointerdown', this._boundHandlePointerDown, false);
+    document.addEventListener('pointerup', this._boundHandlePointerUp, false);
+    document.addEventListener('pointercancel', this._boundHandlePointerUp, false);
+    document.addEventListener('sistine-cancelpointers', this._boundHandleCancelEvent, false);
+
+    this._populate();
+}
+
+Manager.prototype = {
+    /**
+     * Destroys this manager by removing all recognizers and removing all event listeners.
+     */
+    destroy: function() {
+        this.removeAll();
+        this.element.removeEventListener('pointerdown', this._boundHandlePointerDown);
+        document.removeEventListener('pointerup', this._boundHandlePointerUp);
+        document.removeEventListener('pointercancel', this._boundHandlePointerUp);
+        document.removeEventListener('sistine-cancelpointers', this._boundHandleCancelEvent);
+    },
+
+    /**
+     * Returns the number of Recognizers being managed.
+     *
+     * @returns {Number} Returns the number of recognizers being managed.
+     */
+    count: function() {
+        return this.recognizers.length;
+    },
+
+    /**
+     * Adds a Recognizer.
+     *
+     * @param {Recognizer} recognizer The Recognizer instance to add to the
+     * manager.
+     * @returns {Recognizer} Returns the added recognizer.
+     */
+    add: function(recognizer) {
+        var existing = this.get(recognizer.options.eventName);
+        if (existing) {
+            this.remove(existing);
+        }
+
+        recognizer.manager = this;
+        this.recognizers.push(recognizer);
+
+        return this;
+    },
+
+    /**
+     * Remove a Recognizer.
+     *
+     * @param {Recognizer} recognizer The recognizer to remove.
+     * @returns {Manager} Returns this Manager.
+     */
+    remove: function(recognizer) {
+        var recognizers = this.recognizers;
+        recognizer = this.get(recognizer);
+        recognizers.splice(_.indexOf(recognizers, recognizer), 1);
+
+        return this;
+    },
+
+    /**
+     * Remove all Recognizers.
+     *
+     * @returns {Manager} Returns this Manager instance.
+     */
+    removeAll: function() {
+        this.recognizers.length = 0;
+
+        return this;
+    },
+
+    /**
+     * Get a recognizer by its event name.
+     * 
+     * @param {Recognizer|String} eventName Event name or Recognizer instance.
+     * @returns {Recognizer|Null} Returns the Recognizer if it was added to the
+     * manager. Returns null otherwise.
+     */
+    get: function(eventName) {
+        if (eventName instanceof Recognizer) {
+            return eventName;
+        }
+
+        var found = null;
+
+        this.recognizers.every(function(recognizer) {
+            if (recognizer.options.eventName === eventName) {
+                found = recognizer;
+                return false;
+            }
+        }, this);
+
+        return found;
+    },
+
+    /**
+     * Recognize an event. Typically, this is called automatically by the Manager
+     * when handling pointer events from the browser. Calling this method
+     * manually when other events are occurring may interfere with proper
+     * gesture recognition, so use wisely.
+     *
+     * @param {String} eventType One of pointerstart, pointermove, pointerend
+     * or pointercancel.
+     * @param {Object} eventData The event data as a sanitized, flattened object. This
+     * is automatically provided by the ```Pointer.add``` method.
+     * @param {PointerSet} pointerSet The set of all Pointers currently in
+     * the global space. The Manager may provide Recognizers a subset of this
+     * set depending on their configuration.
+     */
+    recognize: function(eventType, eventData, pointerSet) {
+        var recognizers = this.recognizers;
+        var recognizer, otherRecognizer, previousState, currentState;
+        var managedPointerSet = pointerSet ? pointerSet.subset(this.activePointerIDs) : new PointerSet();
+        
+        for (var i = 0, len = recognizers.length; i < len; i++) {
+            recognizer = recognizers[i];
+            previousState = recognizer.state;
+
+            // If the recognizer already failed, skip
+            if (previousState === STATE_FAILED) {
+                continue;
+            }
+
+            currentState = recognizer.recognize(eventType, eventData, recognizer.usesGlobalPointers() ? pointerSet : managedPointerSet);
+
+            // Re-init length, since the event could have destroyed this recognizer
+            // somehow
+            len = recognizers.length;
+
+            // Check for pointer capture and failure dependencies if transitioning
+            // out of STATE_POSSIBLE
+            if (previousState === STATE_POSSIBLE &&
+                currentState !== STATE_POSSIBLE &&
+                currentState !== STATE_FAILED) {
+
+                this.checkCapturePointers(recognizer);
+                this._checkGesturesRequiredToFail(recognizer);
+            }
+        }
+    },
+
+   /**
+    * Tries to reset and clear the recognizers. This should be called by the Manager
+    * when there are no more active pointers, or can be called by recognizers that
+    * get to a terminal state asynchronously. Recognizers and pending emits are
+    * only cleared if all recognizers have reached a terminal state.
+    */
+    tryReset: function() {
+        var recognizer;
+        var recognizers = this.recognizers;
+        var i;
+        var len = recognizers.length;
+
+        var shouldReset = true;
+
+        for (i = 0; i < len; i++) {
+            recognizer = recognizers[i];
+            if (!recognizer.hasTerminated()) {
+                shouldReset = false;
+                break;
+            }
+        }
+
+        if (shouldReset) {
+            for (i = 0; i < len; i++) {
+                recognizer = recognizers[i];
+                recognizer.reset();
+            }
+            this._clearPendingEmits();
+        }
+    },
+
+    /**
+     * Listens for a gesture event on the Manager.
+     *
+     * @param {String} events A comma-delimited string of event names optionally
+     *     suffixed with a selector (by a space).
+     * @param {Function} handler The event handler function.
+     * @returns {Manager} Returns this Manager instance.
+     * @example
+     *     manager.on('tap', function() { ... });
+     *     manager.on('tap .myclass', function() { ... });
+     *     manager.on('tap .myclass, swipe', function() { ... });
+     */
+    on: function(events, handler) {
+        var handlers = this._handlers;
+        _.each(_.map(splitComma(events), splitStr), function(eventPair) {
+            var eventName = eventPair[0],
+                selector = eventPair[1];
+            handlers[eventName] = handlers[eventName] || [];
+            handlers[eventName].push({
+                handler: handler,
+                selector: selector
+            });
+        });
+
+        return this;
+    },
+
+    /**
+     * Stops listening for a gesture event on the Manager.
+     *
+     * @param {String} events A comma-delimited string of event names optionally
+     *     suffixed with a selector (by a space).
+     * @param {Function} handler The event handler function.
+     * @returns {Manager} Returns this Manager instance.
+     * @example
+     *     manager.off('tap');
+     *     manager.off('tap .myclass');
+     *     manager.off('tap', myFunction);
+     *     manager.off('tap .myclass', myFunction);
+     */
+    off: function(events, handler) {
+        var handlers = this._handlers;
+        _.each(_.map(splitComma(events), splitStr), function(eventPair) {
+            var eventName = eventPair[0],
+                selector = eventPair[1];
+
+            if (!handler) {
+                if (!selector) {
+                    delete handlers[eventName];
+                }
+                else {
+                    handlers[eventName].splice(_.indexOf(_.pluck(handlers[eventName], 'selector'), selector), 1);
+                }
+            } 
+            else {
+                if (!selector) {
+                    handlers[eventName].splice(_.indexOf(_.pluck(handlers[eventName], 'handler'), handler), 1);
+                }
+                else {
+                    var idx;
+                    var obj = _.find(handlers[eventName], function(obj, objIdx) {
+                        if (obj.handler === handler && obj.selector === selector) {
+                            idx = objIdx; 
+                            return true;
+                        }
+                    });
+                    handlers[eventName].splice(idx, 1);
+                }
+            }
+        });
+
+        return this;
+    },
+
+    /**
+     * Tries to emit a recognizer event. Recognizers should call this method instead
+     * of calling ```emit``` directly. If an event cannot be emitted due to a dependency, it
+     * is added to a queue to try and emit later.
+     *
+     * @param {Recognizer} recognizer
+     * @param {String} eventName
+     * @param {Object} props
+     */
+    tryEmitRecognizerEvent: function(recognizer, eventName, props) {
+        var requireFailRecognizer = recognizer.requiresFail();
+        if (!requireFailRecognizer || requireFailRecognizer.state !== STATE_POSSIBLE) {
+            this.emit(eventName, props);
+        }
+        else {
+            this._pendingEmits.push({
+                recognizer: recognizer,
+                eventName: eventName,
+                props: props
+            });
+        }
+    },
+
+    /**
+     * Tries to emit any pending events.
+     */
+    tryEmitPending: function() {
+        var pendingEmit;
+        var recognizer; 
+        var requireFailRecognizer; 
+
+        // Cannot cache length for this loop, as we modify the array during
+        // iteration
+        for (var i = 0; i < this._pendingEmits.length; i++) {
+            pendingEmit = this._pendingEmits[i];
+            recognizer = pendingEmit.recognizer;
+            requireFailRecognizer = recognizer.requiresFail();
+
+            if (requireFailRecognizer && requireFailRecognizer.state === STATE_FAILED) {
+                this.emit(pendingEmit.eventName, pendingEmit.props);
+                this._pendingEmits.splice(i, 1);
+                i--;
+            }
+        }
+    },
+
+    /**
+     * Emits an event.
+     *
+     * @param {String} eventName
+     * @param {Object} [props]
+     */
+    emit: function(eventName, props) {
+        props = _.extend(props || {}, {currentTarget: this.element});
+
+        if (this.options.domEvents && props.target) {
+            props.target.dispatchEvent(createEvent(eventName, props));
+        }
+
+        var handlers = this._handlers[eventName] && this._handlers[eventName].slice();
+        if (!handlers || handlers.length === 0) {
+            return;
+        }
+
+        for (var i = 0, len = handlers.length; i < len; i++) {
+            var handler = handlers[i].handler;
+            var selector = handlers[i].selector;
+            var currentTarget = selector ? ancestorWithSelector(props.target, selector) : this.element;
+
+            if (!selector || (selector && currentTarget)) {
+                handlers[i].handler(_.extend(props || {}, {currentTarget: currentTarget}));
+            }
+        }
+    },
+
+    /**
+     * Forces all gesture recognizers tracking the given pointer IDs to fail
+     * immediately. The optional ```excluding``` parameter provides the option
+     * of allowing one or more recognizers to ignore the fail request.
+     *
+     * @param {Array} pointerIds The pointer IDs that should be considered
+     * cancelled by all Recognizers except those in the exclusion list.
+     * @param {Recognizer|Array} [excluding] The Recognizer or Recognizers that
+     * should be considered immune to the cancel request.
+     */
+    cancel: function(pointerIds, excluding) {
+        if (!pointerIds) {
+            return;
+        }
+
+        this.recognizers.every(function(recognizer) {
+            if ((_.isArray(excluding) && _.contains(excluding, recognizer)) ||
+                recognizer === excluding) {
+                return true;
+            }
+
+            recognizer.fail(pointerIds);
+        }, this);
+
+        if (_.isUndefined(excluding) || _.isNull(excluding)) {
+            this._processRemovedPointers(pointerIds);
+        }
+    },
+
+    /**
+     * Checks if the given recognizer captures pointers. If it does,
+     * calls Sistine.cancelPointers with the tracked pointers of the recognizer.
+     *
+     * @param {Recognizer} The recognizer to check.
+     * @returns {Boolean} True if the provided recognizer should capture the
+     * pointers it is tracking, false otherwise.
+     */
+    checkCapturePointers: function(recognizer) {
+        var trackedPointers = recognizer.trackedPointers();
+        var capturePointers = recognizer.shouldCapturePointers();
+
+        if (capturePointers && trackedPointers) {
+            Sistine.cancelPointers(trackedPointers.pointerIds(), recognizer);
+            return true;
+        }
+
+        return false;
+    },
+
+    /***************************************************************************
+    *
+    * Private functions
+    *
+    ***************************************************************************/
+
+    _populate: function() {
+        // Add all of the default recognizers specified in the options.recognizers
+        // Check for strings first, then Recognizer instances
+        var i, len, recognizer, clazz;
+        for (i = 0, len = this.options.recognizers.length; i < len; i++) {
+            recognizer = this.options.recognizers[i];
+            if (_.isString(recognizer)) {
+                clazz = getRecognizer(recognizer);
+                if (_.isFunction(clazz)) {
+                    this.add(new clazz()); // jshint ignore:line
+                }
+            }
+            else if (recognizer instanceof Recognizer) {
+                this.add(recognizer);
+            }
+            else if (_.isObject(recognizer) && recognizer.name) {
+                clazz = getRecognizer(recognizer.name); 
+                this.add(new clazz(recognizer.options)); // jshint ignore:line
+            }
+        }
+    },
+
+    _checkGesturesRequiredToFail: function(recognizer) {
+        var recognizers = this.recognizers;
+        var requireFailRecognizer = recognizer.requiresFail();
+
+        for (var i = 0, len = recognizers.length; i < len; i++) {
+            var otherRecognizer = recognizers[i];
+            if (otherRecognizer === recognizer || !requireFailRecognizer || requireFailRecognizer === otherRecognizer) {
+                continue;
+            }
+
+            otherRecognizer.fail();
+        }
+    },
+
+    _clearPendingEmits: function() {
+        this._pendingEmits.length = 0;
+    },
+
+    _handlePointerDown: function(ev) {
+        var pointerId = ev.pointerId;
+        var masterPointerSet = Sistine.pointerSet;
+        var pointer = masterPointerSet.get(pointerId);
+
+        if (!pointer) {
+            return;
+        }
+
+        var eventData = pointer.lastEvent();
+        var type = pointer.lastEventType();
+
+        if (type !== EVENT_DOWN) {
+            return;
+        }
+
+        if (this.activePointerIDs.length === 0) {
+            document.addEventListener('pointermove', this._boundHandlePointerMove, false);
+        }
+
+        if (_.indexOf(this.activePointerIDs, pointerId) < 0) {
+            this.activePointerIDs.push(pointerId);
+        }
+        this.recognize(type, eventData, masterPointerSet); //masterPointerSet.subset(this.activePointerIDs));
+    },
+
+    _handlePointerMove: function(ev) {
+        var pointerId = ev.pointerId;
+        var masterPointerSet = Sistine.pointerSet;
+        var pointer = masterPointerSet.get(pointerId);
+
+        if (!pointer) {
+            return;
+        }
+
+        var eventData = pointer.lastEvent();
+        var type = pointer.lastEventType();
+
+        if (type !== EVENT_MOVE) {
+            return;
+        }
+
+        if (_.indexOf(this.activePointerIDs, pointerId) > -1) {
+            this.recognize(type, eventData, masterPointerSet);//.subset(this.activePointerIDs));
+        }
+    },
+
+    _handlePointerUp: function(ev) {
+        var pointerId = ev.pointerId;
+        var masterPointerSet = Sistine.pointerSet;
+        var pointer = masterPointerSet.get(pointerId);
+
+        if (!pointer) {
+            return;
+        }
+
+        var eventData = pointer.lastEvent();
+        var type = pointer.lastEventType();
+
+        if (type !== EVENT_UP && type !== EVENT_CANCEL) {
+            return;
+        }
+
+        if (_.indexOf(this.activePointerIDs, pointerId) > -1) {
+            this.recognize(type, eventData, masterPointerSet);
+            this._processRemovedPointer(pointerId);
+        }
+
+        if (this.activePointerIDs.length === 0) {
+            document.removeEventListener('pointermove', this._boundHandlePointerMove);
+        }
+    },
+
+    _handleCancelEvent: function(e) {
+        this.cancel(e.pointerIds, e.sender);
+    },
+
+    _processRemovedPointers: function(pointerIds) {
+        pointerIds.forEach(function(id) {
+            this._processRemovedPointer(id);
+        }, this);
+    },
+
+    _processRemovedPointer: function(pointerId) {
+        var index = _.indexOf(this.activePointerIDs, pointerId);
+
+        if (index > -1) {
+            this.activePointerIDs.splice(index, 1);
+        }
+
+        if (this.activePointerIDs.length === 0) {
+            this.tryReset();
+        }
+    }
+};
+
+
+/**
+ * Used for specifying centimeters (cm) as the preferred measurement unit for
+ * all gesture recognizer options.
+ *
+ * @constant
+ * @type {String}
+ * @default
+ * @memberof Sistine
+ */
+var CENTIMETERS = 'cm';
+
+/**
+ * Used for specifying pixels (px) as the preferred measurement unit for all
+ * gesture recognizer options.
+ *
+ * @constant
+ * @type {String}
+ * @default
+ * @memberof Sistine
+ */
+var PIXELS = 'px';
+
+/**
+ * Both the primary namespace and A shorthand constructor for creating a new 
+ * Manager for a given element.
+ *
+ * @param {HTMLElement} element
+ * @param {Object} [options]
+ * @namespace
+ */
+function Sistine(element, options) {
+    return new Sistine.Manager(element, options);
+}
+
+/**
+ * @memberof Sistine
+ */
+Sistine.defaults = {
+    /**
+     * The default "points per centimeter" to use for unit conversion. When
+     * DOM content is loaded this value will be reset to a calculated value
+     * based on values reported by the browser (if it can be calculated).
+     *
+     * @type {Number}
+     * @default 28
+     */
+    ppcm: 28,
+
+    /**
+     * The default units to use for recognizer options that specify distances.
+     *
+     * @type {String}
+     * @default 'cm'
+     * @see CENTIMETERS
+     */
+    units: CENTIMETERS,
+
+    /**
+     * The collection of default CSS properties to apply to the document body.
+     */
+    cssProps: {
+        userSelect: 'none',
+        touchSelect: 'none',
+        touchCallout: 'none',
+        contentZooming: 'none',
+        userDrag: 'none',
+        tapHighlightColor: 'rgba(0,0,0,0)'
+    },
+
+    /**
+     * The default Recognizers to add to a Manager.
+     *
+     * @type {Array}
+     * @default []
+     */
+    recognizers: [],
+
+    /**
+     * Set to true to enable DOM events, in addition to the standard events
+     * emitted from the Manager instances.
+     *
+     * DOM events are slower and can introduce issues when multiple Managers
+     * are used in the same application with DOM events turned on. Typically,
+     * this means duplicate events for the same gesture across Managers when
+     * those Managers are attached to elements that are descendants of each
+     * other.
+     *
+     * @type {Boolean}
+     * @default false
+     */
+    domEvents: false,
+};
+
+/**
+ * @memberof Sistine
+ */
+Sistine.pointerSet = new PointerSet();
+
+/**
+ * Notifies all gesture recognizers (globally across the application) that
+ * the given pointer IDs should be considered as "cancelled." This means
+ * that any gesture recognizer currently monitoring these touches (either in
+ * the pending or started state) should fail immediately and reset.
+ *
+ * @param {Array} pointerIds The pointer IDs that should be considered as
+ * cancelled.
+ * @memberof Sistine
+ */
+Sistine.cancelPointers = function(pointerIds, sender) {
+    var ev = createEvent('sistine-cancelpointers', {
+        'pointerIds': pointerIds,
+        'sender': sender
+    });
+
+    document.dispatchEvent(ev);
+};
+
+/******************************************************************************
+ *
+ * Private (non-exposed) functions
+ *
+ *****************************************************************************/
+
+/*
+ * Adds new pointers to the master pointer set.
+ */
+function handlePointerStart(ev) {
+    Sistine.pointerSet.add(ev);
+}
+
+/*
+ * Updates the master pointer set with new move data.
+ */
+function handlePointerUpdate(ev) {
+    var masterPointerSet = Sistine.pointerSet;
+
+    if (masterPointerSet.has(ev.pointerId)) {
+        if (!masterPointerSet.add(ev)) {
+            ev.stopPropagation();
+        }
+    }
+    else {
+        ev.stopPropagation();
+    }
+}
+
+/*
+ * Clean-up method for removing pointer history after it is no longer needed.
+ */
+function handlePointerComplete(ev) {
+    Sistine.pointerSet.remove(ev.pointerId);
+}
+
+/*
+ * Performs default setup that must be initialized after the DOM content
+ * is available.
+ */
+function bootstrap() {
+    Sistine.defaults.ppcm = measurePpcm();
+    applyElementPolyfills();
+
+    // Apply the default CSS properties to the document body
+    var body = document.getElementsByTagName('body')[0];
+    _.each(Sistine.defaults.cssProps, function(value, name) {
+        body.style[prefixStyleName(body.style, name)] = value;
+    });
+
+    // Set up master event listeners. By listening on window we ensure we are
+    // the first for pointer down and move (using capture phase), and LAST for 
+    // pointer up and cancel (using bubbling phase).
+    window.addEventListener('pointerdown', handlePointerStart, true);
+    window.addEventListener('pointermove', handlePointerUpdate, true);
+    window.addEventListener('pointerup', handlePointerUpdate, true);
+    window.addEventListener('pointercancel', handlePointerUpdate, true);
+    window.addEventListener('pointerup', handlePointerComplete, false);
+    window.addEventListener('pointercancel', handlePointerComplete, false);
+}
+
+/*
+ * Run the bootstrapping.
+ */
+(function() {
+    if (document.readyState === 'complete') {
+        bootstrap();
+    }
+    else {
+        document.addEventListener('DOMContentLoaded', bootstrap);
+    }
+})();
+
+_.extend(Sistine, {
+    // States
+    STATE_POSSIBLE: STATE_POSSIBLE,
+    STATE_STARTED: STATE_STARTED,
+    STATE_CHANGED: STATE_CHANGED,
+    STATE_ENDED: STATE_ENDED,
+    STATE_CANCELED: STATE_CANCELED,
+    STATE_RECOGNIZED: STATE_RECOGNIZED,
+    STATE_FAILED: STATE_FAILED,
+
+    // Directions
+    DIRECTION_NONE: DIRECTION_NONE,
+    DIRECTION_LEFT: DIRECTION_LEFT,
+    DIRECTION_RIGHT: DIRECTION_RIGHT,
+    DIRECTION_HORIZONTAL: DIRECTION_HORIZONTAL,
+    DIRECTION_UP: DIRECTION_UP,
+    DIRECTION_DOWN: DIRECTION_DOWN,
+    DIRECTION_VERTICAL: DIRECTION_VERTICAL,
+    DIRECTION_ANY: DIRECTION_ANY,
+
+    // Event types
+    EVENT_UP: EVENT_UP,
+    EVENT_DOWN: EVENT_DOWN,
+    EVENT_MOVE: EVENT_MOVE,
+    EVENT_CANCEL: EVENT_CANCEL,
+
+    // Units
+    CENTIMETERS: CENTIMETERS,
+    PIXELS: PIXELS,
+
+    // Core classes
+    Manager: Manager,
+    Recognizer: Recognizer,
+    StateMachine: StateMachine,
+    PointerSet: PointerSet,
+    Pointer: Pointer,
+
+    // Recognizers
+    Tap: Tap,
+    Press: Press,
+    Pinch: Pinch,
+    Pan: Pan
+});
+
+/**
+ * @namespace
+ */
+Sistine.Util = Sistine.Util || {};
+
+_.extend(Sistine.Util, {
+    inherit: inherit,
+    prefixStyleName: prefixStyleName,
+    applyIfExists: applyIfExists,
+    createSimpleMutators: createSimpleMutators,
+    splitStr: splitStr,
+    splitComma: splitComma,
+    toMetric: toMetric,
+    vectorLength: vectorLength,
+    createEvent: createEvent,
+    deepDefaults: deepDefaults
+});
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = Sistine;
+}
+else {
+    window[exportName] = Sistine;
+}
+
+})(window, document, 'Sistine');

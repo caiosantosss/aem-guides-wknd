@@ -1,0 +1,1942 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2015 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(document, Coral, Granite, $, URITemplate) {
+    "use strict";
+
+    /**
+     * @typedef {Object} HistoryConfig
+     * @property {[Object]} formData stores form data.
+     * @property {Boolean} referrer determines whether going back is possible or not.
+     * @property {Object} collectionInfo stores collectionInfo like limit and scrollTo
+     * @property {Object} location stores location info
+     * @property {Object} tagsPredicateData stores tags data to avoid server call to retrieve data.
+     */
+
+    /**
+     * @typedef {Object} Omnisearch
+     * @property {Boolean} open determines whether search is open or not.
+     * @property {Object} elements stores pointer to search static element.
+     * @property {HTMLElement} metadata provides search metadata element on page.
+     * @property {Boolean} closable whether search is closable or not.
+     * @property {Boolean} showRail whether predicate rail needs to be open or not.
+     * @property {String} searchURL search url
+     * @property {Omnisearch.Stack} stack stores callback to clean added listener
+     * @property {Boolean} restored search is restored from saved HistoryConfig.
+     * @property {Boolean} closed whether search is closed or not.
+     * @property {HTMLELement} collectionEl search result collection element.
+     * @property {Function} init initialise the omnisearch.
+     * @property {Function} destroy clean omnisearch saved state.
+     */
+
+    /**
+     * @typedef {Object} Omnisearch.Stack
+     * @property {Array} open --> stores listener callback attached during opening of omnisearch
+     * @property {Array} collection --> stores listener callback attached to result collection
+     */
+
+    // minimum width of the typeahead input
+    var INPUT_MIN_WIDTH = 200;
+    // search icon width
+    var SEARCH_ICON_WIDTH = 36;
+    // delay used to show suggestions after the user interacted with the textfield
+    var DELAY = 300;
+    // key omnisearch path
+    var KEY_OMNISEARCH_PATH = "granite.shell.omnisearch.pathWhenOpeningOmnisearch";
+    // Predicate Id used to identify the location
+    var LOCATION_PREDICATE_ID = "location";
+    // Predicate Id used to identify the location suggestion
+    // eslint-disable-next-line no-unused-vars
+    var LOCATION_SUGGESTION_PREDICATE_ID = "location.suggestion";
+    // timeout used to debounce the user input
+    var inputTimeout;
+    // will be true when opened via search icon
+    // todo better option to retain focus
+    var onExitRestoreSearchIconFocus = false;
+    // rail loading promise
+    // todo better option to define rail loading promise.
+    var railLoadingPromise = Promise.resolve();
+
+    // stores omnisearch state
+    // avoid naming function since only one object is needed
+    var omnisearch = new (function() {
+        var elements;
+        var open;
+        var restored;
+        var showRail;
+        var closable;
+        var vent;
+        var closed;
+        var collectionEl;
+        var omnisearchMinLength;
+
+        // stack holds callback to clear added listener
+        var stack;
+
+        // remove all attached listeners
+        // clean stored stack callback by executing them
+        function clean() {
+            // for each stack key
+            Object.keys(stack).forEach(function(key) {
+                // run the callback stored in stack key value
+                Granite.UI.Foundation.Utils.everyReverse(stack[key], function(callback) {
+                    if (callback) {
+                        callback();
+                    }
+                    return true;
+                });
+            });
+        }
+
+        // reset the omnisearch values to default one
+        // executed during destroying phase
+        function reset() {
+            elements = {};
+            open = restored = showRail = closed = false;
+            closable = true;
+            vent = null;
+            stack = {
+                open: [], // store listener callback attached during opening of omnisearch
+                collection: [] // store listener callback attached to result collection.
+            };
+            collectionEl = null; // store result collection element
+        }
+
+        // remove all omnisearch elements from DOM.
+        // executed during destroying phase
+        function remove() {
+            Object.keys(elements).forEach(function(key) {
+                var element = elements[key];
+                element && element.remove();
+            });
+        }
+
+        // update the elements of omnisearch
+        // @param overlay parent overlay element of omnisearch
+        // executed during initiating phase
+        function update(overlay) {
+            elements.overlay = overlay;
+            elements.form = overlay.querySelector(".granite-omnisearch-form");
+            elements.typeahead = elements.form.querySelector(".granite-omnisearch-typeahead");
+            elements.input = elements.typeahead.querySelector(".granite-omnisearch-typeahead-input");
+            elements.tagList = elements.typeahead.querySelector(".granite-omnisearch-typeahead-tags");
+            elements.tagListHolder = elements.typeahead.querySelector(".granite-omnisearch-typeahead-tags-holder");
+            // eslint-disable-next-line max-len
+            elements.tagListHolderLabel = elements.typeahead.querySelector(".granite-omnisearch-typeahead-tags-holder-label");
+            // eslint-disable-next-line max-len
+            elements.tagListHolderPopover = overlay.querySelector(".granite-omnisearch-typeahead-tags-holder-popover");
+            // eslint-disable-next-line max-len
+            elements.tagListHolderList = elements.tagListHolderPopover.querySelector(".granite-omnisearch-typeahead-tags-holder-list");
+            elements.selectList = elements.typeahead.querySelector(".granite-omnisearch-typeahead-suggestions");
+            elements.typeaheadOverlay = elements.typeahead.querySelector(".granite-omnisearch-typeahead-overlay");
+            elements.close = elements.typeahead.querySelector(".granite-omnisearch-typeahead-close");
+            omnisearchMinLength = overlay.getAttribute("omnisearchMinLength");
+        }
+
+        reset();
+
+        return {
+            get open() {
+                return open || false;
+            },
+            set open(value) {
+                open = Boolean(value);
+            },
+            get elements() {
+                return elements || {};
+            },
+            get metadata() {
+                return document.querySelector(".granite-omnisearch-src");
+            },
+            get vent() {
+                return vent;
+            },
+            get closable() {
+                return closable;
+            },
+            set closable(value) {
+                closable = Boolean(value);
+            },
+            get showRail() {
+                return showRail;
+            },
+            set showRail(value) {
+                showRail = Boolean(value);
+            },
+            get stack() {
+                return stack;
+            },
+            get searchURL() {
+                return this.metadata ? this.metadata.dataset.graniteOmnisearchSearchUrl : null;
+            },
+            get restored() {
+                return restored;
+            },
+            set restored(value) {
+                restored = Boolean(value);
+            },
+            get closed() {
+                return closed;
+            },
+            set closed(value) {
+                closed = Boolean(value);
+            },
+            get collectionEl() {
+                return collectionEl;
+            },
+            get omnisearchMinLength() {
+                return omnisearchMinLength;
+            },
+            set collectionEl(value) {
+                collectionEl = value;
+            },
+            init: function(overlay) {
+                // do not reset while initialising.
+                // only remove previous added listeners
+                clean();
+                // update elements
+                update(overlay);
+                /* global Vent:false */
+                vent = new Vent(overlay);
+            },
+            destroy: function() {
+                clean(); // clean stack
+                vent && vent.destroy(); // destory vent
+                cleanCollection(); // clean collection
+                remove(); // remove attached element.
+                reset(); // reset stored values
+            }
+        };
+    });
+
+    /**
+     * focus the omnisearch input field
+     */
+    function focusInput() {
+        var input = omnisearch.elements.input;
+        if (input) {
+            window.requestAnimationFrame(function() {
+                input.focus();
+            });
+        }
+    }
+
+    /**
+     * finds current location based on form queryParameters
+     * @returns {String} current location, undefined if none.
+     */
+    function getLocationValue() {
+        var form = omnisearch.elements.form;
+
+        var locationObj = $(form).serializeArray().find(function(item) {
+            return item.name === LOCATION_PREDICATE_ID;
+        });
+        return locationObj ? locationObj["value"] : undefined;
+    }
+
+    /**
+     * returns the current page title based on location
+     * @param {String} location of current omnisearch page.
+     * @returns {String} current page title
+     */
+    function getPageTitle(location) {
+        if (location) {
+            return Granite.I18n.get("Location: {0} | AEM Search", location);
+        } else {
+            return Granite.I18n.get("AEM Search");
+        }
+    }
+
+    /**
+     * returns the index to which collection needs to be scrolled
+     * @param {HistoryConfig} config stored in browser history
+     * @returns {Number} return index of the item, null when no stored info.
+     */
+    function getScrollToIndex(config) {
+        if (config && config.collection) {
+            return config.collection.index || null;
+        }
+
+        var state = History.getState();
+
+        if (state.data && state.data.omnisearch && state.data.omnisearch.collection) {
+            return state.data.omnisearch.collection.index || null;
+        }
+        return null;
+    }
+
+    /**
+     * Scrolls to the bottom of the given item in given container.
+     * @param {HTMLElement} item to which we need to scroll
+     * @param {HTMLElement} container item scrollable ancestor
+     */
+    function scrollItemIntoView(item, container) {
+        // both item and container should be present in DOM
+        if (!item || !container || !document.body.contains(item) || !document.body.contains(container)) {
+            return;
+        }
+        var top;
+        var position = $(item).position();
+
+        if (position.top + item.offsetHeight >= container.offsetHeight) {
+            top = item.offsetTop + item.offsetHeight - container.offsetHeight;
+            container.scrollTop = top;
+        } else if (position.top < 0) {
+            // Scroll to the top of the item in this case
+            top = item.offsetTop;
+            container.scrollTop = top;
+        }
+    }
+
+    /**
+     * Returns the position of the cursor of the given input.
+     * @returns {Number} position
+     */
+    function getCursorPosition() {
+        var input = omnisearch.elements.input;
+        if (!input) {
+            // no input field return -1.
+            return -1;
+        } else if ("selectionStart" in input) {
+            return input.selectionStart;
+        } else if (document.selection) {
+            // IE needs the item to be in focus
+            if (document.activeElement !== input) {
+                return -1;
+            }
+            var selection = document.selection.createRange();
+            var selectionLength = selection.text.length;
+            selection.moveStart("character", -input.value.length);
+            return selection.text.length - selectionLength;
+        }
+    }
+
+    /**
+     * adjust input's size to accommodate the tagList.
+     */
+    function adjustInputSize() {
+        Coral.commons.nextFrame(function() {
+            var input = omnisearch.elements.input;
+            var tagList = omnisearch.elements.tagList;
+            var tagListHolder = omnisearch.elements.tagListHolder;
+            var tagListHolderList = omnisearch.elements.tagListHolderList;
+            var tagListHolderLabel = omnisearch.elements.tagListHolderLabel;
+            var tagListHolderPopover = omnisearch.elements.tagListHolderPopover;
+
+            if (!input || !tagList) {
+                return;
+            }
+
+            if (input.clientWidth - tagList.offsetWidth <= INPUT_MIN_WIDTH) {
+                // Hide the last added visible tag
+                // eslint-disable-next-line max-len
+                var tag = tagList.querySelector("coral-tag:not([name='" + LOCATION_PREDICATE_ID + "']):not([hidden])");
+
+                if (tag) {
+                    // Increment the counter
+                    tagListHolderLabel.textContent = Number(tagListHolderLabel.textContent) + 1;
+
+                    // Add an item that copies the tag label to the holder popover list
+                    var item = tagListHolderList.items.add({
+                        type: "button",
+                        content: {
+                            innerHTML: tag.label.innerHTML +
+                                // eslint-disable-next-line max-len
+                                "<coral-icon class='granite-omnisearch-typeahead-tags-holder-list-remove' icon='closeCircle' size='XS'></coral-icon>"
+                        }
+                    });
+
+                    // Store the tag as reference
+                    $(item).data("graniteOmnisearchTagsHolderItemTag", {
+                        tag: tag,
+                        width: tag.getBoundingClientRect().width
+                    });
+
+                    // Show the holder and hide the tag
+                    tagListHolder.closable = false;
+                    tagListHolder.hidden = false;
+                    tag.hidden = true;
+                }
+            } else {
+                var lastItem = tagListHolderList.items.last();
+                if (lastItem) {
+                    var data = $(lastItem).data("graniteOmnisearchTagsHolderItemTag");
+
+                    // If there's enough space, show the last hidden tag if any
+                    if (data && data.tag.hidden) {
+                        if (input.clientWidth - tagList.offsetWidth - data.width > INPUT_MIN_WIDTH) {
+                            data.tag.hidden = false;
+                            tagListHolderList.items.remove(lastItem);
+
+                            if (!tagListHolderList.items.length) {
+                                tagListHolderPopover.open = false;
+                                tagListHolder.hidden = true;
+                                tagListHolderLabel.textContent = "";
+                            } else {
+                                tagListHolderLabel.textContent = Number(tagListHolderLabel.textContent) - 1;
+                            }
+                        }
+                    }
+                }
+
+                $(input).css("padding-left", tagList.offsetWidth + SEARCH_ICON_WIDTH);
+            }
+        });
+    }
+
+    /**
+     * used to set the visibility of shell-header based on value passed
+     * shell header should be hidden when omnisearch is open and shown when closed.
+     * @param {Boolean} hidden true to hide the header
+     */
+    function showHideShellHeader(hidden) {
+        var header = document.querySelector(".granite-shell-header");
+        if (header) {
+            if (hidden) {
+                header.style.visibility = "hidden";
+            } else {
+                header.style.visibility = "";
+            }
+        }
+    }
+
+    /**
+     * update accessiblity state based on new suggestions.
+     * @param {HTMLElement} focusedItem current focused item in suggestion list
+     */
+    function setAccessibilityState(focusedItem) {
+        var input = omnisearch.elements.input;
+        var selectList = omnisearch.elements.selectList;
+
+        input.setAttribute("aria-expanded", true);
+        input.setAttribute("aria-controls", selectList.id);
+        input.setAttribute("aria-activedescendant", focusedItem.id); // update focused element id.
+        focusedItem.setAttribute("aria-live", "polite");
+        // update label with current input text
+        selectList.setAttribute("aria-label", Granite.I18n.get("AEM Search") + ": " + input.value);
+    }
+
+    /**
+     * reset input accessibility state
+     * used when suggestion are hidden
+     */
+    function resetAccessibilityState() {
+        var input = omnisearch.elements.input;
+        var selectList = omnisearch.elements.selectList;
+
+        input.setAttribute("aria-expanded", false);
+        input.removeAttribute("aria-controls");
+        input.removeAttribute("aria-activedescendant"); // remove focused
+        // reset label to default one
+        selectList.setAttribute("aria-label", Granite.I18n.get("AEM Search"));
+    }
+
+    /**
+     * create predicate tag at input tagList
+     * @param {HTMLElement} item tag will be created based this item data.
+     */
+    function createPredicateTag(item) {
+        var predicateId = item.dataset.graniteOmnisearchTypeaheadSuggestionPredicateid;
+        var keepInput = item.dataset.graniteOmnisearchTypeaheadSuggestionKeepinput;
+
+        if (!predicateId) {
+            return; // do nothing if predicate id not present
+        }
+
+        if (!keepInput) {
+            omnisearch.elements.input.value = ""; // we need to clear the input since it now became a tag
+        }
+
+        var queryParams = $(item).data("granite-omnisearch-typeahead-suggestion-queryparameters");
+        // update predicate based on item queryparams
+        updatePredicate(item, queryParams);
+    }
+
+    /**
+     * update the omnisearch predicate based on passed parameters
+     * @param {HTMLElement} item which resulted in predicate update
+     * @param {Object} queryParams query parameters values on which predicate would be updated
+     * @param {Object} tagsPredicateData stored tag data so while updating predicate no need for server calls
+     * @triggers 'granite-omnisearch-predicate-update'
+     */
+    function updatePredicate(item, queryParams, tagsPredicateData) {
+        var form = omnisearch.elements.form;
+        var tagList = omnisearch.elements.tagList;
+
+        $(form).trigger({
+            type: "granite-omnisearch-predicate-update",
+            detail: {
+                item: item,
+                tagList: tagList,
+                queryParameters: queryParams,
+                tagsPredicateData: tagsPredicateData || {}
+            }
+        });
+    }
+
+    /**
+     * clear the omnisearch predicate values
+     * @param {HTMLElement} item which caused the predicate value reset
+     * @triggers 'granite-omnisearch-predicate-clear'
+     */
+    function clearPredicate(item) {
+        var form = omnisearch.elements.form;
+        var tagList = omnisearch.elements.tagList;
+        $(form).trigger({
+            type: "granite-omnisearch-predicate-clear",
+            detail: {
+                item: item,
+                tagList: tagList
+            }
+        });
+    }
+
+    /**
+     * Update the complete form state in browser history
+     * @param {HTMLFormElement} form - The omnisearch form element.
+     */
+    function updateHistoryStateForm(form) {
+        var state = History.getState();
+
+        state.data.omnisearch = state.data.omnisearch || {};
+
+        state.data.omnisearch.formData = $(form).serializeArray();
+        state.data.omnisearch.tagsPredicateData = getTagsPredicateData();
+
+        History.replaceState(state.data, state.title);
+    }
+
+    /**
+     * use to obtain tag information saved in dataset graniteOmnisearchTagPredicateData
+     * @returns {Object} tags predicate data object
+     */
+    function getTagsPredicateData() {
+        var tagsPredicateData = {};
+        var tagList = omnisearch.elements.tagList;
+        var tags = tagList.querySelectorAll("coral-tag");
+        // for each tag store the data in an object
+        // key tag name and value tag data
+        Array.prototype.forEach.call(tags, function(tag) {
+            var tagData = $(tag).data("graniteOmnisearchTagPredicateData");
+            if (tagData) {
+                var name = tagData.name;
+                tagsPredicateData[name] = tagData;
+            }
+        });
+        return tagsPredicateData;
+    }
+
+    /**
+     * Restores the search state based on the given history configuration.
+     *
+     * @param {HistoryConfig} config stored config in history state
+     */
+    function restoreSearch(config) {
+        var formData = config.formData;
+        // tagsPredicateData is used to retrieve tag predicate value without fetching from server
+        var tagsPredicateData = config.tagsPredicateData;
+
+        // use to set the form limit to index value.
+        // this will ensure that fetch items count are atleast index
+        // fetch item count >= index
+        // will be used to scroll down to item at index position
+        var setFormLimitToIndex = function(index) {
+            var form = omnisearch.elements.form;
+            // save form action
+            var action = form.action;
+
+            var resetFormLimit = function() {
+                form.action = action;
+            };
+
+            if (index) {
+                var limit = parseInt(History.getState().data.omnisearch.collection.limit, 10) || 100;
+                // update form action limit
+                form.action = action.substr(0, action.lastIndexOf(".")) + // action before url extension
+                ".0." + (Math.ceil(index / limit) * limit) + // add 0 as offset and closest limit
+                action.substr(action.lastIndexOf("."), action.length); // add extension.
+            }
+
+            return resetFormLimit;
+        };
+
+        // set restored to true
+        omnisearch.restored = true;
+
+        // in case omnisearch is restored after viewing search item
+        // update limit to index to load last viewed item as well.
+        var resetFormLimit = setFormLimitToIndex(getScrollToIndex(config));
+
+        var queryParams = formData.reduce(function(memo, v) {
+            memo[v.name] = v.value;
+            return memo;
+        }, {});
+
+        // update predicate based on stored params
+        updatePredicate(undefined, queryParams, tagsPredicateData);
+
+        // load the search results
+        loadSearchResults();
+        // reset form action limit
+        resetFormLimit();
+    }
+
+    /**
+     * load search result by submitting search form
+     */
+    function loadSearchResults() {
+        var form = omnisearch.elements.form;
+        // Close the suggestion to make the results visible
+        hideSuggestions();
+        // submit form.
+        $(form).submit();
+    }
+
+    /**
+     * hide suggestion list
+     */
+    function hideSuggestions() {
+        var typeaheadOverlay = omnisearch.elements.typeaheadOverlay;
+
+        // clear input timeout
+        clearTimeout(inputTimeout);
+        // resett accessiblity state
+        resetAccessibilityState();
+        // hide suggestion overlay
+        typeaheadOverlay.hide();
+    }
+
+    /**
+     * show suggestions based on user input
+     * @returns {Promise} resolve when suggestion shown
+     */
+    function showSuggestions() {
+        var typeahead = omnisearch.elements.typeahead;
+        var input = omnisearch.elements.input;
+        var form = omnisearch.elements.form;
+        var inputValue = input.value;
+
+        if (!typeahead) {
+            return;
+        }
+
+        // reset accessibility state
+        // will be set with new suggestions
+        resetAccessibilityState();
+
+        // do nothing when inputtext length is less than three
+        if (inputValue.length < omnisearch.omnisearchMinLength) {
+            hideSuggestions();
+            return;
+        }
+
+        var url = URITemplate.expand(typeahead.dataset.graniteOmnisearchTypeaheadSrc, {
+            query: $(form).serialize()
+        });
+
+        if (!url) {
+            return;
+        }
+
+        // load suggestions
+        return $(window).adaptTo("granite-shell-omnisearch-suggestions")
+            .getWrappedSuggestions(getLocationValue(), inputValue)
+            .then(function(wrappedSuggestions) {
+                var selectList = omnisearch.elements.selectList;
+                var typeaheadOverlay = omnisearch.elements.typeaheadOverlay;
+
+                // do nothing if omnisearch is not open
+                // or it has been closed
+                if (!omnisearch.open || omnisearch.closed) {
+                    return;
+                }
+
+                // clear existing suggestions
+                selectList.items.clear();
+
+                wrappedSuggestions.forEach(function(wrappedSuggestion) {
+                    // add new suggestions in selectlist.
+                    selectList.items.add(wrappedSuggestion);
+                });
+
+                // reset heigt value
+                selectList.style.height = "";
+
+                // measures actual height of the selectList
+                var style = window.getComputedStyle(selectList);
+                var height = parseInt(style.height, 10);
+                var maxHeight = parseInt(style.maxHeight, 10);
+
+                if (height < maxHeight) {
+                    // makes it scrollable
+                    selectList.style.height = height + "px";
+                }
+
+                if (selectList.items.length > 0) {
+                    var firstItem = selectList.items.getAll()[0];
+                    // set accessiblity based on first element
+                    setAccessibilityState(firstItem);
+                    // set suggestion overlay as open
+                    typeaheadOverlay.open = true;
+                }
+            });
+    }
+
+    /**
+     * load the predicate panel side rail based on location
+     * @param {String} location current omnisearch location
+     * @returns {Promise} resolve when side rail has been loaded
+     */
+    function loadSideRail(location) {
+        var overlay = omnisearch.elements.overlay;
+        var rail = overlay.querySelector("#granite-omnisearch-result-rail");
+
+        // load side rail when location is specified and omnisearch is open
+        if (location && omnisearch.open) {
+            var src = overlay.dataset.graniteOmnisearchOverlayPredicatesrc;
+            if (!src) {
+                return Promise.reject();
+            }
+
+            var url = URITemplate.expand(src, {
+                location: location
+            });
+
+            return $.ajax({
+                url: url,
+                cache: false
+            }).then(function(data) {
+                return $(window).adaptTo("foundation-util-htmlparser").parse(data).then(function(fragment) {
+                    var newRail = fragment.querySelector("#granite-omnisearch-result-rail");
+
+                    // replace new rail with previous rail.
+                    rail.replaceWith(newRail);
+
+                    $(newRail).trigger("foundation-contentloaded");
+
+                    if (omnisearch.showRail) {
+                        var railToggle = overlay.querySelector("#granite-omnisearch-result-rail-toggle");
+
+                        if (railToggle) {
+                            // If the toggle element already exists then select the item.
+                            // Otherwise, it means that form response comes later.
+                            // Show the rail at the form response handler then.
+                            railToggle.items.getAll()[1].selected = true;
+
+                            omnisearch.showRail = false; // Reset to initial value as the job is done
+                        }
+                    }
+                });
+            });
+        }
+        // return resolved promise
+        return Promise.resolve();
+    }
+
+    /**
+     * unload the loaded predicate panel side rail.
+     * empties the side rail
+     */
+    function unloadSideRail() {
+        var overlay = omnisearch.elements.overlay;
+        var rail = overlay.querySelector("#granite-omnisearch-result-rail");
+        var $rail = $(rail);
+
+        var toggleableAPI = $rail.adaptTo("foundation-toggleable");
+
+        // remove rail toggle
+        var railToggle = overlay.querySelector("#granite-omnisearch-result-rail-toggle");
+        railToggle && railToggle.remove();
+
+        // hide rail and set its content to empty
+        toggleableAPI.hide();
+        $rail.empty();
+
+        // clear all tags
+        omnisearch.elements.tagList.items.clear();
+    }
+
+    /**
+     * handles the user inputs logic
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleUserInput() {
+        var vent = omnisearch.vent;
+        // use a new instance of Coral.Keys to avoid blocking `esc` keydown event propagation
+        // var keys = new Coral.Keys(document.documentElement);
+
+        // whenever user enter a text in omnisearch input field
+        var onInput = function(event) {
+            // Debounce user input before showing suggestions
+            window.clearTimeout(inputTimeout);
+            inputTimeout = window.setTimeout(showSuggestions, DELAY);
+        };
+
+        // global escape key, added during capture phase
+        // so that the overlay and count state have correct values
+        // use to close suggestion, remove selection or close omnisearch
+        var onEscape = function(event) {
+            if (event.key === "Escape") {
+                var overlay = omnisearch.elements.overlay;
+                var typeaheadOverlay = omnisearch.elements.typeaheadOverlay;
+
+                // do nothing when omnisearch is not open or
+                // omnisearch in closing phase
+                if (!omnisearch.open || omnisearch.closed) {
+                    return;
+                }
+
+                // hide suggestion overlay when suggestion is showing
+                // suggestion overlay should be topmost to receive event.
+                if (typeaheadOverlay && typeaheadOverlay.open && typeaheadOverlay._isTopOverlay()) {
+                    event.preventDefault();
+                    hideSuggestions();
+                    // do not process further
+                    return;
+                }
+
+                // do nothing when omnisearch the topmost overlay
+                if (!overlay._isTopOverlay()) {
+                    return;
+                }
+
+                var collectionEl = overlay.querySelector("#granite-omnisearch-result");
+                var selectedCount = $(collectionEl).adaptTo("foundation-selections").count();
+
+                // no omnisearch item is selected close omisearch.
+                // in case of selection, item selection will handle event.
+                // do not close oomnisearch in that case.
+                if (selectedCount === 0) {
+                    event.preventDefault();
+                    closeOmnisearch();
+                }
+            }
+        };
+
+        // user presses a key
+        var onKeyDown = function(event) {
+            var preventDefault = true;
+            var input = omnisearch.elements.input;
+            var selectList = omnisearch.elements.selectList;
+            var typeaheadOverlay = omnisearch.elements.typeaheadOverlay;
+            var tagList = omnisearch.elements.tagList;
+
+            // backspace: Delete tag or clear input
+            function onBackspace(event) {
+                // Allow the cursor to delete as normal
+                if (getCursorPosition(input) === 0 && window.getSelection().toString() === "") {
+                    // Remove the last item since it is the closest to the cursor
+                    var last = tagList.items.last();
+                    last && last.remove();
+
+                    // update suggestion based on new tags,
+                    // do not trigger search query
+                    showSuggestions();
+                }
+                // remove the entire string if it is enclosed by quotes
+                if (input.value.match("^\"(.+)\"$")) {
+                    input.value = "";
+                }
+            }
+
+            // tab: Create a new predicate without triggering search
+            function onTab(event) {
+                if (typeaheadOverlay.open) {
+                    var target = selectList.querySelector("coral-selectlist-item.is-highlighted");
+
+                    if (target && target.dataset.graniteOmnisearchTypeaheadSuggestionPredicateid) {
+                        // As a productivity boost, allow the users to select the tag without refreshing the results
+                        createPredicateTag(target);
+                        showSuggestions();
+                        return;
+                    }
+                }
+            }
+
+            // enter: Select the item and perform the search
+            function onEnter(event) {
+                // suggestion overlay is open.
+                if (typeaheadOverlay.open) {
+                    var target = selectList.querySelector("coral-selectlist-item.is-highlighted");
+                    if (target) {
+                        // This click will create the tag and trigger the search
+                        // load result based on current focused suggestion.
+                        target.click();
+                        return;
+                    }
+                }
+                // load search result
+                loadSearchResults();
+            }
+
+            // up arrow: Move through suggestions.
+            function onUpArrow(event) {
+                // when suugestion are open.
+                // move focus to previous suggestion
+                if (typeaheadOverlay.open) {
+                    var item;
+                    var target = selectList.querySelector("coral-selectlist-item.is-highlighted");
+                    var items = selectList.items.getAll();
+                    var index = items.indexOf(target);
+                    // remove highlighted from current focused suggestion
+                    target && target.classList.remove("is-highlighted");
+
+                    if (items.length === 0) {
+                        return;
+                    }
+
+                    if (index > 0) {
+                        // previous suggestion
+                        item = items[index - 1];
+                    } else {
+                        // current suggestion is first suggestion
+                        // last suggestion
+                        item = items[items.length - 1];
+                    }
+                    // highlight previous suggestion
+                    item.classList.add("is-highlighted");
+                    input.setAttribute("aria-activedescendant", item.getAttribute("id"));
+
+                    scrollItemIntoView(item, typeaheadOverlay);
+                }
+            }
+
+            // down arrow: Move through suggestions or show suggestions if not.
+            function onDownArrow(event) {
+                // when suugestion are open.
+                // move focus to next suggestion
+                if (typeaheadOverlay.open) {
+                    var item;
+                    var target = selectList.querySelector("coral-selectlist-item.is-highlighted");
+                    var items = selectList.items.getAll();
+                    var index = items.indexOf(target);
+                    // remove highlighted from current focused suggestion
+                    target && target.classList.remove("is-highlighted");
+
+                    if (items.length === 0) {
+                        return;
+                    }
+
+                    if (index < items.length - 1) {
+                        // next suggestion
+                        item = items[index + 1];
+                    } else {
+                        // current suggestion is last suggestion
+                        // first suggestion
+                        item = items[0];
+                    }
+                    // highlight next suggestion
+                    item.classList.add("is-highlighted");
+                    input.setAttribute("aria-activedescendant", item.getAttribute("id"));
+
+                    scrollItemIntoView(item, typeaheadOverlay);
+                } else {
+                    // Show the suggestions and do not focus on the first item
+                    showSuggestions();
+                }
+            }
+
+            switch (event.keyCode) {
+                // backspace key
+                case 8:
+                    preventDefault = false;
+                    onBackspace(event);
+                    break;
+                // tab key
+                case 9:
+                    preventDefault = typeaheadOverlay.open ? preventDefault : false;
+                    onTab(event);
+                    break;
+                // enter key
+                case 13:
+                    onEnter(event);
+                    break;
+                // up arrow
+                case 38:
+                    if (typeaheadOverlay.open) {
+                        // Allow the cursor to move as expected
+                        preventDefault = false;
+                    }
+                    // execute up arrow press logic
+                    onUpArrow(event);
+                    break;
+                // down arrow
+                case 40:
+                    if (typeaheadOverlay.open) {
+                        // Allow the cursor to move as expected
+                        preventDefault = false;
+                    }
+                    // execute down arrow press logic
+                    onDownArrow(event);
+                    break;
+                default:
+                    preventDefault = false;
+            }
+
+            if (preventDefault) {
+                event.preventDefault();
+            }
+        };
+
+        vent.on("input", ".granite-omnisearch-typeahead-input", onInput);
+        vent.on("keydown", ".granite-omnisearch-typeahead-input", onKeyDown);
+
+        // handle global escape
+        vent.on("keydown", onEscape, true);
+
+        return function() {
+            vent.off("input", ".granite-omnisearch-typeahead-input", onInput);
+            vent.off("keydown", ".granite-omnisearch-typeahead-input", onKeyDown);
+            vent.off("keydown", onEscape, true);
+        };
+    }
+
+    /**
+     * handles the tagList modification logic.
+     * used to handle tag addition, removal or changed logic
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleTagList() {
+        var vent = omnisearch.vent;
+
+        // when tag are added in tagList
+        var onTagListAddItem = function(event) {
+            // Make sure tags aren't multiline
+            event.detail.item.multiline = false;
+            // we need to adjust input size based on new tags
+            adjustInputSize();
+        };
+
+        // when tags are removed from tagList
+        var onTagListRemoveItem = function(event) {
+            // we need to adjust input size based on remaining tags
+            adjustInputSize();
+            // clear predicate related to tag
+            clearPredicate(event.detail.item);
+        };
+
+        // tagList changed
+        var onTagListChange = function(event) {
+            // show suggestion based on new tags
+            showSuggestions();
+        };
+
+        vent.on("coral-collection:add", ".granite-omnisearch-typeahead-tags", onTagListAddItem);
+        vent.on("coral-collection:remove", ".granite-omnisearch-typeahead-tags", onTagListRemoveItem);
+        vent.on("change", ".granite-omnisearch-typeahead-tags", onTagListChange);
+
+        return function() {
+            vent.off("coral-collection:add", ".granite-omnisearch-typeahead-tags", onTagListAddItem);
+            vent.off("coral-collection:remove", ".granite-omnisearch-typeahead-tags", onTagListRemoveItem);
+            vent.off("change", ".granite-omnisearch-typeahead-tags", onTagListChange);
+        };
+    }
+
+    /**
+     * handles the user interaction with suggestions
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleSuggestions() {
+        var vent = omnisearch.vent;
+
+        // handles suggestion click
+        // load result based on suggestion or
+        // navigate to href when clicked suggestion is navigationSuggestion.
+        var onSuggestionClick = function(event) {
+            var target = event.matchedTarget.selectedItem;
+            var input = omnisearch.elements.input;
+
+            if (!target) {
+                // do nothing when target not present.
+                return;
+            }
+
+            if (typeof target.dataset.graniteOmnisearchTypeaheadNavigation !== "undefined") {
+                // clicked suggestion is navigation one
+                window.location = target.dataset.graniteOmnisearchTypeaheadNavigationHref;
+                return;
+            } else if (target.dataset.graniteOmnisearchTypeaheadSuggestionPredicateid) {
+                // If the item is annotated, create a tag with it
+                createPredicateTag(target);
+            } else {
+                // Otherwise, set the text as the entry
+                input.value = target.value || target.content.textContent;
+            }
+            loadSearchResults();
+        };
+
+        // handles the scenario when mouse pointer enters a suggestion region
+        // update current active suggestion item.
+        var onSuggestionMouseEnter = function(event) {
+            var item = event.target;
+            var input = omnisearch.elements.input;
+            input.setAttribute("aria-activedescendant", item.getAttribute("id"));
+        };
+
+        // handles global click
+        // close suggestion when click outside suggestion overlay.
+        var onClick = function(event) {
+            var eventTarget = event.target;
+            var input = omnisearch.elements.input;
+            var typeaheadOverlay = omnisearch.elements.typeaheadOverlay;
+
+            var eventIsWithinTarget = input ? input.contains(eventTarget) : false;
+
+            if (!eventIsWithinTarget && typeaheadOverlay !== null &&
+                typeaheadOverlay.open && !typeaheadOverlay.contains(eventTarget)) {
+                hideSuggestions();
+            }
+        };
+
+        vent.on("coral-selectlist:change", ".granite-omnisearch-typeahead-overlay coral-selectlist",
+            onSuggestionClick);
+
+        $(document).on("mouseenter", ".granite-omnisearch-typeahead-overlay coral-selectlist coral-selectlist-item",
+            onSuggestionMouseEnter);
+
+        // handles clicking outside the suggestions overlay
+        document.addEventListener("click", onClick);
+
+        return function() {
+            vent.off("coral-selectlist:change", ".granite-omnisearch-typeahead-overlay coral-selectlist",
+                onSuggestionClick);
+            // eslint-disable-next-line max-len
+            $(document).on("mouseenter", ".granite-omnisearch-typeahead-overlay coral-selectlist coral-selectlist-item",
+                onSuggestionMouseEnter);
+            document.removeEventListener("click", onClick);
+        };
+    }
+
+    /**
+     * handles the user interaction with tagListHolder
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleTagListHolder() {
+        var vent = omnisearch.vent;
+
+        // handles the scenario when tagListerHolder item is removed
+        var onTagListHolderRemoveItem = function() {
+            var item = event.matchedTarget;
+            var tagList = omnisearch.elements.tagList;
+            var tagListHolderLabel = omnisearch.elements.tagListHolderLabel;
+            var tagListHolderList = omnisearch.elements.tagListHolderList;
+
+            // tagListHolder contains only one items
+            // last item is being removed.
+            if (tagListHolderList.items.length === 1) {
+                var tagListHolder = omnisearch.elements.tagListHolder;
+                var tagListHolderPopover = omnisearch.elements.tagListHolderPopover;
+
+                // The last item is going to be removed so the holder can be hidden again
+                tagListHolderPopover.open = false;
+                tagListHolder.hidden = true;
+                tagListHolderLabel.textContent = "";
+            } else {
+                tagListHolderLabel.textContent = Number(tagListHolderLabel.textContent) - 1;
+            }
+            // remove item from tagListHolderList
+            tagListHolderList.items.remove(item);
+            // Remove the related tag
+            tagList.items.remove($(item).data("graniteOmnisearchTagsHolderItemTag").tag);
+        };
+
+        vent.on("click", ".granite-omnisearch-typeahead-tags-holder-list [coral-list-item]", onTagListHolderRemoveItem);
+
+        return function() {
+            vent.off("click", ".granite-omnisearch-typeahead-tags-holder-list [coral-list-item]",
+                onTagListHolderRemoveItem);
+        };
+    }
+
+    /**
+     * handles omnisearch form interaction
+     * update state when form is submitted.
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleForm() {
+        var form = omnisearch.elements.form;
+
+        // update history state when form is submitted
+        var onFormSubmit = function(event) {
+            var target = event.target;
+            updateHistoryStateForm(target);
+        };
+
+        $(form).on("submit", onFormSubmit);
+
+        return function() {
+            $(form).off("submit", onFormSubmit);
+        };
+    }
+
+    /**
+     * handles the window resizing
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleResize() {
+        var tagList = omnisearch.elements.tagList;
+
+        // This is required to detect when tags label are modified (e.g. the path predicate)
+        // need to adjsut the input bar size when window is resized
+        Coral.commons.addResizeListener(tagList, adjustInputSize);
+        window.addEventListener("resize", adjustInputSize);
+
+        return function() {
+            window.removeEventListener("resize", adjustInputSize);
+        };
+    }
+
+    /**
+     * handles the user interaction with collection
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleCollection() {
+        var collectionEl = omnisearch.collectionEl;
+        // store the item index, on item click
+        // the stored index will be used to scroll back to this item.
+        var onItemClick = function(event) {
+            var target = event.target;
+            var state = History.getState();
+            var el = target.closest(".foundation-collection-item:not(.is-lazyLoaded)");
+            var pagination = $(collectionEl).adaptTo("foundation-collection").getPagination();
+
+            if (el && pagination) {
+                var index = el.dataset.datasourceIndex;
+
+                state.data.omnisearch = state.data.omnisearch || {};
+
+                state.data.omnisearch.collection = {
+                    index: index,
+                    limit: pagination.limit
+                };
+
+                History.replaceState(state.data, state.title);
+            }
+        };
+
+        collectionEl.addEventListener("click", onItemClick, true);
+        return function() {
+            collectionEl.removeEventListener("click", onItemClick, true);
+        };
+    }
+
+    /**
+     * clean omnisearch collection
+     * remove/clear listener attached to omnisearch collection
+     * avoid potential leak
+     */
+    function cleanCollection() {
+        var collectionEl = omnisearch.collectionEl;
+        // clean when there exists a previous collection
+        // clean collection listener stored in collection stack
+        Granite.UI.Foundation.Utils.everyReverse(omnisearch.stack.collection, function(callback) {
+            callback && callback();
+            return true;
+        });
+        // reset attached listener array for collection
+        omnisearch.stack.collection = [];
+
+        // clean omnisearch collection layout
+        collectionEl && Granite.UI.Foundation.Layouts.cleanAll(this);
+        // wait for certain time
+        // remove items in background.
+        window.setTimeout(function(collectionEl) {
+            collectionEl && $(collectionEl).adaptTo("foundation-collection").clear();
+        }, 1000, collectionEl);
+        // remove child items
+    }
+
+    /**
+     * handles the omnisearch opening
+     * @param {HistoryConfig} config The history config.
+     * When it is passed, the search state is restored based on it.
+     * Otherwise, a new history state is pushed.
+     * @returns {Promise} resolved when omnisearch is opened.
+     * @emits 'granite-shell-omnisearch-predicate-location:update' when location is defined
+     */
+
+    function toggleVisibility(param) {
+        var classname = "non-visible";
+        if (param === true) {
+            $("coral-shell").addClass(classname);
+            $(".granite-skipNavigationLinks").addClass(classname);
+        } else {
+            $("coral-shell").removeClass(classname);
+            $(".granite-skipNavigationLinks").removeClass(classname);
+        }
+    }
+
+    function openOmnisearch(config) {
+        var location;
+        var locationSuggestion;
+        var metadata = omnisearch.metadata;
+
+        if (omnisearch.open) {
+            // do nothing if omnisearch already open
+            adjustInputSize();
+            focusInput();
+            return Promise.resolve();
+        }
+
+        if (!metadata || !metadata.dataset.graniteOmnisearchSrc) {
+            return Promise.reject();
+        }
+
+        // set open to true;
+        omnisearch.open = true;
+
+        var url = metadata.dataset.graniteOmnisearchSrc;
+
+        // hide shell-header, since search-typehead will cover it's display
+        showHideShellHeader(true);
+        toggleVisibility(true);
+
+        if (config && config.location) {
+            location = config.location.value;
+            locationSuggestion = config.location.label;
+        } else {
+            var locationEl = document.head.querySelector(".granite-omnisearch-location");
+            if (locationEl) {
+                location = locationEl.dataset.graniteOmnisearchLocationValue;
+                locationSuggestion = locationEl.dataset.graniteOmnisearchLocationLabel;
+            }
+        }
+
+        url = URITemplate.expand(url, {
+            location: location
+        });
+
+        return $.get(url).then(function(data) {
+            return $(window).adaptTo("foundation-util-htmlparser").parse(data);
+        }).then(function(fragment) {
+            var overlay = fragment.querySelector(".granite-omnisearch-overlay");
+
+            if (!overlay) {
+                return;
+            }
+
+            // Make sure it is the topmost layer
+            $(overlay).css("zIndex", document.querySelector("coral-shell-header").style.zIndex + 10);
+
+            // init omnisearch elements, only once
+            omnisearch.init(overlay);
+
+            // handle user interaction
+            // push callbacks into stack['open'] array
+            omnisearch.stack.open.push(handleUserInput());
+            omnisearch.stack.open.push(handleTagList());
+            omnisearch.stack.open.push(handleSuggestions());
+            omnisearch.stack.open.push(handleTagListHolder());
+            omnisearch.stack.open.push(handleForm());
+            omnisearch.stack.open.push(handleResize());
+
+            // hide close button when omnisearch not closable
+            if (!omnisearch.closable) {
+                omnisearch.elements.close.hidden = true;
+            }
+
+            // append the omnisearch to document body
+            document.body.appendChild(overlay);
+            $(overlay).trigger("foundation-contentloaded");
+
+            // adjust input field size
+            adjustInputSize();
+            // focus input field
+            focusInput();
+
+            if (location && locationSuggestion) {
+                // update location predicate
+                // this will trigger side rail loading
+                $(document).trigger({
+                    type: "granite-shell-omnisearch-predicate-location:update",
+                    detail: {
+                        location: location,
+                        locationSuggestion: locationSuggestion
+                    }
+                });
+            }
+
+            return railLoadingPromise;
+        }).then(function() {
+            // after side rail has been loaded
+            if (config) {
+                // restore search if formdata exists
+                config.formData && restoreSearch(config);
+            } else {
+                if (!window.location.pathname.startsWith(omnisearch.searchURL)) {
+                    window.sessionStorage.setItem(KEY_OMNISEARCH_PATH, window.location.pathname);
+                }
+
+                var title = getPageTitle(location);
+                // save the new loaded state in history
+                History.pushState({
+                    "omnisearch": {
+                        "referrer": true,
+                        "location": {
+                            value: location,
+                            label: locationSuggestion
+                        }
+                    }
+                }, title, omnisearch.searchURL);
+            }
+        });
+    }
+
+    /**
+     * handles the omnisearch closing
+     * used tp remove the omnisearch elements from DOM
+     * used to reset state, or listener
+     */
+    function exitOmnisearch() {
+        // clean omnisearch object.
+        omnisearch.destroy();
+
+        // change selection to content only
+        var collectionpageRailToggle = document.getElementById("shell-collectionpage-rail-toggle");
+        if (collectionpageRailToggle) {
+            collectionpageRailToggle.items.getAll()[0].selected = true;
+        }
+
+        // restore search icon focus
+        var searchIcon = document.getElementById("granite-omnisearch-trigger");
+        if (onExitRestoreSearchIconFocus && searchIcon) {
+            onExitRestoreSearchIconFocus = false;
+            window.setTimeout(function() {
+                var searchButton = searchIcon.querySelector("button");
+                searchIcon.open = false;
+                searchButton.focus();
+                searchButton.classList.add("focus-ring");
+            }, 100);
+        }
+
+        // show shell header when exiting omnisearch
+        showHideShellHeader(false);
+        toggleVisibility(false);
+
+        // reset values
+        railLoadingPromise = Promise.resolve();
+    }
+
+    /**
+     * initiate the omnisearch closing.
+     * when omnisearch is restored, move to last known page state
+     * else move to back page.
+     * actual closing happens in <code>exitOmnisearch</code>
+     */
+    function closeOmnisearch() {
+        if (omnisearch.closable && !omnisearch.closed) {
+            // set omnisearch state to closed
+            // do not set open to false, it will be set in exitOmnisearch
+            omnisearch.closed = true;
+
+            resetAccessibilityState();
+
+            if (omnisearch.restored) {
+                // We restore the original path before omnisearch is opened
+                // This is needed cause the navigation is not linear. E.g. when navigating from
+                // a search result to the details, then press cancel, a new state is created with search/html as
+                // path. Navigating then back when closing is wrong, cause then we navigate back to the details and
+                // not to the original state before opening omnisearch
+                var originalPathBeforeOpeningOmnisearch = window.sessionStorage.getItem(KEY_OMNISEARCH_PATH);
+                History.pushState({}, null, originalPathBeforeOpeningOmnisearch);
+            } else {
+                // move back to last visited page
+                History.back();
+            }
+        }
+    }
+
+    function addOmniSearchFilterQueryParam() {
+        var form = omnisearch.elements.form;
+
+        var input = form.querySelector("#granite-omnisearch-is-opened-filter");
+
+        if (input === null) {
+            input = document.createElement("input");
+            input.id = "granite-omnisearch-is-opened-filter";
+            input.type = "hidden";
+            input.name = "opened-through-filter";
+            input.value = true;
+            form.appendChild(input);
+        }
+    }
+
+    function closeOmniSearchFilterQueryParam() {
+        var form = omnisearch.elements.form;
+
+        var input = form.querySelector("#granite-omnisearch-is-opened-filter");
+
+        if (input !== null) {
+            input.remove();
+        }
+    }
+
+    /**
+     * Handles the search result response
+     * used to replace/append result content
+     * used to scroll to last viewed item in case omnisearch restored.
+     */
+    $(window).adaptTo("foundation-registry").register("foundation.form.response.ui.success", {
+        name: "granite.omnisearch.result",
+        handler: function(form, config, data, textStatus, xhr, parsedResponse) {
+            $(window).adaptTo("foundation-util-htmlparser").parse(parsedResponse).then(function(fragment) {
+                var overlay = omnisearch.elements.overlay;
+                var content = overlay.querySelector(".granite-omnisearch-content");
+
+                // clear omnisearch filter query param every time
+                closeOmniSearchFilterQueryParam();
+
+                // replace oldActionBar with newActionBar
+                var oldActionBar = content.querySelector("#granite-omnisearch-result-actionbar");
+                var newActionbar = fragment.querySelector("#granite-omnisearch-result-actionbar");
+                if (oldActionBar) {
+                    // oldActionBar exists
+                    var oldRailToggle = oldActionBar.querySelector("#granite-omnisearch-result-rail-toggle");
+                    if (oldRailToggle) {
+                        // when oldActionBar and oldRailToggle both exists
+                        // replace only secondary bar
+                        oldActionBar.querySelector("betty-titlebar-secondary")
+                            .replaceWith(newActionbar.querySelector("betty-titlebar-secondary"));
+                    } else if (newActionbar) {
+                        // when oldActionBar and newActionBar both exits
+                        // replace old with new one
+                        oldActionBar.replaceWith(newActionbar);
+                    } else {
+                        // when only oldActionBar is present remove it
+                        oldActionBar.remove();
+                    }
+                } else if (newActionbar) {
+                    // append newActionbar when oldActionBar does not exists
+                    content.querySelector("#granite-omnisearch-result-header").appendChild(newActionbar);
+                }
+
+                // replace old selectionbar with new selectionbar
+                var oldSelectionBar = content.querySelector("#granite-shell-search-result-selectionbar");
+                var newSelectionBar = fragment.querySelector("#granite-shell-search-result-selectionbar");
+                if (oldSelectionBar && newSelectionBar) {
+                    // when both oldSelectionBar and newSelectionBar are present
+                    // replace old with new one
+                    oldSelectionBar.replaceWith(newSelectionBar);
+                } else if (oldSelectionBar) {
+                    // when only oldSelectionBar is present remove it
+                    oldSelectionBar.remove();
+                } else if (newSelectionBar) {
+                    // append newSelectionBar when oldSelectionBar does not exists
+                    content.appendChild(newSelectionBar);
+                }
+
+                // update facets count
+                var facet = fragment.querySelector("#granite-omnisearch-facet");
+                var facetsAPI = $(window).adaptTo("granite-omnisearch-internal-facets");
+                if (facet) {
+                    var config = JSON.parse(facet.dataset.graniteOmnisearchFacetConfig);
+                    var facets = JSON.parse(facet.dataset.graniteOmnisearchFacetFacets);
+                    facetsAPI.updateCount(facets, config);
+                } else {
+                    facetsAPI.updateCount(null); // searchResult = null, clear predicate count
+                }
+
+                // replace oldResultContent with newResultContent
+                var oldResultContent = content.querySelector("#granite-omnisearch-result-content");
+                var newResultContent = fragment.querySelector("#granite-omnisearch-result-content");
+                // clean previous omnisearch layouts
+                // clear added listener in omnisearch
+                // avoid potential memory leak
+                cleanCollection();
+                // now replace after cleaning is done
+                oldResultContent.replaceWith(newResultContent);
+
+                // omnisearch new collection,
+                // would be null during multiresult
+                var collectionEl = newResultContent.querySelector(".granite-omnisearch-result.foundation-collection");
+                var $collection = $(collectionEl);
+                // store collection pointer
+                omnisearch.collectionEl = collectionEl;
+
+                // when we need to scroll to last viewed item,
+                // the limit is updated to item index.
+                // restore the collection limit to default value.
+                var scrollToIndex = getScrollToIndex();
+                if (scrollToIndex) {
+                    var cfg = JSON.parse(collectionEl.dataset.foundationLayout);
+                    var limit = History.getState().data.omnisearch.collection.limit;
+                    if (limit) {
+                        cfg.limit = limit;
+                    }
+                    collectionEl.dataset.foundationLayout = JSON.stringify(cfg);
+                    // update jquery data
+                    $collection.removeData("foundation-layout");
+                    $collection.data("foundation-layout", cfg);
+                }
+
+                // handles collection interaction
+                // only when collectionEl present
+                if (collectionEl) {
+                    // push callbacks into stack['collection'] array
+                    omnisearch.stack.collection.push(handleCollection());
+                }
+
+                // when sorting is supported update sortMode.
+                if (collectionEl && newResultContent.dataset.supportSorting === "true") {
+                    var layoutCfg = JSON.parse(collectionEl.dataset.foundationLayout);
+                    // useful for table layout
+                    layoutCfg.sortMode = "remote";
+                    collectionEl.dataset.foundationLayout = JSON.stringify(layoutCfg);
+                    // update jquery data
+                    $collection.removeData("foundation-layout");
+                    $collection.data("foundation-layout", layoutCfg);
+                }
+
+                // make content visible
+                content.hidden = false;
+
+                // trigger contentloaded event
+                $(content).trigger("foundation-contentloaded");
+
+                // clear selections of all collection,
+                // any background selection should not affect omnisearch collection
+                var collections = document.querySelectorAll(".foundation-collection");
+                Array.prototype.forEach.call(collections, function(collection) {
+                    var selectionAPI = $(collection).adaptTo("foundation-selections");
+                    selectionAPI && selectionAPI.clear();
+                });
+
+                // when search is restored and last viewed item index exists
+                // scroll the collection to that item position.
+                // remove the stored collection information from history state
+                if (scrollToIndex) {
+                    // wait for some time to scroll
+                    // ensure view has been layouted once.
+                    window.requestAnimationFrame(function() {
+                        var item = collectionEl.querySelector("[data-datasource-index='" + scrollToIndex + "']");
+                        if (item) {
+                            // scroll to the specified item top
+                            $(collectionEl.scrollContainer).animate({
+                                scrollTop: item.getClientRects()[0].top -
+                                    collectionEl.scrollContainer.getClientRects()[0].top
+                            }, 0);
+                        }
+                    });
+
+                    // delete stored scrollTo info along with limit info.
+                    var state = History.getState();
+                    delete state.data.omnisearch.collection;
+                    // push the replaced state.
+                    History.replaceState(state.data, state.title);
+                }
+
+                // toggle the predicate panel side rail only when side rail needs to be shown.
+                var railToggle = content.querySelector("#granite-omnisearch-result-rail-toggle");
+                if (railToggle && omnisearch.showRail) {
+                    var secondItem = railToggle.items.getAll()[1];
+                    var target = secondItem.dataset.graniteToggleableControlTarget;
+                    if (target) {
+                        // If target element already exists then select the item.
+                        // Otherwise, it means that rail response comes later.
+                        // Show the rail at the rail response handler then.
+                        secondItem.selected = true;
+                        omnisearch.showRail = false; // Reset to initial value as the job is done
+                    }
+                }
+            });
+        }
+    });
+
+    /**
+     * handles the logic when omnisearch is refreshed
+     * or navigated directly via url
+     */
+    $(function() {
+        var metadata = omnisearch.metadata;
+
+        if (metadata) {
+            var searchURL = omnisearch.searchURL;
+            if (window.location.pathname.startsWith(searchURL)) {
+                // restore previously stored state
+                var config = History.getState().data.omnisearch;
+
+                // set closbale to false if no referred present
+                // omnisearch does not know about its calling page.
+                omnisearch.closable = config && config.referrer;
+
+                // When the config is not there, pass empty one to prevent pushing a new state,
+                // since the page URL is already the search URL.
+                openOmnisearch(config || {});
+            }
+        }
+    });
+
+    /**
+     * Handles the history state change
+     * Used to show omnisearch when navigated back to omnisearch.
+     * reloading the background content in case omnisearch is standalone page
+     */
+    $(window).on("statechange", function() {
+        var state = History.getState();
+        var config = state.data.omnisearch;
+
+        // current page has omnisearch config
+        // omnisearch needs to be restored.
+        if (config) {
+            // only open omnisearch, if not already opened
+            if (!omnisearch.open) {
+                openOmnisearch(config);
+            }
+            return;
+        }
+
+        // state changed when omnisearch is closed
+        // we can't use omnisearch.open check.
+        if (omnisearch.open || omnisearch.closed) {
+            // When /aem/search.html is a standalone page (e.g. due to a browser reload at some point),
+            // it has `meta[name='granite.omnisearch.searchpage']`.
+            // In that case, when navigating back from /aem/search.html (i.e. this code block),
+            // the previous content needs to be reloaded as it is empty otherwise.
+            var meta = document.head.querySelector("meta[name='granite.omnisearch.searchpage']");
+            if (meta && meta.content === "true") {
+                window.location.reload();
+            } else {
+                // simply exit the omnisearch.
+                exitOmnisearch();
+            }
+        }
+    });
+
+    /**
+     * avoid showing quickactions when showing multiresults
+     */
+    $(document).on("coral-overlay:beforeopen", ".granite-omnisearch-multiresult-row coral-quickactions", function(e) {
+        e.preventDefault();
+    });
+
+    /**
+     * handles the viewall logic when viewing multiresult page.
+     */
+    $(document).on("click", ".granite-omnisearch-viewall-button", function(event) {
+        event.preventDefault();
+
+        var button = event.currentTarget;
+        var predicateId = button.dataset.graniteOmnisearchTypeaheadSuggestionPredicateid;
+        var queryParams = JSON.parse(button.dataset.graniteOmnisearchTypeaheadSuggestionQueryparameters);
+
+        if (predicateId) {
+            updatePredicate(button, queryParams);
+            loadSearchResults();
+        }
+    });
+
+    /**
+     * change the visibility of input bar in omnisearch depending upon current mode.
+     * In selection mode inputbar should be hidden since actionbar goes above it.
+     */
+    $(document).on("foundation-mode-change", function(e, mode, group) {
+        var omnisearchTypeHead = document.querySelector(".granite-omnisearch-typeahead");
+        if (omnisearchTypeHead) {
+            if (mode === "selection") {
+                omnisearchTypeHead.style.visibility = "hidden";
+            } else {
+                omnisearchTypeHead.style.visibility = "";
+            }
+        }
+    });
+
+    /**
+     * update the new layout when views are switched
+     * remove listener to avoid potential leak
+     * update sortMode for table layout
+     */
+    $(document).on("coral-cyclebutton:change",
+        ".granite-collection-switcher[data-granite-collection-switcher-target='#granite-omnisearch-result']",
+        function(event) {
+            var timeout;
+
+            // clean previous collection
+            cleanCollection();
+
+            // when views are switched.
+            var onViewSwitched = function(event) {
+                var newCollectionEl = event.target;
+                var $collection = $(newCollectionEl);
+                var layoutCfg = JSON.parse(newCollectionEl.dataset.foundationLayout);
+                var resultContent = newCollectionEl.closest("#granite-omnisearch-result-content");
+
+                // when current view is different than stored one
+                if (omnisearch.collectionEl.nodeName !== newCollectionEl.nodeName) {
+                    // update current collection pointer
+                    omnisearch.collectionEl = newCollectionEl;
+                    // add listeners to new collection
+                    omnisearch.stack.collection.push(handleCollection());
+
+                    // update sortMode when sorting is supported.
+                    if (resultContent && resultContent.dataset.supportSorting === "true" &&
+                        layoutCfg.sortMode !== "remote") {
+                        // useful for table layout
+                        layoutCfg.sortMode = "remote";
+                        newCollectionEl.dataset.foundationLayout = JSON.stringify(layoutCfg);
+                        // update jquery data
+                        $collection.removeData("foundation-layout");
+                        $collection.data("foundation-layout", layoutCfg);
+                    }
+
+                    // remove attached listener
+                    $(document).off("foundation-contentloaded", "#granite-omnisearch-result", onViewSwitched);
+                    // clear timeout
+                    window.clearTimeout(timeout);
+                }
+            };
+
+            // timeout to clear added listener
+            // in case not removed in 5sec
+            timeout = window.setTimeout(function() {
+                $(document).off("foundation-contentloaded", "#granite-omnisearch-result", onViewSwitched);
+            }, 5000);
+
+            $(document).on("foundation-contentloaded", "#granite-omnisearch-result", onViewSwitched);
+        });
+
+    /**
+     * update the current view value in cookie
+     */
+    $(document).on("foundation-layout-perform", "#granite-omnisearch-result", function(e) {
+        var collectionEl = e.target;
+        var config = JSON.parse(collectionEl.dataset.foundationLayout);
+        $.cookie("shell.omnisearch.results.layoutId", config.layoutId, { path: "/" });
+    });
+
+    /**
+     * load the predicate panel side rail based on the new location.
+     * load whenever location is changed.
+     * internal event
+     */
+    $(document).on("granite-shell-omnisearch-predicate-location:updated", function(event) {
+        event.stopImmediatePropagation();
+
+        var location = event.detail.location;
+        // todo find a better way to store promise and use in openOmnisearch function
+        railLoadingPromise = loadSideRail(location);
+    });
+
+    /**
+     * unload the loaded predicate panel side rail when location is undefined
+     * internal event
+     */
+    $(document).on("granite-shell-omnisearch-predicate-location:cleared", function(event) {
+        event.stopImmediatePropagation();
+        // unload loaded side rail
+        unloadSideRail();
+    });
+
+    /**
+     * handles the removing of tagList items
+     * when predicates are reset, location tag
+     * is kept as is.
+     */
+    $(document).on("granite-omnisearch-predicate-clear", function(event) {
+        var tagList = event.detail.tagList;
+        // in case of reset clear all tags except location one.
+        if (event.detail.reset) {
+            tagList.items.getAll().forEach(function(tag) {
+                if (!tag.matches("#granite-omnisearch-field-locationtag")) {
+                    tag.remove();
+                }
+            });
+        }
+    });
+
+    /**
+     * open omnisearch via shortcut key '/'.
+     * It work only work when user has enabled shortcut preference.
+     */
+    $(function() {
+        if ($(window).adaptTo("foundation-preference").getBoolean("shortcutsEnabled", true)) {
+            // Register the KB shortcut for search
+            Coral.keys.on("/", function(event) {
+                var typeahead = omnisearch.elements.typeahead;
+
+                // If "/" is pressed on the predicate ui field abort
+                if ((typeahead && typeahead.contains(document.activeElement)) || omnisearch.open) {
+                    return;
+                }
+
+                // If selectionbar is visible we don't open omnisearch
+                if ($(".granite-collection-selectionbar > .foundation-mode-switcher-item-active").length) {
+                    return;
+                }
+
+                event.preventDefault();
+
+                openOmnisearch();
+            });
+        }
+    });
+
+    /**
+     * open omnisearch when clicked on search icon on shell menubar
+     */
+    $(document).on("click", "#granite-omnisearch-trigger", function(event) {
+        event.preventDefault();
+        onExitRestoreSearchIconFocus = true;
+        openOmnisearch();
+    });
+
+    /**
+     * open omnisearch and trigger a search when filters cyclebutton is clicked.
+     * when opening, add path predicate based on the current path of the collection.
+     */
+    $(document).on("coral-cyclebutton:change", "#granite-shell-actionbar .granite-toggleable-control", function(event) {
+        var selectedEl = event.originalEvent.detail.selection;
+        var collectionSelector = selectedEl.dataset.graniteOmnisearchFilter;
+
+        if (!collectionSelector) {
+            return;
+        }
+        var currentCollection = document.querySelector(collectionSelector);
+        var currentPath = currentCollection.dataset.foundationCollectionId;
+
+        // rail should be open whiling opening from filter cyclebutton
+        omnisearch.showRail = true;
+
+        openOmnisearch().then(function() {
+            updatePredicate(undefined, {
+                "_path": currentPath
+            });
+
+            // adding additional param for detecting whether omnisearch opened from filter or not
+            addOmniSearchFilterQueryParam();
+
+            loadSearchResults();
+        });
+    });
+
+    /**
+     * opens omnisearch from an external event.
+     */
+    $(document).on("granite-omnisearch-external-search", function(event) {
+        var queryParams = event.detail.queryParams;
+        openOmnisearch().then(function() {
+            updatePredicate(undefined, queryParams);
+            loadSearchResults();
+        });
+    });
+
+    /**
+     * close omnisearch when cross button is clicked
+     */
+    $(document).on("click", ".granite-omnisearch-typeahead-close", function(event) {
+        event.preventDefault();
+        closeOmnisearch();
+    });
+})(document, Coral, Granite, Granite.$, Granite.URITemplate);

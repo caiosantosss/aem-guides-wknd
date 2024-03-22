@@ -1,0 +1,414 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * ___________________
+ *
+ *  Copyright 2019 Adobe
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe and its suppliers, if any. The intellectual
+ * and technical concepts contained herein are proprietary to Adobe
+ * and its suppliers and are protected by all applicable intellectual
+ * property laws, including trade secret and copyright laws.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe.
+ */
+ (function($, Granite){
+    "use strict";
+
+    /**
+     * @namespace
+     */
+    CQ.Inbox.UI.OutOfOfficeController = CQ.Inbox.UI.OutOfOfficeController || {};
+    var OutOfOfficeController = CQ.Inbox.UI.OutOfOfficeController;
+    var IS_OUT_OF_OFFICE = "#cq-inbox-is-out-of-office";
+    var OOO_START_TIME = "#cq-inbox-ooo-starttime";
+    var OOO_END_TIME = "#cq-inbox-ooo-endtime";
+    var IS_END_TIME_PROVIDED = "#cq-inbox-is-end-time-provided";
+    var IS_OOO_DESIGNATE_PROVIDED = "#cq-inbox-is-ooo-designate-provided";
+    var OOO_DESIGNATE_MULTIFIELD = "#cq-inbox-ooo-designate-multifield";
+    var OOO_DELEGATE_ACCORDION = ".cq-inbox-ooo-delegate-accordion";
+    var OOO_ASSIGNEE_AUTOCOMPLETE = ".cq-inbox-ooo-assignee-autocomplete";
+    var OOO_WFMODEL = ".cq-inbox-ooo-wfmodel";
+    var OOO_WFMODEL_EXCEPTION = ".cq-inbox-ooo-wfmodel-exception";
+    var OOO_ADDEXCEPTION_BUTTON = ".cq-inbox-ooo-addexception-button";
+    var OOO_WFMODEL_EXCEPTION_CONTAINER = ".cq-inbox-ooo-workflow-model-exception-container";
+    var ALL_WORKFLOWS_DISPLAY = Granite.I18n.get("All Workflows");
+    var ALL_WORKFLOWS_VALUE = "ALL_WORKFLOWS";
+    var multifieldItemsPresent = 0;
+    OutOfOfficeController.getOutOfOfficeSettings = function () {
+        var param = {};
+        param.isOutOfOffice = $(IS_OUT_OF_OFFICE)[0].checked;
+        param.isOutOfOfficeDesignateProvided = $(IS_OOO_DESIGNATE_PROVIDED)[0].checked;
+        param.dateRange = {};
+        if($(OOO_START_TIME)[0].value) {
+            param.dateRange.startTime = (new Date($(OOO_START_TIME)[0].value)).getTime();
+        }
+        if($(IS_END_TIME_PROVIDED)[0].checked && $(OOO_END_TIME)[0].value) {
+            param.dateRange.endTime = (new Date($(OOO_END_TIME)[0].value)).getTime();
+        }
+        param.outOfOfficeDesignates = [];
+        if (param.isOutOfOfficeDesignateProvided) {
+            var oooDesignateMultifieldItems = $(OOO_DESIGNATE_MULTIFIELD + " coral-multifield-item");
+            for (var i = 0 ; i < oooDesignateMultifieldItems.length; i++) {
+                var curr = oooDesignateMultifieldItems[i];
+                var curr_assignee = $(curr).find(OOO_ASSIGNEE_AUTOCOMPLETE).val();
+                var curr_value = {outOfOfficeDesignate:curr_assignee};
+                var curr_wf_models = $(curr).find(OOO_WFMODEL)[0].values;
+                var curr_wf_model_exceptions = $(curr).find(OOO_WFMODEL_EXCEPTION)[0].values;
+                curr_value.wfModels = curr_wf_models;
+                curr_value.wfModelException = curr_wf_model_exceptions;
+                param.outOfOfficeDesignates.push(curr_value);
+            }
+        }
+        return new CQ.Inbox.UI.OutOfOfficeSettings(param);
+    }
+
+    var getNextWeekTime = function () {
+        var currDate = new Date();
+        var weekInMilliseconds = 7 * 24 * 60 * 60 * 1000;
+        if ($(OOO_START_TIME)[0].value) {
+            currDate = new Date($(OOO_START_TIME)[0].value);
+        }
+        return new Date(currDate.getTime() + weekInMilliseconds);
+    }
+
+    var deleteClicked = false;
+
+    OutOfOfficeController.setOutOfOfficeSettingsInUi = function(outOfOfficeSettingsParam) {
+        multifieldItemsPresent = 0;
+        var outOfOfficeSettings = new CQ.Inbox.UI.OutOfOfficeSettings(outOfOfficeSettingsParam);
+        $(OOO_DESIGNATE_MULTIFIELD + ' button[coral-multifield-add]').find("coral-button-label")[0].innerText = Granite.I18n.get("Add Assignee");
+        if (outOfOfficeSettings.getIsOutOfOffice()) {
+            $(IS_OUT_OF_OFFICE)[0].checked = outOfOfficeSettings.getIsOutOfOffice();
+        }
+        if(outOfOfficeSettings.getStartTime()) {
+            $(OOO_START_TIME)[0].value = new Date(outOfOfficeSettings.getStartTime());
+        } else {
+            $(OOO_START_TIME)[0].value = new Date();
+        }
+        if(outOfOfficeSettings.getEndTime()) {
+            $(OOO_END_TIME)[0].value = new Date(outOfOfficeSettings.getEndTime());
+        } else {
+            $(IS_END_TIME_PROVIDED)[0].checked = false;
+            $(OOO_END_TIME)[0].disabled = true;
+        }
+        if(outOfOfficeSettings.getIsOutOfOfficeDesignateProvided()) {
+            $(IS_OOO_DESIGNATE_PROVIDED)[0].checked = outOfOfficeSettings.getIsOutOfOfficeDesignateProvided();
+        }
+        $(IS_OUT_OF_OFFICE).off("change").on("change", function(){
+            toggleDisableAllSettings(!$(IS_OUT_OF_OFFICE)[0].checked);
+            OutOfOfficeController.triggerValidationForMultifield();
+            toggleDisableSaveButton();
+        });
+        $(IS_END_TIME_PROVIDED).off("change").on("change", function(){
+            $(OOO_END_TIME)[0].disabled = !$(IS_END_TIME_PROVIDED)[0].checked;
+            if($(IS_END_TIME_PROVIDED)[0].checked && !$(OOO_END_TIME)[0].value) {
+                $(OOO_END_TIME).adaptTo('foundation-field').setValue(getNextWeekTime());
+                $(OOO_END_TIME).trigger('change');//To run validation
+            }
+            if (!$(IS_END_TIME_PROVIDED)[0].checked) {
+                $(OOO_END_TIME)[0].value = "";
+            }
+            toggleDisableSaveButton();
+        });
+        $(OOO_START_TIME).off("change").on("change",
+            function () {
+                toggleDisableSaveButton();
+        });
+        $(OOO_END_TIME).off("change").on("change",
+            function () {
+              toggleDisableSaveButton();
+        });
+        $(IS_OOO_DESIGNATE_PROVIDED).off("change").on("change", function(){
+            toggleDisableMultifield(!$(IS_OUT_OF_OFFICE)[0].checked || !$(IS_OOO_DESIGNATE_PROVIDED)[0].checked);
+            OutOfOfficeController.triggerValidationForMultifield();
+            toggleDisableSaveButton();
+        });
+        $(OOO_DESIGNATE_MULTIFIELD).off("change").on('change', function(event) {
+            var oooDesignateMultifieldItems = $(OOO_DESIGNATE_MULTIFIELD + " coral-multifield-item");
+            if (multifieldItemsPresent < oooDesignateMultifieldItems.length) {
+                Coral.commons.ready(oooDesignateMultifieldItems[oooDesignateMultifieldItems.length - 1],function(currentMultifieldItem){
+                    initiateMultifieldItem(currentMultifieldItem);
+                    OutOfOfficeController.triggerValidationForMultifield();
+                });
+            }
+            if (deleteClicked) {
+                deleteClicked = false;
+                OutOfOfficeController.triggerValidationForMultifield();
+            }
+            multifieldItemsPresent = oooDesignateMultifieldItems.length;
+        });
+        setDelegateSettings(outOfOfficeSettings.getOutOfOfficeDesignates(), function(){
+            toggleDisableAllSettings(!outOfOfficeSettings.getIsOutOfOffice());
+        });
+    }
+
+    var toggleDisableAllSettings = function(disabled) {
+        $(OOO_START_TIME)[0].disabled = disabled;
+        $(OOO_END_TIME)[0].disabled = disabled || !$(IS_END_TIME_PROVIDED)[0].checked;
+        $(IS_END_TIME_PROVIDED)[0].disabled = disabled;
+        $(IS_OOO_DESIGNATE_PROVIDED)[0].disabled = disabled;
+        toggleDisableMultifield(disabled || (!$(IS_OOO_DESIGNATE_PROVIDED)[0].checked));
+    }
+
+    /*
+    * It will trigger change event for all the
+    * workflow model and assignee autocomplete present
+    * in the multifield accordion.
+    */
+    OutOfOfficeController.triggerValidationForMultifield = function () {
+        $(OOO_WFMODEL).trigger('change');//To run validation
+        $(OOO_ASSIGNEE_AUTOCOMPLETE).trigger('change');
+    }
+
+    var toggleDisableMultifield = function (disabled) {
+        $(OOO_DESIGNATE_MULTIFIELD + ' button[coral-multifield-add]')[0].disabled = disabled;
+        var length = $(OOO_DESIGNATE_MULTIFIELD)[0].items.length;
+        var autocompleteItems = $(OOO_DESIGNATE_MULTIFIELD).find(OOO_ASSIGNEE_AUTOCOMPLETE);
+        var ooo_wfmodelItems = $(OOO_DESIGNATE_MULTIFIELD).find(OOO_WFMODEL);
+        var ooo_wfmodel_taglistItems = $(OOO_DESIGNATE_MULTIFIELD).find(OOO_WFMODEL + " coral-taglist");
+        var ooo_wfmodel_exceptionItems = $(OOO_DESIGNATE_MULTIFIELD).find(OOO_WFMODEL_EXCEPTION);
+        var ooo_wfmodel_exceptiontaglistItems = $(OOO_DESIGNATE_MULTIFIELD).find(OOO_WFMODEL_EXCEPTION + " coral-taglist");
+        var multifield_deleteButtons = $(OOO_DESIGNATE_MULTIFIELD +" button[icon='delete']");
+        var multifield_addexceptionButtons = $(OOO_DESIGNATE_MULTIFIELD).find(OOO_ADDEXCEPTION_BUTTON);
+        for ( var i = 0; i < length; i++) {
+            autocompleteItems[i].disabled = disabled;
+            ooo_wfmodelItems[i].disabled = disabled;
+            if (!disabled) {
+                $(ooo_wfmodel_taglistItems[i]).removeAttr("readOnly");
+            }
+            if (ooo_wfmodel_exceptionItems[i]) {
+                ooo_wfmodel_exceptionItems[i].disabled = disabled;
+                if (!disabled) {
+                    $(ooo_wfmodel_exceptiontaglistItems[i]).removeAttr("readOnly");
+                }
+            }
+            if (multifield_addexceptionButtons[i]) {
+                multifield_addexceptionButtons[i].disabled = disabled;
+            }
+            multifield_deleteButtons[i].disabled = disabled;
+        }
+    }
+
+    var setDelegateSettings = function(items, callBack) {
+        var length = 1;
+        if (items && items.length > 0) {
+            items.forEach(function(item, index) {
+                var curr = $(OOO_DESIGNATE_MULTIFIELD)[0].items.add();
+                Coral.commons.ready(curr, function(readyCurr) {
+                    multifieldItemsPresent++;
+                    initiateMultifieldItem(readyCurr, item);
+                    if (index === items.length - 1) {
+                        callBack();
+                    }
+                });
+            });
+        } else {
+            var curr = $(OOO_DESIGNATE_MULTIFIELD)[0].items.add();
+            Coral.commons.ready(curr, function(readyCurr) {
+                multifieldItemsPresent++;
+                initiateMultifieldItem(readyCurr);
+                callBack();
+            });
+        }
+    }
+
+    var initiateMultifieldItem = function (currentOOOMutlifieldDesignate, outOfOfficeDesignateObj) {
+        $(currentOOOMutlifieldDesignate).find(OOO_DELEGATE_ACCORDION + " coral-accordion-item")[0].selected = true;
+        var curr_assignee_autocomplete = $(currentOOOMutlifieldDesignate).find(OOO_ASSIGNEE_AUTOCOMPLETE);
+        var curr_ooo_addexceptionbutton = $(currentOOOMutlifieldDesignate).find(OOO_ADDEXCEPTION_BUTTON);
+        var curr_ooo_wfmodel_exceptioncontainer = $(currentOOOMutlifieldDesignate).find(OOO_WFMODEL_EXCEPTION_CONTAINER);
+        var curr_ooo_wfmodel_exception = $(currentOOOMutlifieldDesignate).find(OOO_WFMODEL_EXCEPTION);
+        var curr_wfmodel = $(currentOOOMutlifieldDesignate).find(OOO_WFMODEL);
+        var currentMultifieldDeleteButton = $(currentOOOMutlifieldDesignate).find("button[icon='delete']");
+        var showExceptionButtonOrContainer = function(exceptionValues) {
+            if (exceptionValues && exceptionValues.length > 0) {
+                curr_ooo_wfmodel_exceptioncontainer.show();
+            } else {
+                curr_ooo_addexceptionbutton.show();
+            }
+        };
+        curr_assignee_autocomplete.off("change").on("change", function (event) {
+            var currentAssigneeAutocomplete = event.target;
+            changeAccordionLabel($(curr_assignee_autocomplete));
+            if(isOutOfOfficeChecked() && !currentAssigneeAutocomplete.value && $(IS_OOO_DESIGNATE_PROVIDED)[0].checked) {
+                currentAssigneeAutocomplete.invalid = true;
+            } else {
+                currentAssigneeAutocomplete.invalid = false;
+            }
+            toggleDisableSaveButton();
+        });
+        curr_wfmodel[0].items.add({
+          content: {
+            innerHTML: ALL_WORKFLOWS_DISPLAY
+          },value:ALL_WORKFLOWS_VALUE,
+          disabled: false
+        });
+        curr_ooo_addexceptionbutton.hide();
+        curr_ooo_wfmodel_exceptioncontainer.hide();
+        if (outOfOfficeDesignateObj) {
+            if(outOfOfficeDesignateObj.outOfOfficeDesignate) {
+                curr_assignee_autocomplete[0].value = outOfOfficeDesignateObj.outOfOfficeDesignate;
+                changeAccordionLabel(curr_assignee_autocomplete);
+            }
+            if(outOfOfficeDesignateObj.wfModels && outOfOfficeDesignateObj.wfModels.length > 0) {
+                curr_wfmodel[0].values = outOfOfficeDesignateObj.wfModels;
+                if (outOfOfficeDesignateObj.wfModels.indexOf(ALL_WORKFLOWS_VALUE) != -1) {
+                    showExceptionButtonOrContainer(outOfOfficeDesignateObj.wfModelException);
+                    if (curr_wfmodel[0].multiple) {
+                        curr_wfmodel[0].multiple = false;
+                    }
+                }
+            }
+            if(outOfOfficeDesignateObj.wfModelException) {
+                curr_ooo_wfmodel_exception[0].values = outOfOfficeDesignateObj.wfModelException;
+            }
+        }
+        curr_wfmodel.off("change").on("change", function (event) {
+            var currentWfModel = event.target;
+            var isMultipleSelectionEnabled;
+            if(currentWfModel.ignoreCustomChangeEvent) {
+             // execute nothing
+             // required to avoid execution of below code in case of multiple field change
+                return;
+            }
+            if (currentWfModel.values.indexOf(ALL_WORKFLOWS_VALUE) != -1) {
+                showExceptionButtonOrContainer(curr_ooo_wfmodel_exception[0].values);
+                isMultipleSelectionEnabled = false;
+            } else {
+                curr_ooo_addexceptionbutton.hide();
+                curr_ooo_wfmodel_exceptioncontainer.hide();
+                isMultipleSelectionEnabled = true;
+            }
+            // enclosing in this to ensure it is done after all values updated
+            window.requestAnimationFrame(function() {
+                currentWfModel.ignoreCustomChangeEvent = true;
+                if(currentWfModel.multiple !== isMultipleSelectionEnabled) {
+                    currentWfModel.multiple = isMultipleSelectionEnabled;
+                }
+                currentWfModel.ignoreCustomChangeEvent = false;
+            });
+            if(isOutOfOfficeChecked() && !currentWfModel.value && $(IS_OOO_DESIGNATE_PROVIDED)[0].checked) {
+                Coral.commons.ready(currentWfModel, function (readyCurrentWfModel) {
+                    readyCurrentWfModel.invalid = true;
+                });
+
+            } else {
+                Coral.commons.ready(currentWfModel, function (readyCurrentWfModel) {
+                    readyCurrentWfModel.invalid = false;
+                });
+            }
+            toggleDisableSaveButton();
+            });
+
+        curr_ooo_addexceptionbutton.off("click").on("click", function() {
+            curr_ooo_wfmodel_exceptioncontainer.show();
+            curr_ooo_addexceptionbutton.hide();
+        });
+        currentMultifieldDeleteButton.off("click").on("click", function (){
+            deleteClicked = true;
+        });
+    }
+
+    var changeAccordionLabel = function (curr) {
+        if (curr && curr[0]) {
+            $(curr).closest(OOO_DELEGATE_ACCORDION).find("coral-accordion-item-label")[0].innerText=curr[0].value;
+        }
+    }
+
+    /*
+    * It validates start time and end time.
+    * And mark valid/invalid start time end time
+    * on the basis of that.
+    */
+    var validateStartTimeAndEndTime = function () {
+        if (!isOutOfOfficeChecked()) {
+            $(OOO_START_TIME)[0].invalid = false;
+            $(OOO_END_TIME)[0].invalid = false;
+            return;
+        }
+        if ($(OOO_START_TIME)[0].value && $(OOO_END_TIME)[0].value && $(IS_END_TIME_PROVIDED)[0].checked) {
+            var startTime = new Date($(OOO_START_TIME)[0].value).getTime();
+            var endTime = new Date($(OOO_END_TIME)[0].value).getTime();
+            if (startTime < endTime) {
+                $(OOO_START_TIME)[0].invalid = false;
+                $(OOO_END_TIME)[0].invalid = false;
+            } else {
+                $(OOO_START_TIME)[0].invalid = true;
+                $(OOO_END_TIME)[0].invalid = true;
+            }
+        } else {
+            if (!$(OOO_START_TIME)[0].value) {
+                $(OOO_START_TIME)[0].invalid = true;
+            } else {
+                $(OOO_START_TIME)[0].invalid = false;
+            }
+            if (!$(OOO_END_TIME)[0].value && $(IS_END_TIME_PROVIDED)[0].checked) {
+                $(OOO_END_TIME)[0].invalid = true;
+            } else {
+                $(OOO_END_TIME)[0].invalid = false;
+            }
+        }
+    }
+
+    /*
+    * It validates start time, end time and
+    * all the out of office designates multifields
+    * are valid and disable/enable Save button on the basis
+    * of that.
+    */
+    var toggleDisableSaveButton = function () {
+      validateStartTimeAndEndTime();
+      if ((!isOutOfOfficeChecked()) || (!$(OOO_START_TIME)[0].invalid && !$(OOO_END_TIME)[0].invalid && isOutOfOfficeDesignateValid())) {
+        $(".inbox-settings-dialog-save")[0].disabled = false;
+      } else {
+        $(".inbox-settings-dialog-save")[0].disabled = true;
+      }
+    };
+
+    /*
+    * Check if all the workflow models and assignee autocomplete
+    * present in the multifield accordions are valid.
+    * Return false if found any empty workflow model or assignee
+    * autocomplete
+    */
+    var isOutOfOfficeDesignateValid = function () {
+        if (!$(IS_OOO_DESIGNATE_PROVIDED)[0].checked) {
+            return true;
+        }
+        var ooo_assignee_autocomplete = $(OOO_ASSIGNEE_AUTOCOMPLETE);
+        var ooo_wfmodels = $(OOO_WFMODEL);
+        if (ooo_assignee_autocomplete && ooo_assignee_autocomplete.length > 0) {
+            var length = ooo_assignee_autocomplete.length;
+            for (var i = 0; i < length ; i++ ) {
+                var ooo_autocomplete = ooo_assignee_autocomplete[i];
+                if (!ooo_autocomplete.value) {
+                    return false;
+                }
+            }
+        }
+        if (ooo_wfmodels && ooo_wfmodels.length > 0) {
+            var length = ooo_wfmodels.length;
+            for (var i = 0; i < length ; i++ ) {
+                var ooo_wfmodel = ooo_wfmodels[i];
+                if (ooo_wfmodel && ooo_wfmodel.values && ooo_wfmodel.values.length === 0) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    /*
+    * Check if isOutOfOffice is checked or not
+    */
+    var isOutOfOfficeChecked = function () {
+          if ($(IS_OUT_OF_OFFICE)[0].checked) {
+              return true;
+          }
+          return false;
+    }
+
+
+})(Granite.$, Granite);

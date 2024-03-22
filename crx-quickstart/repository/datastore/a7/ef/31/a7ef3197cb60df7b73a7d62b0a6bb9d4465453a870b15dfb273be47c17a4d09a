@@ -1,0 +1,517 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * Creates a reference to the paragraph with the specified path.
+ * @member CQ.wcm.EditBase
+ * @method referenceParagraph
+ * @param {String} path The content path of the referenced paragraph
+ * @param {Object} undoCfg (optional) The undo configuration, as created by
+ *        {@link CQ.undo.util.MultiUndoUtils#begin} (since 5.5)
+ * @return {String} path The content path of the created paragraph. Null otherwise.
+ */
+CQ.wcm.EditBase.referenceParagraph = function(path, undoCfg) {
+    try {
+        if (CQ.wcm.EditRollover.currentlyHighlighted) {
+            CQ.wcm.EditRollover.currentlyHighlighted.hideHighlight();
+        }
+        // todo: make resourceType and path property name configurable (?)
+        var definition = CQ.WCM.getComponentConfig(CQ.wcm.EditBase.REFERENCE_COMPONENT);
+        var params = {};
+        params[CQ.wcm.EditBase.REFERENCE_COMPONENT_PATH_PROPERTY] = path;
+        return this.createParagraph(definition, params, false, false, true, false, undoCfg);
+    } catch(e) {
+        //TODO improve messaging
+        CQ.Ext.Msg.alert('', e);
+    }
+    return null;
+};
+
+/**
+ * Creates a copy of the paragraph with the specified path.
+ * @member CQ.wcm.EditBase
+ * @method copyParagraph
+ * @param {String} path The content path of the copied paragraph
+ * @param {String} resourceType The resource type of the copied paragraph
+ * @param {Boolean} loadAnnotations (optional) True to load the annotations after creation
+ * @param {Object} undoCfg (optional) The undo configuration, as created by
+ *        {@link CQ.undo.util.MultiUndoUtils#begin} (since 5.5)
+ * @return {String} path The content path of the created paragraph. Null otherwise.
+ */
+CQ.wcm.EditBase.copyParagraph = function(path, resourceType, loadAnnotations, undoCfg) {
+    var editable = CQ.WCM.getEditable(path);
+    if (editable && editable.fireEvent(CQ.wcm.EditBase.EVENT_BEFORE_COPY, editable, this.path) === false) {
+        return null;
+    }
+    if (this.isInsertAllowed(resourceType)) {
+        try {
+            if (CQ.wcm.EditRollover.currentlyHighlighted) {
+                CQ.wcm.EditRollover.currentlyHighlighted.hideHighlight();
+            }
+            var definition = CQ.WCM.getComponentConfig(resourceType);
+            var params = {};
+            params["./" + CQ.Sling.COPY_SUFFIX] = path;
+
+            var url = this.getParentPath() + "/";
+            // Cannot copy ancestor to descendant
+            if (url && params['./@CopyFrom'] && url.indexOf(params['./@CopyFrom']) === 0) {
+                CQ.Ext.Msg.alert(CQ.I18n.getMessage('Warning'), CQ.I18n.getMessage('Cannot copy ancestor to descendant.'));
+                return null;
+            }
+
+            var newPath =  this.createParagraph(definition, params, false, loadAnnotations,
+                    true, false, undoCfg);
+            if (editable) editable.fireEvent(CQ.wcm.EditBase.EVENT_AFTER_COPY, editable, this.path, newPath);
+            return newPath;
+        } catch(e) {
+            //TODO improve messaging
+            CQ.Ext.Msg.alert('', e);
+        }
+    }
+    return null;
+};
+
+/**
+ * Moves the paragraph with the specified path.
+ * @member CQ.wcm.EditBase
+ * @method moveParagraph
+ * @param {String} path The content path of the moved paragraph
+ * @param {String} resourceType The resource type of the moved paragraph
+ * @param {Boolean} loadAnnotations (optional) True to load the annotations after creation
+ * @return {String} path The content path of the created paragraph. Null otherwise.
+ */
+CQ.wcm.EditBase.moveParagraph = function(path, resourceType, loadAnnotations) {
+    var editable = CQ.WCM.getEditable(path);
+    if (editable && editable.fireEvent(CQ.wcm.EditBase.EVENT_BEFORE_MOVE, editable, this.path) === false) {
+        return null;
+    }
+    if (this.isInsertAllowed(resourceType)) {
+        try {
+            if (CQ.wcm.EditRollover.currentlyHighlighted) {
+                CQ.wcm.EditRollover.currentlyHighlighted.hideHighlight();
+            }
+            var definition = CQ.WCM.getComponentConfig(resourceType);
+            var params = {};
+            var samePage = editable != null;
+            var sameParSys = samePage && (editable.getParent() == this.getParent());
+            if (samePage && sameParSys) {
+                // reorder existing paragraph
+                var myName = this.path.substring(this.path.lastIndexOf('/') + 1);
+                if (myName == "*") {
+                    params[CQ.Sling.ORDER] = "last";
+                } else {
+                    params[CQ.Sling.ORDER] = "before " + myName;
+                }
+
+                var serverResponse = CQ.utils.HTTP.post(path, null, params, this);
+
+                if (CQ.utils.HTTP.isOk(serverResponse)) {
+                    // action succeeded
+                    if (editable) editable.fireEvent(CQ.wcm.EditBase.EVENT_AFTER_MOVE, this.path);
+                    return path;
+                }
+            } else {
+                params["./" + CQ.Sling.MOVE_SUFFIX] = path;
+                var newPath = this.createParagraph(definition, params, samePage, loadAnnotations, true, true);
+                if (newPath && samePage) {
+                    editable.fireEvent(CQ.wcm.EditBase.EVENT_AFTER_MOVE, this.path, newPath);
+                }
+                return newPath;
+            }
+        } catch(e) {
+            //TODO improve messaging
+            CQ.Ext.Msg.alert('', e);
+        }
+    }
+    return null;
+};
+
+/**
+ * Creates a new paragraph using the specified definition.
+ * @member CQ.wcm.EditBase
+ * @method createParagraph
+ * @param {Object} definition The component definition
+ * @param {Object} extraParams (optional) Any extra parameters
+ * @param {Boolean} noEvent (optional) True to not fire events after creation
+ * @param {Boolean} loadAnnotations (optional) True to load the annotations after creation (since 5.4)
+ * @param {Boolean} ignoreTemplate (optional) True to ignore any template definition (since 5.5)
+ * @param {Boolean} preventUndo (optional) True to prevent an undo step being recorded for the
+ *        create operation (since 5.5)
+ * @param {Object} undoCfg (optional) The undo configuration, as created by
+ *        {@link CQ.undo.util.MultiUndoUtils#begin} (since 5.5)
+ * @return {String} path The content path of the created paragraph. Null otherwise.
+ */
+CQ.wcm.EditBase.createParagraph = function(definition, extraParams, noEvent, loadAnnotations,
+                                           ignoreTemplate, preventUndo, undoCfg) {
+    var rtype = null;
+    try {
+        rtype = definition.virtual ? definition.virtualResourceType : definition.resourceType;
+    }
+    catch (e) {
+        return null;
+    }
+    if (definition.resourceType && this.isInsertAllowed(rtype)) {
+        var params = {};
+        if (definition.config && definition.config.params) {
+            for (var p in definition.config.params) {
+                params[p] = definition.config.params[p];
+            }
+        }
+
+        params["_charset_"] = "utf-8";
+        params["./sling:resourceType"] = definition.resourceType;
+
+        // set last modified
+        params["./jcr:lastModified"] = "";
+        params["./jcr:lastModifiedBy"] = "";
+
+        params["./jcr:created"] = "";
+        params["./jcr:createdBy"] = "";
+
+        var rt = params["./sling:resourceType"];
+        if (rt) {
+            params[":nameHint"] = rt.substring(rt.lastIndexOf('/') + 1);
+        }
+        var parent = this.getParent();
+        var pResourceType = parent ? parent.getResourceType() : "";
+        if (pResourceType) {
+            params["parentResourceType"] = pResourceType;
+        }
+        if (extraParams) {
+            for (var p in extraParams) {
+                params[p] = extraParams[p];
+            }
+        }
+
+        // if template for component present, copy the node from that location
+        if (!ignoreTemplate && definition && definition.templatePath) {
+            params["./" + CQ.utils.Sling.COPY_SUFFIX] = definition.templatePath;
+        }
+
+        var insertedBeforeEBName = this.path.substring(this.path.lastIndexOf('/') + 1);
+        var url = this.getParentPath() + "/";
+
+        params[CQ.utils.Sling.ORDER] = CQ.wcm.EditBase.INSERT_LAST;
+        if (definition.insertBehavior) {
+            params[CQ.utils.Sling.ORDER] = definition.insertBehavior;
+        } else if (insertedBeforeEBName != "*") {
+            params[CQ.utils.Sling.ORDER] = CQ.wcm.EditBase.INSERT_BEFORE + " " + insertedBeforeEBName;
+        }
+        if (insertedBeforeEBName != "*"
+                && (params[CQ.utils.Sling.ORDER] == CQ.wcm.EditBase.INSERT_BEFORE ||
+                    params[CQ.utils.Sling.ORDER] == CQ.wcm.EditBase.INSERT_AFTER)) {
+            params[CQ.utils.Sling.ORDER] += " " + insertedBeforeEBName;
+        }
+
+        if( params[":nameHint"] ) {
+            var page = CQ.utils.WCM.getPage(CQ.utils.WCM.getPagePath());
+            //if page is a Live Copy source/target, paragraph must have a unique name in order to avoid name collisions
+            if(page && ( page.isLiveCopySource() || page.isLiveCopy())) {
+                //generate a 16 bits number ( 2^16 - 1 = 65535)
+                var r = Math.floor( Math.random() * 65535);
+                var hex = r.toString(16);
+                //concatenate the hexadecimal version of this number to the name hint
+                params[":nameHint"] += "_" + hex;
+            }
+        }
+
+        var serverResponse = CQ.utils.HTTP.post(url, null, params, this);
+        if (CQ.utils.HTTP.isOk(serverResponse) && serverResponse.headers) {
+            var contentPath = serverResponse.headers["Path"];
+
+            // create a suitable undo step
+            if ((preventUndo !== true) && CQ.undo.UndoManager.isEnabled()) {
+                var undoHistory = CQ.undo.UndoManager.getHistory();
+                var blobs = undoHistory.createBlobsFromCreateParams(contentPath,
+                        extraParams);
+                var createStep = (undoCfg
+                        ? undoCfg.step
+                        : undoHistory.createUndoStep(undoHistory.createStepConfig()));
+                createStep.addUndoAction(new CQ.undo.actions.InsertParagraphAction(
+                        undoHistory.getIdManager(), contentPath, this.path, {
+                            "definition": definition,
+                            "extraParams": extraParams,
+                            "noEvent": noEvent,
+                            "loadAnnotations": loadAnnotations,
+                            "ignoreTemplate": ignoreTemplate
+                        }, blobs));
+                if (!undoCfg) {
+                    createStep.commit();
+                }
+            }
+
+            if (contentPath && !noEvent && parent &&
+                    parent.fireEvent(CQ.wcm.EditBase.EVENT_BEFORE_CHILD_INSERT, parent, contentPath) === false) {
+                return null;
+            }
+
+            if (contentPath && !noEvent) {
+                this.listenersChecker(definition.config);
+
+                if (definition.config && definition.config.listeners && definition.config.listeners[CQ.wcm.EditBase.EVENT_AFTER_INSERT]) {
+                    definition.config.listeners[CQ.wcm.EditBase.EVENT_AFTER_INSERT].call(this, contentPath, definition);
+                } else {
+                    //default behavior
+                    this.refreshCreated(contentPath, definition, loadAnnotations);
+                }
+                if (parent) {
+                    parent.fireEvent(CQ.wcm.EditBase.EVENT_AFTER_CHILD_INSERT, parent, contentPath);
+                }
+            }
+            if (this.hideHighlight) {
+                CQ.wcm.EditRollover.preventNextHighlight = true;
+            }
+            return contentPath;
+        }
+    }
+    return null;
+};
+
+/**
+ * Updates the paragraph using the specified property name and value(s).
+ * @member CQ.wcm.EditBase
+ * @method updateParagraph
+ * @param {String} propName The property name
+ * @param {String/String[]} values The value(s)
+ * @param {Object} extraParams (optional) Any extra parameters
+ * @param {Boolean} useDefaultSuccessFn (optional) True if the default success method of the
+ *        editable should be executed; must be used to ensure that some CSS classes are
+ *        adjusted; if true, {@link #form} must additionally be specified (otherwise the
+ *        setting is ignored)
+ * @param {CQ.Ext.form.BasicForm} form (optional) The form (or a suitable stub object) to be
+ *        used for further updating the content after successfully updating the paragraph;
+ *        only used if useDefaultSuccessFn == true
+ * @return {Boolean} True if server response is ok (which is always the case, as the
+ *         call is executed asynchroneously)
+ */
+CQ.wcm.EditBase.updateParagraph = function(propName, values, extraParams,
+                                           useDefaultSuccessFn, form) {
+    var params = { "_charset_":"utf-8" };
+    if (propName.indexOf("$") >= 0) {
+        if (!CQ.Ext.isArray(values)) {
+            values = [ values ];
+        }
+        for (var valueIndex = 0; valueIndex < values.length; valueIndex++) {
+            var value = values[valueIndex];
+            var paramName = propName.replace("$", valueIndex + 1);
+            params[paramName] = value;
+
+            //add last modified to ensure images cache refresh
+            var index = paramName.lastIndexOf("/");
+            if( index != -1) {
+                params[paramName.substring(0,index) + "/jcr:lastModified"] = "";
+                params[paramName.substring(0,index) + "/jcr:lastModifiedBy"] = "";
+            }
+        }
+    } else {
+        params[propName] = values;
+
+        //add last modified to ensure images cache refresh
+        var index = propName.lastIndexOf("/");
+        if( index != -1) {
+            params[propName.substring(0,index) + "/jcr:lastModified"] = "";
+            params[propName.substring(0,index) + "/jcr:lastModifiedBy"] = "";
+        }
+    }
+    // add additional params
+    if (extraParams) {
+        for (var p in extraParams) {
+            params[p] = extraParams[p];
+        }
+    }
+    // set last modified
+    params["./jcr:lastModified"] = "";
+    params["./jcr:lastModifiedBy"] = "";
+    var editable = this;
+    CQ.HTTP.post(
+            this.path,
+            function(options, success, response) {
+                if (success) {
+                    if (useDefaultSuccessFn && form) {
+                        // the afteredit event is fired by the editable's success method
+                        editable.success(form, response);
+                        form.fireEvent("actioncomplete", form);
+                    } else {
+                        editable.fireEvent(CQ.wcm.EditBase.EVENT_AFTER_EDIT, editable);
+                    }
+                } else if (useDefaultSuccessFn && form) {
+                    form.fireEvent("actionfailed", form);
+                }
+            },
+            params
+            );
+    return true;
+};
+
+/**
+ * @member CQ.wcm.EditBase
+ * @method removeParagraph
+ * Removes the paragraph.
+ */
+CQ.wcm.EditBase.removeParagraph = function() {
+    if (!CQ.WCM.getSelection().contains(this)) {
+        CQ.WCM.deselect();
+    }
+    var items = [];
+    var checkUrl = "/bin/wcm/references.json";
+    var sel = CQ.WCM.getSelectedItems();
+    if (sel.length == 0 && this) {
+        sel.push(this);
+    }
+    for (var s = 0; s < sel.length; s++) {
+        if (sel[s].isActionDelete()) {
+            items.push(sel[s]);
+            checkUrl = CQ.HTTP.addParameter(checkUrl, "path", sel[s].path);
+        }
+    }
+
+    if (items.length > 0) {
+        // send request to /bin/wcm/references to check if there are any
+        // references to the selected items.
+        checkUrl = CQ.HTTP.noCaching(checkUrl);
+        var data = CQ.HTTP.eval(checkUrl);
+        var numRefs = 0;
+        if (data && data.pages) {
+            for (var i=0;i<data.pages.length;i++) {
+                try {
+                    numRefs += data.pages[i].references.length;
+                } catch(e) {
+                    // ignore
+                }
+            }
+        }
+
+        var lockedLiveRelationship = false;
+        var enableLiveRelationship = false;
+        for (i = 0; i < items.length; i++) {
+            if(items[i].enableLiveRelationship && items[i].liveStatusLocked) {
+                lockedLiveRelationship = true;
+                enableLiveRelationship = true;
+                break;
+            }
+        }
+
+        var msg = CQ.I18n.getMessage("Do you really want to delete the selected component(s)?");
+        if (lockedLiveRelationship) {
+            msg = CQ.I18n.getMessage("Do you really want to cancel inheritance and delete the selected component(s)?");
+        }
+        if (numRefs > 0) {
+            msg = CQ.I18n.getMessage("One or more of the selected components are referenced. Do you really want to delete them?");
+            if (lockedLiveRelationship) {
+                msg = CQ.I18n.getMessage("One or more of the selected components are referenced. Do you really want to cancel inheritance and delete them?");
+            }
+        }
+        CQ.Ext.Msg.confirm(
+                CQ.I18n.getMessage("Delete Component(s)"),
+                msg,
+                function(btnId) {
+                    if (btnId == "yes") {
+                        var isUndoEnabled = CQ.undo.UndoManager.isEnabled();
+                        var undoHistory = (isUndoEnabled ?  CQ.undo.UndoManager.getHistory()
+                                : null);
+                        var undoStep = (isUndoEnabled ? undoHistory.createUndoStep(
+                                undoHistory.createStepConfig()) : null);
+                        // we'll have to collect undo data before the removal actually
+                        // happens to preserve correct insert points
+                        var undoData = null;
+                        if (isUndoEnabled) {
+                            undoData = [ ];
+                            for (var d = 0; d < items.length; d++) {
+                                var parData = CQ.undo.util.UndoUtils.getCurrentData(
+                                        items[d]);
+                                if (parData === false) {
+                                    isUndoEnabled = false;
+                                    break;
+                                }
+                                undoData.push(parData);
+                                var blobs = parData.blobs;
+                                var blobCnt = blobs.length;
+                                for (var b = 0; b < blobCnt; b++) {
+                                    blobs[b].save(undoHistory.binaryServletUrl,
+                                            items[d].path);
+                                }
+                            }
+                        }
+                        // removal & setting undo data
+                        for (var i = 0; i < items.length; i++) {
+                            var item = items[i];
+                            if (item.liveStatusLocked) {
+                                if (!CQ.wcm.EditBase.switchInheritance(item)) {
+                                    return;  //break if the item can't be unlocked
+                                }
+                            }
+                            CQ.wcm.EditBase.doRemoveParagraph(item);
+                            if (isUndoEnabled) {
+                                undoStep.addUndoAction(
+                                        new CQ.undo.actions.RemoveParagraphAction(
+                                                undoHistory.getIdManager(), item.path,
+                                                undoData[i].insertBefore, undoData[i].data,
+                                                undoData[i].blobs, undoData[i].compInfo,
+                                                item.dropTarget, item.hasAnnotations()));
+                            }
+                        }
+                        if (isUndoEnabled) {
+                            CQ.undo.util.UndoUtils.sortRemoveParagraphActions(undoStep);
+                            undoStep.commit();
+                        }
+
+                        // todo: handle better. ghosts are not reloaded because
+                        // components change edit layout (eg. buttons, editbar/rollovers)
+                        if( enableLiveRelationship) {
+                            this.refreshPage();
+                        }
+                    }
+                },
+                this
+                );
+    }
+};
+
+/**
+ * @member CQ.wcm.EditBase
+ * @method doRemoveParagraph
+ * Removes the given item from the server.
+ * @param {Object} item the item to remove
+ */
+CQ.wcm.EditBase.doRemoveParagraph = function(/* Object */ item) {
+    if (item.fireEvent(CQ.wcm.EditBase.EVENT_BEFORE_DELETE, item) === false) {
+        return null;
+    }
+    CQ.WCM.deselect(item); // get rid of reference
+    var url = item.path;
+    var params = {};
+    params[CQ.Sling.STATUS] = CQ.Sling.STATUS_BROWSER;
+    params[CQ.Sling.OPERATION] = CQ.Sling.OPERATION_DELETE;
+    response = CQ.shared.HTTP.post(url, null, params);
+    if (CQ.utils.HTTP.isOk(response)) {
+        item.deleted = true;
+        item.fireEvent(CQ.wcm.EditBase.EVENT_AFTER_DELETE, item);
+    }
+    // todo: error handling
+
+};
+
+CQ.wcm.EditBase.switchInheritance = function(/*Object */ item) {
+    var params = {};
+    // deepCancel = true if component is not container and false if component is container
+    params[ CQ.wcm.msm.MSM.PARAM_STATUS + "/" + CQ.wcm.msm.MSM.PARAM_IS_CANCELLED ] = item.liveStatusLocked;
+    params[ CQ.wcm.msm.MSM.PARAM_STATUS + "/" + CQ.wcm.msm.MSM.PARAM_IS_CANCELLED_FOR_CHILDREN ] = !item.isContainer;
+
+    var serverResponse = CQ.utils.HTTP.post(item.path + ".msm.conf", null, params, item);
+    if (CQ.utils.HTTP.isOk(serverResponse)) {
+        item.liveStatusLocked = !item.liveStatusLocked ;
+        return true;
+    } else {
+        return false;
+    }
+};
+

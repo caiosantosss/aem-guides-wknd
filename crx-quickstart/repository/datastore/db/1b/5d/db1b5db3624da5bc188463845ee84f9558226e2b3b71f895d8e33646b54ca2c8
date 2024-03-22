@@ -1,0 +1,746 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (window, document, Granite, $) {
+    "use strict";
+
+    /*
+     Data Controller for Generic Set builder
+     Usage: Data controller is for controlling data that contains item list with order and common settings.
+     There are 3 fields we keep tracked.
+     - items for item list
+     - order for look-up order of items in item list
+     - settings for page level settings
+     Setup:
+     - One data controller per page since this is to keep tracked of editor state
+     - Data model must be supplied to the controller by defining
+     $.s7dm.datactl._model = {
+     buildItem: methodToDealWithItem(json),
+     buildSettings: methodToDealWithSettings(json),
+     loadData: methodToDealWithInitDataLoader(completeMethod),
+     submit: submit(orderedItems, settings),
+     validateSettings: validateSettings(settings) //optional
+     }
+     Mechanism Note
+     - When you delete item, we just set item to null and remove it from the order. This is for supporting correct
+     undo/redo
+     - Data API can be accessed via $.s7dm.datactl.data.* to get various field setup
+     - Event API can be accessed via $.s7dm.datactl.event.* It's recommended to create event via event API instead of
+     manual build. Then, supply the build event to $(document).trigger(EVENT); For example,
+     $(document).trigger($.s7dm.datactl.event.buildModSettings({'manualThumbnail':'/content/dam/sample.jpg'}));
+
+     */
+
+
+
+    //EVENTS
+    var EVENTS = {
+        'dataChange': 'dmset-data-change',
+        'dataLoad': 'damset-data-loaded',
+        'modData': 'dmset-mod-data',
+        'undo': 'dmset-undo',
+        'redo': 'dmset-redo',
+        'submit': 'dmset-submit',
+        'successSave': 'dmset-save-success',
+        'failSave': 'dmset-save-fail',
+        'noop': 'dmset-noop'
+    }
+
+    //Fields for each state
+    var FIELDS = {
+        'items': 'items', //list of items in the state. item structure is defined by _model
+        'settings': 'settings', //global settings for the editor defined by _model
+        'order': 'order'//order of items
+    }
+
+    //Init blank data matching fields
+    var INIT_BLANK_DATA = { 'items': [], 
+                            'order': [], 
+                            'settings': {} };
+
+
+    /*
+     @private
+     Data stack
+     */
+    var dataStack = {
+        //stack of states
+        states:[],
+        //stack pointer
+        curIdx: -1,
+        //has pending change?
+        pending: false
+    }
+
+    //Retry data load
+    var retryData = {
+        INTERVAL: 100, //ms for waiting load
+        count: 10 //number of retry
+    }
+
+    //Initialize s7dm namespace for jQuery
+    $.s7dm = $.s7dm || {};
+    //Register public event
+    $.s7dm.datactl = $.s7dm.datactl || {
+        event: {
+            //Data change event - typically, other components want to listen to data change
+            DATA_CHANGED: EVENTS.dataChange,
+            //Data load event - for initialization, after all data is loaded
+            DATA_LOADED: EVENTS.dataLoad,
+            //Data submission - This can be tied to submit button
+            SUBMIT: EVENTS.submit,
+            //Fail save event
+            SAVE_FAIL: EVENTS.failSave,
+            //Success save event
+            SAVE_SUCCESS: EVENTS.successSave,
+            //Undo
+            UNDO: EVENTS.undo,
+            //Redo
+            REDO: EVENTS.redo
+        }
+    };
+
+    $(document).one('foundation-contentloaded', function(){
+        initComponent();
+    });
+
+
+    //Public API for Data Controller
+    var dataCtl = {
+        data: {
+            /**
+             * Get current state
+             * @returns {Object} JSON representing state (please refer to FIELDS for available data fields)
+             */
+            getState: function(){
+                return peek();
+            },
+            /**
+             * Check data controller for pending change
+             * @returns {boolean} true when there is pending change
+             */
+            hadPending: function(){
+                return dataStack.pending;
+            },
+            /**
+             * Check data controller for more state to go backward
+             * @return {Boolean} true when you can go backward
+             */
+            hadPrev: function() {
+                return this.hadPending();
+            },
+            /**
+             * Check data controller for more state to go forward
+             * @return {Boolean} true when you can go forward
+             */
+            hadNext: function(){
+                return dataStack.states.length > dataStack.curIdx + 1;
+            },
+            /**
+             * Get array items for the current state
+             * @returns {Array} array of items based on model
+             */
+            getItems:  function(){
+                var state = this.getState()
+                return state['items'] || [];
+            },
+            /**
+             * Get item count for current state
+             * @returns {Number} item count including null one
+             */
+            getItemCount: function(){
+                var items = this.getItems();
+                return items.length;
+            },
+            /**
+             * Get item order lookup for current state
+             * Number in this array is position in items array
+             * @returns {Array} lookup order
+             */
+            getOrder: function(){
+                var state = this.getState();
+                return state['order'] || [];
+            },
+            /**
+             * Get item based on position ID in items array for current state
+             * @param {Number} idx index in array
+             * @returns {Object} item matching index
+             */
+            getItem: function(idx) {
+                var items = this.getItems();
+                return items[idx];
+            },
+            /**
+             * Get ordered items based on order array for current state
+             * @returns {Array} ordered items
+             */
+            getOrderedItems: function(){
+                var orderedItems = [],
+                    order = this.getOrder(),
+                    items = this.getItems();
+                for (var i=0; i < order.length; i++) {
+                    var idx = order[i];
+                    var item = JSON.stringify(items[idx]);
+                    orderedItems.push($.parseJSON(item));
+                }
+                return orderedItems;
+
+            },
+            /**
+             * Get items count without null items for current state
+             * @returns {Number} real item count
+             */
+            getOrderedItemsCount: function(){
+                var orderedItems = this.getOrderedItems();
+                return orderedItems.length;
+            },
+            /**
+             * Get the settings based on model for current state
+             * @returns {Object} settings
+             */
+            getSettings: function(){
+                var state = this.getState();
+                return state['settings'] || {};
+            },
+            /**
+             * Build object for item
+             * @param {Object} json JSON object representing data @see your custom model for buildItem
+             * @return {Object} An object representing item when data model is provided;
+             * 					otherwise, it returns empty object
+             */
+            buildItem: function(json){
+                //Check for model. If no model, returns empty object back
+                if ($.s7dm.datactl._model.buildItem) {
+                    return $.s7dm.datactl._model.buildItem(json);
+                }
+                else {
+                    return {};
+                }
+
+            },
+            /**
+             * Build object for settings
+             * @param {Object} json JSON object representing data @see your custom model for buildSettings
+             * @return {Object} An object representing settings when data model is provided;
+             * 					otherwise, it returns empty object
+             */
+            buildSettings: function(json) {
+                //Check for model. If no model, returns empty object back
+                if ($.s7dm.datactl._model.buildSettings) {
+                    return $.s7dm.datactl._model.buildSettings(json);
+                }
+                else {
+                    return {};
+                }
+            },
+            /**
+             * Validate the current settings based on model
+             * @return {Boolean} result from validateSettings or true when no validation setup
+             */
+            validateSettings: function(){
+                //Check for model. If no model, returns empty object back
+                if ($.s7dm.datactl._model.validateSettings) {
+                    return $.s7dm.datactl._model.validateSettings(this.getSettings());
+                }
+                else {
+                    return true;
+                }
+            },
+			/**
+             * @return current state ID
+             */
+            getStateId: function(){
+                return dataStack.curIdx;
+            }
+
+        },
+        event: {
+            /**
+             * Build data modify event object
+             * @param {Number} idx index of item to be modified (-1 for append to the end for new item
+             * @param {Object} item to be inserted. This items should be built by this.data.buildItem().
+             *				   If this is null, it means delete.
+             * @param {Number} afterIdx insert data after
+             * @retun {Event} JSON event object
+             */
+            buildModItem: function(idx, item, afterIdx) {
+                var json = { 'idx' : idx,
+                    		 'item' : item,
+                    		 'afterIdx' : afterIdx,
+                             'bulk': false};
+                return this._buildModData(FIELDS.items, json);
+            },
+            /**
+             * Build data modify event object for bulk items with single append
+             * @param {Array} items to be inserted. This items should be built by this.data.buildItem().
+             * @retun {Event} JSON event object
+             */
+            buildBulkModItems: function(items) {
+                var json = {'items' : items, 'bulk': true};
+                return this._buildModData(FIELDS.items, json);
+            },
+            /**
+             * Build setting modify event
+             * @param {Object} settings JSON of settings based on your custom model.
+             * @param {Boolean} replaced Use this setting to replace the current one? If false, supplied settings will
+             *          be merged with the current one. optional
+             * @returns {Event} JSON event object
+             */
+            buildModSettings: function(settings, replaced) {
+                var json = { settings: settings,
+                    replaced: replaced };
+                return this._buildModData(FIELDS.settings, json);
+            },
+            /**
+             * Build reorder event
+             * @param {Array} order array of new lookup order. The order members must be matched with the current state.
+             * @param {Boolean} isBackground informs if the reorder is a background operation
+             *          and is being triggered as a rearrangement due to some other user action.
+             * @returns {Event} JSON event object
+             */
+            buildReorder: function(order, isBackground){
+                //Validate that the order is not null/undefined and match with the length of current order
+                if (order && order.length ==  dataCtl.data.getOrder().length) {
+                    return this._buildModData(FIELDS.order, order, !!isBackground);
+                }
+                else {
+                    return this.buildNoop();
+                }
+            },
+            /**
+             * Generic data modification. It's recommended to not call this directly.
+             * @private
+             * @param {String} field field name to be updated @see FIELDS for available fields
+             * @param {Object} json data to be updated
+             * @param {Boolean} isBackground informs if the reorder is a background operation
+             *          and is being triggered as a rearrangement due to some other user action.
+             * @returns {Event} JSON event object
+             */
+            _buildModData: function(field, json, isBackground) {
+                return {
+                    'type': EVENTS.modData,
+                    'field': field,
+                    'json': json,
+                    'isbackground': isBackground
+                };
+            },
+            /**
+             * Build no-op event
+             * @returns {Event} JSON no-op event
+             */
+            buildNoop: function(){
+                return { 'type': EVENTS.noop };
+            }
+        }
+    }
+
+
+    /**
+     * @private
+     * @param {Object} initial data from model to be pushed to initial stack
+     */
+    function loadComplete(json){
+        if (json) {
+            push(json, true);
+        }
+        else {
+            //blank data
+            push(INIT_BLANK_DATA, true);
+        }
+        $(document).trigger({'type': EVENTS.dataLoad});
+    }
+
+    /**
+     * History back
+     * if Undo disable than focus move to Redo
+     */
+    function back(){
+        shiftState(-1);
+        var isUndoButtonDisabled = $('#set-undo').prop('disabled');
+        if(isUndoButtonDisabled){
+            $('#set-redo').focus();
+
+        }
+    }
+
+    /**
+     * History forward
+     * Redo disable than focus move to Undo
+     */
+    function forward(){
+        shiftState(1);
+        var isRedoButtonDisabled = $('#set-redo').prop('disabled');
+        if(isRedoButtonDisabled){
+            $('#set-undo').focus();
+
+        }
+    }
+
+    /**
+     * Modify data and add a new state to the stack
+     * @param {Event} e event object with field and data {e.field, e.json}
+     *
+     */
+    function modifyData(e) {
+        var field = e.field,
+            json = e.json;
+        if (field == FIELDS.items) {
+            if (json.bulk) {
+                modifyItem(-1, json.items, -2);
+            }
+            else{
+            	modifyItem(json.idx, json.item, json.afterIdx);
+            }
+        }
+        else if (field == FIELDS.settings) {
+            modifySettings(json.settings, json.replaced);
+        }
+        else if (field == FIELDS.order) {
+            reorderItem(json, e.isbackground);
+        }
+    }
+
+    /**
+     * Submit data handler
+     */
+    function submitData(){
+        if ($.s7dm.datactl._model.submit) {
+            $.s7dm.datactl._model.submit(dataCtl.data.getOrderedItems(),
+                dataCtl.data.getSettings());
+        }
+    }
+
+    /**
+     * @private
+     * Initialize the component
+     */
+    function initComponent() {
+        $.extend(true, $.s7dm.datactl, dataCtl);
+        //register model
+        if (!$.s7dm.datactl._model) {
+            $.s7dm.datactl._model = {}; //empty model;
+        }
+        $(document).on(EVENTS.noop, function(){});
+        $(document).on(EVENTS.undo, back);
+        $(document).on(EVENTS.redo, forward);
+        $(document).on(EVENTS.modData, modifyData);
+        $(document).on(EVENTS.submit, submitData);
+        initData();
+    }
+
+    /**
+     * @private
+     * data initialization based on loadData in model
+     */
+    function initData(){
+        retryData.count--;
+        if ($.s7dm.datactl._model.loadData) {
+            $.s7dm.datactl._model.loadData(loadComplete);
+        }
+        else if (retryData.count > 0) {
+            //retry loading data in case that model is not loaded yet
+            setTimeout(initData, retryData.INTERVAL);
+        }
+    }
+
+    /**
+     * @private
+     * @param {Number} idx index of item to be modified, added (-1) or deleted
+     * @param {Object} item JSON of item to be added or modified
+     * @param {Number} afterIdx index for insert item after. unset for at the end and -1 for before the first item
+     *					-2 for bulk append
+     */
+    function modifyItem(idx, item, afterIdx) {
+        var items = getJSON(dataCtl.data.getItems()),
+            order = getJSON(dataCtl.data.getOrder()),
+            settings = getJSON(dataCtl.data.getSettings());
+        //Add a new item
+        if (idx < 0) {
+            if (typeof afterIdx != 'undefined' && afterIdx == -2) { 
+                //bulk append with -2
+                for (var i = 0; i < item.length; i++) {
+                    items.push(item[i]);
+                    var newItemIdx = items.length-1;
+                    order.push(newItemIdx);
+                }
+            }
+            else {
+                items.push(item);
+                var newItemIdx = items.length-1;
+                if (typeof afterIdx != 'undefined') {
+                    var newOrder = [],
+                        foundIdx = false;
+                    for (var i = 0; i < order.length; i++) {
+                        //to insert before first item on the list
+                        if (afterIdx == -1 && i == 0) {
+                            newOrder.push(newItemIdx);
+                            foundIdx = true;
+                        }
+                        //add current item to the list
+                        newOrder.push(order[i]);
+                        //add the new item after the afterIdx item
+                        if (order[i] == afterIdx) {
+                            newOrder.push(newItemIdx);
+                            foundIdx = true;
+                        }
+                    }
+                    //when cannot find afterIdx to insert item
+                    if (!foundIdx) {
+                        newOrder.push(newItemIdx);
+                    }
+                    order = newOrder;
+                }
+                else {
+                    order.push(newItemIdx);
+                }
+            }
+        }
+        //Delete an item at idx
+        else if (item == null) {
+            if (items.length > idx) {
+                items[idx] = null;
+                var newOrder = [];
+                for (var i = 0; i < order.length; i++) {
+                    if (order[i] != idx) {
+                        newOrder.push(order[i]);
+                    }
+                }
+                order = newOrder;
+            }
+        }
+        //Update item at idx
+        else {
+            if (items.length > idx && items[idx] != null) {
+                items[idx] = item;
+            }
+        }
+        addNewState(items, order, settings, FIELDS.items);
+
+    }
+
+    /**
+     * Modify settings and push into a new state
+     * @param {Object} json settings for new state based on your custom model
+     * @param {Boolean} replaced if it's true, we replace the whole settings. Otherwise, we merge.
+     * if prev and current value has difference than modify whole setting and datastack value increase or decreases, depends on undo and redo button click
+     */
+    var prevtitle=null;
+    var prevdesc=null;
+    var prevthumb=null;
+    function modifySettings(json, replaced) {
+        if($('#set-title').val() !== prevtitle || $("#set-description").val() !== prevdesc || json.manualThumbnail !== prevthumb ){
+            prevtitle=$('#set-title').val();
+            prevdesc=$("#set-description").val();
+            prevthumb=json.manualThumbnail;
+            var items = getJSON(dataCtl.data.getItems()),
+                order = getJSON(dataCtl.data.getOrder()),
+                settings = getJSON(dataCtl.data.getSettings());
+            if (replaced) {
+                //replace data
+                settings = json;
+            }
+            else {
+                //merge data
+                $.extend(true, settings, json);
+            }
+            addNewState(items, order, settings, FIELDS.settings);
+        }
+
+    }
+
+    /**
+     * @private
+     * Reorder items inside order field. If the order is valid, it will be pushed as a new state.
+     * @param {Array} array of new order
+     * @param {Boolean} if the operation is a background operation
+     */
+    function reorderItem(order, isBackground) {
+        if (isValidOrder(order)) {
+            var items = getJSON(dataCtl.data.getItems()),
+                settings = getJSON(dataCtl.data.getSettings());
+            if (isBackground) {
+                pop();
+            }
+            addNewState(items, order, settings, FIELDS.order);
+        }
+    }
+
+    /**
+     * @private
+     * Add a new state to the data stack
+     * @param {Array} items items list
+     * @param {Array} order items order lookup
+     * @param {Object} settings general settings
+     * @param {String} field updated field name optional
+     */
+    function addNewState(items, order, settings, field) {
+        var newState = buildState(items, order, settings);
+        push(newState, false, field);
+    }
+
+    /**
+     * @private
+     * Check that the input order is valid based on the current state order
+     * @param {Array} order an array of order
+     * @return {Boolean} true if order is valid
+     */
+    function isValidOrder(order){
+        if (!$.isArray(order)) { //reject since it's not array
+            return false;
+        }
+        var currentOrder = getJSON(dataCtl.data.getOrder());
+
+        if (order.length != currentOrder.length) { //reject since it doesn't match number of current order
+            return false;
+        }
+
+        for (var i=0; i < order.length; i++) {
+            for (var j=0; j < currentOrder.length; j++) {
+                if(order[i] == currentOrder[j]) {
+                    currentOrder.splice(j,1);
+                }
+            }
+        }
+        if(currentOrder.length != 0) { //reject since some content doesn't exist in current order
+            return false;
+        }
+        return true;
+    }
+
+
+
+    /**
+     * @private
+     * Cloning Workaround to dereference json from origina obj
+     * @return JSON without reference to original object
+     */
+    function getJSON(json) {
+        return $.parseJSON(JSON.stringify(json));
+    }
+
+    //State management
+
+    /**
+     * @private
+     * Push data to the end of the data stack
+     * @param {Object} state a new data state to be pushed to data stack
+     * @param {Boolean} isInit is initialization?
+     * @param {String} field updated field optional
+     */
+    function push(state, isInit, field) {
+        var currentIdx = dataStack.curIdx;
+        var states = getJSON(dataStack.states);
+        // this is to clean up the state that we don't need 
+        // i.e. modify something after undo/redo
+        if (states.length > currentIdx + 1) {
+            var newStates = [];
+            for (var i = 0; i < currentIdx + 1; i++) {
+                newStates.push(states[i]);
+            }
+            states = newStates;
+        }
+        states.push(state);
+        dataStack.states = states;
+        dataStack.curIdx++;//move current point up by one
+        dataStack.pending = true && (!isInit);//set pending data to true and not initial state
+        //data change only trigger for non-initial one 
+        if (!isInit) {
+            triggerDataChange(field);
+        }
+    }
+
+    /**
+     * @private
+     * Pops last state of data stack
+     * @param {Boolean} forceTriggerDataChange if triggerDataChange needs to be invoked
+     */
+
+    function pop(forceTriggerDataChange){
+        dataStack.curIdx--;
+        if (forceTriggerDataChange) {
+            triggerDataChange();
+        }
+    }
+
+    /**
+     * @private
+     * Peek data stack based on current data index
+     * @return {Object} current state
+     */
+
+    function peek(){
+        var states = dataStack.states;
+        var currentIdx =  dataStack.curIdx;
+        var peekData = [];
+        if (states.length > 0) {
+            peekData = states[ currentIdx ];
+        }
+        return peekData;
+    }
+
+    /**
+     * Build s state
+     * @param {Array} items array of items where each item is defined in custom model
+     * @param {Array} order lookup order based on items position
+     * @param {Object} settings setting JSON based on custom model
+     * @returns {Object} JSON object representing a state
+     */
+    function buildState(items, order, settings) {
+        return {
+            'items': items,
+            'order': order,
+            'settings': settings
+        };
+    }
+
+    /**
+     * State shift base on delta
+     * @param {Number} delta number of step to shift the state
+     *
+     */
+    function shiftState(delta) {
+        var states = dataStack.states
+        states = getJSON(states);
+        var currentIdx = dataStack.curIdx + delta;
+
+        if (currentIdx <= 0) {
+            //no more item so no pending data
+            dataStack.pending = false;
+            dataStack.curIdx = 0;
+        }
+        else if (currentIdx < states.length) {
+            //change state only when there is still more state
+            dataStack.pending = true;
+            dataStack.curIdx = currentIdx;
+        }
+        triggerDataChange();
+    }
+
+    /**
+     * @private
+     * Data change event
+     * @param {String} field updated field name
+     */
+    function triggerDataChange(field){
+        if (field) {
+            $(document).trigger({ 'type': EVENTS.dataChange, 'field': field });
+        }
+        else {
+            $(document).trigger({ 'type': EVENTS.dataChange });
+        }
+    }
+
+})(window, document, Granite, $);

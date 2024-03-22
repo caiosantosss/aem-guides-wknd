@@ -1,0 +1,533 @@
+/*
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2021 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+*/
+(function (window, document, Granite, $) {
+    "use strict";
+    //used to handle events from assetpicker
+    window.addEventListener("message", receiveMessage, false);
+    var publishSettings;
+    var ipMaskArrayToString;
+    var selectedContext;
+    var nameArr;
+    var context;
+    var postwait;
+    var wrapper = $('#edit-configuration-pr');
+    var ui = $(window).adaptTo("foundation-ui");
+    var RULESET_ASSETPICKER = 'ruleset-assetpicker';
+    var DEFAULTIMG_ASSETPICKER = 'defaultImg-assetpicker';
+   
+    var ValidationInputs = {
+        IP_REGEX: {
+            selector: "ip.regex",
+            validator: function (el) {
+                var ip_regex_pattern = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+                var error_message = Granite.I18n.get("Invalid IP address value.");
+                var ip_result = el.value.match(ip_regex_pattern);
+                if (ip_result === null) {
+                    return error_message;
+                }
+            }
+        },
+        NUMBER_VALIDATOR: {
+            selector: "number",
+            validator: function (el) {
+                if (el.value === '') return null
+                var error_message = Granite.I18n.get("Please enter a numerical value.");
+                var numeric_result = $.isNumeric(el.value);
+                if (numeric_result === false || el.value < 0) {
+                    return error_message;
+                }
+            }
+        },
+        XML_VALIDATOR: {
+            selector: "ruleset",
+            validator: function (el) {
+                var xml_pattern = /.xml$/;
+                var error_message = Granite.I18n.get("Please select XML format file.");
+                if(el.value.length > 0) {
+                    var xml_result = el.value.match(xml_pattern) && el.value.length > 0;
+                    if (xml_result === null) {
+                        return error_message;
+                    }
+                }
+            }
+        },
+        IMAGE_VALIDATOR: {
+           selector: "image.regex",
+            validator: function (el) {
+                var img_pattern = (/\.(gif|jpe?g|tiff?|png|webp|bmp)$/i);
+                var error_message = Granite.I18n.get("Please select a valid image format file.");
+                if(el.value.length > 0) {
+                    var img_result = el.value.match(img_pattern);
+                    if (img_result === null) {
+                        return error_message;
+                    }
+                }
+            }
+        }
+    }
+    function isDataChanged (current, original) {
+        for (let key in current) {
+            if (original.hasOwnProperty(key) && current[key] !== original[key]) return true
+        }
+        return false;
+    }
+    for (let key in ValidationInputs) {
+        register(ValidationInputs[key].selector, ValidationInputs[key].validator);
+    }
+    function register(selector, validator) {
+        var foundationReg = $(window).adaptTo("foundation-registry");
+        foundationReg.register("foundation.validation.validator", {
+            selector: "[data-foundation-validation='" + selector + "']",
+            validate: validator
+        });
+    }
+    function generateColorProfileOptions(getdropdown) {
+        var listofDropdown = ICC_PROFILE_LIST.iccProfileList;
+        var arrRgb = [];
+        var arrCmyk = [];
+        var arrGray = [];
+        for (var i = 0; i < listofDropdown.length; i++) {
+            if (listofDropdown[i].colorSpace === "RGB") {
+                arrRgb.push(listofDropdown[i]);
+            } else if (listofDropdown[i].colorSpace === "GRAY") {
+                arrGray.push(listofDropdown[i]);
+            } else {
+                arrCmyk.push(listofDropdown[i]);
+            }
+        }
+        arrRgb.push({ name: 'None Specified', description: 'None', colorSpace: 'RGB', assetHandle: "" });
+        arrCmyk.push({ name: 'None Specified', description: 'None', colorSpace: 'CMYK', assetHandle: "" });
+        arrGray.push({ name: 'None Specified', description: 'None', colorSpace: 'GRAY', assetHandle: "" });
+        if (getdropdown.id === 'RGB') {
+            arrRgb.sort();
+            rebuildSelectControl(getdropdown, arrRgb);
+        } else if (getdropdown.id === 'cmyk') {
+            arrCmyk.sort();
+            rebuildSelectControl(getdropdown, arrCmyk);
+        } else if (getdropdown.id === 'gs-alignment') {
+            arrGray.sort();
+            rebuildSelectControl(getdropdown, arrGray);
+        }
+    }
+    function rebuildSelectControl(selectId, optionList) {
+        var oldSelected = selectId.selectedItem;
+        if (oldSelected) {
+            oldSelected.selected = false;
+        }
+        selectId.items.clear();
+        var oldExists = false;
+        var defaultselect;
+        if (optionList != undefined && optionList.length > 0) {
+            for (var i = 0; i < optionList.length; i++) {
+                var item = { content: { innerHTML: optionList[i].name } };
+                item.value = optionList[i].assetHandle.toLowerCase();
+                if (i == 0) {
+                    defaultselect = item.value;
+                }
+                selectId.items.add(item);
+                if (oldSelected && item.value == oldSelected.value) {
+                    oldExists = true;
+                }
+            }
+            selectId.value = oldExists ? oldSelected.value : defaultselect;
+        }
+    }
+    $(document).on('foundation-contentloaded', function () {
+        generateColorProfileOptions($('#cmyk').get(0));
+        generateColorProfileOptions($('#RGB').get(0));
+        generateColorProfileOptions($('#gs-alignment').get(0));
+        var $publish = $('#publish');
+        var expiration = $('#cache');
+        var thumbnail_default_resolution = $('#thumb-res');
+        var image_width = $('#image-width');
+        var image_height = $('#image-height');
+        var view_size_width = $('#viewsizewidth');
+        var img_size_right = $('#imgsizeright');
+        var thumbnail_width = $('#thumbnailwidth');
+        var thumbnail_height = $('#thumbnailheight');
+        var quality = $('#quality');
+        var thumb_color = $("#thumbnail-color");
+        var background_color = $("#color-background");
+        var resample_alignment = $('#resample-alignment');
+        var horizontal_alignment = $('#h-alignment');
+        var vertical_alignment = $('#v-alignment');
+        var thumbnail_type = $('#thumbnail-type');
+        var color_alignment = $('#color-alignment');
+        var ip_address = $('#ip-address');
+        var mask = $('#mask');
+        var obfus_mode = $('input[name="reqattrtoggleswitch"]');
+        var lockmode_switchtoggle = $('input[name="reqattrlockmodetoggleswitch"]');
+        var image_mode_switchtoggle = $('input[name="reqattrimagemodetoggleswitch"]');
+        var downsamplingmode_switchtoggle = $('input[name="reqattrdownsamplingtoggleswitch"]');
+        var image_suffix = $('#image-suffix');
+        var rgb_sel = $('coral-select[name="rgbsel"]');
+        var cmyk_sel = $('coral-select[name="cmyksel"]');
+        var gray_sel = $('coral-select[name="graysel"]');
+        var ruleset_input = $('#upload_xml');
+        var default_img_input = $('#upload_img');
+        var contextSelect  = $('coral-select#publish');
+        $('#add-sequence-match').click(function () {
+            var row = '<div class="client-address">' +
+                '<input is="coral-textfield" class="coral-Form-field ip-client ip-address" id="ip-address-' + nameArr.length + '" type="text" placeholder="' + Granite.I18n.get("IP Address") + '" aria-label="' + Granite.I18n.get("IP Address") + '" value="" aria-required="true" data-foundation-validation="ip.regex" data-validation="ip.regex" is="coral-textfield" variant="default">' +
+                '<input is="coral-textfield" class="coral-Form-field ip-client mask" id="mask-' + nameArr.length++ + '" type="text" placeholder="' + Granite.I18n.get("Mask") + '" aria-label="' + Granite.I18n.get("Mask") + '" value="" data-foundation-validation="number" data-validation="number" is="coral-textfield" variant="default">' +
+                '<button is="coral-button" class="close-icon" aria-label="' + Granite.I18n.get("Remove") + '" aria-label="' + Granite.I18n.get("Remove") + '" type="button" autocomplete="off"  icon="close" iconsize="M" trackingfeature="" trackingelement="" tracking="ON" variant="action" size="M" quiet></button></div>';
+            $(".ip-mask-list").append(row);
+        });
+        document.addEventListener('click', function (event) {
+            if (event.target.closest('.close-icon')) {
+                event.target.closest('.client-address').remove();
+            }
+        });
+        $('.ruleset-assetpicker, .defaultImg-assetpicker').on('click', function (e) {
+            showAssetPickerModal($(this))
+        })
+        hideAssetPicker();
+     
+        function showDailog(title, message) {
+            ui.prompt(Granite.I18n.get(title), Granite.I18n.get(message), "warning",
+                [{
+                    text: Granite.I18n.get("Cancel"),
+                    id: "cancel",
+                    handler: function () {
+                        var contextSelect = $('coral-select#publish');
+                        contextSelect.val(contextSelect.data('previousSelected'))
+                    }
+                },
+                {
+                    text: Granite.I18n.get("OK"),
+                    id: "ok",
+                    handler: function () {
+                        $(contextSelect).data('previousSelected', $(contextSelect).val()); // update the previous data
+                        updateView()
+                    }
+                }]
+            );
+        }
+        function updateView() {
+            selectedContext = $publish.children("coral-select-item:selected").val();
+            context = publishSettings.find(function (settings) {
+                return settings.contextName === selectedContext;
+            })
+            var settings = context ? context.publishSettingParams : {};
+            if (settings.ClientAddressFilter) {
+                nameArr = settings.ClientAddressFilter.split(',');
+            } else {
+                nameArr = [];
+            }
+            var ipfields = "";
+            for (var i = 0; i < nameArr.length; i++) {
+                var ind = nameArr[i] && nameArr[i].split('/');
+                if (nameArr[i].includes('/')) {
+                    ipfields += '<div class="client-address">' +
+                        '<input is="coral-textfield" class="coral-Form-field ip-client ip-address" id="ip-address-' + i + '" type="text" placeholder="' + Granite.I18n.get("IP Address") + '" aria-label="' + Granite.I18n.get("IP Address") + '" value=' + ind[0] + ' aria-required="true" data-foundation-validation="ip.regex" data-validation="ip.regex" is="coral-textfield" variant="default">' +
+                        '<input is="coral-textfield" class="coral-Form-field ip-client mask" id="mask-' + i + '" type="text" placeholder="' + Granite.I18n.get("Mask") + '" aria-label="' + Granite.I18n.get("Mask") + '" value=' + ind[1] + ' data-foundation-validation="number" is="coral-textfield" variant="default">' +
+                        '<button is="coral-button" class="close-icon" aria-label="' + Granite.I18n.get("Remove") + '" aria-label="' + Granite.I18n.get("Remove") + '" type="button" autocomplete="off"  icon="close" iconsize="M" trackingfeature="" trackingelement="" tracking="ON" variant="action" size="M" quiet></button></div>';
+                } else {
+                    ipfields += '<div class="client-address">' +
+                        '<input is="coral-textfield" class="coral-Form-field ip-client ip-address" id="ip-address-' + i + '" type="text" placeholder="' + Granite.I18n.get("IP Address") + '" aria-label="' + Granite.I18n.get("IP Address") + '" value=' + ind[0] + ' aria-required="true" data-foundation-validation="ip.regex" data-validation="ip.regex" is="coral-textfield" variant="default">' +
+                        '<input is="coral-textfield" class="coral-Form-field ip-client mask" id="mask-' + i + '" type="text" placeholder="' + Granite.I18n.get("Mask") + '" aria-label="' + Granite.I18n.get("Mask") + '" value=""  data-foundation-validation="number" is="coral-textfield" variant="default">' +
+                        '<button is="coral-button" class="close-icon" aria-label="' + Granite.I18n.get("Remove") + '" aria-label="' + Granite.I18n.get("Remove") + '" type="button" autocomplete="off"  icon="close" iconsize="M" trackingfeature="" trackingelement="" tracking="ON" variant="action" size="M" quiet></button></div>';
+                }
+            }
+            if (ipfields) {
+                $('.ip-mask-list').html(ipfields);
+            } else {
+                $('.ip-mask-list').html("");
+            }
+            expiration.val(settings.Expiration);
+            thumbnail_default_resolution.val(settings.ThumbRes);
+            image_width.val(settings.MaxPix.split(',')[0]);
+            image_height.val(settings.MaxPix.split(',')[1]);
+            view_size_width.val(settings.DefaultPix.split(',')[0]);
+            img_size_right.val(settings.DefaultPix.split(',')[1]);
+            thumbnail_width.val(settings.DefaultThumbPix.split(',')[0]);
+            thumbnail_height.val(settings.DefaultThumbPix.split(',')[1]);
+            quality.val(settings.JpegQuality.split(',')[0]);
+            thumb_color.val(settings.ThumbBkgColor.replace('0x', '#'));
+            background_color.val(settings.BkgColor.replace('0x', '#'));
+            ip_address.val(settings.ClientAddressFilter.split('/')[0]);
+            mask.val(settings.ClientAddressFilter.split('/')[1]);
+            image_suffix.val(settings.DefaultExt);
+            resample_alignment.val(settings.ResMode);
+            horizontal_alignment.val(settings.ThumbHorizAlign);
+            vertical_alignment.val(settings.ThumbVertAlign);
+            thumbnail_type.val(settings.ThumbType);
+            color_alignment.val(settings.IccRenderIntent);
+            image_mode_switchtoggle.prop('checked', Boolean(parseInt(settings.DefaultImageMode)));
+            obfus_mode.prop('checked', Boolean(parseInt(settings.RequestObfuscation)));
+            lockmode_switchtoggle.prop('checked', Boolean(parseInt(settings.RequestLock)));
+            downsamplingmode_switchtoggle.prop('checked', !Boolean(parseInt(settings.JpegQuality.split(',')[1])));
+            rgb_sel.val(settings.IccProfileRgb);
+            cmyk_sel.val(settings.IccProfileCmyk);
+            gray_sel.val(settings.IccProfileGray);
+            ruleset_input.val(settings.RuleSetFile);
+            default_img_input.val(settings.DefaultImage)
+            toggleSecurity(context)
+        }
+
+        function toggleSecurity(context) {
+            if(!context) return
+            if(isSecurityTabSupported(context)) {
+                $('.security-tab-content-supported').show()
+                $('.security-tab-content-unsupported').hide()
+            } else {
+                $('.security-tab-content-supported').hide()
+                $('.security-tab-content-unsupported').show()
+            }
+        }
+
+        function isSecurityTabSupported(context) {
+            return context.contextName == 'Test';
+        }
+
+        function getDataFromView() {
+            var updatedIpArray = [];
+            var ipListMask = $('.ip-mask-list');
+            var ipMaskValues = ipListMask.children('.client-address');
+            for (var i = 0; i < ipMaskValues.length; i++) {
+                var maskVal = ipMaskValues[i].children;
+                if (!maskVal[0].value) continue;
+                var iplistval = maskVal[1].value ? maskVal[0].value + '/' + maskVal[1].value : maskVal[0].value
+                updatedIpArray.push(iplistval);
+            }
+            ipMaskArrayToString = updatedIpArray.toString();
+            const rgb2hex = (rgb) => `#${rgb.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/).slice(1).map(n => parseInt(n, 10).toString(16).padStart(2, '0')).join('')}`
+            var RGB_regex = /^(rgb|hsl)(a?)[(]\s*([\d.]+\s*%?)\s*,\s*([\d.]+\s*%?)\s*,\s*([\d.]+\s*%?)\s*(?:,\s*([\d.]+)\s*)?[)]$/;
+            var row = {
+                "DefaultPix": view_size_width.val() + "," + img_size_right.val(),
+                "MaxPix": image_width.val() + "," + image_height.val(),
+                "ClientAddressFilter": ipMaskArrayToString,
+                "RequestObfuscation": obfus_mode.is(':checked') ? "1" : "0",
+                "JpegQuality": quality.val() + ",".concat(downsamplingmode_switchtoggle.is(':checked') ? "0" : "1"),
+                "ThumbBkgColor": thumb_color.val().match(RGB_regex)?rgb2hex(thumb_color.val()).replace('#', '0x'):thumb_color.val().replace('#', '0x'),
+                "BkgColor": background_color.val().match(RGB_regex)?rgb2hex(background_color.val()).replace('#', '0x'):background_color.val().replace('#', '0x'),
+                "DefaultExt": image_suffix.val(),
+                "ResMode": resample_alignment.val(),
+                "ThumbHorizAlign": $('#h-alignment').val(),
+                "ThumbType": $('#thumbnail-type').val(),
+                "Expiration": $('#cache').val(),
+                "ThumbRes": $('#thumb-res').val(),
+                "RequestLock": lockmode_switchtoggle.is(':checked') ? "1" : "0",
+                "DefaultImageMode": image_mode_switchtoggle.is(':checked') ? "1" : "0",
+                "DefaultThumbPix": thumbnail_width.val() + "," + thumbnail_height.val(),
+                "IccRenderIntent": $('#color-alignment').val(),
+                "ThumbVertAlign": $('#v-alignment').val(),
+                "DefaultImage": $('#upload_img').val(),
+                "RuleSetFile": $('#upload_xml').val(),
+                "IccProfileRgb": $('coral-select[name="rgbsel"]').val(),
+                "IccProfileCmyk": $('coral-select[name="cmyksel"]').val(),
+                "IccProfileGray": $('coral-select[name="graysel"]').val()
+            };
+            return row;
+        }
+            var elementId = ["#colorpickreqattr","#colorpickrthumb","#info-ip-mask","#ruleset_help_icon","#width_height_help_icon","#obfus_help_icon","#lockingmode_help_icon","#imagesuffix_help_icon","#font_face_help_icon","#default_image_help_icon","#imagemode_help_icon","#default_view_widthandheight_help_icon","#thumbnail_width_height_help_icon","#quality_help_icon","#downsamping_help_icon","#horz_alg_help_icon","#vert_alg_help_icon","#cache_help_icon","#default_thumbnailtype_help_icon","#thum_res_help_icon","#cmyk_help_icon","#grayscale_help_icon","#rgb_help_icon","#color_render_help_icon"];
+           for(var i=0; i<elementId.length; i++){
+            var title = $(elementId[i]).attr('title');
+            var ariaLabelBy =$(elementId[i]).attr('id');
+            $(elementId[i]+" coral-icon").attr({
+                alt:title,
+                "aria-labelledby":ariaLabelBy,
+                title:title
+             });
+ 
+       }
+
+        $('.coral-TabPanel-content').on('input change click', function () {
+            setTimeout(function () {
+                if ($("input").hasClass('is-invalid')) {
+                    $('#publishsave').prop('disabled', true);
+                } else {
+                    $('#publishsave').prop('disabled', false);
+                }
+            }, 1000);
+        });
+        
+        $('._coral-Dropdown-label').first().addClass("context-selector");
+        $('#publishsave').on('click', function (el) {
+             postwait = new Coral.Wait().set({
+                size: "L",
+                variant: "dots",
+                centered: true
+            });
+            $('.foundation-wizard-step').append(postwait);
+            $('#publishsave').prop('disabled', true);
+            var publishdataimage = {
+                "contextHandle": context.contextHandle,
+                "contextName": context.contextName,
+                "contextType": context.contextType,
+                "publishSettingParams": getDataFromView()
+            };
+            $.ajax({
+                type: 'POST',
+                dataType: "text",
+                contentType: "application/json",
+                url: Granite.HTTP.externalize([ window.location.pathname.substring(window.location.pathname.lastIndexOf('/dmpublish.html') + '/dmpublish.html'.length),"dm_publish_settings", "json"].join(".")),
+                data: JSON.stringify(publishdataimage),
+                cache: false
+            }).done(function (data, textStatus, jqXHR) {
+                $(postwait).remove();
+                var errorMessage = Granite.I18n.get("Changes have been saved Successfully.");
+                showErrorDialog("Success", errorMessage, "success");
+            }).fail(function (jqXHR, textStatus, errorThrown) {
+                var errorMessage = Granite.I18n.get("Failed to post data");
+                showErrorDialog("Error", errorMessage, "error");
+            });
+        });
+     
+        contextSelect.data('previousSelected', $(contextSelect).val()) // init the previous value
+     
+        contextSelect.change(function (e) {
+            var previousSelectedVal = $(contextSelect).data('previousSelected')
+            var currentPublishSettings = getDataFromView();
+            var originalPublishSetting = publishSettings.find(function (setting) {
+                return setting.contextName === previousSelectedVal
+            })
+ 
+            if (isDataChanged(currentPublishSettings, originalPublishSetting.publishSettingParams)) {
+                var errorMessage = Granite.I18n.get("All the unsaved data might be lost. Please save your changes.");
+                showDailog('Warning', errorMessage);
+                return;
+            }
+            $(contextSelect).data('previousSelected', $(contextSelect).val()); // update the previous data
+            updateView();
+        });
+        $.ajax({
+            "async": false,
+            "type": "GET",
+            "dataType": "json",
+            "url": Granite.HTTP.externalize([ window.location.pathname.substring(window.location.pathname.lastIndexOf('/dmpublish.html') + '/dmpublish.html'.length),"dm_publish_settings", "json"].join(".")),
+            "success": function (result) {
+                $('.security-wrapper').show();
+                publishSettings = result.publishContexts;
+                updateView();
+                return result;
+            },
+            "error": function (jqXHR, textStatus, errorThrown) {
+                var errorMessage = Granite.I18n.get("Failed to get data from server. Please try after sometime.");
+                showErrorDialog("Error", errorMessage, 'error');
+            }
+        });
+        $('html').attr({"role":"main","aria-label":"publishsetup"});
+    });
+    function redirect() {
+        window.location.href = Granite.HTTP.externalize('/aem/start.html');
+    }
+    function showErrorDialog(title, message, typeOfAlert) {
+        ui.prompt(Granite.I18n.get(title), Granite.I18n.get(message), typeOfAlert,
+            [{
+                text: Granite.I18n.get("OK"),
+                id: "ok",
+                handler: function () {
+                    redirect();
+                }
+            }]
+        );
+    }
+    function getAssetPickerParam(btnSelector) {
+        if (btnSelector.hasClass(RULESET_ASSETPICKER)) {
+            return '&mimetype=application/xml*'
+        } else if (btnSelector.hasClass(DEFAULTIMG_ASSETPICKER)) {
+            return '&mimetype=image/*&requiredproperty=dam:s7damType'
+        }
+    }
+    function showAssetPickerModal(btnSelector) {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        //if the user closes the assetpicker by hitting 'escape', there isnt an event fired from the picker that we catch
+        //in the messages handler, so we need to manually check and unload the old iframe just in case.
+        var $staleIframeCheck = $("#assetpickeriframe");
+        if ($staleIframeCheck.length > 0) {
+            $($staleIframeCheck).remove();
+        }
+        var assetRoot = "/content/dam";
+        var href = Granite.HTTP.externalize("/aem/assetpicker.html" + assetRoot)
+            + "?mode=single"
+            + getAssetPickerParam(btnSelector)
+            + "&alltags=true"
+            + "&root=/content/dam"
+            + "&requiredproperty=dam:assetState=processed";
+        var $iframe = $('<iframe id="assetpickeriframe" class="cq-AssetPicker cq-AssetPicker-iframe" seamless="seamless" frameborder="0"></iframe>');
+        var $modal = $('#assetpickermodal');
+        var $modalContainer = $('#assetpickermodal #assetpickercontainer');
+        $iframe.attr("src", href).appendTo($modalContainer);
+        var assetPickerType;
+        if (btnSelector.hasClass(RULESET_ASSETPICKER)) {
+            assetPickerType = RULESET_ASSETPICKER
+        } else if (btnSelector.hasClass(DEFAULTIMG_ASSETPICKER)) {
+            assetPickerType = DEFAULTIMG_ASSETPICKER
+        }
+        $iframe.attr("assetPickerType", assetPickerType)
+        $modal.show();
+        ui.clearWait();
+        //this is a bit of a hack - need to override the margins that are added from $modal.modal('show')
+        $("#assetpickermodal").css("margin-left", "0px");
+        $("#assetpickermodal").css("margin-top", "0px");
+        $("#assetpickermodal").removeClass("hide");
+        // the new assetpicker does not appear to have an explicit way to disable the type selector and tag search field like the previous version.
+        // in lieu of that, we manually hide the controls. they render slightly after the iframe is loaded, which necessitates the timeout
+        setTimeout(function () {
+            $("#assetpickeriframe").contents().find('.coral-Form--graniteRail coral-accordion').hide();
+        }, 1000);
+    }
+    function hideAssetPicker() {
+        $('#assetpickermodal').hide();
+    }
+    function closePicker() {
+        var srcIframe = document.getElementById("assetpickeriframe");
+        // abort if asset selector is already closed
+        if (srcIframe === null) {
+            return;
+        }
+        //unload iframe data
+        srcIframe.contentDocument.documentElement.innerHTML = "";
+        $(srcIframe).remove();
+        //hide modal
+        $('#assetpickermodal').hide();
+        populateSelection();
+    }
+    function receiveMessage(event) {
+        var srcIframe = document.getElementById("assetpickeriframe");
+        if (srcIframe === null || event.origin !== location.origin || srcIframe.contentWindow !== event.source) {
+            return;
+        }
+        //sanity check for null data
+        if (event.data) {
+            try {
+                var fromDam = JSON.parse(event.data);
+                if (fromDam.config) {
+                    var configFromDam = fromDam.config;
+                    if (configFromDam.action === 'close') {
+                        closePicker();
+                    } else if (configFromDam.action === 'done') {
+                        if ($('#assetpickermodal #assetpickeriframe').attr("assetPickerType") == RULESET_ASSETPICKER) {
+                            $('#upload_xml').val(fromDam.data[0].path)
+                            $('#upload_xml').trigger('change')
+                        } else if ($('#assetpickermodal #assetpickeriframe').attr("assetPickerType") == DEFAULTIMG_ASSETPICKER) {
+                            $('#upload_img').val(fromDam.data[0].path)
+                            $('#upload_img').trigger('change')
+                        }
+                        closePicker();
+                    }
+                }
+            } catch (e) {
+                //fail silently...
+            }
+        }
+    }
+})(window, document, Granite, Granite.$);
+ 
+ 

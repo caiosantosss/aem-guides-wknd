@@ -1,0 +1,708 @@
+<%--
+  Copyright 1997-2008 Day Management AG
+  Barfuesserplatz 6, 4001 Basel, Switzerland
+  All Rights Reserved.
+
+  This software is the confidential and proprietary information of
+  Day Management AG, ("Confidential Information"). You shall not
+  disclose such Confidential Information and shall use it only in
+  accordance with the terms of the license agreement you entered into
+  with Day.
+
+--%><%@page session="false"
+            import="com.day.cq.commons.jcr.JcrConstants,
+                    com.day.cq.commons.jcr.JcrUtil,
+                    com.day.cq.dam.api.Asset,
+                    com.day.cq.dam.api.s7dam.utils.PublishUtils,
+                    com.day.cq.dam.scene7.api.net.NetUtils,
+                    com.day.cq.i18n.I18n,
+                    com.day.cq.wcm.api.WCMMode,
+                    com.day.cq.wcm.api.components.DropTarget,
+                    com.day.cq.wcm.foundation.ImageMap,
+            		com.day.cq.wcm.foundation.Placeholder,
+                    com.day.text.Text,
+                    org.apache.commons.lang.StringUtils,
+					org.apache.sling.api.resource.ModifiableValueMap,
+                  	javax.jcr.Node,
+                  	javax.jcr.RepositoryException,
+                    javax.jcr.Session,
+                    java.util.Locale,
+					java.util.ResourceBundle"
+        %>
+<%@ taglib prefix="c" uri="http://java.sun.com/jsp/jstl/core" %>
+<%@include file="/libs/foundation/global.jsp"%>
+<%@include file="/libs/dam/components/scene7/utils/s7PageCloudConfig.jsp" %>
+<cq:include script="/libs/dam/components/scene7/utils/s7DynamicImageDimensions.jsp" />
+<%
+    // Only S7 Saas if component is not in DM mode
+    boolean isDMMode = Boolean.TRUE.equals(pageContext.getAttribute("DM_COMPONENT_MODE"));
+    if (isDMMode) {
+%>
+<cq:include script="/libs/dam/components/scene7/utils/s7damutils.jsp" />
+<%
+} else {
+%>
+<cq:include script="/libs/dam/components/scene7/utils/s7SaasDamUtils.jsp" />
+<%
+    }
+%>
+<%
+    boolean isAuthorMode = ((WCMMode.fromRequest(request) == WCMMode.EDIT) || (WCMMode.fromRequest(request) == WCMMode.DESIGN));
+    if (isAuthorMode) {
+%><cq:includeClientLib categories="cq.dam.scene7" /><%
+    }
+%><cq:includeClientLib categories="cq.dam.scene7.dynamicimagebase" /><%
+
+    long defaultDimension = 500;
+    Locale pageLocale = currentPage.getLanguage(true);
+    ResourceBundle resourceBundle = slingRequest.getResourceBundle(pageLocale);
+    I18n i18n = new I18n(resourceBundle);
+
+    String width = properties.get("width","-1");
+    String height = properties.get("height","-1");
+
+    String fileReference = properties.get("fileReference",String.class);
+    String assetType = properties.get("assetType", String.class);
+
+    if (assetType != null && assetType.startsWith("video")) {
+        //Reset asset when video is dropped into the component
+        try {
+            ModifiableValueMap props = resource.adaptTo(ModifiableValueMap.class);
+            props.put("fileReference", "");
+            props.put("assetType", assetType);
+            props.put("s7ImagePreset", "");
+            props.put("s7ViewerPreset", "");
+            resource.getResourceResolver().commit();
+            fileReference = null;
+        } catch (Exception e) {
+            log.error("Unable to reset fileReference ", e);
+        }
+    }
+
+    boolean s7content = (fileReference != null && fileReference.indexOf("/is/image") != -1);
+    if (s7content) {
+        int idx = fileReference.indexOf("?");
+        if (idx != -1) {
+            fileReference = fileReference.substring(0,idx);
+        }
+    }
+
+    Asset asset = null;
+    Resource fileRefRes = resourceResolver.getResource(fileReference);
+    if (fileRefRes != null) {
+        asset = (!s7content ? fileRefRes.adaptTo(Asset.class) : null);
+    }
+    String classicPlaceholder = "<div class=\"" + DropTarget.CSS_CLASS_PREFIX
+            + "image" + (WCMMode.fromRequest(request) == WCMMode.EDIT ? " cq-image-placeholder" : "")
+            + "\"></div>";
+    String placeholder = Placeholder.getDefaultPlaceholder(slingRequest, component,
+            classicPlaceholder, "cq-dd-image");
+    if ((fileReference == null) || (!s7content && (fileRefRes == null || asset == null))) {
+%><%=placeholder%><%
+} else {
+
+    String id = "";
+    String publishStatus = "";
+    if (asset != null) {
+        id = asset.getMetadataValueFromJcr(Scene7Constants.PN_S7_ASSET_ID);
+        publishStatus = asset.getMetadataValueFromJcr(Scene7Constants.PN_S7_FILE_STATUS) != null?  asset.getMetadataValueFromJcr(Scene7Constants.PN_S7_FILE_STATUS):Scene7Constants.PV_S7_PUBLISH_COMPLETE;
+    }
+
+
+    long origWidth = defaultDimension;
+    long origHeight = defaultDimension;
+    boolean hadStageSize = false;
+    if(asset != null) {
+        // calculate some default values according to the correct aspect ratio
+        origWidth = (asset.getMetadataValueFromJcr("tiff:ImageWidth") != null ? (long) Double.parseDouble(asset.getMetadataValueFromJcr("tiff:ImageWidth")) : origWidth);
+        origHeight = (asset.getMetadataValueFromJcr("tiff:ImageLength") != null ? (long) Double.parseDouble(asset.getMetadataValueFromJcr("tiff:ImageLength")) : origHeight);// check if the asset has size defined - if no, we won't pass stage size to viewer.
+        hadStageSize = (asset.getMetadataValueFromJcr("tiff:ImageWidth") != null || asset.getMetadataValueFromJcr("tiff:ImageLength") !=null);
+    } else {
+        origWidth = (long)Double.parseDouble(properties.get("imageWidth",String.valueOf(defaultDimension)));
+        origHeight = (long)Double.parseDouble(properties.get("imageHeight",String.valueOf(defaultDimension)));
+        if (origWidth == 0 || origHeight == 0) {
+            origWidth = origHeight = 500;
+        }
+    }
+
+    int widthInt = -1;
+    int heightInt = -1;
+    try {
+        widthInt = Integer.parseInt(width);
+    } catch (Exception e) {
+        log.warn("Dynamic image width not a valid integer!", e);
+    }
+
+    try {
+        heightInt = Integer.parseInt(height);
+    } catch (Exception e) {
+        log.warn("Dynamic image height not a valid integer!", e);
+    }
+
+    // if the asset is not yet set _or_ the upload/publish has not yet completed
+    if (!s7content && ("".equals(id) || !Scene7Constants.PV_S7_PUBLISH_COMPLETE.equals(publishStatus))) {
+        //asset not uploaded
+
+        if((WCMMode.fromRequest(request) == WCMMode.EDIT) || (WCMMode.fromRequest(request) == WCMMode.DESIGN) ) {
+            String uploadText = i18n.get("Publish to Scene7", "Scene7 upload link text");
+            if(!Scene7Constants.PV_S7_PUBLISH_COMPLETE.equals(publishStatus))
+                uploadText = i18n.get("Check Scene7 Publish Status", "Check Publish Status link text");
+
+%>
+<div class="not-published" style="position:relative;width: <%= defaultDimension %>px; height: <%= defaultDimension %>px;">
+    <img src="<%= xssAPI.getValidHref(fileReference) %>/jcr:content/renditions/cq5dam.thumbnail.48.48.png"/>
+    <div class="overlay" style="width: <%= defaultDimension %>px; height: <%= defaultDimension %>px;"></div>
+    <div style="width: <%= defaultDimension %>px; height: <%= defaultDimension %>px;">
+        <a class="publish-button" id="<%=xssAPI.encodeForHTMLAttr(resource.getPath().replace("/", "-"))%>-publishLink" onclick="CQ.scene7.triggerWorkflowFromViewer('<%=xssAPI.encodeForHTMLAttr(resource.getPath().replace("/", "-"))%>', '<%=xssAPI.getValidHref(fileReference)%>', '<%=xssAPI.getValidHref(scene7PageCloudConfigPath) %>');return false;"><%=xssAPI.encodeForHTML(uploadText) %></a>
+    </div>
+</div>
+<%
+} else {
+%>
+<img src="<%= xssAPI.getValidHref(fileReference) %>" width="<%= xssAPI.encodeForHTMLAttr(width) %>" height="<%= xssAPI.encodeForHTMLAttr(height) %>"/>
+<%
+    }
+} else {
+
+
+    // get the selected viewer preset
+    boolean hasViewerPreset = false;
+    String viewerPreset = properties.get("s7ViewerPreset", "");
+    if (isDMMode && StringUtils.isNotBlank(viewerPreset)) {
+        if (isViewerPresetMatchedType(viewerPreset, assetType)) {
+            hasViewerPreset = true;
+        }
+        else {
+            //Remove unmatched preset / asset type
+            viewerPreset = "";
+            try {
+                ModifiableValueMap props = resource.adaptTo(ModifiableValueMap.class);
+                props.put("s7ViewerPreset", "");
+                props.put("s7ImagePreset", "");
+                resource.getResourceResolver().commit();
+            } catch (Exception e) {
+                log.error("Unable to reset viewer preset ", e);
+            };
+        }
+    }
+
+    // save the externalized image delivery url for use on publish nodes
+    String productionImageDeliveryUrl = properties.get("imageserverurl",String.class);
+    if (WCMMode.fromRequest(request) != WCMMode.DISABLED) {
+        try {
+            PublishUtils publishUtils = sling.getService(PublishUtils.class);
+            productionImageDeliveryUrl = publishUtils.externalizeImageDeliveryUrl(resource, fileReference);
+
+            ModifiableValueMap props = resource.adaptTo(ModifiableValueMap.class);
+            props.put("imageserverurl", productionImageDeliveryUrl);
+            resource.getResourceResolver().commit();
+        } catch (Exception e) {
+            log.error("Unable to set imageserverurl ", e);
+        }
+    } else {
+        fileReference = productionImageDeliveryUrl;
+    }
+
+    // get the selected image preset
+    boolean hasPreset = false;
+    String imagePreset = properties.get("s7ImagePreset", "");
+    if (StringUtils.isNotBlank(imagePreset)) {
+        fileReference = NetUtils.appendQuery(fileReference, "$" + imagePreset + "$");
+        hasPreset = true;
+    }
+
+    // compute crop area
+    // Add wid= and hei= parameters if image is not cropped
+    String imageCropInfo = properties.get("imageCrop", "");
+    if (StringUtils.isNotBlank(imageCropInfo)) {
+        // must format the crop data to match the S7 required format
+        // crop data is Xstart, Ystart, Xend, Yend
+        // S7 required format is Xstart, Ystart, Xsize, Ysize
+        String[] imageCropDataTokens = imageCropInfo.split(",");
+        Integer[] imageCrop = new Integer[imageCropDataTokens.length];
+        for (int i = 0 ; i < imageCropDataTokens.length ; i++) {
+            try {
+                imageCrop[i] = Integer.parseInt(imageCropDataTokens[i]);
+            } catch (Exception e) {
+                imageCrop[i] = 0;
+            }
+        }
+
+        if (imageCrop.length >= 4) {
+            // must compute the S7 rect parameter
+            Integer xStart = imageCrop[0];
+            Integer yStart = imageCrop[1];
+            Integer xEnd = imageCrop[2];
+            Integer yEnd = imageCrop[3];
+            fileReference = NetUtils.appendQuery(fileReference, "crop=" + xStart + "," + yStart + "," + (xEnd-xStart) + "," + (yEnd-yStart));
+        }
+    }
+
+    // add image dimensions (preset has priority)
+    if (!hasPreset  && !hasViewerPreset) {
+        if (widthInt > 0) {
+            fileReference = NetUtils.appendQuery(fileReference, "wid="+widthInt);
+        }
+
+        if (heightInt > 0) {
+            fileReference = NetUtils.appendQuery(fileReference, "hei="+heightInt);
+        }
+    }
+
+    // add image format (preset has priority)
+    String outputFormat = properties.get("outputFormat", "");
+    if (!hasPreset && StringUtils.isNotBlank(outputFormat)) {
+        fileReference = NetUtils.appendQuery(fileReference, "fmt=" + outputFormat);
+
+        // add jpeg quality, if format is jpeg
+        if ("jpeg".equalsIgnoreCase(outputFormat)) {
+            // read jpeg quality
+            long jpegQuality = 85L;
+            try {
+                jpegQuality = properties.get("jpegQuality", 85L);
+            } catch (Exception e) {
+                log.error("S7 Dynamic Image component: Jpeg quality is not a long value - defaulting to 0!", e);
+            }
+
+            fileReference = NetUtils.appendQuery(fileReference, "qlt=" + jpegQuality + ",1");
+        }
+
+    }
+    // add image sharpening (preset has priority)
+    String sharpeningMode = properties.get("sharpeningMode", "");
+    if (!hasPreset && StringUtils.isNotBlank(sharpeningMode)) {
+        // based on the selected sharpening mode, add the needed url modifiers
+        if ("unsharpMask".equalsIgnoreCase(sharpeningMode)) {
+            // advanced sharpening, get amount, radius and threshold values
+            String amount = properties.get("unsharpMaskAmount", "0");
+            String radius = properties.get("unsharpMaskRadius", "0");
+            long threshold = 0;
+
+            double doubleAmount = 0;
+            double doubleRadius = 0;
+
+            try {
+                doubleAmount = Double.parseDouble(amount);
+                if (Double.isNaN(doubleAmount)) {
+                    doubleAmount = 0;
+                }
+            } catch(Exception e) {
+                log.error("Could not convert unsharp mask amount parameter to a Double - defaulting to 0.00!", e);
+            }
+
+            try {
+                doubleRadius = Double.parseDouble(radius);
+                if (Double.isNaN(doubleRadius)) {
+                    doubleRadius = 0;
+                }
+            } catch(Exception e) {
+                log.error("Could not convert unsharp mask radius parameter to a Double - defaulting to 0.00!", e);
+            }
+
+            amount = String.format("%.2f",doubleAmount);
+            radius = String.format("%.2f", doubleRadius);
+
+            try {
+                threshold = properties.get("unsharpMaskThreshold", 0L);
+            } catch(Exception e) {
+                log.error("Could not convert unsharp mask threshold parameter to a long value - defaulting to 0!", e);
+            }
+
+            fileReference = NetUtils.appendQuery(fileReference, "op_usm=" + amount + "," + radius + "," + threshold + ",0");
+        } else {
+            // simple sharpening
+            fileReference = NetUtils.appendQuery(fileReference, "op_sharpen=1");
+        }
+    }
+
+    // add any extra url modifiers if any
+    String urlModifiers = properties.get("urlModifiers", "");
+    if (StringUtils.isNotBlank(urlModifiers)) {
+        fileReference = NetUtils.appendQuery(fileReference, urlModifiers);
+    }
+
+    //embed
+    String idPrefix = "id-" + resource.getPath().replaceAll("[^0-9a-z_]", "_");
+
+    if (idPrefix.length() > 64) {
+        idPrefix = idPrefix.substring(idPrefix.length() - 64);
+    }
+
+    //click through
+    String href = properties.get("linkUrl", "");
+    String linkTarget = properties.get("linkTarget", "_self");
+
+    if (StringUtils.isNotBlank(href)) {
+        //only for internal links
+        if ((href.charAt(0) == '/') || (href.charAt(0) == '#')) {
+            int anchorPos = href.indexOf("#");
+            String anchor = "";
+            if (anchorPos > 0) {
+                anchor = href.substring(anchorPos, href.length());
+                href = href.substring(0, anchorPos);
+            }
+
+            // add extension to href if necessary
+            int extSepPos = href.lastIndexOf(".");
+            int slashPos = href.lastIndexOf("/");
+            if ((extSepPos <= 0) || (extSepPos < slashPos)) {
+                href = Text.escape(href, '%', true) + ".html" + anchor;
+            }
+        }
+    }
+
+
+    // compute image map based on the node properties
+    String imageMapInfo = properties.get("imageMap", "");
+    ImageMap imageMap = null;
+    String imageMapId = null;
+    if (StringUtils.isNotBlank(imageMapInfo)) {
+        imageMap = ImageMap.fromString(imageMapInfo);
+        imageMapId = "map_" + Math.round(Math.random() * Integer.MAX_VALUE)
+                + "_" + System.currentTimeMillis();
+    }
+
+    String title = properties.get(JcrConstants.JCR_TITLE, "");
+    String alt = properties.get("alt", "");
+    if (StringUtils.isNotBlank(title) && StringUtils.isBlank(alt)) {
+        alt = title;
+    }
+
+    boolean isImage = assetType != null ? assetType.equalsIgnoreCase("image") : true;
+
+
+    Object breakPointsObj = properties.get("breakpoints");
+
+    if(breakPointsObj == null) {
+        breakPointsObj = properties.get("defaultBreakpoints");
+    }
+
+    String breakpoints = (breakPointsObj != null)? breakPointsObj.toString() : "";
+%>
+<c:choose>
+    <c:when test="<%= (!hasViewerPreset && isImage && breakpoints.isEmpty()) %>">
+        <%-- render regular image if no viewer preset, asset is an image, and no breakpoint for responsive image --%>
+        <c:if test="<%= StringUtils.isNotBlank(href) %>">
+            <a href="<%= xssAPI.getValidHref(href) %>" target="<%= xssAPI.encodeForHTMLAttr(linkTarget) %>">
+        </c:if>
+        <img
+                id="<%= xssAPI.encodeForHTMLAttr(idPrefix) %>"
+                <%
+                    if (!hasPreset) {
+                        if (widthInt > 0) {
+                %>
+                width="<%= xssAPI.encodeForHTMLAttr(String.valueOf(widthInt)) %>"
+                <%
+                    }
+                    if (heightInt > 0) {
+                %>
+                height="<%= xssAPI.encodeForHTMLAttr(String.valueOf(heightInt)) %>"
+                <%
+                        }
+                    } %>
+            <%--Have to remove xssAPI call for now due to issue of return
+           result when port presents (i.e. http://example.com:8080 will return empty).
+           original code:
+           xssAPI.getValidHref(fileReference) --%>
+                src="<%=xssAPI.getValidHref(fileReference)%>"
+                <%
+                    if (imageMapId != null) {
+                %>
+                usemap="#<%=imageMapId %>"
+                <%
+            }
+            if (StringUtils.isNotBlank(title)) {
+                %>title="<%=xssAPI.encodeForHTMLAttr(title) %>"<%
+            }
+            if (StringUtils.isNotBlank(alt)) {
+                %>alt="<%=xssAPI.encodeForHTMLAttr(alt) %>"<%
+            }
+            if (isAuthorMode) { %>
+                class="<%= DropTarget.CSS_CLASS_PREFIX %>image"
+                <%}%>
+
+                />
+        <c:if test="<%= StringUtils.isNotBlank(href) %>">
+            </a>
+        </c:if>
+    </c:when>
+    <c:otherwise>
+
+        <%
+            String viewerPresetName = "";
+            String viewerTemplateType = "";
+            String viewerPresetPath = "";
+            String imageServer = "";
+            String s7Asset = "";
+            String embedCode = "";
+            String wrapperCSS = "";
+            String viewerInstanceId = xssAPI.encodeForHTMLAttr(idPrefix);
+            viewerInstanceId = viewerInstanceId.replace("-","_");
+            if ( hasViewerPreset ) {
+                String[] viewerPresetPart = viewerPreset.split("\\|");
+                if ( viewerPresetPart.length > 2 ){
+                    viewerPresetName = viewerPresetPart[0];
+                    viewerTemplateType = viewerPresetPart[1];
+                    viewerPresetPath = viewerPresetPart[2];
+                    viewerTemplateType = viewerTemplateType.toLowerCase();
+                    if ( viewerTemplateType.equalsIgnoreCase("zoom") || viewerTemplateType.equalsIgnoreCase("imageset") ){
+                        viewerTemplateType = "basiczoom";
+                    }
+                }
+            }
+
+            if ( !isImage ) {
+                viewerTemplateType = assetType;
+            }
+
+            String stageSize =  null;
+
+            wrapperCSS = "height:" + Long.toString(origWidth) + "px; width:"  + Long.toString(origHeight) + "px";
+            if ( widthInt > 0 && heightInt > 0 ) {
+                stageSize = Integer.toString(widthInt) + "," + Integer.toString(heightInt);
+                wrapperCSS = "height:" + Integer.toString(widthInt) + "px; width:" + Integer.toString(heightInt) + "px";
+            }
+            else if ( hadStageSize ) {
+                stageSize = Long.toString(origWidth) + ","  + Long.toString(origHeight);
+            }
+
+            Session currentSession = resourceResolver.adaptTo(Session.class);
+            String VIEWER_CONFIG_NODE = "/libs/dam/viewers/default/jcr:content";
+            String VIEWER_JS_FOLDER = "/html5/js/";
+            String s7viewerRootPath = "/etc/dam/viewers/isv/";
+            String s7viewerVersion = "5.0.1";
+            String s7viewerPath = "";
+            String s7sdkRootPath = "/etc/dam/viewers/sdk/";
+            String s7sdkVersion = "2.7.1";
+            String s7sdkPath = s7sdkRootPath + "2.7.1/js/";
+            String s7contextPath = request.getContextPath();
+            //Grab viewer version and root path from viewers settting
+            if (currentSession.nodeExists(VIEWER_CONFIG_NODE)) {
+                Node viewerNode = currentSession.getNode(VIEWER_CONFIG_NODE);
+                if (viewerNode.hasProperty("sdkVersion")){
+                    s7sdkVersion = viewerNode.getProperty("sdkVersion").getString();
+                }
+                if (viewerNode.hasProperty("sdkRootPath")) {
+                    s7sdkRootPath = viewerNode.getProperty("sdkRootPath").getString();
+                }
+                if (viewerNode.hasProperty("viewerVersion")){
+                    s7viewerVersion = viewerNode.getProperty("viewerVersion").getString();
+                }
+                if (viewerNode.hasProperty("viewerRootPath")) {
+                    s7viewerRootPath = viewerNode.getProperty("viewerRootPath").getString();
+                }
+                s7viewerPath = s7contextPath + s7viewerRootPath + s7viewerVersion + VIEWER_JS_FOLDER;
+                s7sdkPath = s7contextPath + s7sdkRootPath + s7sdkVersion + "/js/";
+
+                // Make sure that the content path starts with "/", otherwise the path will be relative
+                // to /is/content which is not the right place to load resources. Resources should be
+                // loaded from the JCR directly.
+                String contentPath = s7contextPath;
+                if (!contentPath.startsWith("/")) {
+                    contentPath = "/" + contentPath;
+                }
+
+                if ( !breakpoints.isEmpty() && isImage && !hasViewerPreset ) {
+                    //Only use responsive image when the asset type is image AND breakpoint is not empty AND no viewer preset
+                    embedCode = buildResponsiveImageCode( viewerNode,
+                            s7viewerPath,
+                            fileReference,
+                            viewerInstanceId,
+                            breakpoints );
+                } else {
+                    embedCode =  buildEmbedCode( viewerNode,
+                            "html5",
+                            viewerTemplateType,
+                            s7viewerPath,
+                            contentPath,
+                            fileReference,
+                            viewerPresetPath,
+                            stageSize,
+                            viewerInstanceId,
+                            s7sdkPath );
+                }
+            }
+        %>
+        <% if (isAuthorMode) { %>
+        <div class="<%= DropTarget.CSS_CLASS_PREFIX %>image">
+            <% } %>
+
+            <%=xssAPI.encodeForHTML(embedCode)%>
+
+            <% if (isAuthorMode) { %>
+        </div>
+        <% } %>
+    </c:otherwise>
+</c:choose>
+<%
+    if (imageMap != null) {
+%><%=xssAPI.encodeForHTML(imageMap.draw(imageMapId))%><%
+            }
+            // end  embed
+        }
+    }
+%>
+
+
+
+<%!
+    String getS7ViewerPath(Node viewerNode,
+                           String templateType,
+                           String viewerType,
+                           String viewerRootPath) {
+        String key = viewerType + "." + templateType;
+        String path = null;
+        try {
+            if(viewerNode.hasProperty(key)){
+                path = viewerNode.getProperty(key).getString();
+                path = viewerRootPath + path;
+            }
+
+        } catch (RepositoryException rex){
+        }
+        return path;
+    }
+
+    String getViewerConstructor(String templateType) {
+        String viewerConstructor = "";
+        if (templateType.equalsIgnoreCase("basiczoom")){
+            viewerConstructor = "BasicZoom";
+        }
+        else if (templateType.equalsIgnoreCase("mixedmedia")){
+            viewerConstructor = "MixedMedia";
+        }
+        else {
+            String firstChar = templateType.substring(0,1);
+            viewerConstructor = firstChar.toUpperCase() + templateType.substring(1);
+        }
+        viewerConstructor += "Viewer";
+        return viewerConstructor;
+    }
+    String buildEmbedCode(Node viewerNode,
+                          String viewerType,
+                          String templateType,
+                          String viewerRootPath,
+                          String contentRoot,
+                          String fileReference,
+                          String config,
+                          String stageSize,
+                          String uniqueInstanceId,
+                          String sdkRootPath){
+
+        String imageServer = "";
+        String asset = "";
+        final String IS_IMAGE_PATH = "/is/image/";
+        int isidx = fileReference.indexOf(IS_IMAGE_PATH);
+        if (isidx != -1) {
+            // imageServer contains from the start including /is/image (not the slash)
+            // s7Asset contains everything after /is/image/
+            imageServer = fileReference.substring(0, isidx + IS_IMAGE_PATH.length() - 1);
+            asset = fileReference.substring(isidx + IS_IMAGE_PATH.length());
+        }
+
+        String embedCode = "";
+        if (templateType.equalsIgnoreCase("flyout_zoom") || templateType.equalsIgnoreCase("flyoutzoom")) {
+            templateType = "flyout";
+        }
+        String viewerPath = getS7ViewerPath( viewerNode,
+                templateType,
+                viewerType,
+                viewerRootPath );
+        embedCode = "";
+        //from HTML5SDKEmbed in s7ondemand
+        if ( viewerPath != null ) {
+            String instanceId = uniqueInstanceId + "s7" + templateType + "viewer";
+            String containerId = uniqueInstanceId + "s7" + templateType + "_div";
+            String viewerConstructor = getViewerConstructor(templateType);
+            String sdkPath = sdkRootPath + "s7sdk/utils/Utils.js";
+
+            if (!templateType.equalsIgnoreCase("flyout") || ( templateType.equalsIgnoreCase("flyout") && stageSize == null ) ) {
+                //for any viewer except flyout and flyout without size, we add responsive CSS
+                embedCode = "<style type=\"text/css\">\n"
+                        + "\t#" + containerId + ".s7" + viewerConstructor.toLowerCase() + "{\n"
+                        + "\t\t width:100%; \n"
+                        + "\t\t height:auto;\n"
+                        + "\t}\n"
+                        + "</style>\n";
+            }
+            embedCode += "<script type=\"text/javascript\" src=\""+ sdkPath +"\"></script>\n"
+                    + "<script type=\"text/javascript\" src=\""+ viewerPath +"\"></script>\n"
+                    + "<div id=\"" + containerId + "\"></div>\n"
+                    + "<script type=\"text/javascript\">\n"
+                    + "\tvar "+ instanceId +" = new s7viewers." + viewerConstructor + "({\n";
+            embedCode +=  "\t\t\"containerId\" : \"" + containerId + "\",\n";
+            embedCode +=  "\t\t\"params\" : { \n"
+                    + "\t\t\t\"serverurl\" : \"" + imageServer + "\",\n"
+                    + "\t\t\t\"contenturl\" : \"" + contentRoot + "\", \n";
+            if (config != null) {
+                embedCode += "\t\t\t\"config\" : \""+ config + "\",\n";
+            }
+            if (stageSize != null) {
+                embedCode += "\t\t\t\"stagesize\" : \""+ stageSize + "\",\n";
+            }
+            if (templateType.equalsIgnoreCase("flyout")) {
+                embedCode += "\t\t\t\"imagereload\" : \"1,breakpoint,100;320;480\",\n";
+            }
+
+            embedCode += "\t\t\t\"asset\" : \"" + asset + "\" }\n";
+            embedCode += "\t}).init();\n</script>";
+
+        }
+        return embedCode;
+    }
+
+    /**
+     *
+     * @param viewerPreset
+     * @param assetType
+     * @return true if the viewer preset is same as asset type
+     */
+    boolean isViewerPresetMatchedType(String viewerPreset, String assetType) {
+        String viewerPresetType = "";
+        if ( viewerPreset!= null ) {
+            String[] viewerPresetPart = viewerPreset.split("\\|");
+            if ( viewerPresetPart.length > 1 ){
+                viewerPresetType = viewerPresetPart[1];
+            }
+        }
+        if (assetType.equalsIgnoreCase("image")) {
+            return (viewerPresetType.equalsIgnoreCase("flyoutzoom") || viewerPresetType.equalsIgnoreCase("zoom"));
+        }
+        else if (assetType.equalsIgnoreCase("zoom")) {
+            return (viewerPresetType.equalsIgnoreCase("imageset"));
+        }
+        else {
+            return (assetType.equalsIgnoreCase(viewerPresetType));
+        }
+    }
+
+    String buildResponsiveImageCode( Node viewerNode,
+                                     String viewerRootPath,
+                                     String fullAssetPath,
+                                     String uniqueInstanceId,
+                                     String breakpoints) {
+        String embedCode = "";
+        String viewerPath = getS7ViewerPath( viewerNode,
+                "image",
+                "html5",
+                viewerRootPath );
+        if ( viewerPath != null ) {
+            embedCode = "<style type=\"text/css\"> \n"
+                    + "\t.s7responsiveContainer {\n"
+                    + "\t\twidth: 100%;\n"
+                    + "\t}\n"
+                    + "\t.fluidimage {\n"
+                    + "\t\tmax-width: 100%;\n"
+                    + "\t}\n"
+                    + "</style>\n";
+            embedCode += "<div class=\"s7responsiveContainer\"> \n"
+                    + "<img id=\"" + uniqueInstanceId + "\" src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\" data-src=\"" + fullAssetPath + "\"  data-breakpoints=\"" + breakpoints + "\" class=\"fluidimage\">\n"
+                    + "</div>\n"
+                    + "<script type=\"text/javascript\" src=\"" + viewerPath + "\"></script>\n"
+                    + "<script type=\"text/javascript\"> \n"
+                    + "\ts7responsiveImage(document.getElementById(\"" + uniqueInstanceId + "\"));\n"
+                    + "</script>";
+        }
+        return embedCode;
+    }
+%>

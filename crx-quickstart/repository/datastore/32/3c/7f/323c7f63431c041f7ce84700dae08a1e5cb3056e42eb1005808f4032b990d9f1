@@ -1,0 +1,830 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2015 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function (document, $) {
+    var ERROR_QUEUE_PREFIX = "error-";
+    var AGENTS_SETTINGS_URL = "/libs/sling/distribution/settings/agents/";
+    var ui = $(window).adaptTo("foundation-ui");
+
+    /**
+     * Clear queue on the agent screen
+     */
+    $(document).on("click", "#clearQueue", function (e) {
+        var queueName = getSelectedQueueId();
+        var agentStatusDiv = $("#agentDetailsDiv");
+        var agentName = "";
+
+        if (agentStatusDiv.length > 0 && queueName !== undefined && queueName.length > 0) {
+            agentName = agentStatusDiv.data("name");
+        }
+
+        if ($.trim(queueName).length > 0 && $.trim(agentName).length > 0
+            && agentName !== undefined && $.trim(agentName).length > 0) {
+            clearQueue(agentName, queueName);
+        } else {
+            showNotification(Granite.I18n.get("Please select the queue you want to clear."), "error");
+        }
+
+    });
+
+    /**
+     * Clear queue on detail queue view
+     */
+    $(document).on("click", "#clearQueueOnDetail", function (e) {
+        var queueName = getRequestParameter("queueName");
+        var agentName = getRequestParameter("agentName");
+
+        if (queueName !== undefined && $.trim(queueName).length > 0
+            && agentName !== undefined && $.trim(agentName).length > 0) {
+            clearQueue(agentName, queueName);
+        } else {
+            showNotification(Granite.I18n.get("A valid agent and queue need to be provided before the clear queue operation."), "error");
+        }
+    });
+
+    /**
+     * Gets the queue ID from the queue collection selection
+     * @returns Selected queue id
+     */
+    function getSelectedQueueId() {
+        var result = "";
+        var queue, i;
+        var items = $(".granite-distribution-queue-collection .foundation-selections-item");
+
+        for (i = 0; i < items.length; i++) {
+            queue = $(items[i]);
+            result = queue.data("queue-id");
+        }
+        return result;
+    }
+
+    /**
+     * Full page refresh
+     */
+    $(document).on("click", "#refreshQueue", function (e) {
+        window.location.reload();
+    });
+
+    /**
+     * Delete selected queue items
+     */
+    $(document).on("click", "#deleteQueueItemsButton", function (e) {
+        var queueName = getRequestParameter("queueName");
+        var agentName = getRequestParameter("agentName");
+
+        postToQueueWithParameters(agentName, queueName, "delete");
+    });
+
+    /**
+     * Delete selected queue items
+     */
+    $(document).on("click", "#retryQueueButton", function (e) {
+        var queueName = getRequestParameter("queueName");
+        var agentName = getRequestParameter("agentName");
+
+        if(queueName.startsWith(ERROR_QUEUE_PREFIX)) {
+            var destinationQueueName = $("#retryQueueId").val();
+
+            if($.trim(destinationQueueName).length > 0) {
+                var extraData = {"from": queueName};
+                postToQueueWithParameters(agentName, destinationQueueName, "move", extraData);
+            } else {
+                showNotification(Granite.I18n.get("The retry queue is not specified for this error queue."), "error");
+            }
+        } else {
+            showNotification(Granite.I18n.get("The retry operation is allowed only on error queues."), "error");
+        }
+    });
+
+    /**
+     * Performs a POST call to queueName, in order to perform the given operation
+     * @param agentName
+     * @param queueName
+     * @param operation - delete or copy
+     * @param extraData - additional parameters for the call, in key-value format
+     */
+    function postToQueueWithParameters(agentName, queueName, operation, extraData) {
+        if(queueName && operation) {
+            var data = "operation=" + operation;
+            // if we have additional parameters, add them to the call
+            if(extraData) {
+                for(key in extraData) {
+                    data += "&" + key + "=" + extraData[key];
+                }
+            }
+
+            var items = getSelectedItemIds();
+
+            for (var i = 0; i < items.length; i++) {
+                data = data + "&id=" + items[i];
+            }
+            ui.wait();
+
+            if (items !== undefined && items.length > 0) {
+                $.ajax({
+                    data: data,
+                    type: "POST",
+                    url: Granite.HTTP.externalize("/libs/sling/distribution/services/agents/" + agentName + "/queues/" + queueName),
+                    timeout: 10000,
+                    success: function (resultData) {
+                        //reload the page to get the new item list
+                        window.location.reload();
+                    },
+                    error: function (resultData) {
+                        ui.clearWait();
+                        var errorMessage = Granite.I18n.get("There was an error while performing operation {0} on queue {1}.", [operation, queueName], "0 is the operation performed on the queue 1 is the queueName");
+                        showNotification(errorMessage, "error");
+                    }
+                });
+            } else {
+                ui.clearWait();
+                showNotification(Granite.I18n.get("Please select one or more queue items."), "error");
+            }
+        }
+    }
+
+    /**
+     * Gets the selected queue items from the queue entry collection selection
+     * @returns list of selected item ids
+     */
+    function getSelectedItemIds() {
+        var resultItems = new Array();
+        var entry, i;
+        var items = $(".granite-distribution-queue-entry-collection .foundation-selections-item");
+        if (items.length > 0) {
+            for (i = 0; i < items.length; i++) {
+                entry = $(items[i]).data("entry-id");
+                resultItems.push(entry);
+            }
+        }
+        return resultItems;
+    }
+
+    /**
+     * Submit on distribute tab
+     */
+    $(document).on("submit", "#granite-distribution-form", function (e) {
+        //prevent event bubbling
+        e.preventDefault();
+        var form = $("#granite-distribution-form");
+        var action = $("#granite-distribution-form").find('input[name="action"]:checked').val();
+        var path = $("#granite-distribution-form").find('input[name="path"]').val();
+
+        var successHandler = function (data) {
+            window.location.reload();
+        };
+
+        var errorMessage = Granite.I18n.get("An error has occurred while attempting to distribute content.");
+
+        makeDistributePostCall(form.attr("action"), action, path, successHandler, errorMessage);
+    });
+
+    $(document).on("click", "#testConnection", function(e) {
+        var agentName = getRequestParameter("agentName");
+        var url = Granite.HTTP.externalize("/libs/sling/distribution/services/agents/" + agentName);
+        var successHandler = function (data) {
+            showNotification(Granite.I18n.get("A test package was successfully delivered."), "success");
+        };
+
+        var errorMessage = Granite.I18n.get("An error has occurred while attempting to deliver test package.");
+        makeDistributePostCall(url, "TEST", "", successHandler, errorMessage);
+    });
+
+    /**
+     * Makes a post call to the actionUrl, containing action and path as data
+     * @param actionUrl
+     * @param action
+     * @param path
+     * @param successHandler
+     * @param errorMessage
+     */
+    function makeDistributePostCall(actionUrl, action, path, successHandler, errorMessage) {
+        var data = {"action": action};
+        if (action !== "TEST") {
+            data["path"] = path;
+        }
+
+        // only show the spinner if the request takes a considerable amount of time, otherwise
+        // the flash of the spinner is a little ugly
+        var timer = setTimeout(function () {
+            ui.wait();
+        }, 50);
+
+        $.ajax({
+            data: data,
+            type: "POST",
+            url: Granite.HTTP.externalize(actionUrl),
+            timeout: 60000,
+            success: function(data) {
+				clearTimeout(timer);
+                ui.clearWait();
+                successHandler(data);
+            },
+            error: function (data) {
+                var statusCode = data.status;
+
+                //the 202 status code is picked up by the error handler, despite the fact that it's a success.
+                //This might be caused by the format of the rest of the response, but it's a success nonetheless
+                if (statusCode !== undefined && statusCode === 202) {
+                    return successHandler(data);
+                }
+
+                //error, otherwise
+                var responseJson = data.responseJSON;
+
+                if (responseJson != undefined) {
+                    errorMessage = errorMessage + " " + responseJson.message;
+                }
+                showNotification(errorMessage, "error");
+
+                clearTimeout(timer);
+                ui.clearWait();
+            }
+        });
+    }
+
+    /**
+     * Add listener for document.ready
+     */
+    $(document).ready(function (e) {
+        var queueCollection = $(".granite-distribution-queue-collection");
+
+        if (queueCollection.length > 0) {
+            //for the agent detail page, we need to compute the total # of queues blocked and items pending
+            //find the total number of queues blocked
+            var blockedQueuesMessage = "";
+            var blocked = queueCollection.find(".granite-distribution-red-icon");
+
+            var queuesBlockedContainer = $(".granite-distribution-queues-blocked-container");
+            if (blocked.length == 0) {
+                //queuesBlockedContainer.prop("hidden", true);
+            } else {
+                queuesBlockedContainer.removeProp("hidden");
+                if (blocked.length == 1) {
+                    blockedQueuesMessage = Granite.I18n.get("1 QUEUE BLOCKED");
+                } else {
+                    blockedQueuesMessage = Granite.I18n.get("{0} QUEUES BLOCKED", blocked.length + "", "0 is the number of queues");
+                }
+                var queuesBlockedDiv = $(".granite-distribution-queues-blocked");
+                if (queuesBlockedDiv.length == 1) {
+                    queuesBlockedDiv.text(blockedQueuesMessage);
+                }
+            }
+
+            //find the total number of pending items
+            var pending = queueCollection.find(".granite-distribution-items-pending-marker");
+            var count = 0;
+            for (var i = 0; i < pending.length; i++) {
+                count += parseInt($(pending[i]).text(), 10) || 0;
+            }
+            var itemsPendingMessage = "";
+            if (count == 1) {
+                itemsPendingMessage = Granite.I18n.get("1 Item Pending");
+            } else {
+                itemsPendingMessage = Granite.I18n.get("{0} Items Pending", count + "", "0 is the number of items");
+            }
+            var itemsPendingDiv = $(".granite-distribution-items-pending");
+            if (itemsPendingDiv.length == 1) {
+                itemsPendingDiv.text(itemsPendingMessage);
+            }
+
+            // on the agent list page, we need to update the action bar buttons
+            //-> form the edit link URL using the agent PID and show/hide the enable/disable buttons
+            updateButtonsAndDivsDependingOnAgentStatus();
+
+            //load the agent log in the corresponding tab
+            var agentName = getRequestParameter("agentName");
+            loadLogContentWithSpinner(Granite.HTTP.externalize("/libs/sling/distribution/services/agents/" + agentName + "/log.txt"));
+        }
+
+        toggleItemVisibility("#clear-queue-activator", $(".distribution-queue-detail-panel.editable-queue").length > 0);
+
+    });
+
+    $(document).on("foundation-contentloaded", function(e) {
+        // on the edit agent page
+        if(window.location.href.indexOf("edit-agent.html") >= 0) {
+
+            // adding a short delay because in very rare occasions it still happens that the type
+            // field is uninitialized when the content is loaded
+            setTimeout(function () {
+                Coral.commons.ready(document.querySelector("#agentTypeSelectInput"), function (e) {
+
+                    // using the input instead of $("coral-select")[0].value because that's in an unreliable state on page load,
+                    // especially if we're in the create form
+                    var selectedAgentTypeField = $("input[name='type']");
+                    if (selectedAgentTypeField.length > 0) {
+                        showHideFieldsForAgentType(selectedAgentTypeField.val());
+                    }
+
+                    // the agent name and type should be disabled for editing agents
+                    reenableUneditableFormFields();
+                });
+            }, 150);
+        }
+    })
+
+    function reenableUneditableFormFields() {
+        // name input
+        var input = $("[name='name']");
+        // if we're currently in the create agent form, re-enable the name and type fields
+        if(input.length > 0 && (!input.val() || input.val().trim().length == 0)) {
+            input.removeAttr("disabled");
+
+            // agent type input
+            var agentType = $( "[name='type']");
+            if(agentType.length > 0) {
+                agentType.removeAttr("disabled");
+            }
+        }
+
+    }
+
+    /** Creates a notification using the given message and status and adds it to the page
+     * @param message
+     * @param status
+     */
+    function showNotification(message, status) {
+        ui.notify(null, message, status);
+    };
+
+
+    /**
+     * Adds the agent PID to the edit link. We only have this information once the page is loaded, so we add it now
+     * Shows the enable or disable button based on the agent state
+     */
+    function updateButtonsAndDivsDependingOnAgentStatus() {
+        var agentDiv = $("#agentDetailsDiv");
+        if(agentDiv.length > 0) {
+
+            toggleEnableAndPauseButtons(agentDiv);
+
+            // hide the queue table if the agent is disabled or has a configuration error
+            var enabled = agentDiv.data("enabled");
+            var configError = agentDiv.data("configurationerror");
+
+            toggleItemVisibility("#queueActionBar", enabled && !configError);
+            toggleItemVisibility(".granite-distribution-queue-collection", enabled && !configError);
+        }
+    }
+
+    function toggleEnableAndPauseButtons(item) {
+        if(item.length == 1) {
+            //show / hide the enable / disable buttons based on the state of the agent
+            var enabled = item.data("enabled");
+            var visibilitySwitch = enabled !== null && $.trim(enabled).toLowerCase() === "true";
+
+            toggleItemVisibility("#agent-disable-activator", visibilitySwitch);
+            toggleItemVisibility("#agent-enable-activator", !visibilitySwitch);
+
+            //Show/hide the pause / resume buttons
+            var processing = item.data("processing");
+            visibilitySwitch = processing !== null && $.trim(processing).toLowerCase() === "true";
+
+            toggleItemVisibility("#agent-pause-activator", visibilitySwitch);
+            toggleItemVisibility("#agent-resume-activator", !visibilitySwitch);
+        }
+    }
+
+    $(document).on("click", "#agentEditLink", function(e) {
+        e.preventDefault();
+
+        var selectedAgent = getSelectedAgentId();
+        window.location.href = Granite.HTTP.externalize("/libs/granite/distribution/content/edit-agent.html/libs/sling/distribution/settings/agents/" + selectedAgent);
+    });
+
+    /**
+     * Handler for agent disable button
+     */
+    $(document).on("click", "#disableAgentButton", function (e) {
+        toggleAgentEnable(false);
+    });
+
+    /**
+     * Handler for agent enable button
+     */
+    $(document).on("click", "#enableAgentButton", function (e) {
+        toggleAgentEnable(true);
+    });
+
+    /**
+     * Enables / disables the distribution agent
+     * @param enable - true or false
+     */
+    function toggleAgentEnable(enable) {
+        var enablingString = enable ? Granite.I18n.get("enabling") : Granite.I18n.get("disabling");
+        var errorMessage = Granite.I18n.get("There was an error while {0} the agent.", enablingString, "0 is either 'enabling' or 'disabling'");
+
+        toggleAgentProperty("enabled", enable, errorMessage)
+    }
+
+    /**
+     * Handler for agent pause button
+     */
+    $(document).on("click", "#agentPauseButton", function (e) {
+        toggleAgentProcessing(false);
+    });
+
+    /**
+     * Handler for agent resume button
+     */
+    $(document).on("click", "#agentResumeButton", function (e) {
+        toggleAgentProcessing(true);
+    });
+
+    /**
+     * Toggles the processing enabled property
+     * @param enable - true or false
+     */
+    function toggleAgentProcessing(enable) {
+        var enablingString = enable ? Granite.I18n.get("enabling") : Granite.I18n.get("disabling");
+        var errorMessage = Granite.I18n.get("There was an error while {0} queue processing.", enablingString, "0 is either 'enabling' or 'disabling'");
+
+        toggleAgentProperty("queue.processing.enabled", enable, errorMessage, 700);
+    }
+
+    /**
+     * Toggles the propertyName property
+     * @param propertyName
+     * @param enable - true or false
+     * @param errorMessage - message to show in case the operation failed
+     */
+    function toggleAgentProperty(propertyName, enable, errorMessage, waitTime) {
+        var distributionAgent = $("#agentDetailsDiv");
+        var data = propertyName + "=" + enable;
+        var agentName;
+
+        // if we're in the agent detail page, we can get the agent name from the agentDetailsDiv
+        if (distributionAgent.length > 0) {
+            agentName = distributionAgent.data("name");
+        } else {
+            //otherwise, if we're in the agent list page, we can get the agent name from the
+            // selected collection item
+            agentName = getSelectedAgentId();
+        }
+
+        if (agentName !== undefined && $.trim(agentName).length > 0) {
+            $.ajax({
+                data: data,
+                type: "POST",
+                url: Granite.HTTP.externalize("/libs/sling/distribution/settings/agents/" + agentName),
+                timeout: 10000,
+                success: function (data) {
+                    if (waitTime !== undefined && waitTime > 0) {
+                        setTimeout(function () {
+                            window.location.reload();
+                        }, waitTime);
+                    } else {
+                        window.location.reload();
+                    }
+
+                },
+                error: function (data) {
+                    showNotification(errorMessage, "error");
+                }
+            });
+        }
+
+    }
+
+    function getSelectedAgentId() {
+        var agentName = "";
+        //we can get the agent name from the selected collection item
+        var selectedAgent = $(".granite-distribution-agent-collection .foundation-selections-item");
+        if(selectedAgent.length == 1) {
+            var card = selectedAgent.find("coral-card");
+            if(card.length == 1) {
+                agentName = card.data("id");
+            } else {
+                //list view
+                agentName = selectedAgent.data("id");
+            }
+        }
+        return agentName;
+    }
+
+    /**
+     * Clears the selected queue
+     * @param enable - true or false
+     */
+    function clearQueue(agentName, queueName) {
+        if (queueName !== undefined && $.trim(queueName).length > 0
+            && agentName !== undefined && $.trim(agentName).length > 0) {
+            $.ajax({
+                data: {
+                    "operation": "delete",
+                    "limit": -1
+                },
+                type: "POST",
+                url: Granite.HTTP.externalize("/libs/sling/distribution/services/agents/" + agentName + "/queues/" + queueName),
+                timeout: 10000,
+                success: function (data) {
+                    window.location.reload();
+                },
+                error: function (data) {
+                    var errorMessage = Granite.I18n.get("There was an error while clearing the queue.");
+                    showNotification(errorMessage, "error");
+                }
+            });
+        } else {
+            showNotification(Granite.I18n.get("A valid agent and queue need to be provided before the clear queue operation."), "error");
+        }
+    }
+
+    /**
+     * Returns the first value of the searchParamName parameter
+     * @param searchParamName
+     * @returns - the value of searchParamName
+     */
+    function getRequestParameter(searchParamName) {
+        var searchString = window.location.search;
+        var urlVariables, i, parameterName;
+
+        if (searchString.indexOf('?') >= 0 && searchParamName !== undefined
+            && searchParamName.length > 0) {
+            //remove the ?
+            searchString = window.location.search.substring(1);
+            urlVariables = searchString.split('&');
+
+            for (i = 0; i < urlVariables.length; i++) {
+                parameterName = urlVariables[i].split('=');
+                //return the value of the first parameter with that name.
+                //The case with multiple parameter values is not taken into consideration
+                if (parameterName[0].toLowerCase() === searchParamName.toLowerCase()) {
+                    return parameterName[1];
+                }
+            }
+        }
+        return "";
+    }
+
+    /**
+     * Loads the log content and inserts it in the log tab
+     * @param remoteUrl
+     */
+    function loadLogContentWithSpinner(remoteUrl) {
+        var target = $("#distributionAgentLogContent");
+
+        // load remote link, if necessary
+        if (remoteUrl) {
+            // only show the spinner if the request takes an appreciable amount of time, otherwise
+            // the flash of the spinner is a little ugly
+            var timer = setTimeout(function () {
+                target.html('<coral-wait size="L"></coral-wait>');
+            }, 50);
+
+            $.ajax({
+                type: "GET",
+                url: Granite.HTTP.externalize(remoteUrl),
+                timeout: 10000,
+                success: function (data) {
+                    clearTimeout(timer);
+                    target.text(data);
+                },
+                error: function (data) {
+                    clearTimeout(timer);
+
+                    var alert = new Coral.Alert();
+                    alert.variant = "error";
+                    alert.header.textContent = Granite.I18n.get("ERROR");
+                    alert.content.innerHTML = Granite.I18n.get("Failed to load log content.");
+
+                    target.empty();
+                    target.append(alert);
+                    target.removeClass("distribution-agent-log-content");
+                }
+            });
+        }
+    }
+
+    $(document).on("foundation-selections-change", ".granite-distribution-agent-collection", function(e) {
+        var collection = $(this);
+        var items;
+
+        if (collection != undefined) {
+            items = collection.find(".foundation-selections-item");
+            if(items.length == 1) {
+                var selection = items.find("coral-card");
+                if(selection.length == 0) {
+                    selection = items; // list view
+                }
+                toggleEnableAndPauseButtons(selection);
+            }
+        }
+    });
+
+    $(document).on("foundation-selections-change", ".granite-distribution-queue-collection", function(e) {
+        var collection = $(this);
+        var items;
+
+        if (collection != undefined) {
+            items = collection.find(".foundation-selections-item.editable-queue");
+
+            toggleItemVisibility("#clearQueueButton", items.length == 1);
+        }
+    });
+
+    $(document).on("foundation-selections-change", ".granite-distribution-queue-entry-collection", function(e) {
+        var collection = $(this);
+        var items;
+
+        if (collection != undefined) {
+            items = collection.find(".foundation-selections-item.editable-queue");
+
+            toggleItemVisibility("#deleteItemsButton", items.length > 0);
+
+            var queueName = getRequestParameter("queueName");
+            // only make the retry button available for error queues
+            if(queueName && queueName.startsWith(ERROR_QUEUE_PREFIX)) {
+                toggleItemVisibility("#retryButton", items.length > 0);
+            }
+        }
+    });
+
+    function toggleItemVisibility(itemId, show) {
+        var item = $(itemId);
+        if(item.length > 0) {
+            if (show) {
+                item.removeProp("hidden");
+            } else {
+                item.prop("hidden", true);
+            }
+        }
+    }
+
+    $(document).on("click", ".granite-distribution-agent-configure", function(e) {
+        var href = $(this).data("href");
+        window.location.href = Granite.HTTP.externalize(href);
+    });
+
+    /**
+     * Submit on Create Agent form
+     */
+    $(document).on("submit", "#editDistributionAgentForm", function (e) {
+        //prevent event bubbling
+        e.preventDefault();
+        var form = $(this);
+        var agentName = form.find("input[name='name']").val();
+        var actionUrl = AGENTS_SETTINGS_URL + agentName;
+
+        var successHandler = function() {
+            // wait a while to let the configuration changes take place
+            setTimeout(function() {
+                ui.clearWait();
+                window.location.href = Granite.HTTP.externalize("/libs/granite/distribution/content/distribution.html");
+            }, 1000);
+        };
+        performPostOperation(form, actionUrl, successHandler, "create agent");
+    });
+
+    $(document).on("change", "#agentTypeSelectInput", function(event) {
+        var selectedAgentType = $(this).val();
+
+        showHideFieldsForAgentType(selectedAgentType);
+    });
+
+    //$(document).on("change", "coral-checkbox#useForReplicationCheckbox", function(event) {
+    //    toggleReplicationFieldsVisibility(this.checked);
+    //});
+
+    /**
+     * This function iterates through .agentDependentFieldContainers, making visible the ones that contain
+     * selectedAgentType in their agenttype data property
+     * @param selectedAgentType
+     */
+    function showHideFieldsForAgentType(selectedAgentType) {
+        if(selectedAgentType) {
+            var agentPropertiesContainer = $("#agentPropertiesContainer");
+            if(agentPropertiesContainer.length > 0) {
+                agentPropertiesContainer.removeAttr("hidden");
+            }
+
+            $.each($(".agentDependentFieldContainer"), function (index, value) {
+                var container = $(value);
+                // look at the agent types -if the selected type is among these, the field should be visible,
+                // otherwise it should be hidden and disabled
+                var agentTypes = container.data("agenttype");
+                if(container.data("agenttype")) {
+                    agentTypes = agentTypes.split(",");
+
+                    var dependencyField = container.data("depends-on-field");
+                    toggleContainerVisibilityAndDisableFields(container,
+                        $.inArray(selectedAgentType, agentTypes) >= 0 && isDependencyFieldChecked(dependencyField));
+                }
+            });
+        }
+    }
+
+    //function toggleReplicationFieldsVisibility(show) {
+    //    var wrapper = $(".replicationFieldsWrapper");
+    //    if(wrapper.length > 0) {
+    //        toggleContainerVisibilityAndDisableFields(wrapper, show);
+    //    }
+    //}
+
+    /**
+     * Returns true if the checkbox specified by dependsOnField is checked.
+     * Also returns true if the dependsOnField is empty
+     * @param dependsOnField
+     * @returns {boolean}
+     */
+    function isDependencyFieldChecked(dependsOnField) {
+        var response = false;
+        if(dependsOnField && $.trim(dependsOnField).length > 0) {
+            var field = $("#" + dependsOnField);
+            if (field.length == 1) {
+                if (field[0].checked) {
+                    response = true;
+                }
+            }
+        } else {
+            response = true;
+        }
+        return response;
+    }
+
+    /**
+     * Shows / hides a field container and disables the form inputs inside this container
+     * @param container
+     * @param show
+     */
+    function toggleContainerVisibilityAndDisableFields(container, show) {
+        if(container && container.length > 0) {
+            if (show) {
+                container.removeAttr("hidden");
+                container.find(".coral-Form-field").each(function (i, formField) {
+                    $(formField).removeAttr("disabled");
+                });
+            } else {
+                container.attr("hidden", true);
+                container.find(".coral-Form-field").each(function (i, formField) {
+                    $(formField).attr("disabled", true);
+                });
+            }
+        }
+    }
+
+    function performPostOperation(form, URL, successHandler, operation) {
+        ui.wait();
+        $.ajax({
+            data: form.serialize(),
+            type: "POST",
+            url: Granite.HTTP.externalize(URL),
+            timeout: 60000,
+            success: successHandler,
+            error: function(xmlhttprequest, textStatus, message) {
+                showNotification(Granite.I18n.get("An error occurred while attempting to {0}: {1}.",
+                    [operation, message], "0 is the operation, 1 is the error message"), "error");
+                ui.clearWait();
+            }
+        });
+    }
+
+    /**
+     * Returns the id of the currently selected collection item
+     * @param collectionSelector - a class for collection selection (e.g. ".elastic-customer-collection")
+     * @param button - the button that triggers the action (if we can't get the ID from the collection item itself, the
+     * backup solution is to look at the button data attributes)
+     * @returns {*}
+     */
+    function getSelectedItemId(collectionSelector, button) {
+        var selectedId;
+        var selectedItemList = $(collectionSelector + " .foundation-selections-item");
+        if(selectedItemList.length > 0) {
+            var card = selectedItemList.find("coral-card");
+            // for card layouts, the data is placed on the card item
+            if (card.length > 0) {
+                selectedId = card.data("id");
+            } else {
+                // for list layouts, the data is directly on the selected item
+                selectedId = selectedItemList.data("id");
+            }
+        } else {
+            selectedId = button.data("id");
+        }
+        return selectedId;
+    }
+
+    $(document).on("click", "#distribution-agent-delete-activator", function(e) {
+        var selectedAgent = getSelectedItemId(".granite-distribution-agent-collection", $(this));
+
+        $("#deleteDistributionAgentForm").attr("action", AGENTS_SETTINGS_URL + selectedAgent);
+        $("#deleteAgentMessage").text(
+            Granite.I18n.get("Are you sure you want to delete distribution agent {0}?",
+            selectedAgent, "0 is the selected agent name"))
+    });
+})(document, Granite.$);

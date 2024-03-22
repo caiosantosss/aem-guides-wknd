@@ -1,0 +1,586 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.HeavyMoveDialog
+ * @extends CQ.Dialog
+ * The HeavyMoveDialog is a dialog for moving a page and its child pages,
+ * also considering reactivation of previously activated pages ('heavy' move).
+ * @constructor
+ * Creates a new HeavyMoveDialog.
+ * @param {Object} config The config object
+ */
+CQ.wcm.HeavyMoveDialog = CQ.Ext.extend(CQ.Dialog, {
+
+    /**
+     * @cfg {String} dstName
+     * Default name of the destination page.
+     *
+     * @cfg {String} dstParentPath
+     * Default path of the destination parent page.
+    */
+
+    /**
+     * @property {CQ.Ext.data.JsonStore} store
+     * Internal store for the move information.
+     * @private
+     */
+    store: null,
+
+    /**
+     * @cfg {String} dataPath Path to the servlet to retrieve the store data from
+     * (defaults to "/bin/wcm/heavymove").
+     */
+    dataPath: null,
+
+    /**
+     * @cfg {String/String[]} path
+     * Source page path(s).
+     */
+    path: null,
+
+    /**
+     * @cfg {String} vtype A validation type name as defined in {@link CQ.Ext.form.VTypes} (defaults to "itemname")
+     * @since 5.3
+     */
+    vtype: null,
+    
+    maxRefNo: CQ.MOVE_DIALOG_MAX_REF,
+    
+    adjustMap: {},
+    
+    publishMap: {},
+
+    constructor: function(config) {
+        if (!config) {
+            config = new Object();
+        }
+        this.dataPath = config.dataPath;
+        if (!this.dataPath) {
+            this.dataPath = "/bin/wcm/heavymove";
+        }
+        
+
+        if (config.maxRefNo) {
+            this.maxRefNo = config.maxRefNo;
+        }
+
+        if (!(config.path instanceof Array)) {
+        	this.path = decodeURIComponent(config.path);
+        }
+
+        if (this.path == null) {
+          this.path = config.path;
+        }
+        
+        var colAdjust = new CQ.wcm.HeavyMoveDialog.CheckColumn({
+            header: CQ.I18n.getMessage("Adjust"),
+            dataIndex: 'adjust',
+            enabledIf: 'adjustable',
+            width: 40
+        });
+        var colActivate = new CQ.wcm.HeavyMoveDialog.CheckColumn({
+            header: CQ.I18n.getMessage("Republish"),
+            dataIndex: 'publish',
+            enabledIf: 'published',
+            width: 60
+        });
+
+        var modCol = CQ.Util.copyObject(CQ.wcm.SiteAdmin.COLUMNS["modified"]);
+        modCol.width = 120;
+
+        var cm = new CQ.Ext.grid.ColumnModel([
+            colAdjust,
+            colActivate,
+            {
+                header: CQ.I18n.getMessage("Title"),
+                dataIndex: 'title',
+                width: 120
+            }, {
+                id:'path',
+                header: CQ.I18n.getMessage("Path"),
+                dataIndex: 'path',
+                width: 170
+            },
+            modCol
+        ]);
+
+        // by default columns are sortable
+        cm.defaultSortable = true;
+
+        var hmd = this;
+        var response =[];
+        var url;
+        if (config.path instanceof Array) {
+        	for (var i= 0; i < config.path.length; i++) {
+                var url = CQ.HTTP.addParameter(this.dataPath, "path", decodeURIComponent(config.path[i]));
+                url = CQ.HTTP.addParameter(url, "_charset_", "utf-8");
+                url = CQ.HTTP.addParameter(url, "maxRefNo", this.maxRefNo);
+                url = CQ.shared.HTTP.externalize(url);
+                var xhr = new XMLHttpRequest();
+                xhr.open("GET", url, false);
+                xhr.dlg = this;
+                xhr.onreadystatechange = function (e, dlg) {
+                  if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                      var r = JSON.parse(xhr.responseText);
+                	  for (var j =0 ;j <r.pages.length ; j++) {
+                		  if (this.dlg.adjustMap[r.pages[j].path] == undefined) {
+                			  this.dlg.adjustMap[r.pages[j].path] = new Array();
+                		  }
+                		  if (this.dlg.publishMap[r.pages[j].path] == undefined) {
+                			  this.dlg.publishMap[r.pages[j].path] = new Array();
+                		  }
+                		  this.dlg.adjustMap[r.pages[j].path].push(i);
+                		  this.dlg.publishMap[r.pages[j].path].push(i);
+                	  }
+                      if ( i ==0) {
+                    	  response = r;
+                      } else {
+                    	  for (var j =0 ;j <r.pages.length ; j++) {
+                    		  response.pages.push(r.pages[j]);
+                    	  }
+                      }
+                      
+                      //response.push(r.pages[0]);
+                    } else {
+                      console.error(xhr.statusText);
+                    }
+                  }
+                };
+                xhr.onerror = function (e) {
+                  console.error(xhr.statusText);
+                };
+                xhr.send(null);
+        	} 
+        } else {
+            url = CQ.HTTP.addParameter(this.dataPath, "path", this.path);
+            url = CQ.HTTP.addParameter(url, "_charset_", "utf-8");
+            url = CQ.HTTP.addParameter(url, "maxRefNo", this.maxRefNo);
+            url = CQ.shared.HTTP.externalize(url);
+        }
+        this.store = new CQ.Ext.data.JsonStore({
+            "url": url,
+            "root": "pages",
+            "fields": [{
+                name: "title"
+            },{
+                name: "path"
+            },{
+                name: CQ.shared.XSS.getXSSPropertyName("path")
+            },{
+                name: "published"
+            },{
+                name: "adjustable"
+            },{
+                name: "publish",
+                defaultValue: true
+            },{
+                name: "adjust",
+                defaultValue: true
+            },{
+                name: "lastModifiedBy"
+            },{
+                name: CQ.shared.XSS.getXSSPropertyName("lastModifiedBy")
+            },{
+                name: "lastModified"
+            }, {
+                name: "replication"
+            }],
+           "totalProperty": "totalPages",           
+            "listeners":{
+                "beforeload":function() {
+                    hmd.loadingRefs = true;
+                },
+                "load":function(store, records, opts) {
+                    hmd.loadingRefs = false;
+                },
+                
+                "loadexception": function(proxy, options, response) {
+                    hmd.loadingRefs = false;
+                    try {
+                        var json = CQ.Ext.decode(response.responseText);
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                                         CQ.I18n.getVarMessage(json.message));
+                    } catch (e) {
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                                         CQ.I18n.getMessage("Unexpected error while loading move dialog"));
+                    }
+                    hmd.hide();
+                }
+                
+            }
+        });
+
+        if (config.path instanceof Array) {
+            this.store.loadData(response);
+        }
+        var grid = new CQ.Ext.grid.GridPanel({
+            cls: "cq-heavymove",
+            id:CQ.Util.createId("cq-heavymovegridpanel"),
+            store: this.store,
+            stateful: false,
+            cm: cm,
+            listeners: {
+            	"activate": function() {
+            		this.loadMask.hide();
+            	}
+            	
+            },
+            height:238,
+            disableSelection: true,
+            enableHdMenu: false,
+            autoExpandColumn: 'path',
+            clicksToEdit:1,
+            viewConfig: {
+                renderBody: function(){
+                    if(this.grid.store.getTotalCount() > hmd.maxRefNo){
+                        this.emptyText = CQ.I18n.get("The move you are about to make has more than {0} references and will be automatically adjusted and republished", [hmd.maxRefNo]);
+                    }
+                    var markup = this.renderRows() || '&#160;';
+                    return this.templates.body.apply({rows: markup});
+                },
+                emptyText: CQ.I18n.getMessage("No references to display")
+            },
+            loadMask:{
+                msg:CQ.I18n.getMessage("Loading references...")
+            }
+        });
+
+        
+        colAdjust.init(grid);
+        colActivate.init(grid);
+
+        grid.on("headerclick", function(grid, ci, e) {
+            if (ci == 0 || ci == 1) {
+                // hard code names for now
+                var cn = ci == 0 ? "adjust" : "publish";
+                var value;
+                grid.store.each(function(r) {
+                    if (typeof value == "undefined") {
+                        value = !r.data[cn];
+                    }
+                    r.set(cn, value);
+                    r.dirty = false;
+                    return true;
+                });
+            }
+            return true;
+        });
+        
+        var tmpPath;
+        if (config.path instanceof Array) {
+           tmpPath = decodeURIComponent(config.path[0]);
+        } else {
+           tmpPath = decodeURIComponent(config.path);
+        }
+        var i = tmpPath.lastIndexOf('/');
+        var srcParentPath = tmpPath.substring(0, i);
+        var srcName = tmpPath.substring(i + 1);
+        var dstParentPath = config.dstParentPath ? decodeURIComponent(config.dstParentPath) : srcParentPath;
+        var dstName = config.dstName ? decodeURIComponent(config.dstName) : srcName;
+        // overwrite config
+        config = CQ.Util.applyDefaults(config, {
+            "xtype": "dialog",
+            "title":CQ.I18n.getMessage("Move"),
+            "formUrl": CQ.shared.HTTP.externalize("/bin/wcmcommand"),
+            "params": {
+                "cmd":"movePage",
+                "integrity": "true",
+                "_charset_":"utf-8"
+            },
+            "fileUpload": true,
+            "items": {
+                "xtype": "panel",
+                
+                "items": [{
+                    "xtype": "fieldset",
+                    "title": CQ.I18n.get("Location"),
+                    "autoHeight": true,
+                    "autoWidtht": true,
+                    "stateful": false,
+                    "items": [{
+                        "fieldLabel":CQ.I18n.getMessage("Destination"),
+                        "xtype": "pathfield",
+                        "anchor": "100%",
+                        "name":"destParentPath",
+                        "value": dstParentPath,
+                        "listeners": {
+                            "blur": function() {
+                                while (/(.*)\/$/.test(this.getValue())) {
+                                    this.setValue(this.getValue().replace(/(.*)\/$/, "$1"));
+                                }
+                            }
+                        }
+                    }]
+                },
+                   {
+                    "xtype": "fieldset",
+                    "title": "Items",
+                    "id": "movefieldsetpanel",
+                    "autoHeight": true,
+                    "autoWidtht": true,
+                    "stateful": false
+                 },
+                grid]
+            },
+            "listeners": {
+                "show":function() {
+                	grid.loadMask.hide();
+                    grid.getStore().load();
+                    
+                }
+            },
+            "failure": function() {
+                CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                                 CQ.I18n.getMessage("An error occurred while moving page"));
+            }
+        });
+        config.buttons = [{
+            "text": CQ.I18n.getMessage("Move"),
+            "cls": "cq-btn-move",
+            "disabled": false,
+            "handler": function() {
+                if (this.loadingRefs) {
+                    CQ.Ext.Msg.show({
+                        title:CQ.I18n.getMessage('Move Page'),
+                        msg: CQ.I18n.getMessage('Please wait until the references are loaded.'),
+                        buttons: CQ.Ext.Msg.OK,
+                        icon: CQ.Ext.Msg.WARNING
+                    });
+                    return;
+                }
+                var dlg = this; 
+                var dstPath = this.getField("destParentPath").getValue();
+                var dstJson = CQ.utils.HTTP.eval(dstPath + '.1.json');
+                if (dstJson["jcr:primaryType"] == "dam:Asset") {
+                           CQ.Ext.Msg.show({
+                              title:CQ.I18n.getMessage('Move Page'),
+                              msg: CQ.I18n.getMessage('Destination cannot be an asset.'),
+                              buttons: CQ.Ext.Msg.OK,
+                              icon: CQ.Ext.Msg.ERROR
+                          });
+                          return;
+                }
+                if (this.path instanceof Array) {
+                    for (var i = 0 ; i < this.path.length; i++) {
+
+                        var j = this.path[i].lastIndexOf('/');
+                        var srcParentPath = this.path[i].substring(0, j);
+                        var srcName = this.path[i].substring(j + 1);
+                        var dstParentPath = srcParentPath;
+                        var dstName = this.getField(i+"_destName").getValue();
+                       if (dstPath == this.path[i] || dstPath.indexOf(this.path + "/") == 0) {
+                           CQ.Ext.Msg.show({
+                              title:CQ.I18n.getMessage('Move Page'),
+                              msg: CQ.I18n.getMessage('Page cannot be moved below itself.'),
+                              buttons: CQ.Ext.Msg.OK,
+                              icon: CQ.Ext.Msg.ERROR
+                          });
+                          return;
+                      }
+                      if (dstPath == dstParentPath && dstName == srcName) {
+                           CQ.Ext.Msg.show({
+                              title:CQ.I18n.getMessage('Move Page'),
+                              msg: CQ.I18n.getMessage('Page cannot be moved. Please change the destination or rename it.'),
+                              buttons: CQ.Ext.Msg.OK,
+                              icon: CQ.Ext.Msg.ERROR
+                         });
+                         return;
+                     }
+                }
+                    
+
+                } else {
+                        if (dstPath == this.path || dstPath.indexOf(this.path + "/") == 0) {
+                         CQ.Ext.Msg.show({
+                            title:CQ.I18n.getMessage('Move Page'),
+                            msg: CQ.I18n.getMessage('Page cannot be moved below itself.'),
+                            buttons: CQ.Ext.Msg.OK,
+                            icon: CQ.Ext.Msg.ERROR
+                         });
+                         return;
+                    }
+                    if (dstPath == dstParentPath && dstName == srcName) {
+                        CQ.Ext.Msg.show({
+                            title:CQ.I18n.getMessage('Move Page'),
+                            msg: CQ.I18n.getMessage('Page cannot be moved. Please change the destination or rename it.'),
+                            buttons: CQ.Ext.Msg.OK,
+                            icon: CQ.Ext.Msg.ERROR
+                        });
+                        return;
+                   }
+                   } 
+                
+                CQ.Ext.Msg.confirm(
+                    CQ.I18n.getMessage('Move Page'),
+                    CQ.I18n.getMessage('Do you really want to move the page to the selected destination?'),
+                    function (btn) {
+                        if (btn == "yes") {
+                            dlg.ok.call(dlg);
+                        }
+                    });
+                }
+            },
+            CQ.Dialog.CANCEL
+        ];
+        config.width = 600;
+        config.height = 470;
+
+        CQ.wcm.HeavyMoveDialog.superclass.constructor.call(this, config);
+        this.vtype = config.vtype ? config.vtype : "itemname";
+        grid.loadMask.hide();
+        var fieldSetPanel = CQ.Ext.getCmp("movefieldsetpanel");
+        this.fieldSetPanel = fieldSetPanel;
+        if (config.path instanceof Array) {
+         for (var i = 0 ; i < config.path.length; i++) {
+        	var path = decodeURIComponent(config.path[i]);
+            fieldSetPanel.add(new CQ.Ext.form.TextField({
+                "xtype": "textfield",
+                "anchor": "100%",
+                "fieldLabel":CQ.I18n.getMessage("Move"),
+                "allowBlank":false,
+                "name":"srcPath",
+                "readOnly": true,
+                "value":path
+            }));
+            
+            var j = path.lastIndexOf('/');
+            var srcParentPath = path.substring(0, j);
+            var srcName = path.substring(j + 1);
+            var dstParentPath = config.dstParentPath ? decodeURIComponent(config.dstParentPath) : srcParentPath;
+            var dstName = config.dstName ? decodeURIComponent(config.dstName) : srcName;
+            
+            fieldSetPanel.add({
+                "xtype": "textfield",
+                "anchor": "100%",
+                "fieldLabel":CQ.I18n.getMessage("Rename to"),
+                "allowBlank":false,
+                "vtype":this.vtype,
+                "name":i+"_destName",
+                "value":dstName
+            	
+            });
+        }
+        } else {
+
+           var path = decodeURIComponent(config.path);
+            fieldSetPanel.add(new CQ.Ext.form.TextField({
+                "xtype": "textfield",
+                "anchor": "100%",
+                "fieldLabel":CQ.I18n.getMessage("Move"),
+                "allowBlank":false,
+                "name":"srcPath",
+                "readOnly": true,
+                "value":path
+            }));
+            
+            var j = config.path.lastIndexOf('/');
+            var srcParentPath = config.path.substring(0, j);
+            var srcName = config.path.substring(j + 1);
+            var dstParentPath = config.dstParentPath ? decodeURIComponent(config.dstParentPath) : srcParentPath;
+            var dstName = config.dstName ? decodeURIComponent(config.dstName) : srcName;
+            
+            fieldSetPanel.add({
+                "xtype": "textfield",
+                "anchor": "100%",
+                "fieldLabel":CQ.I18n.getMessage("Rename to"),
+                "allowBlank":false,
+                "vtype":this.vtype,
+                "name":i+"_destName",
+                "value":dstName
+            	
+            });
+        }
+
+
+        this.doLayout();
+        // add before submit handler that fills up the hiddens
+        this.on("beforesubmit", function() {
+            var dlg = this;
+            var adjustRefs = [];
+            var publishRefs = [];
+            if(dlg.store.data.length > 0){
+                for(var i = 0;i < dlg.store.data.items.length;i++){
+                    var item = dlg.store.data.items[i];
+                    if (item.data.adjust && item.data.adjustable) {
+                        adjustRefs.push(item.data.path);
+                        for (var  j = 0; j < dlg.adjustMap[item.data.path].length;j++){
+                        	var adjust = dlg.adjustMap[item.data.path][j]+"_adjust";
+                        	var adjustJson = "{"+adjust+": "+item.data.path+"}";
+                      	var hidden = {};
+                            hidden[adjust] = item.data.path;              
+                        	dlg.addHidden(hidden);
+                        } 
+                        this.adjustMap[item.data.path] =[];
+                    }
+                    if (item.data.publish && item.data.published) {
+                        publishRefs.push(item.data.path);
+                        for (var  j = 0; j < dlg.publishMap[item.data.path].length;j++){
+                        	var publish = dlg.publishMap[item.data.path][j]+"_publish";
+                        	var hidden = {};
+                            hidden[publish] = item.data.path;							
+                        	dlg.addHidden(hidden);                        	
+                        }
+                        this.publishMap[item.data.path] = [];
+                    }
+                }
+            }else if(dlg.store.getTotalCount() > dlg.maxRefNo){
+                dlg.addHidden({retrieveAll: true});
+            }
+            dlg.adjustMap = {};
+            dlg.publishMap = {};
+            return true;
+        });
+    }
+
+});
+
+CQ.Ext.reg('heavymovedialog', CQ.wcm.HeavyMoveDialog);
+
+CQ.wcm.HeavyMoveDialog.CheckColumn = function(config) {
+    CQ.Ext.apply(this, config);
+    if (!this.id) {
+        this.id = CQ.Ext.id();
+    }
+    this.renderer = this.renderer.createDelegate(this);
+};
+
+CQ.wcm.HeavyMoveDialog.CheckColumn.prototype = {
+    init : function(grid) {
+        this.grid = grid;
+        this.grid.on('render', function() {
+            var view = this.grid.getView();
+            view.mainBody.on('mousedown', this.onMouseDown, this);
+        }, this);
+    },
+
+    onMouseDown : function(e, t) {
+        if (t.className && t.className.indexOf('x-grid3-cc-' + this.id) != -1) {
+            e.stopEvent();
+            var index = this.grid.getView().findRowIndex(t);
+            var record = this.grid.store.getAt(index);
+            record.set(this.dataIndex, !record.data[this.dataIndex]);
+            // we don't want the 'dirty indicators'
+            record.dirty = false;
+        }
+    },
+
+    renderer : function(v, p, record) {
+        if (!this.enabledIf || record.data[this.enabledIf]) {
+            p.css += ' x-grid3-check-col-td';
+            return '<div class="x-grid3-check-col' + (v ? '-on' : '') + ' x-grid3-cc-' + this.id + '">&#160;</div>';
+        } else {
+            return '&nbsp;';
+        }
+    }
+};

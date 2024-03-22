@@ -1,0 +1,731 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+  "use strict";
+
+  var hiddenCssClass = "hide";
+
+  /*
+   AdobePatentID="2789US01"
+   */
+
+  /**
+   * Granite.author.history.History
+   * <p>Represents a history of undo/redo steps.</p>
+   * <p>Manages the history steps.</p>
+   * <p>Each step may consist of one or more history actions.</p>
+   *
+   * @ignore
+   * @class
+   * @alias Granite.author.history.History
+   * @param config The history configuration.
+   */
+  ns.history.History = function (config) {
+    var self = {};
+
+    /**
+     * The Array of available undo/redo steps
+     * @type Granite.author.history.Step[]
+     * @private
+     */
+    self.history = [];
+
+    /**
+     * Currently active undo/redo step (as array index of array {@link #history}), undefined if no undo/redo steps available
+     * @type Number
+     * @private
+     */
+    self.activeStep = -1;
+
+    /**
+     * The undo/redo step being processed
+     * @type Granite.author.history.Step
+     * @private
+     */
+    self.stepInProcess = null;
+
+    /**
+     * The type of operation in progress, either
+     * Granite.author.history.Step.OPERATION_UNDO or Granite.author.history.Step.OPERATION_REDO
+     * @type Boolean
+     * @private
+     */
+    self.operationType = null;
+
+    /**
+     * Array that defines currently blocked paths
+     */
+    self.blockedPaths = [];
+
+    /**
+     * The module used to persist the undo history over several requests
+     */
+    self.persistence = null;
+
+    /**
+     * Page version (usually the time code last requested from the server) the undo
+     * history is valid for; used for detecting page content invalidated by using
+     * browser back/forward buttons
+     *
+     */
+    self.pageVersion = null;
+
+    /**
+     * Flag that determines if undo/redo is (temporarily) blocked
+     */
+    self.blocked = false;
+
+    /**
+     * Flag that determines if either a undo step has been recorded or an undo or redo
+     * operation has been executed since last page load; roughly, this means that the
+     * page content may have changed using AJAX and therefore should not be taken from
+     * browser cache
+     */
+    self.edited = false;
+
+    /**
+     * Flag that determines if currently an undo or redo operation is active
+     */
+    self.operationActive = false;
+
+    /**
+     * <p>Initializes the undo/redo history.</p>
+     * @param {Object} cfg The history configuration object
+     */
+    self._init = function (cfg) {
+      cfg = cfg || {};
+      self.config = $.extend(true, {}, ns.history.History.defaults, cfg);
+      self.persistence = ns.clientsidePersistence.createStore(self.config.persistenceConfig);
+
+      // Listen on and react to step events
+      self.addListeners();
+    };
+
+    /* UNDO/REDO
+     -------------*/
+
+    /**
+     * <p>Determines if an undo operation can be executed by the user.</p>
+     * @return {Boolean} True if undo is available (i.e. nothing blocking and undo steps available)
+     */
+    self.canUndo = function () {
+      return !self.operationActive && !self.blocked && (self.activeStep >= 0);
+    };
+
+    /**
+     * <p>Determines if a redo operation can be executed by the user.</p>
+     * @return {Boolean} True if redo is available (i.e. nothing blocking and redo steps available)
+     */
+    self.canRedo = function () {
+      return !self.operationActive && !self.blocked && (self.activeStep < (self.history.length - 1));
+    };
+
+    /**
+     * Executes an undo operation.
+     */
+    self.undo = function () {
+      var stepValidity;
+
+      if (!self.canUndo()) {
+        throw new Error(Granite.I18n.get("Unable to undo."));
+      }
+
+      if (!self.isActivePointerValid()) {
+        throw new Error("The undo position is invalid. Position: " + self.activeStep + "; max: " + self.history.length);
+      }
+
+      self.stepInProcess = self.history[self.activeStep];
+      stepValidity = self.stepInProcess.getValidity(self);
+
+      if (stepValidity !== ns.history.Step.VALID) {
+        self.handleInvalidStep(stepValidity, false);
+        if (stepValidity != ns.history.Step.NOT_WHITELISTED) {
+          return;
+        }
+      }
+
+      // Perform the undo
+      self.activeStep--;
+      self.setEdited(true);
+
+      // Save the history if in step mode
+      if (self.config.persistenceMode == ns.history.persistence.Mode.ON_STEP) {
+        self.save(ns.history.Manager.getPagePath());
+      }
+
+      self.operationType = ns.history.History.OPERATION_UNDO;
+      self.setOperationActive(true);
+      self.stepInProcess.undo(); // Call the undo on the step
+    };
+
+    /**
+     * Executes a redo operation.
+     */
+    self.redo = function () {
+      var stepValidity;
+
+      if (!self.canRedo()) {
+        throw new Error(Granite.I18n.get("Unable to redo."));
+      }
+
+      self.activeStep++;
+
+      if (!self.isActivePointerValid()) {
+        throw new Error("The redo position is invalid. Position: " + (self.activeStep - 1) + "; max: " + self.history.length);
+      }
+
+      self.stepInProcess = self.history[self.activeStep];
+      stepValidity = self.stepInProcess.getValidity(self);
+
+      if (stepValidity !== ns.history.Step.VALID) {
+        self.handleInvalidStep(stepValidity, true);
+        if (stepValidity !== ns.history.Step.NOT_WHITELISTED) {
+          self.activeStep--;
+          return;
+        }
+      }
+
+      self.setEdited(true);
+
+      // Save the history if in step mode
+      if (self.config.persistenceMode == ns.history.persistence.Mode.ON_STEP) {
+        self.save(ns.history.Manager.getPagePath());
+      }
+
+      self.setOperationActive(true);
+      self.operationType = ns.history.History.OPERATION_REDO;
+      self.stepInProcess.redo();
+    };
+
+    /**
+     * <p>Adds a new undo step.</p>
+     * @param {Granite.author.history.Step} step The history step to add
+     * @return {Boolean} success status, true = success, false = fail
+     */
+    self.addStep = function (step) {
+      self.clearRedo(); // Remove all steps behind the active step (Existing redo is invalidated on add)
+      self.history.push(step);
+      self.activeStep++;
+
+      return true;
+    };
+
+    /**
+     * <p>Remove the specified step from the undo history.</p>
+     * @param {Granite.author.history.Step} step The step to be removed
+     * @return {Boolean} success status, true = success, false = fail
+     */
+    self.removeStep = function (step) {
+      var itemsRemoved = [];
+
+      $.each(self.history, function(i, s) {
+        if (step == s) {
+          itemsRemoved = self.history.splice(i, 1);
+          self.activeStep = i - 1;
+        }
+      });
+
+      return (itemsRemoved.length === 0);
+    };
+
+    /**
+     * <p>Clears the entire history and unbinds events.</p>
+     */
+    self.clear = function () {
+      self.history = [];
+      self.activeStep = -1;
+      self.blockedPaths = [];
+      channel.off("cq-history-paragraph-id-changed");
+      self.updateUIControls();
+    };
+
+    /**
+     * <p>Clear all redo steps.</p>
+     * @return {Granite.author.history.Step[]} Array of removed undo steps
+     */
+    self.clearRedo = function () {
+      var clearStart = self.activeStep + 1,
+        numStepsToRemove = self.history.length - clearStart,
+        removedSteps = [];
+
+      if (self.canRedo()) {
+        removedSteps = self.history.splice(clearStart, numStepsToRemove);
+      }
+
+      return removedSteps;
+    };
+
+    /* EVENTING
+     -------------*/
+
+    /**
+     * <p>Handles step committed to history.</p>
+     * @param {jQuery.event} [event] The step committed jQuery event
+     * @param {Granite.author.history.Step} [step] The step that was committed to history
+     */
+    self.onStepCommitted = function (event, step) {
+      self.pruneHistory();
+      self.setEdited(true);
+      self.updateUIControls(); // Toggle undo/redo control buttons as necessary
+
+      // Save the history if in step mode
+      if (self.config.persistenceMode == ns.history.persistence.Mode.ON_STEP) {
+        self.save(ns.history.Manager.getPagePath());
+      }
+    };
+
+    /**
+     * <p>Handles completion of a step operation.</p>
+     * @param {jQuery.event} event The step completed jQuery event
+     * @param {Granite.author.history.Step} step The step that completed processing
+     */
+    self.onStepCompleted = function (event, step) {
+      var historyEvent = 'cq-history-step-' + self.operationType + '-complete';
+
+      // Save the history if in step mode
+      if (self.config.persistenceMode == ns.history.persistence.Mode.ON_STEP) {
+        self.save(ns.history.Manager.getPagePath());
+      }
+
+      channel.trigger(historyEvent, step);
+      self.restoreScreen(step, (self.operationType === "undo"));
+
+      // TODO - reload page if step config demands it - see update action
+      self.setOperationActive(false); // Flag this history as having no operation running
+      self.updateUIControls(); // Toggle undo/redo control buttons as necessary
+    };
+
+    /**
+     * <p>Handler for failure of a step undo/redo operation.</p>
+     * @param {jQuery.event} event The step failed jQuery event
+     * @return {Boolean} step The step that failed
+     */
+    self.onStepFailed = function (event, step) {
+      var isUndo = (self.operationType === ns.history.History.OPERATION_UNDO),
+          title = (isUndo
+            ? Granite.I18n.get("Undo failed")
+            : Granite.I18n.get("Redo failed")),
+          message;
+
+      self.setOperationActive(false);
+
+      // TODO - specific messages provided by actions
+
+      message = (isUndo
+        ? Granite.I18n.get("The undo operation failed. ")
+        : Granite.I18n.get("The redo operation failed. "));
+      message += Granite.I18n.get("The reason may be a concurrent page edit, redone cross-page move, or network issue.");
+      message += "<br><br>";
+      message += Granite.I18n.get("You can either:");
+      message += "<ul><li>";
+      message += Granite.I18n.get("<b>Clear History</b> - Clears the undo history and you won't be able to undo or redo recorded actions.");
+      message += "</li><li>";
+      message += Granite.I18n.get("<b>Cancel</b> - Returns you to where you were and you can still redo previously undone actions.");
+      message += "</li></ul>";
+
+      ns.ui.helpers.prompt({
+            title: title,
+            message: message,
+            actions: [
+              {
+                id: "CANCEL",
+                text: Granite.I18n.get("Cancel", "Label for Cancel button")
+              },
+              {
+                id: "CLEAR_HISTORY",
+                primary: true,
+                text: Granite.I18n.get("Clear History", "Label for Clear History button")
+              }
+            ],
+            callback: function (actionId) {
+              if (actionId === "CANCEL") {
+                if (isUndo) {
+                  self.activeStep++;
+                } else {
+                  self.activeStep--;
+                }
+              } else if (actionId === "CLEAR_HISTORY") {
+                self.clear();
+                self.save(ns.history.Manager.getPagePath());
+              } else {
+                self.updateUIControls();
+              }
+            }
+        });
+    };
+
+    /**
+     * Listen for history step events and react accordingly
+     */
+    self.addListeners = function () {
+      channel.on('cq-history-step-committed', self.onStepCommitted);
+      channel.on('cq-history-step-completed', self.onStepCompleted);
+      channel.on('cq-history-step-error', self.onStepFailed);
+    };
+
+    /**
+     * Remove listeners for history step events
+     */
+    self.removeListeners = function () {
+      channel.off('cq-history-step-committed');
+      channel.off('cq-history-step-completed');
+      channel.off('cq-history-step-error');
+    };
+
+    /* STATE
+     -------------*/
+
+    /**
+     * <p>Sets the history to be blocked or unblocked. i.e. Temporarily prevents undo/redo.</p>
+     * @param {Boolean} condition Block or unblock undo/redo of the history
+     * @return {Object} this history object
+     */
+    self.setBlocked = function (condition) {
+      if (condition === true || condition === undefined) {
+        self.blocked = true;
+      } else if (condition === false) {
+        self.blocked = false;
+      }
+
+      return self;
+    };
+
+    /**
+     * <p>Flags the history as edited or not edited.</p>
+     * @param {Boolean} condition Set history as edited or not edited
+     * @return {Object} this history object
+     */
+    self.setEdited = function (condition) {
+      if (condition === true || condition === undefined) {
+        self.edited = true;
+      } else if (condition === false) {
+        self.edited = false;
+      }
+
+      return self;
+    };
+
+    /**
+     * <p>Flags the history having an operation active, or not.</p>
+     * @param {Boolean} condition Flags history as having operation active, or not
+     * @return {Object} this history object
+     */
+    self.setOperationActive = function (condition) {
+      if (condition === true || condition === undefined) {
+        self.operationActive = true;
+      } else if (condition === false) {
+        self.operationActive = false;
+      }
+
+      return self;
+    };
+
+    /**
+     * <p>Determines if the page has been edited since the last page load.</p>
+     * <p>This is determined by checking if any undo steps have been recorded or any
+     * undo/redo operation has been executed since then, indicated by the edited flag</p>
+     * @return {Boolean} True if edits were done since last page load
+     */
+    self.isEdited = function () {
+      return self.edited;
+    };
+
+    /* PERSISTENCE
+     -------------*/
+
+    /**
+     * <p>Serializes the undo history to a JSON-compatible object.</p>
+     * @return {Object} The JSON-compatible object representing the undo history
+     */
+    self.serialize = function () {
+      var stepCnt = self.history.length,
+          data = {
+              "a": self.activeStep,
+              "bp": self.blockedPaths,
+              "s": stepCnt,
+              "pv": self.pageVersion,
+              "pe": self.edited
+          }, stepToProcess;
+
+      for (var i = 0; i < stepCnt; i++) {
+        stepToProcess = self.history[i];
+        data["s" + i] = stepToProcess.serialize();
+      }
+
+      return data;
+    };
+
+    /**
+     * <p>Deserializes the undo history from a JSON-compatible object that was created
+     * by {@link #serialize}.</p>
+     * @param {Object} data The JSON compatible object to deserialize from
+     */
+    self.deserialize = function (data) {
+      var stepCnt, stepToProcess, step;
+
+      try {
+        self.activeStep = parseInt(data["a"]);
+        self.blockedPaths = data["bp"];
+        self.pageVersion = data["pv"];
+        self.edited = data["pe"];
+        self.history.length = 0;
+        stepCnt = data["s"];
+
+        for (var i = 0; i < stepCnt; i++) {
+          stepToProcess = data["s" + i];
+          step = new ns.history.Step(self.createStepConfig());
+          self.history.push(step);
+          step.deserialize(stepToProcess);
+        }
+      } catch (e) {
+        self.clear();
+        console.log("Error deserializing:", e); // TODO - error handling
+      }
+    };
+
+    /**
+     * <p>Saves the current undo history to the persistence layer.</p>
+     * @param {String} pagePath The page's path to save the history against
+     */
+    self.save = function (pagePath) {
+      var serializedHistory;
+
+      pagePath = pagePath ? pagePath : ns.pageInfo.status.path;
+      serializedHistory = encodeURIComponent(JSON.stringify(self.serialize()));
+
+      if (serializedHistory) {
+        self.persistence.save({key:pagePath, undoHistory:serializedHistory});
+      }
+    };
+
+    /**
+     * <p>Loads the undo history from the persistence layer if available.</p>
+     * @param {String} pagePath The page's path to load history from
+     */
+    self.load = function (pagePath) {
+      var serializedHistoryObject;
+
+      pagePath = pagePath ? pagePath : ns.pageInfo.status.path;
+
+      self.persistence.get(pagePath, function(pageData) {
+        if (pageData && pageData.undoHistory) {
+          self.clear();
+          serializedHistoryObject = $.parseJSON(decodeURIComponent(pageData.undoHistory));
+          self.deserialize(serializedHistoryObject);
+        }
+      });
+    };
+
+    /* CACHING
+     -------------*/
+
+    /**
+     * <p>Sets the page version the undo history is valid for.</p>
+     * <p>Must be set on each page load. If the page version is still the same after next
+     * page load, the page content may be invalid, as it has been taken from cache.</p>
+     * @param {Number} pageTc The page's timecode
+     */
+    self.setPageVersion = function (pageTc) {
+      self.pageVersion = pageTc;
+      self.edited = false;
+    };
+
+    /**
+     * <p>Gets the page version the undo history is valid for.</p>
+     * <p>Should be checked on each page load. If the page version is still the same as
+     * returned by this method, the page content may be invalid, as it has been taken from
+     * cache.</p>
+     * @return {Number} The page's timecode
+     */
+    self.getPageVersion = function () {
+      return self.pageVersion;
+    };
+
+    /* HELPERS
+     -------------*/
+
+    /**
+     * <p>Toggles UI control buttons based on undoable/redoable status.</p>
+     * @private
+     */
+    self.updateUIControls = function () {
+      $('[data-history-control="'+ns.history.History.OPERATION_UNDO+'"]').toggleClass(hiddenCssClass, !self.canUndo());
+      $('[data-history-control="'+ns.history.History.OPERATION_REDO+'"]').toggleClass(hiddenCssClass, !self.canRedo());
+    };
+
+    /**
+     * <p>Handles a temporarily invalid undo context.</p>
+     * @param {Number} validity The reason why the undo context is invalid
+     * @param {Boolean} isRedo True if the originating operation was a redo (rather than
+     *        an undo)
+     */
+    self.handleInvalidStep = function (validity, isRedo) {
+      var message,
+          tempBlocked = (isRedo
+            ? Granite.I18n.get("This operation can currently not be redone.")
+            : Granite.I18n.get("This operation can currently not be undone.")),
+          blocked = (isRedo
+            ? Granite.I18n.get("This operation can not be redone.")
+            : Granite.I18n.get("This operation can not be undone.")),
+          title = (isRedo
+            ? Granite.I18n.get("Redo unavailable")
+            : Granite.I18n.get("Undo unavailable")),
+          isModal = true;
+
+      switch (validity) {
+        case ns.history.Step.BLACKLISTED:
+          message = blocked + "<br>";
+          message += Granite.I18n.get("The action references an item that is known to cause problems with undo.");
+          break;
+        case ns.history.Step.NOT_WHITELISTED:
+          isModal = false;
+          title = (isRedo ? Granite.I18n.get("Redo") : Granite.I18n.get("Undo"));
+          message = Granite.I18n.get("The action references an item that may cause problems with undo. Proceed at your own risk.");
+          break;
+        case ns.history.Step.BLOCKED_PATH:
+          message = tempBlocked + "<br>";
+          message += Granite.I18n.get("The action references an item that has been moved to a different page by cutting and pasting. Please navigate to that page and undo the paste operation first.");
+          break;
+      }
+      if (isModal) {
+        ns.ui.helpers.prompt({
+          title: title,
+          message: message,
+          actions: [
+            {
+              id: "OK",
+              primary: true,
+              text: Granite.I18n.get("OK", "Label for Ok button")
+            }
+          ]
+        });
+      } else {
+        ns.ui.helpers.notify({
+          content: message,
+          type: ns.ui.helpers.NOTIFICATION_TYPES.WARNING,
+          heading: title
+        });
+      }
+    };
+
+    /**
+     * <p>Restores the screen after an undo/redo operation. Does the following:</p>
+     * <p> - Restores scroll offset.</p>
+     * <p> - Creates a suitable selection.</p>
+     * @param {Granite.author.history.Step} step The undo/redo step
+     * @param {Boolean} isUndo True for undo, false for redo
+     */
+    self.restoreScreen = function (step, isUndo) {
+      var scrollOffset = step.getScrollOffset(),
+        $scrollEl = ns.ContentFrame.wrapper.parent(),
+        editables;
+
+      // Scroll to the correct page position
+      if (scrollOffset && $scrollEl) {
+        $scrollEl.scrollTop(scrollOffset.top);
+        $scrollEl.scrollLeft(scrollOffset.left);
+      }
+
+      // Select the affected editables
+      // TODO - fix selection
+      //editables = step.getSelection(isUndo);
+      //$.each(editables, function(i, editable) {
+      //  ns.selection.select(editable);
+      //});
+    };
+
+    /**
+     * <p>Convenience method to test whether the history exceeds the max allowed.</p>
+     * @return {Boolean} true if steps exceed the maximum, otherwise false.
+     */
+    self.isHistoryTooBig = function () {
+      return (self.history.length > self.config.maxSteps);
+    };
+
+    /**
+     * <p>Convenience method to test whether the active step pointer is valid.</p>
+     * @return {Boolean} true if activeStep doesn't exceed the maximum, otherwise false.
+     */
+    self.isActivePointerValid = function () {
+      return (self.activeStep < self.history.length);
+    };
+
+    /**
+     * <p>Test the history for overgrowth and prune it if necessary.</p>
+     * @return {Granite.author.history.Step[]} The cut steps
+     * @private
+     */
+    self.pruneHistory = function () {
+      var numStepsToRemove;
+      if (self.isHistoryTooBig()) {
+        numStepsToRemove = self.history.length - self.config.maxSteps;
+
+        self.history.splice(0, numStepsToRemove);
+        self.activeStep -= numStepsToRemove;
+      }
+    };
+
+    /**
+     * <p>Creates a configuration object that is suitable for an undo step.</p>
+     * @return {Object} the newly created step config
+     */
+    self.createStepConfig = function() {
+      var $scrollEl = ns.ContentFrame.wrapper.parent(),
+        scrollOffset = {
+          "top" : $scrollEl.scrollTop(),
+          "left" : $scrollEl.scrollLeft()
+        };
+
+      return {
+        "scrollOffset": scrollOffset,
+        "binaryServletUrl": self.config.binaryServletUrl
+      };
+    };
+
+    self._init(config); // Initialize history
+
+    return self;
+  };
+
+  /**
+   * History history default configuration.
+   * @type {Object}
+   */
+  ns.history.History.defaults = {
+    "maxSteps" : 30,                                         // Maximum number of undo steps
+    "persistenceConfig" : {                                  // Default configuration for the persistence module
+      name : ns.history.persistence.STORE
+    },
+    "persistenceMode" : ns.history.persistence.Mode.ON_STEP, // The persistence save strategy (step or unload)
+    "binaryServletUrl": "/libs/wcm/undo/bvm",                // The URL for accessing the servlet that manages binary values
+    "whitelist": [],                                         // List of components that are safe for undo
+    "blacklist": []                                          // List of components and component operations that have known problems with undo
+  };
+
+  /* CONSTANTS */
+
+  /**
+   * The undo operation identifier
+   */
+  ns.history.History.OPERATION_UNDO = "undo";
+
+  /**
+   * The redo operation identifier
+   */
+  ns.history.History.OPERATION_REDO = "redo";
+
+}(jQuery, Granite.author, jQuery(document), this));

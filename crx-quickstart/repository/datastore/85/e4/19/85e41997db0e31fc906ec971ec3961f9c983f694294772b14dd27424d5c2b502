@@ -1,0 +1,586 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2011 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+
+/**
+ * @class CQ.mcm.CampaignPlanner
+ * @extends CQ.Ext.Panel
+ * The campaigns overview panel of the Marketing Campaigns Managment console. 
+ * It contains the list and calendar views of a campaign. 
+ * @constructor
+ * Creates a new Campaigns Overview.
+ * @param {Object} config The config object
+ * @since 5.5
+ */
+CQ.mcm.CampaignPlanner = CQ.Ext.extend(CQ.Ext.Panel, {
+
+    /**
+     * @cfg {String} path
+     * The root path of the campaigns (defaults to "
+     */
+    path: "/content/campaigns",
+    
+    baseId: "mcm-campaign-planner",
+    
+    /**
+     * @cfg {Number} pageSize
+     * Size of the pages for listview etc.
+     */
+    pageSize: 15,
+
+    constructor: function(config) {
+        var that = this;
+        this.currentRootPath = "";
+        try {
+        this.store = new CQ.Ext.data.JsonStore({
+            root: 'experiences',
+            totalProperty: 'experiencesTotal',
+            idProperty: 'id',
+            remoteSort: true,
+            sortInfo: { field: 'experienceTitle', direction: 'ASC' },
+            proxy: new CQ.Ext.data.HttpProxy ({
+                method: "GET",
+                url: "/libs/mcm/experiences.json"
+            }),
+			"baseParams": {
+                "_charset_":"utf-8"
+            },
+            listeners: {
+                "beforeload": function(store, opts) {
+                
+                    /* if we get the resource-based resolution of the experiences servlet to work this should be used:
+                     store.proxy.url = CQ.HTTP.externalize(that.currentRootPath + "/jcr:content.experiences.json");
+                    store.proxy.conn.url = CQ.HTTP.externalize(that.currentRootPath + "/jcr:content.experiences.json");
+                    console.log("Before load ", CQ.HTTP.externalize(that.currentRootPath + "/jcr:content.experiences.json"));
+                    */
+                    opts.params.path = that.currentRootPath;
+                    if (opts.params.limit) {
+                        // ok, paging params set
+                    } else {
+                        // need to set to first page
+                        opts.params.start = 0;
+                        opts.params.limit = that.pageSize;
+                    }
+                }
+            },
+    
+            fields: [
+                'id', 
+                'type',
+                'pluginId',
+                'image', 
+                'experienceTitle', 
+                'segments', 
+                'tags',
+                'touchpointTitle',
+                'touchpointPage',
+                'touchpointChannel',
+                'onTime',
+                'offTime',
+                'analyzeUrl',
+                'simulateUrl'
+            ]
+        });
+
+
+        this.touchpointStore = new CQ.Ext.data.JsonStore({
+            root: 'touchpoints',
+            idProperty: 'id',
+            remoteSort: true,
+    
+            fields: [
+                'id',
+                'pluginId',
+                'channel',
+                'title',
+                'color',
+                'pagetitle',
+                'pageuri'
+            ]
+        });
+
+        this.path = config.path ? config.path : this.path;
+
+        var filterComboDefaultListeners = {
+            select: function(combo, record, index) {
+                that.refreshData();
+            },
+            keyup: function(combo, evt) { 
+                if (evt.keyCode == evt.RETURN || evt.keyCode == evt.ENTER) {
+                    that.refreshData();
+                } else {
+
+                    // this event happens even for TAB key - so to hold unnecessary refreshing:
+                    if (evt.keyCode != evt.TAB) {
+                        that.filterDirty = true;
+                    }
+                }
+            },
+            beforequery: function(qe) {
+                qe.combo.lastQuery = null;
+            },
+            blur: function(combo) {
+                if (that.filterDirty) {
+                    that.refreshData();
+                }
+            }
+        };
+        
+        CQ.Util.applyDefaults(config,  {
+            cls: "cq-mcm-planner",
+            layout: "border",
+            border: false,
+            items: [
+                that.optionsPanel = new CQ.Ext.Panel({
+                    height: 27,
+                    width: "100%",
+                    region: "north",
+                    border: false,
+                    flex: 0,
+                    layout: {
+                        type: 'hbox',
+                        padding: "3"
+                    },
+                    hidden: true,
+                    defaults: {
+                        margins: {
+                            top: 0,
+                            right: 2,
+                            bottom: 0,
+                            left: 2
+                        }
+                    },
+                    items: [
+                        {
+                            xtype: "combo",
+                            id: that.baseId + "-channelfiltercombo",
+                            emptyText: CQ.I18n.getMessage("Filter by Channel"),
+                            triggerAction: "all",
+                            selectOnFocus: true,
+                            autoSelect: false,
+                            minChars: 0,
+                            displayField: "channelname",
+                            valueField: "channelname",
+                            queryParam: "channelFilter",
+                            flex: 2,
+                            border: false,
+                            style: {
+                                "vertical-align": "baseline"
+                            },
+                            listeners: filterComboDefaultListeners,
+                            store: new CQ.Ext.data.Store({
+                                autoLoad: false,
+                                proxy: new CQ.Ext.data.HttpProxy({
+                                    url: "laterset",
+                                    method: "GET"
+                                }),
+                                "baseParams": {
+                                    "_charset_":"utf-8"
+                                },
+                                "reader": new CQ.Ext.data.JsonReader({
+                                        idProperty: "channelname",
+                                        root: "touchpoints",
+                                        fields: [
+                                            {name: "channelname", 
+                                                convert: function(val, o, idx) {
+                                                    if (o["channel"]) {
+                                                        return o["channel"];
+                                                    } else {
+                                                        return "not set";
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                }),
+                                listeners: {
+                                    beforeload: function(store, opts) {
+                                        store.proxy.url = CQ.HTTP.externalize(that.currentRootPath + "/jcr:content.touchpoints.json");
+                                        store.proxy.conn.url = CQ.HTTP.externalize(that.currentRootPath + "/jcr:content.touchpoints.json");
+                                    },
+                                    load: function(store, records, opts) {
+                                        var checkMap = {};
+                                        if (records) {
+                                            var i = records.length - 1;
+                                            while (i>=0) {
+                                                var channelname = records[i].data.channelname;
+                                                if (checkMap[channelname]) {
+                                                    // remove duplicates
+                                                    store.removeAt(i);
+                                                } else {
+                                                    checkMap[channelname] = true;
+                                                }
+                                                i--;
+                                            };
+                                        }
+                                    }
+                                }
+                            })
+                        },
+                        {
+                            xtype: "combo",
+                            id: that.baseId + "-touchpointfiltercombo",
+                            "stateful":false,
+                            emptyText: CQ.I18n.getMessage("Filter by Touchpoint"),
+                            triggerAction: "all",
+                            selectOnFocus: true,
+                            autoSelect: false,
+                            minChars: 0,
+                            displayField: "touchpointName",
+                            valueField: "touchpointName",
+                            queryParam: "touchpointNameFilter",
+                            flex: 2,
+                            border: false,
+                            style: {
+                                "vertical-align": "baseline"
+                            },
+                            listeners: filterComboDefaultListeners,
+                            store: new CQ.Ext.data.Store({
+                                autoLoad: false,
+                                proxy: new CQ.Ext.data.HttpProxy({
+                                    url: "laterset",
+                                    method: "GET"
+                                }),
+                                "baseParams": {
+                                    "_charset_":"utf-8"
+                                },
+                                "reader": new CQ.Ext.data.JsonReader({
+                                        idProperty: "title",
+                                        root: "touchpoints",
+                                        fields: [
+                                            "touchpointName"
+                                        ]
+                                }),
+                                listeners: {
+                                    beforeload: function(store, opts) {
+                                        store.proxy.url = CQ.HTTP.externalize(that.currentRootPath + "/jcr:content.touchpoints.json");
+                                        store.proxy.conn.url = CQ.HTTP.externalize(that.currentRootPath + "/jcr:content.touchpoints.json");
+                                        
+                                        var channelFilter = that.optionsPanel.get(that.baseId + "-channelfiltercombo").getRawValue();
+                                        store.baseParams["channelFilter"] = channelFilter;
+                                    },
+                                    load: function(store, records, opts) {
+                                        var checkMap = {};
+                                        if (records) {
+                                            var i = records.length - 1;
+                                            while (i>=0) {
+                                                var tpname = records[i].data.touchpointName;
+                                                if (checkMap[tpname]) {
+                                                    // remove duplicates
+                                                    store.removeAt(i);
+                                                } else {
+                                                    checkMap[tpname] = true;
+                                                }
+                                                i--;
+                                            };
+                                        }
+                                    }
+                                }
+                            })
+                        },
+                        {
+                            xtype: "pathfield",
+                            emptyText: CQ.I18n.getMessage("Filter by Segment"),
+                            id: that.baseId + "-segmentfiltercombo",
+                            selectOnFocus: true,
+                            autoSelect: false,
+                            rootPath: "/etc/segmentation",
+                            flex: 2,
+                            border: false,
+                            style: {
+                                "vertical-align": "baseline"
+                            },
+                            listeners: CQ.Util.applyDefaults(filterComboDefaultListeners, {
+                                dialogselect: function(combo, record, index) { that.refreshData(); }
+                            })
+                        },
+                        {
+                            xtype: "combo",
+                            emptyText: CQ.I18n.getMessage("Filter by Author"),
+                            id: that.baseId + "-authorfiltercombo",
+                            triggerAction: "all",
+                            selectOnFocus: true,
+                            autoSelect: false,
+                            minChars: 0,
+                            displayField: "name",
+                            valueField: "name",
+                            queryParam: "filter",
+                            flex: 2,
+                            border: false,
+                            style: {
+                                "vertical-align": "baseline"
+                            },
+                            store: new CQ.Ext.data.Store(CQ.Util.applyDefaults(config.authorfiltercombo, {
+                                "proxy": new CQ.Ext.data.HttpProxy({
+                                    "url":"/bin/security/authorizables.json",
+                                    "method":"GET",
+                                    "_charset_":"utf-8"
+                                }),
+                                "baseParams": {
+                                    "hideGroups":true,
+                                    "hideUsers":false,
+                                    "limit": 25
+                                },
+                                "reader": new CQ.Ext.data.JsonReader({
+                                    idProperty: "id",
+                                    root: "authorizables",
+                                    fields: [
+                                        "name"
+                                    ]
+                                })
+                            })),
+                            listeners: filterComboDefaultListeners
+                        },
+                        {
+                            xtype: "button",
+                            text: CQ.I18n.getMessage("Reset Filter"),
+                            flex: 1,
+                            height: 21,
+                            border: false,
+                            style: {
+                                "vertical-align": "baseline"
+                            },
+                            handler: function() { that.clearFilters(); }
+                        }
+                    ]
+                }),
+                that.campaignViewPanel = new CQ.Ext.Panel({
+                    border: false,
+                    flex: 1,
+                    region: "center",
+                    layout: "card",
+                    activeItem: 0,
+                    "cls": "cq-mcm-campaigns",
+                    "items": [{
+                        id: that.baseId + "-viewcontainer-0",
+                        xtype: "mcmcalendarview",
+                        cls: "calendarview",
+                        touchpointStore: that.touchpointStore,
+                        planner: that,
+                        border: false
+                    }, {
+                        id: that.baseId + "-viewcontainer-1",
+                        xtype: "mcmlistview",
+                        cls: "listview",
+                        store: that.store,
+                        planner: that,
+                        border: false
+                    }]
+                })]
+        });
+
+        CQ.mcm.CampaignPlanner.superclass.constructor.call(this, config);
+
+        CQ.event.EventAdmin.registerEventHandler("com/day/mcm/SELECTIONCHANGE", this.selectionChange, this);
+        } catch (e) {
+            console.log(e);
+        }
+    },
+    selectionChange: function(event) {
+        if (this.currentRootPath != event.properties.path) {
+            if(event.properties.resourceType != "cq/personalization/components/campaignpage")
+                return;
+    
+            this.currentRootPath = event.properties.path;
+            this.currentSelection = event.properties;
+    
+            this.refreshData();
+
+            CQ.mcm.cal.Calendar.setDate(new Date());
+            CQ.mcm.cal.Calendar.update();
+        }
+    },
+    refreshData: function(cursor, searchField) {
+        if (cursor) {
+            // ok, using given cursor
+        } else {
+            cursor = 0; // default to start
+        }
+    
+        var paramsObject = {
+            start: cursor,
+            limit: this.pageSize
+        };
+        var filter = this.getFilter();
+        if (filter) {
+            paramsObject["filter"] = CQ.HTTP.externalize(CQ.Ext.util.JSON.encode(filter));
+        }
+        //before loading clear the store cache
+	this.store.removeAll();
+        this.store.load({
+            params: paramsObject
+        });  
+        
+        this.touchpointStore.loadData(CQ.HTTP.eval(this.currentRootPath + "/jcr:content.touchpoints.json"));
+        
+        this.filterDirty = false;
+        
+        var pathToRefresh = this.currentRootPath;
+        CQ.event.EventAdmin.sendEvent( new CQ.event.Event( "com/day/mcm/REFRESH", {
+            path: pathToRefresh
+        }) );
+    },
+    getFilter: function() {
+        var filter = {};
+        var hasFilter = false;
+        // need to get RAW value here to make use of ENTER work, which's event is received before 
+        // getValue returns the updated value
+        var channelFilter = this.optionsPanel.get(this.baseId + "-channelfiltercombo").getRawValue();
+        if (channelFilter) {
+            filter["touchpointChannel"] = channelFilter;
+            hasFilter = true;
+        }
+        var touchpointFilter = this.optionsPanel.get(this.baseId + "-touchpointfiltercombo").getRawValue();
+        if (touchpointFilter) {
+            filter["touchpointTitle"] = touchpointFilter;
+            hasFilter = true;
+        }
+        var authorFilter = this.optionsPanel.get(this.baseId + "-authorfiltercombo").getRawValue();
+        if (authorFilter) {
+            filter["lastModifiedByTitle"] = authorFilter;
+            hasFilter = true;
+        }
+
+        var segmentFilterCombo = this.optionsPanel.get(this.baseId + "-segmentfiltercombo");
+        var segmentFilterVal = segmentFilterCombo.getRawValue();
+        if (segmentFilterVal) {
+            filter["segments"] = {
+                    type: "listmember",
+                    key: "path",
+                    value: segmentFilterVal
+            };
+            hasFilter = true;
+        }
+        
+
+        var toolbar = this.campaignViewPanel.layout.activeItem.getTopToolbar();
+        var itemBaseId = this.campaignViewPanel.layout.activeItem.baseId;
+        var searchValue = toolbar.get(itemBaseId + "-searchfield").getValue();
+        if (searchValue) {
+            filter["experienceTitle"] = searchValue;
+            hasFilter = true;
+        }
+        
+        if (hasFilter) {
+            return filter;
+        }
+        return null;
+    },
+    clearFilters: function() {
+        var filterSubIds = ["-channelfiltercombo",
+                            "-touchpointfiltercombo",
+                            "-segmentfiltercombo",
+                            "-authorfiltercombo",
+                            "-languagefiltercombo"
+                            ];
+        
+        for (var i=0; i<filterSubIds.length; i++) {
+            var curr = filterSubIds[i];
+            var combo = this.optionsPanel.get(this.baseId + curr);
+            if (combo) {
+                combo.setValue("");
+            } else {
+                // might not have been created yet
+            }
+        }
+        
+        this.refreshData();
+    },
+    switchCampaignView: function(itemNo) {
+        var itemId = this.baseId + "-viewcontainer-" + itemNo;
+        if(this.campaignViewPanel.layout.activeItem.id == itemId)
+            return;
+            
+        this.campaignViewPanel.layout.setActiveItem(itemId);
+        var toolbar = this.campaignViewPanel.layout.activeItem.getTopToolbar();
+        var itemBaseId = this.campaignViewPanel.layout.activeItem.baseId;
+        toolbar.get(itemBaseId + "-viewbutton-" + itemNo).toggle(true, false);
+        
+        var stuffToDisable = [
+            toolbar.get(itemBaseId + "-advancedtogglebutton"),
+            toolbar.get(itemBaseId + "-searchfield"),
+            toolbar.get(itemBaseId + "-searchbutton"),
+            toolbar.get(itemBaseId + "-clearsearchbutton")
+        ];
+        
+        for (var i = 0; i<stuffToDisable.length; i++) {
+            var toDis = stuffToDisable[i];
+            if (toDis) {
+                if (this.campaignViewPanel.layout.activeItem.usesAdvancedFilter) {
+                    toDis.enable();
+                } else {
+                    toDis.disable();
+                }
+            }
+        }
+        this.switchAdvancedOptions();
+    },
+
+    doSearch: function() {
+    
+        var toolbar = this.campaignViewPanel.layout.activeItem.getTopToolbar();
+        var itemBaseId = this.campaignViewPanel.layout.activeItem.baseId;
+        var value = toolbar.get(itemBaseId + "-searchfield").getValue();
+    
+        if (value != '') {
+            this.refreshData(0, value);
+        } else {
+            this.clearSearch();
+        }
+    },
+    setSearch: function(val) {
+        if (val !== undefined) {
+            var toolbar = this.campaignViewPanel.layout.activeItem.getTopToolbar();
+            var itemBaseId = this.campaignViewPanel.layout.activeItem.baseId;
+            toolbar.get(itemBaseId + "-searchfield").setValue(val);
+            this.doSearch();
+        }
+    },
+    clearSearch: function() {
+        var toolbar = this.campaignViewPanel.layout.activeItem.getTopToolbar();
+        var itemBaseId = this.campaignViewPanel.layout.activeItem.baseId;
+        toolbar.get(itemBaseId + "-searchfield").setValue("");
+        this.refreshData();
+    },
+    
+    switchAdvancedOptions: function(button, state) {
+        
+        var filterPossible = false;
+        var activeItem = this.campaignViewPanel.layout.activeItem;
+        if (activeItem && activeItem.usesAdvancedFilter) {
+            filterPossible = true;
+        }
+        
+        var showFilter = false;
+        if (filterPossible) {
+            var toolbar = this.campaignViewPanel.layout.activeItem.getTopToolbar();
+            var itemBaseId = this.campaignViewPanel.layout.activeItem.baseId;
+            var advancedToggleButton = toolbar.get(itemBaseId + "-advancedtogglebutton");
+            if (advancedToggleButton) {
+                showFilter = advancedToggleButton.pressed;
+            }
+        }
+        if (filterPossible && !showFilter) {
+            this.clearFilters();
+        }
+        
+        this.optionsPanel.setVisible(showFilter);
+        this.optionsPanel.ownerCt.doLayout();
+    }
+
+});
+
+CQ.Ext.reg("mcmcampaignplanner", CQ.mcm.CampaignPlanner);

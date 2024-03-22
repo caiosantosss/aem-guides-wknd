@@ -1,0 +1,948 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.ContentFinder
+ * @extends CQ.Ext.Viewport
+ * <p>The ContentFinder is a specialized two column {@link CQ.Ext.Viewport Viewport}
+ * which contains the actual Content Finder on the left and the Content Frame on the
+ * right. It allows interaction between the search results of the Content Finder
+ * and the content page shown in the Content Frame.</p>
+ * <p>The Content Finder on the left is a {@link CQ.Ext.TabPanel Tab Panel} where
+ * the single tabs are {@link CQ.wcm.ContentFinderTab}s that usualy provide a specific
+ * search as e.g. image, document or page search.</p>
+ * <p>The tabs are usualy provided by the ContentFinder's {@link #extensions}
+ * property.</p>
+ * <p>The Content Frame can be vertically split into two areas each showing a
+ * different content page. The additonally frame on the right side is called
+ * Side Bar. Call {@link #openSideBoard} to open it.</p>
+ * <p>The Content Finder also provides the {@link CQ.wcm.Sidekick Sidekick}.</p>
+ * @constructor
+ * Creates a new ContentFinder.
+ * @param {Object} config The config object
+ */
+CQ.wcm.ContentFinder = CQ.Ext.extend(CQ.Ext.Viewport, {
+
+    /**
+     * @cfg {Object} sidekick
+     * The config object of the {@link CQ.wcm.Sidekick Sidekick}.
+     */
+
+    /**
+     * @cfg {Object} extensions
+     * The extension object. Currently only "tabs"/{@link #ContentFinder.EXTENSIONS_TABS CQ.wcm.ContentFinder.EXTENSIONS_TABS}
+     * is supported.<br>
+     * extension.tabs is an array of config objects of {@link CQ.wcm.ContentFinderTab}s.
+     * <pre><code>
+var cf = new CQ.wcm.ContentFinder({
+     "extensions": {
+        "tabs": [
+            {
+                "xtype": "contentfindertab"
+            }
+        ]
+     }
+});
+</code></pre>
+     */
+
+    /**
+     * @cfg {String} path
+     * The path of the content page to be loaded into the Content Frame.
+     */
+    path: null,
+
+    /**
+     * The URL of the page shown in the Content Frame
+     * @type String
+     * @private
+     */
+    url: null,
+
+    /**
+     * The window object of the Content Frame.
+     * @type Window
+     * @private
+     */
+    contentWindow: null,
+
+    /**
+     * The x position of the Content Frame. Used solely in ContentFinderDD.
+     * @private
+     * @type Number
+     */
+    contentWindowLeft: 0,
+
+    /**
+     * The global toolbar container
+     * @private
+     * @type CQ.Ext.Panel
+     */
+    toolbarCt: null,
+
+    /**
+     * The elements of RSS feed  and favicon links
+     * @private
+     */
+    linkElements: [],
+
+    constructor: function(config) {
+        this.debug = config.debug;
+        var finder = this;
+        if (!document.title) {
+            document.title = CQ.wcm.ContentFinder.TITLE;
+        }
+
+        var body = CQ.Ext.getBody();
+        body.setStyle("margin", "0");
+        if (CQ.Ext.isIE) {
+            body.dom.scroll = "no";
+        }
+        else {
+            body.setStyle("overflow", "hidden");
+        }
+
+
+        // apply config defaults
+        config = CQ.Util.applyDefaults(config, {
+            sidekick: {
+                "xtype": "sidekick"
+            }
+        });
+
+        // always hide the mask on mouse up
+        CQ.Ext.EventManager.on(document, "mouseup", function() {
+            CQ.wcm.ContentFinder.unmaskFrame();
+        });
+
+        var anchor = CQ.HTTP.getAnchor(document.location.href);
+        if (anchor && anchor != CQ.wcm.ContentFinder.EXTERNAL_URL) {
+            // validate the url (disallow external URLs)
+            anchor = decodeURI(anchor);
+            this.url = this.isValidURL(anchor) ? anchor : CQ.Ext.SSL_SECURE_URL;
+        } else if (config.path) {
+            this.url = config.path + ".html";
+        }
+        this.urlWithParams = this.url;
+
+        // init page frame
+        var el = document.createElement("iframe");
+        var url = this.url;
+        if (url && !top.CQ_PORTAL_API) {
+            url = CQ.HTTP.externalize(url);
+        }
+        el.src = url ? url : CQ.Ext.SSL_SECURE_URL;
+        el.id = CQ.wcm.ContentFinder.FRAME_ID;
+        el.name = CQ.wcm.ContentFinder.FRAME_ID;
+        el.frameBorder = "0";
+        el.border = "0";
+
+        var frame = new CQ.Ext.Element(el);
+        frame.addClass("cq-frame");
+
+        var frameContainer = new CQ.Ext.BoxComponent({
+            "id": CQ.wcm.ContentFinder.FRAME_CT_ID,
+            "autoEl": {
+                "tag": "div"
+            },
+            "style": {
+                "width": "100%",
+                "height": "100%"
+            }
+        });
+
+        frameContainer.on("render",function() {
+            (function() {
+                frame.appendTo(frameContainer.getEl());
+            }).defer(16, this);
+        });
+
+        var onload_handler = function() {
+            finder.contentWindow = frames[CQ.wcm.ContentFinder.FRAME_ID];
+            try {
+                // check if content window is accessible -> internal URL
+                var tmp = finder.contentWindow.location.href;
+            }
+            catch (e) {
+                // external URL
+                if (CQ.HTTP.getAnchor(window.location.href) != CQ.wcm.ContentFinder.EXTERNAL_URL) {
+                    // first external URL
+                    document.title = CQ.wcm.ContentFinder.TITLE;
+                    finder.url = finder.urlWithParams = CQ.wcm.ContentFinder.EXTERNAL_URL;
+                    CQ.Ext.History.add(CQ.wcm.ContentFinder.EXTERNAL_URL, true, true);
+                }
+                return;
+            }
+            finder.contentWindow.onscroll = function(e) {
+                var f = CQ.WCM.getContentFinder();
+                if (f) {
+                    f.onContentScroll(arguments);
+                }
+            };
+            var paramUrl = CQ.HTTP.internalize(finder.contentWindow.location.href);
+            var url = CQ.HTTP.removeParameters(paramUrl);
+            if (url == CQ.Ext.SSL_SECURE_URL) return;
+            if (paramUrl != finder.urlWithParams) {
+                finder.url = url;
+                finder.urlWithParams = paramUrl;
+                CQ.Ext.History.add(paramUrl, true, true);
+            }
+
+            // proxy title, feeds and favicon from document
+            try {
+                document.title = finder.contentWindow.document.title;
+                var head = document.getElementsByTagName("head")[0];
+
+                // remove old links
+                for (var i = 0; i < finder.linkElements.length; i++) {
+                    head.removeChild(finder.linkElements[i]);
+                }
+                finder.linkElements = [];
+
+                var links = finder.contentWindow.document.getElementsByTagName("link");
+                for (var l = 0; l < links.length; l++) {
+                    var link = links[l];
+                    var rel = link.rel ? link.rel.toLowerCase() : "";
+                    if (rel.indexOf("icon") != -1 || rel.indexOf("alternate") != -1) {
+                        var fLink = document.createElement("link");
+                        fLink.rel = link.rel;
+                        if (link.href) fLink.href = link.href;
+                        if (link.type) fLink.type = link.type;
+                        if (link.title) fLink.title = link.title;
+                        head.appendChild(fLink);
+                        finder.linkElements.push(fLink);
+                    }
+                }
+            } catch (e) {
+//                console.log(e);
+            }
+
+            CQ.WCM.onClipboardChange(function(e) {
+                if (!finder.clipboardLocked) {
+                    finder.clipboardLocked = true;
+                    window.setTimeout(function() {
+                        var records = CQ.WCM.getClipboardRecords();
+                        var store = finder.clipboard.items.first().store;
+                        if (store.getCount()) {
+                            store.removeAll();
+                        }
+                        if (records.length > 0) {
+                            store.add(records);
+                            finder.clipboard.expand();
+                        }
+                        finder.clipboardLocked = false;
+                    }, 100);
+                }
+            });
+
+            var sideViewPath = CQ.HTTP.getParameter(CQ.WCM.getContentUrl(), CQ.wcm.ContentFinder.SIDEVIEW_PARAM);
+            if( sideViewPath != null) {
+                var url = sideViewPath + ".html";
+                url = CQ.HTTP.addParameter(url, "wcmmode", "disabled");
+                finder.collapse();
+                finder.openSideBoard(CQ.HTTP.externalize(url), CQ.Ext.getBody().getWidth() / 2);
+            }
+
+            var p = CQ.WCM.getPagePath();
+            if (p) finder.refreshTabs(p);
+        };
+
+        //wait of the child frame to fully initialize
+        var onload_loop = function() {
+            var fcw = frames[CQ.wcm.ContentFinder.FRAME_ID];
+
+            if (typeof fcw.CQ != "undefined" && typeof fcw.CQ.utils != "undefined" && typeof fcw.CQ.utils.WCM != "undefined" && fcw.CQ.utils.WCM.getSidekick()) {
+                //console.log("resume init");
+                window.setTimeout(onload_handler, 50);
+            } else {
+                //console.log("not there yet, try again later");
+                window.setTimeout(function(){ onload_loop();}, 1000);
+            }
+        };
+        frame.on("load", onload_loop);
+
+        this.clipboard = new CQ.Ext.Panel({
+            "xtype":"panel",
+            "region":"south",
+            "title":CQ.I18n.getMessage("Clipboard"),
+            "id": CQ.wcm.ContentFinder.CLIPBOARD_ID,
+            "stateful":true,
+//            "layout":"fit",
+            "height":CQ.themes.wcm.ContentFinder.CLIPBOARD_HEIGHT,
+            "tools": [
+                {
+                    "id":"refresh",
+                    "handler":function(e) {
+                        CQ.WCM.clearClipboard();
+                    },
+                    "scope":finder
+                }
+            ],
+            "collapseMode":"mini",
+            "collapsible":true,
+            "collapsed": true,
+            "split":true,
+            "animate":true,
+            "autoScroll":true,
+            "items": [
+                {
+                    "xtype": "dataview",
+                    "cls":"cq-cf-clipboard",
+                    "border":false,
+                    "layout":"fit",
+                    "multiSelect": true,
+                    "overClass":"x-view-over",
+                    "selectedClass":"x-view-selected",
+                    "tpl": CQ.wcm.ContentFinder.CLIPBOARD_TEMPLATE,
+                    "itemSelector": CQ.wcm.ContentFinder.CLIPBOARD_ITEMSELECTOR,
+                    "store":new CQ.Ext.data.SimpleStore({
+                        "fields": ["path", "xtype", "action"],
+                        "data":[]
+                     }),
+                    "prepareData": function(data) {
+                        data.qtip = data.path;
+                        data.title = CQ.Ext.util.Format.ellipsis(data.title, 32);
+                        data.icon = CQ.HTTP.externalize(data.icon);
+                        return data;
+                    }
+                    /* todo: create an own drag zone to enable DD on clipboard items
+                     ,"listeners": {
+                        "render": function(comp) {
+                            comp.dragZone = new CQ.wcm.ContentFinderTab.DragZone(comp, {
+                                containerScroll:false
+                            });
+                            comp.dragZone.addToGroup(CQ.wcm.EditBase.DD_GROUP_COMPONENT);
+                            comp.dragZone.removeFromGroup(CQ.wcm.EditBase.DD_GROUP_DEFAULT);
+                        }
+                    }
+                    */
+                }
+            ]
+        });
+
+        this.toolbarPref = CQ.User.getCurrentUser().getPreference("toolbarDisplay");
+        if (!this.toolbarPref) {
+            this.toolbarPref = "ondemand";
+        }
+
+        // init component by calling super constructor
+        var finderConfig = {
+            "id":"cq-cf",
+            "layout":"border",
+            "renderTo":"CQ",
+            "stateful":true,
+            "stateEvents": [ "pathselected" ],
+            "items": [
+                {
+                    "id":"cq-cf-wrapper",
+                    "xtype":"panel",
+                    "layout":"border",
+                    "region":"center",
+                    "border":false,
+                    "items": [
+                        {
+                            "id":"cq-cf-west",
+                            "stateful":true,
+                            "xtype": "panel",
+                            "region":"west",
+                            "layout":"border",
+                            "collapseMode":"mini",
+                            "collapsible":true,
+                            "hideCollapseTool": true,
+                            "split":true,
+                            "animate":true,
+                            "border":false,
+                            "width":CQ.themes.wcm.ContentFinder.FINDER_WIDTH,
+                            "margins":"5 0 0 5",
+                            "items": [
+                                {
+                                    "xtype":"tabpanel",
+                                    "region":"center",
+                                    "id": CQ.wcm.ContentFinder.TABPANEL_ID,
+                                    "stateful": true,
+//                                    "activeTab": 0,
+                                    "deferredRender": false,
+                                    "enableTabScroll": true,
+//                                    "margins":"2 0 5 5", // margin and cmargin for mini
+        //                            "cmargins":"2 2 5 2",
+        //                            "title": CQ.I18n.getMessage("CQ WCM"),
+                                    "border":false
+                                },
+                                this.clipboard
+                            ],
+                            listeners: {
+                                "beforeexpand": function() {
+                                    // Lazy loading of the content finder
+                                    var tabpanel = CQ.Ext.getCmp(CQ.wcm.ContentFinder.TABPANEL_ID);
+                                    tabpanel.hide();
+                                    finder.lazyLoad(config);
+                                },
+                                "expand": function() {
+                                    finder.doLayout();
+                                    var tabpanel = CQ.Ext.getCmp(CQ.wcm.ContentFinder.TABPANEL_ID);
+                                    tabpanel.show();
+                                }
+                            }
+                        },{
+                            "xtype": "panel",
+                            "stateful":false,
+                            "id": "cq-cf-framewrapper",
+                            "region": "center",
+                            "layout": "fit",
+                            "items": {
+                                "xtype":"panel",
+                                "layout":"border",
+                                "border":false,
+                                "items": [
+                                    {
+                                        "id":"cq-cf-toolbar-ct",
+                                        "xtype":"panel",
+                                        "region":"north",
+                                        "cls":"cq-cf-toolbar-ct",
+                                        "autoHeight":true,
+                                        "border":false,
+                                        "header": false,
+                                        "layout":"column",
+                                        "collapsed": this.toolbarPref != "always",
+                                        "collapsible":true,
+                                        "collapseMode":"mini",
+                                        "animCollapse":false,
+                                        "items":[{
+                                            "xtype":"toolbar",
+                                            "items":[
+                                                {
+                                                    "text":CQ.I18n.getMessage("Copy"),
+                                                    "handler": function() {
+                                                        CQ.WCM.copy(CQ.WCM.getSelectedItems());
+                                                    }
+                                                },
+                                                {
+                                                    "text":CQ.I18n.getMessage("Cut"),
+                                                    "handler": function() {
+                                                        CQ.WCM.cut(CQ.WCM.getSelectedItems());
+                                                    }
+                                                },
+                                                {
+                                                    "text":CQ.I18n.getMessage("Paste"),
+                                                    "handler": function() {
+                                                        var items = CQ.WCM.getSelectedItems();
+                                                        if (items.length < 1) {
+                                                            return;
+                                                        }
+                                                        var muu = CQ.undo.util.MultiUndoUtils;
+                                                        var undoCfg = muu.begin();
+                                                        var editable = items[0];
+                                                        var toPaste = CQ.WCM.paste();
+                                                        while (toPaste.length > 0) {
+                                                            var item = toPaste.shift();
+                                                            if (item.action != CQ.WCM.ACTION_CUT) {
+                                                                editable.copyParagraph(item.path, item.resourceType, item.hasAnnotations, undoCfg);
+                                                            } else {
+                                                                muu.determineMoveInformation(undoCfg, item);
+                                                                var newPath = editable.moveParagraph(item.path, item.resourceType, item.hasAnnotations);
+                                                                if (newPath) {
+                                                                    muu.addMoveAction(undoCfg, newPath, editable);
+                                                                }
+                                                            }
+                                                        }
+                                                        muu.reverseActions(undoCfg);
+                                                        muu.commit(undoCfg);
+                                                    }
+                                                },
+                                                {
+                                                    "text":CQ.I18n.getMessage("Delete"),
+                                                    "handler": function() {
+                                                        CQ.WCM.remove(CQ.WCM.getSelectedItems());
+                                                    }
+                                                },
+                                                "-"
+                                            ]
+                                        }]
+                                    },
+                                    {
+                                        "xtype":"panel",
+                                        "region":"center",
+                                        "border":false,
+                                        "items":frameContainer
+                                    }
+                                ]
+                            }
+                        },{
+                            "xtype": "panel",
+                            "stateful":false,
+                            "id": "cq-cf-east",
+                            "region": "east",
+                            "layout": "fit",
+                            "collapseMode":"mini",
+                            "collapsible":true,
+                            "hideCollapseTool": true,
+                            "collapsed":true,
+                            "split":true,
+                            "animate":true,
+                            "width": 400,
+                            "border":false,
+                            "hidden": true,
+                            "hideMode": "offsets",
+                            //"disabled": true,
+                            //"disabledClass": "cq-sideboard-mask",
+                            //"maskDisabled": false,
+                            "listeners": {
+                                collapse: function(p) {
+                                    // remove all items
+                                    p.items.each(function(){
+                                        p.remove(this, true);
+                                    });
+                                    // doesn't work...but ignore for now
+                                    p.hide();
+                                }
+                            }
+                            //"items": [
+                        }
+                    ]
+                }
+            ],
+            "listeners": {
+                "beforeshow": function() {
+                    if (CQ.WCM.isEditMode()) {
+                        this.expand(false);
+                    } else {
+                        this.collapse(false);
+                    }
+                }
+            }
+        };
+
+        // init component by calling super constructor
+        CQ.wcm.ContentFinder.superclass.constructor.call(this, finderConfig);
+
+        // Load content finder if not collapsed
+        if (!finder.isCollapsed()) {
+            finder.lazyLoad(config);
+        }
+
+        CQ.WCM.getTopWindow().CQ_ContentFinder = this;
+
+        // init history
+        new CQ.Ext.form.Hidden({
+            "id":CQ.Ext.History.fieldId,
+            "renderTo":CQ.Util.ROOT_ID
+        });
+        var historyFrame = document.createElement("iframe");
+        historyFrame.id = CQ.Ext.History.iframeId;
+        historyFrame.src = "javascript:false";
+        historyFrame.className = "x-hidden";
+        historyFrame.frameBorder = "0";
+        historyFrame.border = "0";
+        new CQ.Ext.Element(historyFrame).appendTo(CQ.Util.getRoot());
+
+        CQ.Ext.History.init();
+        CQ.Ext.History.on("change", function(token) {
+            if (token == CQ.wcm.ContentFinder.EXTERNAL_URL) {
+                return;
+            }
+            var current = decodeURI(finder.urlWithParams);
+            if (token != current) {
+                // validate the anchor string (disallow external URLs)
+                var url = finder.isValidURL(token) ? token : CQ.Ext.SSL_SECURE_URL;
+                CQ.wcm.ContentFinder.loadContentWindow(url, true);
+            }
+        });
+
+        CQ.Util.observeComponent(this, CQ.VERY_SHORT_INTERVAL);
+
+    },
+
+    // returns the content window
+    // private, use CQ.WCM.getContentWindow() instead
+    getContentWindow: function() {
+        return this.contentWindow ? this.contentWindow : frames[CQ.wcm.ContentFinder.FRAME_ID];
+    },
+
+    getClipboard: function() {
+        return CQ.WCM.getClipboard(this);
+    },
+
+    getToolbarCt: function() {
+        return CQ.Ext.getCmp("cq-cf-toolbar-ct");
+    },
+
+    // private, use CQ.WCM.loadToolbar() instead
+    loadToolbar: function(tb) {
+        if (this.toolbarPref != "never") {
+            var toolbarCt = this.getToolbarCt();
+            toolbarCt.add(tb);
+            toolbarCt.doLayout(false, true);
+            toolbarCt.items.get(0).hide();
+            if (toolbarCt.collapsed) {
+                toolbarCt.expand();
+            }
+        }
+    },
+
+    // private, use CQ.WCM.unloadToolbar() instead
+    unloadToolbar: function() {
+        if (this.toolbarPref != "never") {
+            var toolbarCt = this.getToolbarCt();
+            while (toolbarCt.items.getCount() > 1) {
+                toolbarCt.remove(toolbarCt.items.get(toolbarCt.items.getCount() -1));
+            }
+            toolbarCt.doLayout();
+            if (this.toolbarPref == "always") {
+                toolbarCt.items.get(0).show();
+            } else if (!toolbarCt.collapsed) {
+                toolbarCt.collapse();
+            }
+        }
+    },
+
+    /**
+     * Collapses the left column with the Content Finder.
+     */
+    collapse: function() {
+        CQ.Ext.getCmp("cq-cf-west").collapse();
+    },
+
+    /**
+     * Expands the left column with the Content Finder.
+     */
+    expand: function() {
+        CQ.Ext.getCmp("cq-cf-west").expand();
+    },
+
+    /**
+     * Displays the Side Board with the specified URL.
+     * @param {String} url The URL of the page to display in the Side Board
+     * @param {Number} width The width of the Side Board
+     */
+    openSideBoard: function(url, width) {
+        // init sideboard frame
+        var el = document.createElement("iframe");
+        //el.scrolling="no";
+        el.src = url;
+        el.frameBorder = "0";
+        el.border = "0";
+
+        var sideFrame = new CQ.Ext.Element(el);
+        sideFrame.addClass("cq-frame");
+        sideFrame.setStyle("height", "100%");
+        //sideFrame.setStyle("overflow", "hidden");
+
+        var frameContainer = new CQ.Ext.BoxComponent({
+            "autoEl": {
+                "tag": "div"
+            },
+            "style": {
+                "width": "100%",
+                "height": "100%"
+            }
+        });
+
+        frameContainer.on("render",function() {
+            sideFrame.appendTo(frameContainer.getEl());
+        });
+
+        var cmp = CQ.Ext.getCmp("cq-cf-east");
+        if (width) {
+            cmp.setWidth(width);
+        }
+
+        cmp.add(frameContainer);
+        cmp.show();
+        cmp.expand();
+    },
+
+    /**
+     * Closes the Side Board.
+     */
+    closeSideBoard: function() {
+        var cmp = CQ.Ext.getCmp("cq-cf-east");
+        cmp.collapse();
+    },
+
+    /**
+     * Returns true if the Side Board is collapsed.
+     * @return {Boolean}
+     */
+    isSideBoardCollapsed: function() {
+        var cmp = CQ.Ext.getCmp("cq-cf-east");
+        return cmp.collapsed;
+    },
+
+    /**
+     * Returns true if the Content Finder is collapsed.
+     * @return {Boolean}
+     */
+    isCollapsed: function() {
+        var cmp = CQ.Ext.getCmp("cq-cf-west");
+        return cmp.collapsed;
+    },
+
+    // sync scrolling of content frame and side board
+    // private
+    onContentScroll: function() {
+        var cmp = CQ.Ext.getCmp("cq-cf-east");
+        var frameCmp = cmp.items.get(0);
+        if (frameCmp) {
+            var el = frameCmp.getEl();
+            if (el) {
+                var y = this.getContentWindow().scrollY;
+                // todo: scroll frame
+            }
+        }
+
+    },
+
+    observe: function() {
+        // make sure the content finder itself doesn't scroll
+        var scroll = this.getEl().getScroll();
+        if (scroll.top || scroll.left) {
+            if (CQ.Ext.isIE && CQ.Ext.isStrict) {
+                // todo: IE probably doesn't need this, but check
+            } else {
+                window.scroll(0, 0);
+            }
+        }
+    },
+
+    getFrame: function() {
+        return CQ.Ext.get(CQ.wcm.ContentFinder.FRAME_ID);
+    },
+
+    getFrameContainer: function() {
+        return CQ.Ext.get(CQ.wcm.ContentFinder.FRAME_CT_ID);
+    },
+
+    //private: filter items (by reading override property and override tabs)
+    //set an allTabs property member
+    setupAllTabs: function(items) {
+        var tmp = {};
+        for(var i=0; i< items.length; i++) {
+            var item = items[i];
+            //id is required
+            item.id = item.id  || CQ.Ext.id();
+            tmp[item.id] = item;
+        }
+
+        //manage override config
+        for(var i=0; i< items.length; i++) {
+            var item = items[i];
+            if( item.override && tmp[item.override]) {
+                tmp[item.id] = CQ.Util.applyDefaults(tmp[item.id], tmp[item.override]);
+                delete tmp[item.override];
+            }
+        }
+
+        items = [];
+        for(var id in tmp) {
+            items.push(tmp[id]);
+        }
+
+        this.allTabs = items;
+    },
+
+    //private: return the computed visible tabs config. Excludes non authorized tabs.
+    getVisibleTabs: function(path) {
+        var items = this.allTabs;
+        var visibleTabs = [];
+        if( items ) {
+            for(var i=0; i< items.length; i++) {
+                var item = items[i];
+
+                var hide = false;
+                if(item.hidden)  {
+                    if( CQ.Ext.isFunction(item.hidden)) {
+                        hide = item.hidden.call(item, item, path);
+                    } else {
+                        hide = (item.hidden === true);
+                    }
+                }
+
+                if( !hide) {
+                    if( path && item.allowedPaths ) {
+                        hide = true;
+                        var ap = CQ.Ext.isArray(item.allowedPaths) ? item.allowedPaths : [item.allowedPaths];
+                        for(var j = 0; j< ap.length; j++) {
+                            var reg = new RegExp(ap[j], "i");
+                            if( path.search(reg) != -1) {
+                                hide = false;
+                            }
+                        }
+                    } else {
+                        hide = false;
+                    }
+                }
+
+                if( !hide ) {
+                    visibleTabs.push(item);
+                }
+            }
+
+        }
+        return CQ.Util.sortByRanking(visibleTabs);
+    },
+
+    //private: refresh tabs depending on the specified path
+    refreshTabs: function(path) {
+        var tabpanel = CQ.Ext.getCmp(CQ.wcm.ContentFinder.TABPANEL_ID);
+        if( tabpanel ) {
+            var redrawNeeded = false;
+
+            //check if computed visible tabs are the one currently displayed.
+            //if not, redraw tabs.
+            var computedVisibleTabs = this.getVisibleTabs(path);
+
+            if( computedVisibleTabs.length != tabpanel.items.getCount()) {
+                redrawNeeded = true;
+            } else {
+                tabpanel.items.each(function(item, index, length) {
+                    if( item.id != computedVisibleTabs[index].id) {
+                        redrawNeeded = true;
+                        return false;
+                    }
+                });
+            }
+
+            if(redrawNeeded) {
+                tabpanel.getEl().mask(CQ.I18n.getMessage("Loading..."));
+
+                tabpanel.removeAll();
+                var tabs = this.getVisibleTabs(path);
+                if (tabs.length > 0) {
+                    tabpanel.add(tabs);
+                    tabpanel.setActiveTab(tabs[0].id);
+                }
+                tabpanel.getEl().unmask();
+            }
+        }
+    },
+
+    lazyLoad: function(config) {
+        var finder = this;
+        if (!finder.isInitialized) {
+            var allTabs = config.items != undefined ? config.items : [];
+
+            if (config.extensions) {
+                if (config.extensions[CQ.wcm.ContentFinder.EXTENSIONS_TABS]) {
+                    allTabs = allTabs.concat(config.extensions[CQ.wcm.ContentFinder.EXTENSIONS_TABS]);
+                }
+            }
+
+            this.setupAllTabs(allTabs);
+
+            var items = this.getVisibleTabs(finder.url);
+
+            var tabPanel = CQ.Ext.getCmp(CQ.wcm.ContentFinder.TABPANEL_ID);
+            items = CQ.Util.sortByRanking(items);
+            for (var i = 0; i < items.length; i++) {
+                tabPanel.add(items[i]);
+            }
+            tabPanel.setActiveTab(0);
+            finder.isInitialized = true;
+        }
+    },
+
+    /**
+     * Returns true if the specified URL is a valid one to be loaded into
+     * the content frame of the content finder. A URL is considered valid
+     * - if it is relative (e.g. a/b/c.html or /a/b/c.html)
+     * - if it is absolute and its host matches the one of the executing
+     *   CQ instance (e.g. http://localhost:4502/a/b/c.html)
+     */
+    isValidURL: function (url) {
+        // create an <a> element to parse the URL
+        var a = document.createElement("a");
+        a.href = url;
+
+        // IE doesn't populate all link properties when setting .href with a relative URL,
+        // however .href will return an absolute URL which then can be used on itself
+        // to populate these additional fields.
+        if ((CQ.Ext.isIE || navigator.appVersion.indexOf('Trident/') > 0) && a.host == "") {
+            a.href = a.href;
+        }
+        return a.hostname == window.location.hostname;
+    }
+});
+CQ.Ext.reg("contentfinder", CQ.wcm.ContentFinder);
+
+CQ.wcm.ContentFinder.TABPANEL_ID = "cq-cf-tabpanel";
+
+CQ.wcm.ContentFinder.CLIPBOARD_ID = "cq-cf-clipboard";
+
+CQ.wcm.ContentFinder.TITLE = CQ.I18n.getMessage("AEM Content Finder");
+
+CQ.wcm.ContentFinder.EXTERNAL_URL = "_";
+
+/**
+ * Loads the given URL into the content window.
+ * @static
+ */
+CQ.wcm.ContentFinder.loadContentWindow = function(url, preventHistory) {
+    CQ.shared.Util.reload(CQ.WCM.getContentWindow(), CQ.HTTP.externalize(url), preventHistory);
+};
+
+/**
+ * Masks the Content Frame with an invisible layer. Thus the entire visible area
+ * becomes part of the Content Finder. Mouse and key events "over" the content page
+ * are no longer handled by the content page but by the Content Finder. This is e.g.
+ * used for dragging items from the search results.
+ * @static
+ * @return {CQ.Ext.Element} The mask
+ */
+CQ.wcm.ContentFinder.maskFrame = function() {
+    if (!CQ.wcm.ContentFinder.frameMask) {
+        CQ.wcm.ContentFinder.frameMask = CQ.Ext.get("cq-cf-framewrapper").mask();
+    }
+    return CQ.wcm.ContentFinder.frameMask;
+};
+
+/**
+ * Unmasks the Content Frame.
+ * @static
+ */
+CQ.wcm.ContentFinder.unmaskFrame = function() {
+    if (CQ.wcm.ContentFinder.frameMask) {
+        CQ.wcm.ContentFinder.frameMask = null;
+        CQ.Ext.get("cq-cf-framewrapper").unmask();
+    }
+};
+
+CQ.wcm.ContentFinder.FRAME_ID = "cq-cf-frame";
+CQ.wcm.ContentFinder.FRAME_CT_ID = "cq-cf-frame-ct";
+
+/**
+ * The name of the Content Finder's tab extension.
+ * @static
+ * @final
+ * @type String
+ */
+CQ.wcm.ContentFinder.EXTENSIONS_TABS = "tabs";
+
+/**
+ * The default item selector for the clipboard items.
+ * @type String
+ */
+CQ.wcm.ContentFinder.CLIPBOARD_ITEMSELECTOR = ".item-wrap";
+
+/**
+ * The default template for the clipboard items.
+ * @type String
+ */
+CQ.wcm.ContentFinder.CLIPBOARD_TEMPLATE =
+    '<tpl for=".">' +
+        '<div class="item-wrap"  style="background-image:url({icon})" title="{qtip}">' +
+            '<span>{title}</span>' +
+        '</div>' +
+    '</tpl>' +
+    '<div class="x-clear"></div>';
+
+
+CQ.wcm.ContentFinder.SIDEVIEW_PARAM = "cq_sideView";

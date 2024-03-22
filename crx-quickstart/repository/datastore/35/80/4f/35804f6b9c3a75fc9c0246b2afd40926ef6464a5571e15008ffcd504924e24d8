@@ -1,0 +1,422 @@
+/*
+ ADOBE CONFIDENTIAL
+
+ Copyright 2015 Adobe Systems Incorporated
+ All Rights Reserved.
+
+ NOTICE:  All information contained herein is, and remains
+ the property of Adobe Systems Incorporated and its suppliers,
+ if any.  The intellectual and technical concepts contained
+ herein are proprietary to Adobe Systems Incorporated and its
+ suppliers and may be covered by U.S. and Foreign Patents,
+ patents in process, and are protected by trade secret or copyright law.
+ Dissemination of this information or reproduction of this material
+ is strictly forbidden unless prior written permission is obtained
+ from Adobe Systems Incorporated.
+ */
+(function(document, $) {
+    "use strict";
+
+    // download action
+    $(document).on("foundation-contentloaded", function(e) {
+        var downloadActivator = ".cq-damadmin-admin-actions-download-activator";
+        var downloadAssetModal = "#downloadasset";
+        var userHome = "a/admin";
+        var lightboxCollectionPathPrefix = "path=/content/dam/collections";
+        var lightboxCollectionName = "lightbox";
+        var lightboxCollectionPath = lightboxCollectionPathPrefix + "/" + userHome + "/" + lightboxCollectionName;
+        var toDownloadLightbox = false;
+        var downloadErrorModal;
+        var downloadModalVisibleTrigger = "assets-download-modal-ready";
+
+
+        // Check if the download lightbox collection button was clicked
+        $(document).on("click.download-lightbox", ".download-lightbox", function(e) {
+            toDownloadLightbox = true;
+            if ($(".mediacart").attr("user-home") !== "undefined") {
+                userHome = $(".mediacart").attr("user-home");
+                lightboxCollectionPath = lightboxCollectionPathPrefix + "/" + userHome + "/" + lightboxCollectionName;
+            }
+        });
+
+        function isHidden(element) {
+            return $(element).is(":hidden");
+        }
+
+        function areSelectedItemsVisible(items) {
+            var areItemsVisible = false;
+            items.length && items.each(function() {
+                if (!isHidden(this)) {
+                    areItemsVisible = true;
+                }
+            });
+            return areItemsVisible;
+        }
+        function removeHiddenElementsSelection(items) {
+            items.length && items.each(function() {
+                if (isHidden(this)) {
+                    $(this).toggleClass("foundation-selections-item");
+                }
+            });
+        }
+        function getExplainJson(paths, dialogHtml, original, subasset) {
+            var queryObj = $.parseHTML(dialogHtml);
+            var obj = new Object();
+            var tar = [];
+            for (var i = 0; i < paths.length; i++) {
+                var ty = new Object();
+                ty.type = getType(paths[i], queryObj);
+                var prm = new Object();
+                if (original) {
+                    prm.excludeOriginalRendition = "false";
+                    prm.includeAllRenditions = "false";
+                } else {
+                    prm.excludeOriginalRendition = "true";
+                    prm.includeAllRenditions = "true";
+                }
+                // subasset
+                if (subasset) {
+                    prm.includeSubAssets = "true";
+                }
+                prm.path = paths[i];
+                prm.archiveName = "tmp.zip";
+                ty.parameters = prm;
+                tar.push(ty);
+            }
+            obj.targets = tar;
+            return JSON.stringify(obj);
+        }
+        function getType(path, queryObj) {
+            var type = "asset";
+            if (queryObj === undefined) {
+                return type;
+            }
+            $(queryObj).find(".downloadItem").each(function() {
+                var restype = $(this).attr("data-restype");
+                if (path === this.value) {
+                    type = mapJcrTypeToExplainServlet(restype);
+                    return false;
+                }
+            });
+            return type;
+        }
+        function mapJcrTypeToExplainServlet(resourceType) {
+            var type = "asset";
+            if (resourceType === "sling:Folder" || resourceType === "sling:OrderedFolder") {
+                type = "folder";
+            } else if (resourceType === "dam/collection" || resourceType === "dam/smartcollection") {
+                type = "collection";
+            }
+            return type;
+        }
+        function getTotalSizeAndCount(paths, dialogHtml) {
+            // original and not a subasset
+            fetchTotalSizeAndCount(paths, dialogHtml, true, false);
+            // not original and not a subasset
+            fetchTotalSizeAndCount(paths, dialogHtml, false, false);
+            // subasset
+            if ($(".subassetSelectCheckBox coral-checkbox-label .dam-download-meta") !== undefined) {
+                // original and a subasset
+                fetchTotalSizeAndCount(paths, dialogHtml, true, true);
+            }
+        }
+
+        function fetchTotalSizeAndCount(paths, dialogHtml, original, subasset) {
+            var totalSize = 0;
+            var totalCount = 0;
+            Granite.$.ajax({
+                type: "POST",
+                contentType: "application/json;charset=utf-8",
+                url: Granite.HTTP.externalize("/libs/dam/content/download/explaindownload/command.json"),
+                data: getExplainJson(paths, dialogHtml, original, subasset),
+                cache: false,
+                timeout: 60000,
+                success: function(xhr) {
+                    if (xhr[0] !== undefined) {
+                        totalSize = xhr[0].totalSize;
+                        totalCount = Object.keys(xhr[0].files).length;
+                        var message = humanReadable(totalCount, totalSize);
+                        updateDownloadMeta(original, subasset, message);
+                    }
+                },
+                error: function(xhr) {
+                    updateDownloadMeta(original, subasset, Granite.I18n.get("Unable to calculate size."));
+                }
+            });
+        }
+        function updateDownloadMeta(original, subasset, message) {
+            if (subasset) {
+                $(".subassetSelectCheckBox coral-checkbox-label .dam-download-meta")
+                    .text(message);
+            } else if (original) {
+                $(".assetSelectCheckBox coral-checkbox-label .dam-download-meta")
+                    .text(message);
+            } else {
+                $(".renditionSelectCheckBox coral-checkbox-label .dam-download-meta").
+                    text(message);
+            }
+        }
+        function humanReadable(totalCount, totalSize) {
+            if (totalCount === 1) {
+                return ("1 " + Granite.I18n.get("File") + " " + humanReadableSize(totalSize));
+            } else {
+                return (totalCount + " " + Granite.I18n.get("Files") + " " + humanReadableSize(totalSize));
+            }
+        }
+        function humanReadableSize(totalSize) {
+            if (totalSize === 0) {
+                return ("0 " + Granite.I18n.get("B"));
+            }
+            var val = Math.floor(Math.log(totalSize) / Math.log(1024));
+            return (totalSize / Math.pow(1024, val)).toFixed(0) + " " + Granite.I18n.get(" KMGTPEZY".charAt(val) + "B");
+        }
+
+        function openDownloadDialog(licenseCheckURL, licenseSelectionURL, downloadUrl, params, onComplete) {
+            var hasLicense = checkLicense(licenseCheckURL, licenseSelectionURL, params);
+            if (hasLicense) {
+                // Return if license acceptance is needed
+                // Download will be triggered once license is accepted
+                return;
+            }
+
+            Granite.$.ajax({
+                url: downloadUrl,
+                type: "POST",
+                data: params,
+                async: true,
+                success: function(html) {
+                    if (onComplete) {
+                        onComplete();
+                    }
+
+                    // remove the existing download modal (could be from the previous processing)
+                    var oldDialogs = $("coral-dialog[id='downloadasset']");
+                    if (oldDialogs) {
+                        $(oldDialogs).each(function() {
+                            var $this = $(this);
+                            // hide it(may be due to multiple requests,
+                            // we have multiple modals getting shown overlaid) and remove it
+                            $this.hide();
+                            $this.remove();
+                        });
+                    }
+
+                    $("body").append(html);
+
+                    // dialog.show() does not work on first startup on firefox
+                    // so enclosing it in Coral.commons.ready().
+                    var dialog = document.querySelector(downloadAssetModal);
+                    Coral.commons.ready(dialog, function() {
+                        dialog.on("coral-overlay:open", function() {
+                            // totalSize and count
+                            getTotalSizeAndCount(params.path, html);
+                        });
+                        dialog.show();
+                    });
+
+                    // This event is basically an event that will notify that something is injected to the DOM.
+                    // It is used by component handler to check if it has to upgrade the markup (userlist ...)
+                    // or not.
+                    $(downloadAssetModal).trigger("foundation-contentloaded");
+
+                    // trigger event to allow download modal to bind event handlers
+                    $(document).trigger(downloadModalVisibleTrigger);
+                },
+                error: function(item) {
+                    if (onComplete) {
+                        onComplete();
+                    }
+
+                    if (!downloadErrorModal) {
+                        var $reponseHtml = $(Granite.UI.Foundation.Utils.processHtml(item.responseText));
+                        var errorMessage = Granite.I18n.get("Failed to download.");
+                        var content = errorMessage + "<br>" + $reponseHtml.filter("h1").text();
+
+                        downloadErrorModal = new Coral.Dialog().set({
+                            id: "downloadError",
+                            variant: "error",
+                            closable: "on",
+                            header: {
+                                innerHTML: Granite.I18n.get("Error")
+                            },
+                            content: {
+                                innerHTML: content
+                            },
+                            footer: {
+                                innerHTML: '<button is="coral-button" class="closeExport" variant="default" ' +
+                                  "coral-close>" + Granite.I18n.get("OK") + "</button>"
+                            }
+                        });
+                    }
+                    downloadErrorModal.show();
+                }
+            });
+        }
+
+        function checkLicense(licenseCheckURL, licenseSelectionURL, params) {
+            var licenseSelectionPathArr = [];
+            var collectionNonLicensedAssets = {};
+            var hasLicense = false;
+
+            Granite.$.ajax({
+                url: licenseCheckURL,
+                type: "POST",
+                data: params,
+                async: false,
+                success: function(data) {
+                    var licensedAssetpaths = "";
+                    for (var p in data) {
+                        if (p !== "license") {
+                            if (data[p] === true) {
+                                licenseSelectionPathArr.push(p);
+                                licensedAssetpaths += "path=" + p + "&";
+                            } else {
+                                collectionNonLicensedAssets[p] = true;
+                            }
+                        }
+                    }
+                    // process html
+                    if (data["license"] === true) {
+                        hasLicense = true;
+                        window.sessionStorage.setItem("licensedAssetPaths", licensedAssetpaths);
+                        window.sessionStorage.setItem("nonLicensedAssetPaths",
+                            JSON.stringify(collectionNonLicensedAssets));
+                    }
+                }
+            });
+
+            if (hasLicense) {
+                var data = {
+                    "path": licenseSelectionPathArr,
+                    "ck=": Date.now(),
+                    "_charset_": "utf-8"
+                };
+                post(licenseSelectionURL, data);
+            }
+
+            return hasLicense;
+        }
+
+        $(document).off("click", downloadActivator).one("click", downloadActivator, function(e) {
+            var activator = $(this);
+            var patharr = [];
+            var paths = "";
+            // selections
+            var items = $(".foundation-selections-item");
+            var ui = $(window).adaptTo("foundation-ui");
+
+            if (ui !== undefined) {
+                ui.wait();
+            }
+            /*
+                the selection of elements persist even after changing the panel from dropdown
+                so we are chacking if the selected elements are visible
+                so that we can send the correct info to backend for downloadasset popup
+            */
+            var areItemsVisible = areSelectedItemsVisible(items);
+            // removing the selection on previous panel because the panel has been changed
+            removeHiddenElementsSelection(items);
+            if (items.length && areItemsVisible) {
+                if (items.data("foundation-collection-item-id").startsWith("/content/dam/collections/")) {
+                    window.sessionStorage.setItem("collection", true);
+                }
+                items.each(function(i) {
+                    var item = $(this);
+                    var itemPath = item.data("foundation-collection-item-id");
+                    patharr.push(itemPath);
+                    // "itemPath" has to be encoded to distinguish the "&" in path vs
+                    // it being used for multi-selected assets
+                    paths += "path=" + encodeURIComponent(itemPath) + "&";
+                });
+
+                // remove the last '&'
+                paths = paths.substr(0, paths.length - 1);
+            } else {
+                // quick actions
+                var path = activator.data("itempath");
+                if (path === undefined) {
+                    var pathname = location.pathname;
+                    // assetdetails & annotate page
+                    if (pathname.indexOf("/assetdetails.html") > -1) {
+                        path = decodeURIComponent(pathname.substring(pathname.indexOf("/assetdetails.html") + 18));
+                    } else if (pathname.indexOf("/annotate.html") > -1) {
+                        path = decodeURIComponent(pathname.substring(pathname.indexOf("/annotate.html") + 14));
+                    }
+                }
+                patharr.push(path);
+
+                // To be consistent with multi-selected assets: encode the path to distinguish two uses of "&"
+                path = encodeURIComponent(path);
+                paths = "path=" + path;
+            }
+            // If lightbox collection is to be downloaded then change the paths accordingly
+            if (toDownloadLightbox === true) {
+                paths = lightboxCollectionPath;
+                toDownloadLightbox = false;
+            }
+
+            // keep path in window, so that it can be accessible while starting download
+            // note: path is encoded
+            window.sessionStorage.damAssetDownloads = paths;
+            var downloadUrl = Granite.HTTP.externalize(activator.data("href"));
+            var licenseCheckURL = Granite.HTTP.externalize(activator.data("haslicense-href"));
+            var licenseSelectionURL = Granite.HTTP.externalize(activator.data("license-href"));
+            var type = $(".foundation-selections-item").data("type");
+            var params = {
+                "path": patharr,
+                "_charset_": "utf-8",
+                "type": type
+            };
+
+            openDownloadDialog(licenseCheckURL, licenseSelectionURL, downloadUrl, params, function onComplete() {
+                // Clear the spinner
+                if (ui !== undefined) {
+                    ui.clearWait();
+                }
+            });
+        });
+
+
+        // Post to the provided URL with the specified parameters.
+        function post(path, parameters) {
+            var form = $("<form></form>");
+            form.attr("method", "post");
+            form.attr("action", path);
+            $.each(parameters, function(key, value) {
+                if ($.isArray(value)) {
+                    $.each(value, function(keyArray, valueArray) {
+                        var field = $("<input></input>");
+                        field.attr("type", "hidden");
+                        field.attr("name", key);
+                        field.attr("value", valueArray);
+                        form.append(field);
+                    }
+                    );
+                } else {
+                    var field = $("<input></input>");
+                    field.attr("type", "hidden");
+                    field.attr("name", key);
+                    field.attr("value", value);
+                    form.append(field);
+                }
+            });
+            // The form needs to be a part of the document in
+            // order for us to be able to submit it.
+            $(document.body).append(form);
+
+            var ui = $(window).adaptTo("foundation-ui");
+
+            // Clear the spinner before showing the modal
+            if (ui !== undefined) {
+                ui.clearWait();
+            }
+
+            form.submit();
+        }
+
+        window.Dam = window.Dam || {};
+        Dam.Util = Dam.Util || {};
+        Dam.Util.Download = Dam.Util.Download || {};
+        Dam.Util.Download.openDownloadDialog = openDownloadDialog;
+    });
+})(document, Granite.$);

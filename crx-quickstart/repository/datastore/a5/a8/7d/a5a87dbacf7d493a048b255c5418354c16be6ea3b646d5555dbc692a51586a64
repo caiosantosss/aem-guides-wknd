@@ -1,0 +1,464 @@
+/*******************************************************************************
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ * Copyright 2018 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ ******************************************************************************/
+
+(function ($, ns, channel) {
+
+    // jQuery variables
+    var $activeConfig; // Parent or current config, depending on inherited state
+    var $parentConfig; // Parent config from which current may inherit
+    var $currentConfig; // Config for current entity
+    var $exportProperties; // Wrapper for Target-related form fields
+    var $format; // Export Format radio group
+    var $formatOptions; // Export Format radio buttons
+    var $workspace; // Workspace select/dropdown
+    var $workspaceButton; // Coral Select-button, used to display Wait
+    var $workspaceAlert; // Wrapper for Coral.Alert
+    var $workspaceWait; // Wrapper for Coral.Wait
+    var $externalizerSelect; // Externalizer select/dropdown
+
+    // constants
+    var SELECTORS = {
+        inheritance: ".js-cq-CloudServices-inheritance",
+        container: ".js-cq-CloudServices-container",
+        serviceSelect: ".js-cq-CloudServices-serviceSelect",
+        parentConfig: ".js-cq-CloudServices-parentConfig",
+        currentConfig: ".js-cq-CloudServices-currentConfig",
+        configSelect: ".js-cq-CloudServices-configSelect",
+        removeButton: ".js-cq-CloudServices-removeButton",
+        exportProperties: ".cq-adobe-target-export-properties",
+        format: ".cq-adobe-target-export-format",
+        workspace: ".cq-adobe-target-export-workspace",
+        externalizer: "#externalizername",
+        radioButton: "[type=\"radio\"]",
+        selectButton: "coral-select [handle='button']"
+    };
+    var DISABLED = "disabled";
+    var READONLY = "readonly";
+    var TARGET_MARKER = "/etc/cloudservices/testandtarget";
+    // url to retrieve the cloudservice configurations
+    var WORKSPACES_URL = Granite.HTTP.externalize("/libs/cq/cloudservices/testandtarget/workspaces.json");
+
+    // properties
+    var formatProperty = 'cq:adobeTargetExportFormat';
+    var externalizerProperty = "cq:externalizerName";
+    var workspaceProperty = 'cq:adobeTargetExportWorkspace';
+
+    var displayTargetOptionsTimeout;
+    var state = {
+        targetConfigPath: null,
+        workspace: null // ID of saved workspace (if it exists)
+    };
+
+    /**
+     * @param {string} path
+     * @return {Promise}
+     */
+    var getParentProperties = function (path) {
+        return $.get(path + ".1.json");
+    };
+
+    /**
+     * @param {Object} data - from ajax response
+     */
+    var applyInheritedProperties = function (data) {
+        var format = data[formatProperty];
+        var workspace = data[workspaceProperty];
+        var externalizerDomainName = data[externalizerProperty];
+        var jcrContent = data['jcr:content'];
+
+        if (!format && jcrContent) {
+            format = jcrContent[formatProperty];
+        }
+        if (!workspace && jcrContent) {
+            workspace = jcrContent[workspaceProperty];
+        }
+        if (!externalizerDomainName && jcrContent) {
+            externalizerDomainName = jcrContent[externalizerProperty];
+        }
+
+        $formatOptions.val([format]);
+
+        selectWorkspace(workspace, true);
+        // "save" inherited workspace selection, so that it is restored if inherited unchecked
+        // (and config remains the same), even if there is an error with the target integration.
+        state.workspace = workspace;
+
+        if ($externalizerSelect[0]) {
+            var externalizerDomains = $externalizerSelect[0].items.getAll();
+            externalizerDomains.forEach(function(item, index) {
+                if (item.value === externalizerDomainName) {
+                    item.selected = true;
+                }
+            });
+        }
+    };
+
+    /**
+     * Toggle the enabled/disabled state of the Target-related form elements.
+     *
+     * @param {boolean=} forceDisabled
+     */
+    var toggleDisabled = function (forceDisabled) {
+        var $inheritance = $(SELECTORS.inheritance);
+        var isInherited = Boolean($inheritance[0] && $inheritance[0].checked);
+
+        // Sets preselection of export format, workspace ID  and externalizer from the parent.
+        var pathText = $inheritance.text().trim();
+        var array = pathText.split(" ");
+        var path = array[array.length - 1];
+
+        if (path && isInherited) {
+            getParentProperties(path)
+                .done(applyInheritedProperties)
+                .then(function() {
+                    $formatOptions.attr(DISABLED, true);
+                    $workspace.attr(DISABLED, true);
+                    $externalizerSelect.attr(DISABLED, true);
+                });
+        }
+        else {
+            forceDisabled = Boolean(forceDisabled);
+            $formatOptions.attr(DISABLED, isInherited || forceDisabled);
+            $workspace.attr(DISABLED, isInherited || forceDisabled);
+            $externalizerSelect.attr(DISABLED, isInherited || forceDisabled);
+        }
+    };
+
+    /**
+     * Toggle the display of the Target-related form elements and attach them
+     * to parent or current config, where appropriate.
+     *
+     * @param {boolean} show
+     */
+    var displayTargetOptions = function (show) {
+        window.clearTimeout(displayTargetOptionsTimeout);
+
+        // wait for the target configuration select to be added/removed
+        displayTargetOptionsTimeout = window.setTimeout(function () {
+            var currentWorkspace = null;
+            var $inheritance = $(SELECTORS.inheritance);
+            var isInherited = Boolean($inheritance[0] && $inheritance[0].checked);
+            var targetConfigurationSelect = $activeConfig
+                .find('[value*="' + TARGET_MARKER + '/"]')
+                .parent(SELECTORS.configSelect)[0];
+
+            if (show) {
+                targetConfigurationSelect.parentNode.insertBefore(
+                    $exportProperties[0],
+                    targetConfigurationSelect.nextSibling
+                );
+                $exportProperties.show();
+
+                // There has been a change in configuration NOT caused by user selecting from config dropdown
+                if (targetConfigurationSelect.value !== state.targetConfigPath) {
+
+                    // If we are changing configuration from an existing one, we nullify the saved workspace.
+                    // But we retain current selection, to see if it can be re-applied.
+                    if (state.targetConfigPath !== null) {
+                        state.workspace = null;
+                        currentWorkspace = getSelectedWorkspace();
+                    }
+
+                    state.targetConfigPath = targetConfigurationSelect.value;
+
+                    $workspace.parent().show();
+            
+                    getWorkspaces(state.targetConfigPath)
+                        .done(populateWorkspacesDropdown)
+                        .fail(onGetWorkspacesFailure)
+                        .always(function() {
+                            // Select previously selected workspace if it is present, but do not add it to list.
+                            if (currentWorkspace && !isInherited) {
+                                selectWorkspace(currentWorkspace, false);
+                            }
+                            toggleDisabled(false);
+                        });
+                }
+                else {
+                    toggleDisabled();
+                }
+            }
+            else {
+                $exportProperties.hide();
+                toggleDisabled(true);
+            }
+        }, 250);
+    };
+
+    /**
+     * Get the value of the currently selected item in the workspace dropdown.
+     * Return null if none exists.
+     *
+     * @return {string|null} selectedWorkspace
+     */
+    var getSelectedWorkspace = function() {
+        var selectedWorkspace = null;
+
+        if ($workspace[0] && $workspace[0].selectedItem) {
+            selectedWorkspace = $workspace[0].selectedItem.value;
+        }
+
+        return selectedWorkspace;
+    };
+
+    /**
+     * Select the given workspace (ID) in the workspace dropdown.
+     *
+     * If it is not an existing option in the dropdown - and the addIfMissing flag is true,
+     * we add it to the dropdown, using the workspace as both the value and text
+     *
+     * @param {string} workspace - Workspace ID
+     * @param {boolean} addIfMissing
+     */
+    var selectWorkspace = function (workspace, addIfMissing) {
+
+        // Coral.Select#items (Coral.Collection)
+        var workspaceCollection = $workspace[0].items;
+
+        if (addIfMissing && $workspace.find("coral-select-item[value='" + workspace + "']").length === 0) {
+            workspaceCollection.add({
+                value: workspace,
+                content: {
+                    textContent: workspace
+                }
+            });
+        }
+
+        workspaceCollection.getAll().forEach(function(workspaceItem) {
+            if (workspaceItem.value === workspace) {
+                workspaceItem.selected = true;
+            }
+        });
+    };
+
+    /**
+     * Fetch workspace options associated with configuration path
+     *
+     * @return {Promise}
+     */
+    var getWorkspaces = function (targetCloudConfigurationPath) {
+        if (!$workspace[0]) {
+            return;
+        }
+
+        // clear and "disable" dropdown and add wait animation
+        var workspaceCollection = $workspace[0].items;
+        workspaceCollection.clear();
+        $workspace.attr(READONLY, true);
+        $workspaceWait.remove();
+        $workspaceButton.append($workspaceWait);
+
+        // Remove alert from DOM
+        $workspaceAlert.remove();
+
+        return $.get(WORKSPACES_URL, {path: targetCloudConfigurationPath});
+    };
+
+    /**
+     * Add retrieved workspaces as options to dropdown
+     * Ensure any saved workspace is preselected.
+     *
+     * @param {Object} data
+     */
+    var populateWorkspacesDropdown = function (data) {
+        var premium = data.premium;
+
+        if (!$workspace[0]) {
+            return;
+        }
+        var workspaceCollection = $workspace[0].items;
+        // Clear dropdown (again), in case any inherited workspaces were added before
+        // the getWorkspaces ajax call returns
+        workspaceCollection.clear();
+
+        if (data.workspaces) {
+            data.workspaces.forEach(function(value, index) {
+                workspaceCollection.add(value);
+            });
+        }
+        // Apply existing selection
+        if (state.workspace) {
+            selectWorkspace(state.workspace, true);
+
+            // Clear saved workspace as user now controls selection
+            state.workspace = null;
+        }
+
+        if (!premium) {
+            $workspace.attr(DISABLED, true);
+            $workspace.parent().hide();
+        }
+
+        // Re-enable field and remove wait animation
+        $workspace.attr(READONLY, false);
+        $workspaceWait.remove();
+    };
+
+    /**
+     * Set properties to default/initial values
+     */
+    var resetExportProperties = function () {
+        var firstFormatOption = $formatOptions.length ? $formatOptions[0].value : "";
+        $formatOptions.val([firstFormatOption]);
+        $workspace.val("");
+        $externalizerSelect.val("");
+        state.workspace = null;
+        state.targetConfigPath = null;
+    };
+
+    /**
+     * EVENT HANDLERS
+     */
+
+    /**
+     * Handler for when fetching workspace options fails
+     * https://api.jquery.com/ajaxerror/#ajaxError-handler
+     *
+     * @param {jqXHR} xhr
+     * @param {string} status
+     * @param {string} error
+     */
+    var onGetWorkspacesFailure = function (xhr, status, error) {
+        var errorMessage = error;
+
+        if (xhr && xhr.responseJSON && xhr.responseJSON.errorMessage) {
+            errorMessage = xhr.responseJSON.errorMessage;
+        }
+
+        if (state.workspace) {
+            selectWorkspace(state.workspace, true);
+        }
+
+        if ($workspaceAlert[0]) {
+            $workspaceAlert[0].variant = Coral.Alert.variant.WARNING;
+
+            $workspaceAlert[0].content.innerText = errorMessage;
+            $workspace.append($workspaceAlert);
+        }
+
+        // We use readonly so that a saved value is not deleted if form is saved.
+        $workspace.attr(READONLY, true);
+        $workspaceWait.remove();
+    };
+
+    /**
+     * Display target options if target configuration enabled
+     *
+     * @param {Event} event
+     */
+    var onServiceSelectChange = function(event) {
+        if ($(event.target).val().indexOf(TARGET_MARKER) > -1) {
+            displayTargetOptions(true);
+            resetExportProperties();
+        }
+    };
+
+    /**
+     * Retrieve relevant workspaces if configuration is Adobe Target and config has changed.
+     *
+     * @param {Event} event
+     */
+    var onConfigSelectChange = function(event) {
+        var configSelectValue = $(event.target).val();
+        var currentWorkspace = getSelectedWorkspace();
+
+        if (configSelectValue.indexOf(TARGET_MARKER) > -1 && configSelectValue !== state.targetConfigPath) {
+            // Clear saved workspace so that it is not added to repopulated dropdown.
+            state.workspace = null;
+            state.targetConfigPath = configSelectValue;
+
+            $workspace.parent().show();
+    
+            getWorkspaces(state.targetConfigPath)
+                .done(populateWorkspacesDropdown)
+                .fail(onGetWorkspacesFailure)
+                .always(function() {
+                    // Select previously selected workspace if it is present, but do not add it to list.
+                    if (currentWorkspace) {
+                        selectWorkspace(currentWorkspace, false);
+                    }
+                });
+        }
+    };
+
+    /**
+     * @param {Event} event
+     */
+    var onInheritanceChange = function(event) {
+        var $target = $(event.currentTarget);
+
+        // if inheritance flag is on, the options will be displayed in the inherited parent area
+        var isInherited = Boolean($target[0] && $target[0].checked);
+        $activeConfig = isInherited ? $parentConfig : $currentConfig;
+
+        var show = $activeConfig.text().indexOf("Adobe Target") > -1;
+        displayTargetOptions(show);
+    };
+
+    /**
+     * If Target configuration has been removed, reset and hide all relevant property form elements.
+     *
+     * @param {Event} event
+     */
+    var onRemoveButtonClick = function(event) {
+        var isAdobeTarget = $(event.currentTarget).data("path").indexOf(TARGET_MARKER) > -1;
+
+        if (isAdobeTarget) {
+            resetExportProperties();
+            displayTargetOptions(false);
+        }
+    };
+
+    /**
+     * Assign jQuery variables, set initial state and attach event handlers.
+     */
+    var onReady = function() {
+        // Assign elements.
+        $parentConfig = $(SELECTORS.parentConfig);
+        $currentConfig = $(SELECTORS.currentConfig);
+        $exportProperties = $(SELECTORS.exportProperties);
+        $format = $exportProperties.find(SELECTORS.format);
+        $workspace = $exportProperties.find(SELECTORS.workspace);
+        $workspaceButton = $workspace.find(SELECTORS.selectButton);
+        $workspaceWait = $(new Coral.Wait());
+        $workspaceAlert = $(new Coral.Alert());
+        $externalizerSelect = $exportProperties.find(SELECTORS.externalizer);
+        $formatOptions = $format.find(SELECTORS.radioButton);
+
+        var $inheritance = $(SELECTORS.inheritance);
+        var isInherited = Boolean($inheritance[0] && $inheritance[0].checked);
+
+        $activeConfig = isInherited ? $parentConfig : $currentConfig;
+
+        // Any existing saved value will be used for selection after workspace population
+        state.workspace = getSelectedWorkspace();
+
+        var $targetConfiguration = $activeConfig.find('[value*="' + TARGET_MARKER + '/"]');
+
+        // attach event handlers
+        channel.on("change", SELECTORS.serviceSelect, onServiceSelectChange);
+        channel.on("change", SELECTORS.configSelect, onConfigSelectChange);
+        channel.on("change", SELECTORS.inheritance, onInheritanceChange);
+        channel.on("click", SELECTORS.removeButton, onRemoveButtonClick);
+
+        displayTargetOptions($targetConfiguration.length !== 0);
+    };
+
+    channel.ready(function () {
+        Coral.commons.ready(document, onReady);
+    });
+})(jQuery, Granite.author, jQuery(document));

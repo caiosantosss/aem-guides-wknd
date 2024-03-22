@@ -1,0 +1,471 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function($, ns, channel, Class, window) {
+    "use strict";
+    var rel = ".aem-assets-image-edit-canvas";
+
+    var storedMapData = "";
+    var previousTransformData = {};
+    var Editor = new Class({
+        extend: CUI.ImageEditor
+    });
+
+    ns.ImageEditor = function() {
+        var self = this;
+        channel.on("inline-edit-start", function(e) {
+            var editable = $(e.editable);
+            storedMapData = e.mapData;
+            previousTransformData = transformImageMapForCUI(storedMapData);
+            self.startImageEditor(editable);
+
+            // disable edit actions for MSM livecopies
+            var isLiveCopy = window.isLiveCopy;
+            if (isLiveCopy) {
+                var $toolbars = $(".imageeditor-toolbars");
+                $toolbars.find("button").not("[data-action='control#close']").each(function() {
+                    var $btn = $(this);
+                    $btn.addClass("is-disabled");
+                    $btn.attr("disabled", "");
+                });
+            }
+        });
+    };
+
+    ns.ImageEditor.prototype.startImageEditor = function(editable) {
+        var options = $.extend({}, ns.ImageEditor.options);
+        // Send the previous transform results such as image map etc to the CUI image editor
+        options.result = previousTransformData;
+        var a =
+            new Editor({
+                element: editable,
+                parent: "body",
+                mode: "fullscreen",
+                theme: "dark"
+            });
+        a.start(options);
+        a.$ui.attr("role","main");
+
+        // customize destroyUI to not delete $ui
+        a.destroyUI =
+            function() {
+                var dimensions = this.$ui.copy.data("imageeditor-dimensions");
+                // this.$ui.remove();
+                this.toggleAnimation(false);
+                this.$element.removeClass("imageeditor-editable");
+                this.$element.css(dimensions);
+            };
+    };
+
+
+    /**
+     * CUI ImageEditor configuration options
+     */
+    ns.ImageEditor.options = {
+        "ui": {
+            "fullscreen": {
+                "toolbar": [
+                    [
+                        "crop#launchwithratio",
+                        "rotate#left",
+                        "rotate#right",
+                        "flip#vertical",
+                        "flip#horizontal",
+                        "map#launch"
+                    ],
+                    [
+                        "history#undo",
+                        "history#redo",
+                        "control#close",
+                        "control#finish"
+                    ]
+                ],
+                "replacementToolbars": {
+                    "crop": [
+                        [
+                            "crop#identifier"
+                        ],
+                        [
+                            "crop#unlaunch",
+                            "crop#confirm"
+                        ]
+                    ],
+                    "map": [
+                        [
+                            "map#rectangle",
+                            "map#circle"
+                        ],
+                        [
+                            "map#unlaunch",
+                            "map#confirm"
+                        ]
+                    ]
+                }
+            }
+        }
+    };
+
+    function transformImageMapForCUI(mapData) {
+        var result = [];
+        var tmp;
+        tmp = {
+            regexp: /\[(\w+)\(([0-9,]+)\)"([^"]*)"\|"([^"]*)"\|"([^"]*)"\]/g
+        };
+
+        tmp.transformation = {
+            transformation: "map",
+            areas: []
+        };
+
+        var inverseScaleFactorX = 1.0 / getScaleFactorX();
+        var inverseScaleFactorY = 1.0 / getScaleFactorY();
+
+        while ((tmp.match = tmp.regexp.exec(mapData)) !== null) {
+            tmp.area = {};
+
+            tmp.area.shape = tmp.match[1];
+            tmp.area.href = tmp.match[3];
+            tmp.area.target = tmp.match[4];
+            tmp.area.alt = tmp.match[5];
+            tmp.coords = $.map(tmp.match[2].split(","), function(e) {
+                return parseInt(e, 10);
+            });
+            switch (tmp.area.shape) {
+                case "rect":
+                    tmp.area.selection = {
+                        left: tmp.coords[0] * inverseScaleFactorX,
+                        top: tmp.coords[1] * inverseScaleFactorY,
+                        width: (tmp.coords[2] - tmp.coords[0]) * inverseScaleFactorX,
+                        height: (tmp.coords[3] - tmp.coords[1]) * inverseScaleFactorY
+                    };
+                    break;
+                case "circle":
+                    tmp.area.selection = {
+                        left: (tmp.coords[0] - tmp.coords[2]) * inverseScaleFactorX,
+                        top: (tmp.coords[1] - tmp.coords[2]) * inverseScaleFactorY,
+                        width: 2 * tmp.coords[2] * inverseScaleFactorX,
+                        height: 2 * tmp.coords[2] * inverseScaleFactorY
+                    };
+                    break;
+                default:
+                    continue;
+            }
+            tmp.transformation.areas.push(tmp.area);
+        }
+        result.push(tmp.transformation);
+        return result;
+    }
+
+    function back() {
+        location.href = $(".aem-assets-imageeditor-back").attr("href");
+    }
+
+    channel.on("editing-cancelled", function() {
+        back();
+    });
+
+    channel.on("editing-finished", function(e, properties) {
+
+        // give feedback that something is happening immediately
+        $(window).adaptTo("foundation-ui").wait();
+
+        var result = {
+            imageCrop: null,
+            imageRotate: null,
+            imageFlipHorizontal: null,
+            imageFlipVertical: null,
+            imageMap: null
+        };
+        var tmp;
+        var i;
+        var transformation;
+        var scaleFactorX = getScaleFactorX();
+        var scaleFactorY = getScaleFactorY();
+
+        for (i = 0; i < properties.result.length; i++) {
+            transformation = properties.result[i];
+
+            switch (transformation.transformation) {
+                case "crop":
+                    result.imageCrop = [
+                        Math.round(transformation.left * scaleFactorX),
+                        Math.round(transformation.top * scaleFactorX),
+                        Math.round((transformation.left + transformation.width) * scaleFactorX),
+                        Math.round((transformation.top + transformation.height) * scaleFactorX)
+                    ].join(",");
+
+                    break;
+
+                case "rotate":
+                    tmp = parseInt(transformation.angle, 10);
+                    if (!isNaN(tmp)) {
+                        tmp = tmp % 360;
+                        tmp = tmp + 360;
+                        tmp = tmp % 360;
+
+                        result.imageRotate = tmp.toString();
+                    }
+
+                    break;
+
+                case "flip":
+                    // CUI image editor swaps the flip actions when the image is rotated.
+                    var flipAxes = (result.imageRotate % 180) !== 0;
+                    if (!flipAxes) {
+                        result.imageFlipHorizontal = (transformation.horizontal) ? "fliphorizontal" : "";
+                        result.imageFlipVertical = (transformation.vertical) ? "flipvertical" : "";
+                    } else {
+                        result.imageFlipVertical = (transformation.horizontal) ? "flipvertical" : "";
+                        result.imageFlipHorizontal = (transformation.vertical) ? "fliphorizontal" : "";
+                    }
+
+                    break;
+
+                case "map":
+                    tmp = {
+                        count: 0,
+                        area: null,
+                        areaStrings: []
+                    };
+                    for (tmp.count = 0; tmp.count < transformation.areas.length; tmp.count++) {
+                        tmp.area = transformation.areas[tmp.count];
+
+                        switch (tmp.area.shape) {
+                            case "circle":
+                                tmp.radius = Math.round(tmp.area.selection.width / 2.0 * scaleFactorX);
+                                tmp.coords = [
+                                    Math.round(tmp.area.selection.left * scaleFactorX + tmp.radius),
+                                    Math.round(tmp.area.selection.top * scaleFactorY + tmp.radius),
+                                    tmp.radius
+                                ];
+                                break;
+                            case "rect":
+                                tmp.coords = [
+                                    Math.round(tmp.area.selection.left * scaleFactorX),
+                                    Math.round(tmp.area.selection.top * scaleFactorY),
+                                    Math.round((tmp.area.selection.left + tmp.area.selection.width) * scaleFactorX),
+                                    Math.round((tmp.area.selection.top + tmp.area.selection.height) * scaleFactorY)
+                                ];
+                                break;
+                            default:
+                                continue;
+                        }
+
+                        // Escaping double quotes, not escaping square brackets and vertical bars.
+                        tmp.areaStrings.push(
+                            "[" +
+                                tmp.area.shape +
+                                "(" + tmp.coords.join(",") + ")" +
+                                "\"" + tmp.area.href.replace(/\"/g, "%22") + // eslint-disable-line no-useless-escape
+                                "\"|" + // eslint-disable-line no-useless-escape
+                                "\"" + tmp.area.target + // eslint-disable-line no-useless-escape
+                                "\"|" + // eslint-disable-line no-useless-escape
+                                "\"" + tmp.area.alt.replace(/\"/g, "\&quot;") + // eslint-disable-line no-useless-escape
+                                "\"" +// eslint-disable-line no-useless-escape
+                                "]");
+                    }
+
+                    result.imageMap = tmp.areaStrings.join("");
+            }
+        }
+
+        if (isDynamicMediaEnabled()) {
+            nonDestructiveSave(result);
+        } else {
+            destructiveSave(result);
+        }
+    });
+
+    function getScaleFactorX() {
+        var scaleFactor = 1;
+        var img = $(rel + " img");
+        var actualWidth = img.data("originalWidth") || 1;
+        var renditionWidth = parseInt(((img.css("width")) ? img.css("width") : 1), 10);
+
+        if (actualWidth > 1 && renditionWidth > 1) {
+            scaleFactor = actualWidth / renditionWidth;
+        }
+        return scaleFactor;
+    }
+
+
+    function getScaleFactorY() {
+        var scaleFactor = 1;
+        var img = $(rel + " img");
+        var actualHeight = img.data("originalHeight") || 1;
+        var renditionHeight = parseInt(((img.css("height")) ? img.css("height") : 1), 10);
+
+        if (actualHeight > 1 && renditionHeight > 1) {
+            scaleFactor = actualHeight / renditionHeight;
+        }
+        return scaleFactor;
+    }
+
+
+    function destructiveSave(result) {
+        var form = $(".form_inline_image_edit");
+        $("#crop_dimension").val(result.imageCrop);
+        $("#rotation_angle").val(result.imageRotate);
+        $("#flip_horizontal").val(result.imageFlipHorizontal);
+        $("#flip_vertical").val(result.imageFlipVertical);
+        $("#image_map").val(result.imageMap);
+
+        $.ajax({
+            type: form.prop("method"),
+            url: form.data("action"),
+            data: form.serialize(),
+            path: form.data("redirect"),
+            success: function(e) {
+                var editCanvas = $(rel);
+                var lastModified = editCanvas.data("lastmodified");
+                var assetPath = editCanvas.data("path");
+                var renditionName = editCanvas.data("renditionname");
+                updateImage({ data: {
+                    "lastModified": lastModified,
+                    "renditionName": renditionName,
+                    "assetPath": assetPath
+                } });
+            },
+            error: function(e) {
+                $("#image-edit-failure-modal")[0].show();
+                var ui = $(window).adaptTo("foundation-ui");
+                ui.clearWait();
+                $("#image-edit-failure-modal").find("coral-dialog-footer button")[0].addEventListener("click",
+                    function() {
+                        back();
+                    });
+            }
+        });
+    }
+
+    function displayMessage(title, message, type) {
+        // show info dialog
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.clearWait();
+
+        ui.prompt(title, message, type, [{
+            text: Granite.I18n.get("OK"),
+            primary: true
+        }]);
+        // listen for confirm
+        $("coral-dialog-footer > button").on("click", function() {
+            back();
+        });
+    }
+
+    function updateImage(e) {
+        var ORIGINAL_RENDITION_SUFFIX = "/jcr:content/renditions/original";
+        var lastModified = e.data.lastModified;
+        var assetPath = e.data.assetPath;
+        var nuienabled = $(".aem-assets-image-edit-canvas").data("nuienabled");
+        var renditionName = "cq5dam.thumbnail.48.48.png";
+        if (e.data.renditionName) {
+            renditionName = e.data.renditionName;
+        }
+
+        var url = assetPath + "/jcr:content/renditions/" + renditionName + "/jcr:content.json";
+
+        if (nuienabled) {
+            assetPath = $(".aem-assets-image-edit-canvas").data("path");
+            url = assetPath + ORIGINAL_RENDITION_SUFFIX + "/jcr:content.json";
+        }
+
+        Dam.Util.detectChange(url, "jcr:lastModified", lastModified, 2000, 5, true, function() {
+            // if nui is NOT enable exit
+            if (!nuienabled) {
+                back();
+                return;
+            }
+
+            // NUI upload asset if enabled
+            var EVENT_UPLOAD_BLOB = "upload-blob";
+            var DAM_FILE_UPLOAD_ENDED = "upload-blob-completed";
+            var DAM_FILE_UPLOAD_ERROR = "upload-blob-error";
+            var SEL_DAM_CHUNK_UPLOAD = "dam-chunkfileupload";
+
+            // get file name
+            var fileName = getAssetNameFromPath(assetPath);
+            // get folder path
+            var folderPath = assetPath.replace("/" + fileName, "");
+            // get original for reprocess
+            var req = new Request(Granite.HTTP.externalize(assetPath + ORIGINAL_RENDITION_SUFFIX));
+
+            // override get path method
+            DamFileUpload.prototype._getContentPath = function() {
+                return folderPath;
+            };
+
+            // add DOM object for event tracking
+            DamFileUpload.prototype.fileUpload = $(SEL_DAM_CHUNK_UPLOAD);
+            DamFileUpload.prototype.fileUpload._abortFile = function() {};
+
+            // override layoutid
+            DamFileUpload.prototype.fileUpload.layoutId = "";
+
+            // remove handler for file upload end
+            $(document).off(DAM_FILE_UPLOAD_ENDED)
+                .on(DAM_FILE_UPLOAD_ENDED, function(e) {
+                    var successMessage = Granite.I18n.get("Asset reprocessing has been initiated.");
+                    displayMessage(Granite.I18n.get("Success"), successMessage, "success");
+                });
+
+            // handle upload errors
+            $(document).off(DAM_FILE_UPLOAD_ERROR)
+                .on(DAM_FILE_UPLOAD_ERROR, function (e) {
+                    var errorMessage = Granite.I18n.get("Unable to update the modified asset. Please try again.");
+                    if (e && e.detail && e.detail.item && e.detail.item.responseText) {
+                        errorMessage = e.detail.item.responseText;
+                    }
+                    displayMessage(Granite.I18n.get("Error"), errorMessage, "error");
+                });
+
+            fetch(req).then(function(response) {
+                return response.blob();
+            }).then(function(blob) {
+                // upload to nui for reprocess
+                var decodedFileName = decodeURI(fileName)
+                var file = { file: { name: decodedFileName }, name: decodedFileName, path: folderPath, _originalFile: blob };
+                var evt = $.Event(EVENT_UPLOAD_BLOB, { type: EVENT_UPLOAD_BLOB, file: file });
+                // trigger event
+                $(document).trigger(evt);
+            });
+        });
+    }
+
+    channel.on("dynamic-fetch-finished", function() {
+        window.location.reload(true);
+    });
+
+    function getAssetNameFromPath(path) {
+        var pathParts = path.split("/");
+        return pathParts[pathParts.length - 1];
+    }
+
+    function nonDestructiveSave(result) {
+        // for now use destructiveSave
+        // TODO: replace with non-destructive save
+        destructiveSave(result);
+    }
+
+    // create new inline image editor
+    new ns.ImageEditor([
+
+    ]);
+
+    function isDynamicMediaEnabled() {
+        return $(rel).data("dynamicmedia") || false;
+    }
+}(jQuery, Granite, jQuery(document), Class, this));

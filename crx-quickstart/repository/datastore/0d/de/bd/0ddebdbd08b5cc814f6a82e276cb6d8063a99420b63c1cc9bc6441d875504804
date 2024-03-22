@@ -1,0 +1,478 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (document, $) {
+    var EVENT_VALIDATE_DOWNLOAD_OPTIONS = "validateDownloadOptions";
+    var DOWNLOAD_MODAL_VISBLE_TRIGGER = "assets-download-modal-ready";
+    var OPTION_OTHER = "other";
+
+    var currentSizeUnit = "pixels"; //default size unit
+    var companysetting_maxpix = null;
+
+    if ($.validator) {
+        $.validator.register({
+            selector: "[data-validation='dynamicrendition.maxsize']",
+            validate: function(el) {
+                return validateCustomSetting(el);
+            }
+        });
+    }
+
+    $(document).on(DOWNLOAD_MODAL_VISBLE_TRIGGER, function(e){
+        var hasQualifiedS7Asset = $(".dynamicRenditionsData").data("hasQualifiedS7Asset");
+
+        // toggle the "DynamicRenditions" div
+        toggleUI(".dynamicRenditions", hasQualifiedS7Asset);
+
+        // init settings UI
+        toggleUI(".dynamicRenditionSettings", false);
+        toggleUI("#size_inch", false);
+        toggleUI("#size_centimeter", false);
+        toggleUI(".custom_size", false);
+        toggleUI(".custom_resolution", false);
+
+        if ($(".imagepresets-sel > coral-select-item").length === 1) {
+            // don't show "imagePreset" if there isn't any
+            toggleUI(".imagepresets-sel", false);
+        }
+
+        // validate inputs
+        $('.dynamicRenditions').find("input").on('keyup', function(e) {
+            $(e.target).trigger("change");
+        });
+
+        // To get the current settings when mouse move over the download button
+        $("#exportBtn").on("mouseover", updateExportSettings);
+
+        if (!!!window.CONST_USE_ICC_OBJ) {
+            $(".icc_sel").prop("disabled", true);
+        } else {
+            generateColorProfileOptions(true);
+            setSelectElementValueAndTriggerSelected(".icc_sel", CONST_RGB_DEFAULT);
+
+            $('.format_sel').on('change selected', function(e) {
+                addRemoveColorSpaceOpt(cmykSupportedFormat($('.format_sel select').val()));
+                generateColorProfileOptions(cmykSupportedFormat($('.format_sel select').val()));
+            });
+
+            $('.color_sel').on('change', function () {
+                $(".icc_sel").prop("disabled", false);
+                if($(".color_sel select").val() == "RGB") {
+                    setSelectElementValueAndTriggerSelected(".icc_sel", CONST_RGB_DEFAULT);
+                } else if($(".color_sel select").val() == "CMYK") {
+                    $(".icc_sel").prop("disabled", false);
+                    setSelectElementValueAndTriggerSelected(".icc_sel", CONST_CMYK_DEFAULT);
+                } else {
+                    setSelectElementValueAndTriggerSelected(".icc_sel", "None");
+                    $(".icc_sel").prop("disabled", true);//grayscale has no color profile
+                }
+            });
+
+            $('.icc_sel').on('change', function () {
+                if(ICC_PROFILE_MAP[$(".icc_sel").val()] == "RGB") {
+                    setSelectElementValueAndTriggerSelected(".color_sel", "RGB");
+                } else if(ICC_PROFILE_MAP[$(".icc_sel").val()] == "CMYK") {
+                    setSelectElementValueAndTriggerSelected(".color_sel", "CMYK");
+                }
+            });
+        }
+    });
+
+
+    /**
+     * valueLabelOverrides is a key/value hash. the key is one of the constants in the script header, the override
+     * is generally a value the back end is expecting
+     */
+    function rebuildSelectControl(selectId, optionList, optionLabelOverrides, optionValueOverrides) {
+        var selectComp = $(selectId).get(0);
+        var oldSelected = selectComp.selectedItem;
+        if(selectComp.selectedItem){
+            selectComp.selectedItem.selected = false;
+        }
+
+        selectComp.items.clear();
+        var oldexists = false;
+        var defaultselect;
+        if (optionList != undefined && optionList.length > 0) {
+            for (var i = 0; i < optionList.length; i++) {
+                var item = {content: { innerHTML: optionList[i]}};
+                item.value = optionValueOverrides && optionValueOverrides[optionList[i]] ? optionValueOverrides[optionList[i]] : optionList[i].toLowerCase();
+                if(i == 0) {
+                    defaultselect = item.value;
+                }
+                selectComp.items.add(item);
+                if(oldSelected && item.value == oldSelected.value){
+                    oldexists = true;
+                }
+            }
+            selectComp.value = oldexists ? oldSelected.value : defaultselect;
+        }
+    }
+
+    function cmykSupportedFormat(fmt) {
+        var formats = 'jpeg,pdf,eps,ptif,ptif-alpha,tif,tif-alpha';
+
+        return (formats.search(fmt) >= 0);
+    }
+
+    function generateColorProfileOptions(add) {
+        var optionList = [];
+        var overrides = {};
+        for(var key in ICC_PROFILE_MAP) {
+            if(ICC_PROFILE_MAP.hasOwnProperty(key)) {
+                if(add) {
+                    optionList.push(key);
+                    overrides[key] = key;
+                } else {
+                    if(ICC_PROFILE_MAP[key] != 'CMYK') {
+                        optionList.push(key);
+                        overrides[key] = key;
+                    }
+                }
+            }
+        }
+
+        optionList.sort(); //just easier for users to read through... should have a filter though.
+        rebuildSelectControl(".icc_sel", optionList, null, overrides);
+        setDefaultColorSpaces();
+    }
+
+    function setDefaultColorSpaces() {
+        var currentColorSpace = $('.color_sel select').val();
+        if(currentColorSpace == "RGB") {
+            setSelectElementValueAndTriggerSelected(".icc_sel", CONST_RGB_DEFAULT);
+        } else if( currentColorSpace == "CMYK") {
+            setSelectElementValueAndTriggerSelected(".icc_sel", CONST_CMYK_DEFAULT);
+        } else {
+            setSelectElementValueAndTriggerSelected(".icc_sel", "None");
+        }
+    }
+
+    function setSelectElementValueAndTriggerSelected(selectId, value) {
+        var selectComp = $(selectId).get(0);
+        selectComp.value = value;
+        $(selectComp).trigger("selected");
+    }
+
+    function addRemoveColorSpaceOpt(add) {
+        var prevValue = "RGB";
+        if ($('.color_sel select').val() && $('.color_sel select').val() != "" && $('.color_sel select').val() != null) {
+            //if cmyk isnt supported, it cannot be a value in the first place
+            prevValue = $('.color_sel select').val().trim();
+        }
+
+        var colorspaceOverrides = {};
+        colorspaceOverrides[Granite.I18n.get('GRAY')] = "GRAY";
+        colorspaceOverrides[Granite.I18n.get('RGB')] = "RGB";
+        colorspaceOverrides[Granite.I18n.get('CMYK')] = "CMYK";
+
+        var optionList = [Granite.I18n.get('RGB'), Granite.I18n.get('GRAY')];
+
+        if(add) { //Add cmyk as a value if it is supported
+            optionList.push(Granite.I18n.get('CMYK'));
+        } else {
+            prevValue = prevValue == 'CMYK' ? 'RGB' : prevValue;
+        }
+
+        rebuildSelectControl(".color_sel", optionList, null, colorspaceOverrides);
+        setSelectElementValueAndTriggerSelected(".color_sel", prevValue);
+    }
+
+    // toggle the settings if smart crop is checked
+    $(document).on("change", ".smartcropSelectCheckBox", function (e) {
+        // update export settings
+        updateExportSettings();
+    });
+
+    // toggle the settings
+    $(document).on("click", ".dynamicRenditions-sel", function (e) {
+        if ($(".dynamicRenditions-sel [type='checkbox']").prop("checked")) {
+            toggleUI(".dynamicRenditionSettings", true);
+        } else {
+            toggleUI(".dynamicRenditionSettings", false);
+
+            $("#downloadasset").trigger(EVENT_VALIDATE_DOWNLOAD_OPTIONS);
+        }
+    });
+
+    // toggle the manual settings
+    $(document).on("change", ".imagepresets-sel", function (e) {
+        var imgPreset = $(this).val();
+        var showManualSettings = ((typeof(imgPreset) === "undefined") || imgPreset === "");
+        toggleUI(".manualPresetSettings", showManualSettings);
+
+        updateExportSettings();
+
+        if (!showManualSettings) {
+            $("#downloadasset").trigger(EVENT_VALIDATE_DOWNLOAD_OPTIONS);
+        }
+    });
+
+    // toggle the custom size
+    $(document).on("change", ".size_select", function (e) {
+        var sizeSel = $(this).val();
+        var showCustomSizeSettings = ((typeof(sizeSel) === "undefined") || sizeSel === OPTION_OTHER);
+        toggleUI(".custom_size", showCustomSizeSettings);
+
+        toggleValidationStatus(showCustomSizeSettings);
+    });
+
+    // toggle the custom resolution
+    $(document).on("change", ".resolution_sel", function (e) {
+        var resolutionSel = $(this).val();
+        var showCustomResSettings = ((typeof(resolutionSel) === "undefined") || resolutionSel === OPTION_OTHER);
+        toggleUI(".custom_resolution", showCustomResSettings);
+
+        toggleValidationStatus(showCustomResSettings);
+    });
+
+    function toggleValidationStatus(showCustomSettings){
+        if (!showCustomSettings) {
+            $("#downloadasset").trigger(EVENT_VALIDATE_DOWNLOAD_OPTIONS);
+        }
+    }
+
+    // toggle the size options
+    $(document).on("change", ".size_unit", function (e) {
+        var sizeUnit = $(this).val();
+        if ((typeof(sizeUnit) !== "undefined") && sizeUnit !== currentSizeUnit){
+            currentSizeUnit = sizeUnit;
+            hideAllSizeSelects();
+
+            if (sizeUnit === "pixels") {
+                toggleUI("#size_pixel", true);
+            } else if (sizeUnit === "inches") {
+                toggleUI("#size_inch", true);
+            } else if (sizeUnit === "centimeters") {
+                toggleUI("#size_centimeter", true);
+            }
+        }
+    });
+
+    function hideAllSizeSelects(){
+        toggleUI("#size_pixel", false);
+        toggleUI("#size_inch", false);
+        toggleUI("#size_centimeter", false);
+        toggleUI(".custom_size", false);
+    }
+
+    function toggleUI(ele, show){
+        var $sibling = $("" + ele).prev();
+        var hasFieldLabel = $sibling.hasClass("coral-Form-fieldlabel");
+
+        if (show) {
+            $("" + ele).show();
+            if (hasFieldLabel) {
+                $sibling.show();
+            }
+        } else {
+            $("" + ele).hide();
+            if (hasFieldLabel) {
+                $sibling.hide();
+            }
+        }
+    };
+
+    $.getCompanySettings =  (function getFeeds($url) {
+        return $.ajax({
+            dataType: "json",
+            async: false,
+            url: $url
+        }).pipe(function (response) {
+            return response;
+        });
+    });
+
+    function addParameter(url, name, value) {
+        if (value && value instanceof Array) {
+            for (var i = 0; i < value.length; i++) {
+                url = addParameter(url, name, value[i]);
+            }
+            return url;
+        }
+        var separator = (url.length === 0 ? "" : "&");
+        var hashIdx = url.indexOf("#");
+        if (hashIdx < 0) {
+            return url + separator + name + "=" + value;
+        } else {
+            var hash = url.substring(hashIdx);
+            url = url.substring(0, hashIdx);
+            return url + separator + name + "=" + value + hash;
+        }
+    }
+
+    function isDefined(value) {
+        return (!(typeof(value) === "undefined") && value !== "" && value !== null);
+    }
+
+    function updateExportSettings() {
+        var s7ExportSettings = [];
+        var companysetting_maxpix = null;
+        var is_modifier = "";
+
+        if ($(".dynamicRenditionSettings").is(":visible")){
+            var imgPreset = $(".imagepresets-sel").val();
+            if (isDefined(imgPreset)) {
+                s7ExportSettings.push("{imagepreset:" + imgPreset + "}");
+            } else if (imgPreset === "" || typeof (imgPreset) === "undefined"){
+                var res = $(".dynamicRenditionSettings").data("printRes");
+                if (!isDefined(res)) {
+                    res = $('.resolution_sel').val();
+                }
+                is_modifier = addParameter(is_modifier, "printRes", res);
+
+                var wid = $(".dynamicRenditionSettings").data("wid");
+                var hei = $(".dynamicRenditionSettings").data("hei");
+                if (!isDefined(wid) || !isDefined(hei)) {
+                    var size = getSize();
+                    wid = size.split("x")[0];
+                    hei = size.split("x")[1];
+                }
+                is_modifier = addParameter(is_modifier, "wid", wid);
+                is_modifier = addParameter(is_modifier, "hei", hei);
+
+                var fmt = $(".format_sel").val();
+                var color = $(".color_sel").val();
+                if (isDefined(fmt) && isDefined(color)) {
+                    is_modifier = addParameter(is_modifier, "fmt", fmt + "," + color);
+                }
+
+                // extramodifiers
+                var extramod = $('.extramodifiers').val();
+                if (isDefined(extramod)) {
+                    if (extramod.charAt(0) !== "&"){
+                        extramod = "&" + extramod;
+                    }
+                    is_modifier += extramod;
+                }
+
+                var icc = $(".icc_sel").val();
+                if(CONST_USE_ICC_OBJ && isDefined(icc) && icc != "None") {
+                    is_modifier = addParameter(is_modifier, "icc", icc + ",relative,1,0");
+                    //always embed the color profile
+                    is_modifier = addParameter(is_modifier, "iccEmbed", "1");
+                }
+
+                s7ExportSettings.push("{modifier:" + is_modifier + "}");
+            }
+        }
+
+        // append / add smart crop setting if applicable
+        if($('.smartcropSelectCheckBox').prop('checked')) {
+            s7ExportSettings.push("{smartcrop:" + true + "}");
+        }
+
+        $("#downloadasset").data("s7exportsettings", s7ExportSettings);
+    }
+
+    function getSelectedSize(){
+        var sizeSel = $('.size_select');
+        var size = "";
+        $.each(sizeSel, function( i, ele ) {
+            if($(ele).is(":visible")) {
+                size = $(ele).val();
+                return;
+            }
+        });
+        return size;
+    }
+
+    /**
+     * This will be triggered by these changes: width/height/resolution, or size unit
+     */
+    function validateCustomSetting(el){
+        var resolution = $('.resolution_sel').val();
+        var size = getSize();
+        if (companysetting_maxpix === null) {
+            // load the s7 companysetting for maxpixel for the images
+            var companySettingsPath = $(".dynamicRenditionsData").data("companySettingsPath");
+            $.getCompanySettings(companySettingsPath)
+                .done(function (response) {
+                    if (response) {
+                        var compsettings = response;
+                        if (compsettings.hasOwnProperty("maxpix")) {
+                            companysetting_maxpix = compsettings.maxpix;
+                        }
+                    }
+                });
+        }
+
+        if (resolution === "" || resolution === OPTION_OTHER){
+            resolution = $('#custom_resolution_input').val();
+        }
+
+        var wid = 0;
+        var hei = 0;
+        var sizeunit = $(".size_unit").val();
+        var unitAdjust = 1; // for "pixels"
+        if (sizeunit === "inches") {
+            unitAdjust = resolution;
+        } else if (sizeunit === "centimeters") {
+            unitAdjust = resolution/2.54;
+        }
+        if (size === "other") {
+            wid = $("#custom_size_width").val();
+            hei = $("#custom_size_height").val();
+        } else {
+            wid = size.split("x")[0];
+            hei = size.split("x")[1];
+        }
+
+        wid = (wid !== "" ? Math.round(wid * unitAdjust) : "");
+        hei = (hei !== "" ? Math.round(hei * unitAdjust) : "");
+        // validate the custom size
+        if (isDefined(companysetting_maxpix)){
+            var maxwid = companysetting_maxpix.split(",")[0];
+            var maxhei = companysetting_maxpix.split(",")[1];
+            var msg = "";
+
+            if ($(el).attr("id") === "custom_size_width" && wid > maxwid){
+                msg = Granite.I18n.getVar("Width exceeds the maximum company settings.");
+            }else if ($(el).attr("id") === "custom_size_height" && hei > maxhei){
+                msg = Granite.I18n.getVar("Height exceeds the maximum company settings.");
+            }else if(wid > maxwid || hei > maxhei){
+                if ($(el).attr("id") === "custom_resolution_input") {
+                    msg = Granite.I18n.getVar("Image size exceeds the maximum company settings.");
+                } else {
+                    msg = Granite.I18n.getVar("This setting will make the image size exceed the maximum company settings.");
+                }
+            }
+
+            if (msg !== "") {
+                $("#exportBtn").attr('disabled', 'disabled');
+                return msg;
+            } else {
+                $("#downloadasset").trigger(EVENT_VALIDATE_DOWNLOAD_OPTIONS);
+            }
+        }
+
+        $(".dynamicRenditionSettings").data("printRes", resolution);
+        $(".dynamicRenditionSettings").data("wid", wid);
+        $(".dynamicRenditionSettings").data("hei", hei);
+
+        return "";
+    }
+
+    function getSize(){
+        var size_sel = $('.size_select');
+        for (var i = 0; i < size_sel.length; i++) {
+            if ($(size_sel[i]).is(":visible")) {
+                return $(size_sel[i]).val();
+            }
+        }
+    }
+
+})(document, Granite.$);

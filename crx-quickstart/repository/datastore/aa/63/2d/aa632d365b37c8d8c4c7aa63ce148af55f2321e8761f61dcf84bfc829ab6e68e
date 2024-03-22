@@ -1,0 +1,777 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * ___________________
+ *
+ *  Copyright 2012 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+
+/**
+ * @class CUI.rte.HtmlSerializer
+ * @extends CUI.rte.Serializer
+ * The HtmlSerializer is used to serialize a DOM (sub-) tree to its HTML (String)
+ * equivalent.
+ * @constructor
+ * Creates a new HtmlSerializer.
+ * @param {Object} config The configuration object
+ */
+/* global Class: true */
+/* jshint strict: false */
+(function (CUI) {
+  //'use strict';
+  CUI.rte.HtmlSerializer = new Class({
+
+    toString: 'HtmlSerializer',
+
+    extend: CUI.rte.Serializer,
+
+    /**
+     * The edit context
+     * @private
+     * @type CUI.rte.EditContext
+     */
+    context: null,
+
+    /**
+     * HTML code that should be added to the next structural node that has no more child
+     * nodes
+     * @private
+     * @type String
+     */
+    deepestChildAddHtml: null,
+
+    /**
+     * @cfg {String[]} nonClosingTags
+     * Array that contains tags that must not be closed. Defaults to: [ "br", "hr", "img",
+     * "area", "input", "col" ]
+     */
+    nonClosingTags: null,
+
+    /**
+     * @cfg {String} tagCase
+     * Defines the case of tags; valid values are: "upper" (for uppercase tags), "lower"
+     * (for lowercase tags), "keep" (to keep tag names as they are according to DOM).
+     * Defaults to "lower".
+     */
+    tagCase: null,
+
+    /**
+     * @cfg {String} attribNameCase
+     * Defines the case of attribute names; valid values are: "upper" (for uppercase tags),
+     * "lower" (for lowercase tags), "keep" (to keep tag names as they are according to
+     * DOM). Defaults to "lower".
+     */
+    attribNameCase: null,
+
+    /**
+     * @cfg {String} styleAttribNameCase
+     * Defines the case of style attribute names; valid values are: "upper" (for uppercase
+     * tags), "lower" for (lowercase tags), "keep" (to keep tag names as they are according
+     * to DOM). Defaults to "lower"
+     */
+    styleAttribNameCase: null,
+
+    /**
+     * @cfg {String} idAttribMode
+     * Defines how to handle the ID attribute; valid values are: "remove" (for removing
+     * ID attributes), "keep" (to keep them). Defaults to "keep"
+     */
+    idAttribMode: null,
+
+    /**
+     * @cfg {Function} beautifier
+     * A function that is called on every node. This function may add whitespace to
+     * "beautify" the generated HTML. The function gets the edit context, the DOM object and
+     * a flag that determines if the function is called before (true) or after (false)
+     * processing the DOM object. The function may return "null" (= do nothing) or some
+     * text to be added. The text to be added must be specified as an Object with
+     * properties "before" and "after", defining the text to be inserted before/after
+     * the opening resp. closing tag.
+     */
+    beautifier: null,
+
+    /**
+     * @cfg {Boolean} convertToHTMLEntities
+     * If set to true, this will trigger encoding of special characters into html entities
+     * as provided in htmlEntitiesConversionMap.
+     */
+    convertToHTMLEntities: false,
+
+    /**
+     * Map containing mapping from special character's unicode value to the corresponding html
+     * entities. Eg. For registered trademark character the map could be like:
+     * {
+     *     '\u00ae' : '&reg;'
+     * }
+     */
+    htmlEntitiesConversionMap: null,
+
+    construct: function (config) {
+      this._init(config);
+    },
+
+    _init: function (config) {
+      config = config || {};
+      CUI.rte.Utils.applyDefaults(config, {
+        'nonClosingTags': CUI.rte.HtmlSerializer.NON_CLOSING_TAGS,
+        'tagCase': 'lower',
+        'attribNameCase': 'lower',
+        'styleAttribNameCase': 'lower',
+        'idAttribMode': 'keep',
+        'beautifier': CUI.rte.HtmlSerializer.defaultBeautifier,
+        'convertToHTMLEntities' : false,
+        'htmlEntitiesConversionMap' : CUI.rte.HtmlSerializer.HTML_ENTITIES_MAP
+      });
+      CUI.rte.Utils.apply(this, config);
+    },
+
+    /**
+     * <p>Browser-independent way to get attribute values.</p>
+     * <p>Contrary to {@link CUI.rte.Common#getAttribute}, this method does not do
+     * any attribute-name translations, but works around an IE bug with cloned nodes (some
+     * attributes are returned as 0 if accessed regularily) that the former method doesn't
+     * work around.</p>
+     * @param {HTMLElement} dom The DOM element to get the attribute value from
+     * @param {String} attribName The attribute's name
+     * @return {String} The attribute's value
+     */
+    getAttribValue: function (dom, attribName) {
+      var com = CUI.rte.Common;
+      // IE <= 7 handles named anchors differently; see bug #36231
+      if (com.ua.isIE6 || com.ua.isIE7) {
+        var nameLC = attribName.toLowerCase();
+        if (CUI.rte.Common.isTag(dom, 'a') && (nameLC === 'name')) {
+          return dom.attributes['name'].nodeValue;
+        }
+      }
+      return com.ua.isOldIE ? dom.getAttribute(attribName, 2) : dom.getAttribute(attribName);
+    },
+
+    /**
+     * Helper that determines if an attribute has actually to be serialized according to
+     * the serializer's settings.
+     * @param {Attr} attrib The attribute to check
+     * @return {Boolean} True if the attribute must not be serialized
+     */
+    ignoreAttribute: function (attrib) {
+      var com = CUI.rte.Common;
+      var attrName = attrib.nodeName.toLowerCase();
+      if ((attrName === 'id') && (this.idAttribMode === 'remove')) {
+        return true;
+      }
+      return com.arrayContains(CUI.rte.HtmlSerializer.HELPER_ATTRIBUTES, attrName);
+    },
+
+    /**
+     * Adjusts the case of the specified string.
+     * @private
+     */
+    adjustCase: function (str, strCase) {
+      switch (strCase) {
+      case 'upper':
+        str = str.toUpperCase();
+        break;
+      case 'lower':
+        str = str.toLowerCase();
+        break;
+      }
+      return str;
+    },
+
+    /**
+     * Creates the tag name string for the specified DOM element.
+     * @param {HTMLElement} dom The DOM element to create the tag name for
+     * @return {String} The tag name ("img", "IMG", "a", "table", ...)
+     */
+    createTagStr: function (dom) {
+      return this.adjustCase(dom.tagName, this.tagCase);
+    },
+
+    /**
+     * Serializes the specified attribute of the specified DOM element.
+     * @param {String} name The name of the attribute to serialize
+     * @param {String} value The value of the attribute to serialize
+     */
+    serializeAttribute: function (name, value) {
+      name = this.adjustCase(name, this.attribNameCase);
+      var nameLC = name.toLowerCase();
+      if ((nameLC === 'style') && (this.styleAttribNameCase !== 'keep')) {
+        var styleDef = CUI.rte.HtmlProcessor.parseStyleDef(value);
+        value = '';
+        for (var styleName in styleDef) {
+          if (styleDef.hasOwnProperty(styleName)) {
+            var styleValue = styleDef[styleName];
+            // IE 9 may report empty style parts; ignore them
+            if (styleValue && (styleValue.length > 0)) {
+              if (value.length > 0) {
+                value += ' ';
+              }
+              styleName = this.adjustCase(styleName, this.styleAttribNameCase);
+              value += styleName + ': ' + styleValue + ';';
+            }
+          }
+        }
+      }
+      // don't write empty attributes, they don't make sense at all ...
+      // except for alt attribute as an Empty alt tags tell the screen reader that an image is only a decorative image
+      if (nameLC !== 'alt' && ((value === null || value === undefined) || (value.length === 0))) {
+        return '';
+      }
+      // ignore colspan/rowspan of "1"
+      if ((nameLC === 'colspan') || (nameLC === 'rowspan')) {
+        if (parseInt(value, 10) === 1) {
+          return '';
+        }
+      }
+      return name + '=\"' + CUI.rte.Utils.htmlEncode(value) + '\"';
+    },
+
+    /**
+     * Serializes the attributes of the specified DOM element.
+     * @param {HTMLElement} dom The DOM element
+     */
+    serializeAttributes: function (dom) {
+      var com = CUI.rte.Common;
+      var attribFilter = (com.ua.isGecko ? com.FILTER_GECKO_TEMPORARY_ATTRIBS : null);
+      var attributeNames = com.getAttributeNames(dom, true, attribFilter);
+      var attribCnt = attributeNames.length;
+      var attribsStr = '';
+      var isFirstAttrib = true;
+      for (var a = 0; a < attribCnt; a++) {
+        var attrib = dom.attributes.getNamedItem(attributeNames[a]);
+        if (!this.ignoreAttribute(attrib)) {
+          var attrName = attrib.nodeName;
+          var attrNameLC = attrName.toLowerCase();
+          // IE bugs around, at least if DOM is cloned, so again use a special
+          // treatment
+          var attrValue = this.getAttribValue(dom, attrName);
+          if (!attrValue) {
+            if (attrNameLC === 'style') {
+              attrValue = dom.style.cssText;
+            } else if (attrNameLC === 'class') {
+              attrValue = dom.className;
+            }
+          }
+          // handle helper attributes
+          var tagNameLC = dom.tagName.toLowerCase();
+          var attribMapping = CUI.rte.HtmlSerializer.HELPER_ATTRIB_MAPPINGS[
+            tagNameLC];
+          if (attribMapping) {
+            for (var m = 0; m < attribMapping.length; m += 2) {
+              var srcAttrib = attribMapping[m];
+              if (attrNameLC === srcAttrib) {
+                attrValue = this.getAttribValue(dom, attribMapping[m + 1]);
+                break;
+              }
+            }
+          }
+          // at last, do the actual serializing
+          var serializedAttrib = this.serializeAttribute(attrName, attrValue);
+          if (serializedAttrib.length > 0) {
+            if (!isFirstAttrib) {
+              attribsStr += ' ';
+            } else {
+              isFirstAttrib = false;
+            }
+            attribsStr += serializedAttrib;
+          }
+        }
+      }
+      return attribsStr;
+    },
+
+    /**
+     * Serializes the specified text node.
+     * @param {HTMLElement} dom The text node to be serialized (must be a text node!)
+     * @return {String} The serialized representation of the text node
+     */
+    serializeTextNode: function (dom) {
+      var markup = CUI.rte.Utils.htmlEncode(dom.nodeValue);
+      var conversionMap = this.htmlEntitiesConversionMap;
+      if (this.convertToHTMLEntities) {
+        for (var key in conversionMap) {
+          if (conversionMap.hasOwnProperty(key)) {
+            var reg = new RegExp(key, 'g');
+            markup = markup.replace(reg, conversionMap[key]);
+          }
+        }
+      }
+      return markup.replace(/\u00A0/g, '&nbsp;');
+    },
+
+    /**
+     * Serializes the specified comment node.
+     * @param {HTMLElement} dom The comment node to be serialized (must be a comment node!)
+     * @return {String} The serialized representation of the comment node
+     */
+    serializeCommentNode: function(dom) {
+      // comments need not to be escaped, see:
+      // https://www.w3.org/TR/html-markup/syntax.html#syntax-text
+      return '<!--' + dom.nodeValue + '-->';
+    },
+
+    /**
+     * Serializes the specified DOM node on "entering" the node (= before
+     * processing/serializing child nodes).
+     * @param {HTMLElement} dom DOM node to serialize
+     * @return {String} The serialized representation of the DOM node
+     */
+    serializeNodeEnter: function (dom) {
+      var com = CUI.rte.Common;
+      if (dom.nodeType === 3) {
+        return this.serializeTextNode(dom);
+      }
+      if (dom.nodeType === 8) {
+        return this.serializeCommentNode(dom);
+      }
+      var html = '<' + this.createTagStr(dom);
+      var attribsStr = this.serializeAttributes(dom);
+      if (attribsStr.length > 0) {
+        html += ' ' + attribsStr;
+      }
+      html += '>';
+      // insert an additional linebreak after opening "pre" tags
+      if (com.isTag(dom, 'pre')) {
+        html += '\n';
+      }
+      // add &nbsp; to empty editing blocks
+      if (com.isEmptyEditingBlock(dom, true)) {
+        this.deepestChildAddHtml = '&nbsp;';
+      }
+      if (this.deepestChildAddHtml !== null && this.deepestChildAddHtml !== undefined) {
+        if (dom.childNodes.length === 0) {
+          html += this.deepestChildAddHtml;
+          this.deepestChildAddHtml = null;
+        }
+      }
+      return html;
+    },
+
+    /**
+     * Serializes the specified DOM node on "leaving" the node (= after
+     * processing/serializing child nodes).
+     * @param {HTMLElement} dom DOM node to serialize
+     * @return {String} The serialized representation of the DOM node
+     */
+    serializeNodeLeave: function (dom) {
+      if (dom.nodeType === 3 || (dom.nodeType === 8)) {
+        return '';
+      }
+      var com = CUI.rte.Common;
+      var html = '';
+      if (!com.isTag(dom, this.nonClosingTags)) {
+        html = '</' + this.createTagStr(dom) + '>';
+        if (com.isTag(dom, 'pre')) {
+          html = '\n' + html;
+        }
+      }
+      return html;
+    },
+
+    /**
+     * Serializes the specified subtree, including the specified subtree root.
+     * @param {HTMLElement} dom The subtree root
+     * @return {String} The serialized representation of the specified subtree
+     */
+    serializeSubTree: function (dom) {
+      /**
+       * Return noscript tag content since it is treated as a "text" by browser
+       * And when HTML is placed inside it, gets HTML encode which breaks the content
+       */
+
+      if(dom.nodeName === 'NOSCRIPT'){
+        return '<noscript>' + dom.innerHTML + '</noscript>';
+      }
+
+      var preHtml = this.beautifier(this.context, dom, true);
+      var html = '';
+      var nodeHtml = this.serializeNodeEnter(dom);
+      if (preHtml) {
+        if (preHtml.before) {
+          html = preHtml.before;
+        }
+        html += nodeHtml;
+        if (preHtml.after) {
+          html += preHtml.after;
+        }
+      }
+      else {
+        html = nodeHtml;
+      }
+      var childCnt = dom.childNodes.length;
+      for (var c = 0; c < childCnt; c++) {
+        html += this.serializeSubTree(dom.childNodes[c]);
+      }
+      nodeHtml = this.serializeNodeLeave(dom);
+      var postHtml = this.beautifier(this.context, dom, false);
+      if (postHtml) {
+        if (postHtml.before) {
+          html += postHtml.before;
+        }
+        html += nodeHtml;
+        if (postHtml.after) {
+          html += postHtml.after;
+        }
+      } else {
+        html += nodeHtml;
+      }
+      return html;
+    },
+
+    /**
+     * <p>Serializes the specified DOM (sub-) tree.</p>
+     * <p>Note that the specified DOM element itself doesn't get serialized.</p>
+     * @param {CUI.rte.EditContext} context The edit context
+     * @param {HTMLElement} dom The DOM (sub-) tree to serialize
+     * @return {String} The serialized representation of the DOM (sub-) tree
+     */
+    serialize: function (context, dom) {
+      this.context = context;
+      this.deepestChildAddHtml = null;
+      var html = '';
+      var childCnt = dom.childNodes.length;
+      for (var c = 0; c < childCnt; c++) {
+        html += this.serializeSubTree(dom.childNodes[c]);
+      }
+      return html;
+    }
+
+  });
+
+  /**
+   * Array containing (default) tags that should not have a closing tag in HTML
+   * @type String[]
+   * @private
+   */
+  CUI.rte.HtmlSerializer.NON_CLOSING_TAGS = ['br', 'hr', 'img', 'area', 'input', 'col'];
+
+  /**
+   * Array that defines helper attributes that will not be serialized
+   * @type String[]
+   * @private
+   */
+  CUI.rte.HtmlSerializer.HELPER_ATTRIBUTES = [
+    CUI.rte.Common.HREF_ATTRIB,
+    CUI.rte.Common.SRC_ATTRIB
+  ];
+
+  /**
+   * Object that defines the mapping of helper attributes
+   * @type Object
+   * @private
+   */
+  CUI.rte.HtmlSerializer.HELPER_ATTRIB_MAPPINGS = {
+    'a': ['href', CUI.rte.Common.HREF_ATTRIB],
+    'img': ['src', CUI.rte.Common.SRC_ATTRIB]
+  };
+
+  CUI.rte.HtmlSerializer.defaultBeautifier = function (context, dom, isNodeEnter) {
+    var com = CUI.rte.Common;
+    if (com.isTag(dom, com.BLOCK_TAGS)) {
+      if (isNodeEnter) {
+        if (!com.isTag(dom, com.EDITBLOCK_TAGS)) {
+          return {
+            'before': null,
+            'after': '\n'
+          };
+        }
+      } else {
+        return {
+          'before': null,
+          'after': '\n'
+        };
+      }
+      return null;
+    }
+    if (com.isTag(dom, com.EDITBLOCK_TAGS)) {
+      if (!isNodeEnter) {
+        return {
+          'before': null,
+          'after': '\n'
+        };
+      }
+      return null;
+    }
+    if (com.isTag(dom, 'br')) {
+      if (!isNodeEnter) {
+        // don't add \n if we have a Gecko/WebKit empty line placeholder
+        if (!com.ua.isIE) {
+          var editBlock = com.getTagInPath(context, dom, com.EDITBLOCK_TAGS);
+          if (editBlock) {
+            var contentNodes = com.getCharacterNodes(editBlock);
+            if (contentNodes.length === 1) {
+              return null;
+            }
+          }
+        }
+        return {
+          'before': null,
+          'after': '\n'
+        };
+      }
+    }
+    return null;
+  };
+
+  CUI.rte.HtmlSerializer.HTML_ENTITIES_MAP = {
+    '\u00ad': '&shy;',
+    '\u00a1': '&iexcl;',
+    '\u00a2': '&cent;',
+    '\u00a3': '&pound;',
+    '\u00a4': '&curren;',
+    '\u00a5': '&yen;',
+    '\u00a6': '&brvbar;',
+    '\u00a7': '&sect;',
+    '\u00a8': '&uml;',
+    '\u00a9': '&copy;',
+    '\u00aa': '&ordf;',
+    '\u00ab': '&laquo;',
+    '\u00ac': '&not;',
+    '\u00ae': '&reg;',
+    '\u00af': '&macr;',
+    '\u00b0': '&deg;',
+    '\u00b1': '&plusmn;',
+    '\u00b2': '&sup2;',
+    '\u00b3': '&sup3;',
+    '\u00b4': '&acute;',
+    '\u00b5': '&micro;',
+    '\u00b6': '&para;',
+    '\u00b7': '&middot;',
+    '\u00b8': '&cedil;',
+    '\u00b9': '&sup1;',
+    '\u00ba': '&ordm;',
+    '\u00bb': '&raquo;',
+    '\u00bc': '&frac14;',
+    '\u00bd': '&frac12;',
+    '\u00be': '&frac34;',
+    '\u00bf': '&iquest;',
+    '\u00d7': '&times;',
+    '\u00f7': '&divide;',
+    '\u0192': '&fnof;',
+    '\u2022': '&bull;',
+    '\u2026': '&hellip;',
+    '\u2032': '&prime;',
+    '\u2033': '&Prime;',
+    '\u203e': '&oline;',
+    '\u2044': '&frasl;',
+    '\u2118': '&weierp;',
+    '\u2111': '&image;',
+    '\u211c': '&real;',
+    '\u2122': '&trade;',
+    '\u2135': '&alefsym;',
+    '\u2190': '&larr;',
+    '\u2191': '&uarr;',
+    '\u2192': '&rarr;',
+    '\u2193': '&darr;',
+    '\u2194': '&harr;',
+    '\u21b5': '&crarr;',
+    '\u21d0': '&lArr;',
+    '\u21d1': '&uArr;',
+    '\u21d2': '&rArr;',
+    '\u21d3': '&dArr;',
+    '\u21d4': '&hArr;',
+    '\u2200': '&forall;',
+    '\u2202': '&part;',
+    '\u2203': '&exist;',
+    '\u2205': '&empty;',
+    '\u2207': '&nabla;',
+    '\u2208': '&isin;',
+    '\u2209': '&notin;',
+    '\u220b': '&ni;',
+    '\u220f': '&prod;',
+    '\u2211': '&sum;',
+    '\u2212': '&minus;',
+    '\u2217': '&lowast;',
+    '\u221a': '&radic;',
+    '\u221d': '&prop;',
+    '\u221e': '&infin;',
+    '\u2220': '&ang;',
+    '\u2227': '&and;',
+    '\u2228': '&or;',
+    '\u2229': '&cap;',
+    '\u222a': '&cup;',
+    '\u222b': '&int;',
+    '\u2234': '&there4;',
+    '\u223c': '&sim;',
+    '\u2245': '&cong;',
+    '\u2248': '&asymp;',
+    '\u2260': '&ne;',
+    '\u2261': '&equiv;',
+    '\u2264': '&le;',
+    '\u2265': '&ge;',
+    '\u2282': '&sub;',
+    '\u2283': '&sup;',
+    '\u2284': '&nsub;',
+    '\u2286': '&sube;',
+    '\u2287': '&supe;',
+    '\u2295': '&oplus;',
+    '\u2297': '&otimes;',
+    '\u22a5': '&perp;',
+    '\u22c5': '&sdot;',
+    '\u2308': '&lceil;',
+    '\u2309': '&rceil;',
+    '\u230a': '&lfloor;',
+    '\u230b': '&rfloor;',
+    '\u27e8': '&lang;',
+    '\u27e9': '&rang;',
+    '\u25ca': '&loz;',
+    '\u2660': '&spades;',
+    '\u2663': '&clubs;',
+    '\u2665': '&hearts;',
+    '\u2666': '&diams;',
+    '\u02c6': '&circ;',
+    '\u02dc': '&tilde;',
+    '\u2002': '&ensp;',
+    '\u2003': '&emsp;',
+    '\u2009': '&thinsp;',
+    '\u200c': '&zwnj;',
+    '\u200d': '&zwj;',
+    '\u200e': '&lrm;',
+    '\u200f': '&rlm;',
+    '\u2013': '&ndash;',
+    '\u2014': '&mdash;',
+    '\u2018': '&lsquo;',
+    '\u2019': '&rsquo;',
+    '\u201a': '&sbquo;',
+    '\u201c': '&ldquo;',
+    '\u201d': '&rdquo;',
+    '\u201e': '&bdquo;',
+    '\u2020': '&dagger;',
+    '\u2021': '&Dagger;',
+    '\u2030': '&permil;',
+    '\u2039': '&lsaquo;',
+    '\u203a': '&rsaquo;',
+    '\u20ac': '&euro;',
+    '\u00c0': '&Agrave;',
+    '\u00c1': '&Aacute;',
+    '\u00c2': '&Acirc;',
+    '\u00c3': '&Atilde;',
+    '\u00c4': '&Auml;',
+    '\u00c5': '&Aring;',
+    '\u00c6': '&AElig;',
+    '\u00c7': '&Ccedil;',
+    '\u00c8': '&Egrave;',
+    '\u00c9': '&Eacute;',
+    '\u00ca': '&Ecirc;',
+    '\u00cb': '&Euml;',
+    '\u00cc': '&Igrave;',
+    '\u00cd': '&Iacute;',
+    '\u00ce': '&Icirc;',
+    '\u00cf': '&Iuml;',
+    '\u00d0': '&ETH;',
+    '\u00d1': '&Ntilde;',
+    '\u00d2': '&Ograve;',
+    '\u00d3': '&Oacute;',
+    '\u00d4': '&Ocirc;',
+    '\u00d5': '&Otilde;',
+    '\u00d6': '&Ouml;',
+    '\u00d8': '&Oslash;',
+    '\u00d9': '&Ugrave;',
+    '\u00da': '&Uacute;',
+    '\u00db': '&Ucirc;',
+    '\u00dc': '&Uuml;',
+    '\u00dd': '&Yacute;',
+    '\u00de': '&THORN;',
+    '\u00df': '&szlig;',
+    '\u00e0': '&agrave;',
+    '\u00e1': '&aacute;',
+    '\u00e2': '&acirc;',
+    '\u00e3': '&atilde;',
+    '\u00e4': '&auml;',
+    '\u00e5': '&aring;',
+    '\u00e6': '&aelig;',
+    '\u00e7': '&ccedil;',
+    '\u00e8': '&egrave;',
+    '\u00e9': '&eacute;',
+    '\u00ea': '&ecirc;',
+    '\u00eb': '&euml;',
+    '\u00ec': '&igrave;',
+    '\u00ed': '&iacute;',
+    '\u00ee': '&icirc;',
+    '\u00ef': '&iuml;',
+    '\u00f0': '&eth;',
+    '\u00f1': '&ntilde;',
+    '\u00f2': '&ograve;',
+    '\u00f3': '&oacute;',
+    '\u00f4': '&ocirc;',
+    '\u00f5': '&otilde;',
+    '\u00f6': '&ouml;',
+    '\u00f8': '&oslash;',
+    '\u00f9': '&ugrave;',
+    '\u00fa': '&uacute;',
+    '\u00fb': '&ucirc;',
+    '\u00fc': '&uuml;',
+    '\u00fd': '&yacute;',
+    '\u00fe': '&thorn;',
+    '\u00ff': '&yuml;',
+    '\u0152': '&OElig;',
+    '\u0153': '&oelig;',
+    '\u0160': '&Scaron;',
+    '\u0161': '&scaron;',
+    '\u0178': '&Yuml;',
+    '\u0391': '&Alpha;',
+    '\u0392': '&Beta;',
+    '\u0393': '&Gamma;',
+    '\u0394': '&Delta;',
+    '\u0395': '&Epsilon;',
+    '\u0396': '&Zeta;',
+    '\u0397': '&Eta;',
+    '\u0398': '&Theta;',
+    '\u0399': '&Iota;',
+    '\u039a': '&Kappa;',
+    '\u039b': '&Lambda;',
+    '\u039c': '&Mu;',
+    '\u039d': '&Nu;',
+    '\u039e': '&Xi;',
+    '\u039f': '&Omicron;',
+    '\u03a0': '&Pi;',
+    '\u03a1': '&Rho;',
+    '\u03a3': '&Sigma;',
+    '\u03a4': '&Tau;',
+    '\u03a5': '&Upsilon;',
+    '\u03a6': '&Phi;',
+    '\u03a7': '&Chi;',
+    '\u03a8': '&Psi;',
+    '\u03a9': '&Omega;',
+    '\u03b1': '&alpha;',
+    '\u03b2': '&beta;',
+    '\u03b3': '&gamma;',
+    '\u03b4': '&delta;',
+    '\u03b5': '&epsilon;',
+    '\u03b6': '&zeta;',
+    '\u03b7': '&eta;',
+    '\u03b8': '&theta;',
+    '\u03b9': '&iota;',
+    '\u03ba': '&kappa;',
+    '\u03bb': '&lambda;',
+    '\u03bc': '&mu;',
+    '\u03bd': '&nu;',
+    '\u03be': '&xi;',
+    '\u03bf': '&omicron;',
+    '\u03c0': '&pi;',
+    '\u03c1': '&rho;',
+    '\u03c2': '&sigmaf;',
+    '\u03c3': '&sigma;',
+    '\u03c4': '&tau;',
+    '\u03c5': '&upsilon;',
+    '\u03c6': '&phi;',
+    '\u03c7': '&chi;',
+    '\u03c8': '&psi;',
+    '\u03c9': '&omega;',
+    '\u03d1': '&thetasym;',
+    '\u03d2': '&upsih;',
+    '\u03d6': '&piv;',
+    '\u0027': '&#39;'
+  };
+
+}(window.CUI));

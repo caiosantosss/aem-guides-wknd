@@ -1,0 +1,614 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function ($, ns, channel, document, window) {
+    "use strict";
+
+    var FILEUPLOAD_EVENT_NAMESPACE = ".fileupload";
+    var _thumbnailSelector = "[data-cq-fileupload-thumbnail-img]";
+    var _editButtonSelector = ".cq-FileUpload-edit";
+    var _isActiveClass = "is-active";
+    var _isFilledClass = "is-filled";
+    var _isInitializedClass = "fileupload-is-initialized";
+    var _imageEditorFields = ["imageMap", "imageCrop", "imageRotate"];
+    var _fileDeleteParam = "@Delete";
+    var _additionalImageEditorClass = 'cq-ImageEditor-param';
+
+    /**
+     * Returns the value carried by the design resource
+     *
+     * @param {HTMLElement} element     - The DOM element representing the fileUpload
+     * @param {String} propertyName     - The property name
+     * @returns {boolean|null}
+     */
+    function getPropertyFromDesign(element, propertyName) {
+        // In case the dialog has been opened outside of the Editor context, be conservative and restrict the upload
+        if (!ns.author) {
+            return null;
+        }
+
+        var $dataElement = $(element).closest("form.cq-dialog");
+
+        if ($dataElement.length < 1) {
+            return null;
+        }
+
+        var contentPath = $dataElement.attr("action").replace("_jcr_content", "jcr:content");
+        contentPath = Granite.HTTP.internalize(contentPath);
+
+        if (!contentPath || contentPath.length < 1) {
+            return null;
+        }
+
+        var editables = ns.author.editables.find(contentPath);
+
+        if (editables && editables.length > 0) {
+            return ns.author.editableHelper.getStyleProperty(editables[0], propertyName);
+        }
+      return null;
+    }
+
+    // CQ-103855
+    function open(url) {
+        var winMode = $("meta[name='user.preferences.winmode']").attr("content");
+
+        if (winMode === "single") {
+            window.location.href = url;
+        } else {
+            window.open(url);
+        }
+    }
+
+    /**
+     * Sets focus to a non-interactive element or image,
+     * adding tabIndex as needed, and removing the added tabIndex on blur.
+     *
+     * @param {HTMLElement} thumbnail - The DOM element or jQuery element to receive focus
+     */
+    function tempFocusThumbnailElement(thumbnail) {
+        thumbnail = $(thumbnail);
+        if (!thumbnail[0].hasAttribute('tabindex')) {
+            thumbnail.attr("tabindex", "-1");
+            thumbnail.on("blur.temporaryFocus", function() {
+                thumbnail.removeAttr("tabindex");
+                thumbnail.off("blur.temporaryFocus");
+            });
+        }
+        thumbnail.focus();
+    }
+
+    /**
+     * Creates a new File Upload component
+     *
+     * @param {{}} config                      - Configuration object
+     * @param {HTMLElement} config.element     - The File Upload element
+     * @param {boolean} [config.allowUpload]   - Should the component allow uploading files from the file system
+     * @param {boolean} [config.allowDrop]     - Should the component allow dropping assets from the side rail
+     * @constructor
+     */
+    var FileUpload = function (config) {
+        var self = this;
+
+        self._element = config.element;
+        self._$element = $(config.element);
+        self._element.classList.add(_isInitializedClass);
+
+        var $fileInput = self._$element.find("input[type=file]");
+        var filename = $fileInput.attr('name');
+        var path = filename.substr(0, filename.lastIndexOf("/")) || "";
+        if (path !== "") {
+            path += "/";
+        }
+        self.path = path;
+
+        // Allow File upload by default unless it is not explicitly disabled
+        if (config.allowUpload == null) {
+            // Configuration at the dialog resource level
+            self._allowUpload = self._element.hasAttribute("data-cq-fileupload-allowupload");
+        } else {
+            if (typeof config.allowUpload === "string") {
+                config.allowUpload = config.allowUpload === "true";
+            }
+            // Configuration provided by the constructor
+            self._allowUpload = config.allowUpload;
+        }
+
+        // Allow Asset drop by default unless it is not explicitly disabled
+        if (config.allowDrop == null) {
+            // Configuration at the dialog resource level
+            self._allowDrop = self._element.hasAttribute("data-cq-fileupload-allowdrop");
+        } else {
+            if (typeof config.allowDrop === "string") {
+                config.allowDrop = config.allowDrop === "true";
+            }
+            // Configuration provided by the constructor
+            self._allowDrop = config.allowDrop;
+        }
+
+        if (!self._element.action) {
+            self._element.action = self._$element.closest("form.cq-dialog").attr("action");
+        }
+
+        // Avoid sending hidden inputs as additional parameters for the temporary upload
+        self._element.parameters = [];
+
+        self._inputs = [];
+        self._$element.find("input[type='hidden'][data-cq-fileupload-parameter]").each(function() {
+            var key = this.getAttribute("data-cq-fileupload-parameter");
+            self._inputs[key] = this;
+        });
+
+        self._removeDuplicateHiddenInputs();
+        self._bindEvents();
+
+        if(self._hasImageMimeType()) {
+            self._addImageEditorFields();
+        }
+    };
+
+    /** @private */
+    FileUpload.prototype._appendHiddenInput = function (name, config) {
+        var $input = this._$element.closest("form").find(`input[name='${name}']`);
+
+        if ($input.length === 0) {
+            $input = $("<input type='hidden'/>").attr("name", name);
+            if(config.hasOwnProperty("class")) {
+                $input.attr("class", config['class']);
+            }
+            this._element.appendChild($input[0]);
+        } else if ($input.closest(this._element).length === 0) {
+            return null; // there is a duplicate input elsewhere in the form
+        }
+
+        this._updateHiddenInput($input[0], config);
+
+        return $input[0];
+    };
+
+    /** @private */
+    FileUpload.prototype._updateHiddenInput = function (element, config) {
+        if (element === undefined) {
+            return;
+        }
+
+        if (config !== undefined) {
+            if (config.value !== undefined) {
+                element.setAttribute("value", config.value);
+            }
+
+            if (config.disabled) {
+                $(element).prop("disabled", true);
+            } else if (config.disabled === false) {
+                $(element).removeProp("disabled");
+            }
+        }
+    };
+
+    /** @private */
+    FileUpload.prototype._removeDuplicateHiddenInputs = function () {
+        var self = this;
+        var $inputs = self._$element.find("input[type='hidden']");
+
+        $inputs.each(function() {
+            var $foundInputs = self._$element.closest("form").find(`input[name='${this.getAttribute("name")}']`);
+            if ($foundInputs.length > 1) {
+                this.parentNode.removeChild(this);
+            }
+        });
+    };
+
+    /** @private */
+    FileUpload.prototype._addParamInputs = function(params) {
+        var i;
+
+        if (typeof(params) === "string") {
+            try {
+                params = JSON.parse(params);
+            } catch (e) {
+            }
+        }
+
+        if (typeof(params) === "object") {
+            for (i in params) {
+                if (params.hasOwnProperty(i)) {
+                    var input = this._appendHiddenInput(i, {
+                        value: params[i],
+                        disabled: false
+                    });
+                    if (input) {
+                        input.setAttribute("data-cq-fileupload-parameter", "additional");
+                    }
+                }
+            }
+        }
+    };
+
+    /** @private */
+    FileUpload.prototype._removeAdditionalSlingParamHiddenInputs = function () {
+        this._$element.find("[data-cq-fileupload-parameter='additional']").remove();
+    };
+
+    /** @private */
+    FileUpload.prototype._bindEvents = function () {
+        var self = this;
+
+        self._$element.find("[coral-fileupload-clear]").on("click", function () {
+            handleClickEvent(self);
+        });
+
+        // authoring drop controller e.g. drag and drop from asset finder
+        self._$element.on("assetselected", function (event) {
+            handleAssesselectedEvent(self, event);
+        });
+
+        // Following feature is hard to test with unit tests as it depends
+        // on many internal Granite which need to be mock, then breaking the Granite itself.
+        self._$element.find(".cq-FileUpload-picker").on("click", function(event) {
+          handlePickerClickEvent(self, event);
+        });
+
+
+
+        if (self._allowUpload) {
+            // file added from the file system
+            self._element.on("coral-fileupload:fileadded", function (event) {
+              handleFileAddedEvent(self, event);
+            });
+
+            // temporary file uploaded with success
+            self._element.on("coral-fileupload:load", function (event) {
+              handleLoadEvent(self, event);
+            });
+
+            channel.off(`dialog-closed${FILEUPLOAD_EVENT_NAMESPACE}`).one(`dialog-closed${FILEUPLOAD_EVENT_NAMESPACE}`, function () {
+                if (self._temporaryFileUploaded) {
+                    self._deleteTemporaryFileUpload();
+                }
+            });
+
+            channel.off(`dragover${FILEUPLOAD_EVENT_NAMESPACE}`).on(`dragover${FILEUPLOAD_EVENT_NAMESPACE}`, function(event) {
+                if (event.originalEvent.dataTransfer && event.originalEvent.dataTransfer.files) {
+                    self._element.classList.add(_isActiveClass);
+                }
+            })
+                .off(`dragleave${FILEUPLOAD_EVENT_NAMESPACE}`).on(`dragleave${FILEUPLOAD_EVENT_NAMESPACE}`, function() {
+                self._element.classList.remove(_isActiveClass);
+            });
+
+            self._element._elements.input.removeAttribute("aria-hidden");
+        } else {
+            self._element._elements.input.setAttribute("aria-hidden", "true");
+        }
+    };
+
+    /**
+     * Sends a delete operation to remove the temporary file upload
+     * @returns $.Deferred
+     * @private
+     */
+    FileUpload.prototype._deleteTemporaryFileUpload = function () {
+        var data = {};
+
+        data[this._element.getAttribute("data-cq-fileupload-temporaryfiledelete")] = true;
+        $.post(this._element.action, data);
+    };
+
+    /** @private */
+    FileUpload.prototype._isMimeTypeAllowed = function (mimeType)  {
+        var isAllowed = false;
+        var mimeTypes = this._element.accept.split(",");
+
+        if (mimeTypes === "") {
+            return true;
+        }
+
+        mimeTypes.some(function (allowedMimeType) {
+            // we also check strings equality in case the mime type contains regex special characters (e.g. "image/svg+xml")
+            if (allowedMimeType === mimeType || allowedMimeType === "*" || (new RegExp(allowedMimeType)).test(mimeType)) {
+                isAllowed = true;
+                return true;
+            }
+          return false;
+        });
+
+        return isAllowed;
+    };
+
+    /** @private */
+    FileUpload.prototype._hasImageMimeType = function() {
+        var mimeTypes = this._element.accept.split(",");
+        var hasImageMimeType = false;
+
+        for (var i = 0; i < mimeTypes.length; i++) {
+            hasImageMimeType = mimeTypes[i].match("image/*");
+
+            if (hasImageMimeType) {
+                break;
+            }
+        }
+
+        return hasImageMimeType;
+    };
+
+    FileUpload.prototype._addImageEditorFields = function() {
+        var self = this;
+        _imageEditorFields.forEach(function (item) {
+            self._appendHiddenInput(`${self.path}${item}${_fileDeleteParam}`, {
+                "class": _additionalImageEditorClass,
+                disabled: true,
+                value: ""
+            });
+        });
+    };
+
+    channel.on("foundation-contentloaded", function (event) {
+        $(event.target).find("coral-fileupload.cq-FileUpload").each(function() {
+            Coral.commons.ready(this, function (fileUpload) {
+                if (!fileUpload.classList.contains(_isInitializedClass)) {
+                    new FileUpload({
+                        element: fileUpload,
+                        allowUpload: getPropertyFromDesign(fileUpload, "allowUpload"),
+                        allowDrop: getPropertyFromDesign(fileUpload, "allowDrop")}
+                    );
+                }
+            });
+        });
+    });
+
+
+
+    channel.off(`click${FILEUPLOAD_EVENT_NAMESPACE}`, _editButtonSelector).on(`click${FILEUPLOAD_EVENT_NAMESPACE}`, _editButtonSelector, function (event) {
+        // "cq-FileUpload-edit" button is only present if the fileupload holds a fileReference
+        var $target = $(event.currentTarget);
+        var fileReference = $target.data("cqFileuploadFilereference");
+        var viewInAdminURI = $target.data("cqFileuploadViewinadminuri");
+        var url = Granite.URITemplate.expand(viewInAdminURI, {
+            item: fileReference
+        });
+        if(url.startsWith("/") || url.startsWith("http")){
+            open(Granite.HTTP.externalize(url));
+        } else {
+            console.warn(`Opening URL was blocked. Suspicious URL was detected (${url})`);
+        }
+    });
+
+    function handleClickEvent(self) {
+      self._updateHiddenInput(self._inputs["filename"], { value: "", disabled: false });
+      self._updateHiddenInput(self._inputs["filereference"], { value: "", disabled: false });
+      self._$element.find(`.${_additionalImageEditorClass}`).removeAttr("disabled").val("true");
+      self._updateHiddenInput(self._inputs["filedelete"], { value: "true", disabled: false });
+      self._updateHiddenInput(self._inputs["filemovefrom"], { value: "", disabled: true });
+      self._removeAdditionalSlingParamHiddenInputs();
+
+      if (self._allowDrop) {
+        self._element.classList.remove(_isFilledClass);
+      }
+      self._$element.find(_thumbnailSelector).empty();
+
+      self._$element.find(".cq-FileUpload-picker.cq-FileUpload-icon").focus();
+    }
+
+  function handleAssesselectedEvent(self, event) {
+    if (self._element.disabled) {
+      return;
+    }
+
+    if (!self._isMimeTypeAllowed(event.mimetype)) {
+      return;
+    }
+
+    self._removeAdditionalSlingParamHiddenInputs();
+    self._updateHiddenInput(self._inputs["filereference"], { value: event.path, disabled: false });
+    self._updateHiddenInput(self._inputs["filedelete"], { value: "false", disabled: true });
+    self._$element.find(`.${_additionalImageEditorClass}`).prop("disabled", true).val("");
+    self._updateHiddenInput(self._inputs["filemovefrom"], { value: "false" });
+    self._addParamInputs(event.param);
+
+    self._element.classList.add(_isFilledClass);
+    self._$element.find(_thumbnailSelector).empty().append(event.thumbnail);
+
+    self._$element.trigger("change");
+
+    // enable "edit" button since the asset is available in DAM
+    self._$element.find(_editButtonSelector)
+      .data("cqFileuploadFilereference", event.path)
+      .prop("disabled", false);
+
+    tempFocusThumbnailElement(event.thumbnail);
+  }
+
+  function handlePickerClickEvent(self, event) {
+    event.preventDefault();
+
+    var control = $(this);
+    var state = getState(control);
+
+    if (state.loading) {
+        return;
+    }
+
+    if (state.el) {
+        if (state.open) {
+            state.api.cancel();
+            cancel(control, state);
+        } else {
+            show(self, control, state);
+        }
+    } else {
+        var src = "/mnt/overlay/granite/ui/content/coral/foundation/form/pathfield/picker.html" +
+          "?_charset_=utf-8&path=%2fcontent%2fdam&root=%2fcontent%2fdam&filter=hierarchyNotFile&selectionCount=single";
+        if (!src) {
+            return;
+        }
+
+        state.loading = true;
+
+        $.ajax({
+            url: src,
+            cache: false
+        }).then(function(html) {
+            return $(window).adaptTo("foundation-util-htmlparser").parse(html);
+        }).then(function(fragment) {
+            return $(fragment).children()[0];
+        }).then(function(pickerEl) {
+            state.loading = false;
+            state.el = pickerEl;
+            state.api = $(pickerEl).adaptTo("foundation-picker");
+            show(self, control, state);
+        }, function() {
+            state.loading = false;
+        });
+    }
+  }
+
+  function handleFileAddedEvent(self, event) {
+    self._removeAdditionalSlingParamHiddenInputs();
+    var $form = self._$element.closest("form");
+    if (self._hasImageMimeType() && $form) {
+      var editablePath = $form.attr("action").replace("_jcr_content", "jcr:content");
+      if (ns.author && ns.author.editables) {
+        var editables = ns.author.editables.find(editablePath);
+        if (editables.length > 0 && typeof editables[0].getDropTarget === "function") {
+          var dropTarget = editables[0].getDropTarget("image");
+          if (dropTarget) {
+            self._addParamInputs(dropTarget.params);
+          }
+        }
+      }
+    }
+
+    var $fileInput = self._$element.find("input[type=file]");
+    var item = event.detail.item;
+    var filename = item.file.name;
+    var prevName = $fileInput.attr("name");
+    var temporaryFileName = self._element.getAttribute("data-cq-fileupload-temporaryfilename");
+
+    $fileInput.attr("name", temporaryFileName);
+    self._element.upload(filename);
+    $fileInput.attr("name", prevName);
+    self._$element.trigger("change");
+
+    // disable "edit" button since the asset isn't available in DAM
+    self._$element.find(_editButtonSelector).prop("disabled", true);
+  }
+
+  function handleLoadEvent(self, event) {
+    var $thumbnail = self._$element.find(_thumbnailSelector);
+    var file = event.detail.item._originalFile;
+
+    $thumbnail.empty();
+
+    if (file.type.indexOf("image") !== -1) {
+      (function ($thumbImage, reader) {
+        reader.onload = function (e) {
+          $thumbnail.empty();
+          var $img = $("<img/>").attr({ "src": e.target.result, "alt": file.name || Granite.I18n.get("Thumbnail asset rendition") });
+          $thumbImage.append($img);
+          tempFocusThumbnailElement($img);
+        };
+
+        reader.readAsDataURL(file);
+      }($thumbnail, new FileReader()));
+    } else {
+      var $message = $(`<p>${file.name}</p>`);
+      $thumbnail.append($message);
+      tempFocusThumbnailElement($message);
+    }
+
+    var temporaryFilePath = self._element.getAttribute("data-cq-fileupload-temporaryfilepath");
+    self._updateHiddenInput(self._inputs["filename"], { value: file.name, disabled: false });
+    self._updateHiddenInput(self._inputs["filereference"], { value: "", disabled: false });
+    self._updateHiddenInput(self._inputs["filedelete"], { disabled: true });
+    self._updateHiddenInput(self._inputs["filemovefrom"], { value: temporaryFilePath, disabled: false });
+    self._$element.find(`.${_additionalImageEditorClass}`).removeAttr("disabled").val("true");
+    self._temporaryFileUploaded = true;
+    self._element.classList.add(_isFilledClass);
+    self._element.classList.remove(_isActiveClass);
+  }
+
+  function getState(control) {
+    var KEY_STATE = "fileupload-picker.internal.state";
+    var state = control.data(KEY_STATE);
+
+    if (!state) {
+      state = {
+        el: null,
+        open: false,
+        loading: false
+      };
+      control.data(KEY_STATE, state);
+    }
+
+    return state;
+  }
+  function show(self, control, state) {
+    state.api.attach(this);
+
+    state.api.pick(control[0], []).then(function (selections) {
+      state.api.detach();
+      state.open = false;
+
+      handleSelections(self, control, state, selections);
+    }, function () {
+      cancel(control, state);
+    });
+
+    if ("focus" in state.api) {
+      state.api.focus(last);
+    } else {
+      state.el.focus();
+    }
+
+    state.open = true;
+  }
+
+  function cancel(control, state) {
+    state.api.detach();
+    state.open = false;
+  }
+
+  function handleSelections(self, control, state, selections) {
+    var API_ASSETS = "/api/assets";
+    var ASSETS_PREFIX = "/content/dam";
+    var assetPath = selections[0].value;
+    var jsonAssetPath = assetPath.substring(ASSETS_PREFIX.length);
+
+    $.get(`${API_ASSETS}${jsonAssetPath}.json`)
+        .done(function (data) {
+            if (!data.properties || !data.properties.metadata || !data.properties.metadata['dc:format']) {
+                return;
+            }
+
+            var thumbnailLink = data.links.find(function (elem) {
+                return elem.rel.includes('thumbnail');
+            });
+
+            var assetSelectedEvent = jQuery.Event("assetselected");
+            assetSelectedEvent.path = assetPath;
+            assetSelectedEvent.mimetype = data.properties.metadata['dc:format'];
+
+            if (thumbnailLink === undefined) {
+                thumbnailLink = {};
+                thumbnailLink.href = Granite.HTTP.externalize(Granite.HTTP.getContextPath() + assetPath + ".thumb.319.319.png?ck=" + new Date().getTime());
+            }
+
+            assetSelectedEvent.thumbnail = $("<img/>").attr(
+                {"src": thumbnailLink ? thumbnailLink.href : assetPath + ".thumb.319.319.png", "alt": data.properties.metadata['dc:title'] || data.properties.name});
+            self._$element.trigger(assetSelectedEvent);
+        });
+}
+
+}(Granite.$, Granite, jQuery(document), document, this));

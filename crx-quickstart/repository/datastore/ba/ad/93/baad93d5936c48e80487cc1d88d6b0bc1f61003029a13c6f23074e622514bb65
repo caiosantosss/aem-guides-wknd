@@ -1,0 +1,623 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * This is the base class for all charts that display series of ("over time") data (and that
+ * are based on Raphael).
+ * @class CQ.reports.SeriesBasedChart
+ * @extends CQ.reports.charts.RaphaelChart
+ */
+CQ.reports.charts.SeriesBasedChart = CQ.Ext.extend(CQ.reports.charts.RaphaelChart, {
+
+    /**
+     * Flag that determines if data is available.
+     * @private
+     * @type Boolean
+     */
+    hasData: false,
+
+    /**
+     * Flag that determines if loading data has failed before (to avoid subsequent load
+     * trials)
+     * @private
+     * @type Boolean
+     */
+    isLoadError: false,
+
+    /**
+     * The data series.
+     * @private
+     * @type CQ.reports.charts.SnapshotSeries
+     */
+    series: null,
+
+    /**
+     * Array containing legend labels if the chart has a legend created using
+     * {@link #createSeriesLegend}
+     * @private
+     * @type Array
+     */
+    gLabels: null,
+
+    /**
+     * Number of series to display; defaults to 9
+     * @private
+     * @type Number
+     */
+    seriesCnt: 0,
+
+    /**
+     * The panel to be used for configuring the period of time to be displayed
+     * @type CQ.Ext.Panel
+     * @private
+     */
+    configPanel: null,
+
+    /**
+     * The element that holds the config panel
+     * @type CQ.Ext.Element
+     * @private
+     */
+    configPanelEl: null,
+
+    /**
+     * The padding (right margin) to be used for the config panel
+     * @type Number
+     * @private
+     */
+    configPanelPadding: 10,
+
+    /**
+     * Attributes to be used for drawing the popup
+     * @private
+     */
+    popupAttribs: {
+            "font-family": "Tahoma, Arial, sans-serif",
+            "font-size": "12px",
+            "text-anchor": "start",
+            "fill": "#fff"
+        },
+
+    /**
+     * The maximum number of values to be hovered
+     * @type Number
+     * @private
+     */
+    hoverLimit: 0,
+
+    /**
+     * The chart's current configuration
+     * @private
+     */
+    chartConfig: null,
+
+    constructor: function(chartDef, report) {
+        CQ.reports.charts.SeriesBasedChart.superclass.constructor.call(this, chartDef,
+                report, CQ.I18n.getMessage("Historic data"));
+        var now = new Date();
+        var from = now.add(Date.MONTH, -1).add(Date.DAY, 1);
+        this.chartConfig = {
+                "from": this.createDateStamp(from),
+                "to": this.createDateStamp(now),
+                "aggregation": "day"
+            };
+    },
+
+    // overrides CQ.reports.RaphaelChart#render
+    render: function(parentEl, initialSize) {
+        CQ.reports.charts.SeriesBasedChart.superclass.render.call(this, parentEl,
+                initialSize);
+        this.configPanelEl = CQ.Ext.get(CQ.Ext.DomHelper.append(parentEl, {
+                "tag": "div",
+                "style": "position: absolute; top: 0; left: 0; visibility: hidden;"
+            }));
+        var now = new Date();
+        var fdow = this.report.getFirstDayOfWeek() - 1;
+        this.isNarrowVersion = (initialSize[0] < 450);
+        // automatic width determination fails on IE, hence provoiding explicit widths for
+        // each component
+        var items = [ ];
+        if (!this.isNarrowVersion) {
+            items.push({
+                    "xtype": "static",
+                    "text": CQ.I18n.getMessage("Period"),
+                    "cls": "cq-reports-chart-daterange",
+                    "width": 40
+                });
+        }
+        items.push({
+                "xtype": "datefield",
+                "itemId": "from",
+                "id": "from",
+                "width": 96,
+                "maxValue": now,
+                "vtype": "daterange",
+                "endDateField": "to",
+                "startDay": fdow
+            }, {
+                "xtype": "datefield",
+                "itemId": "to",
+                "id": "to",
+                "width": 96,
+                "maxValue": now,
+                "vtype": "daterange",
+                "startDateField": "from",
+                "startDay": fdow
+            });
+        if (!this.isNarrowVersion) {
+            items.push({
+                    "xtype": "static",
+                    "text": CQ.I18n.getMessage("Interval"),
+                    "cls": "cq-reports-chart-daterange",
+                    "width": 60
+                });
+        }
+        items.push({
+                "xtype": "selection",
+                "type": "select",
+                "itemId": "agginterval",
+                "width": 72,
+                "options": [ {
+                            "value": "month",
+                            "text": CQ.I18n.getMessage("Month")
+                        }, {
+                            "value": "week",
+                            "text": CQ.I18n.getMessage("Week")
+                        }, {
+                            "value": "day",
+                            "text": CQ.I18n.getMessage("Day")
+                        }, {
+                            "value": "hour",
+                            "text": CQ.I18n.getMessage("Hour")
+                        }
+                    ]
+            });
+        if (!this.isNarrowVersion) {
+            items.push({
+                    "xtype": "static",
+                    "html": "&nbsp;",
+                    "width": 10
+                });
+        }
+        items.push({
+                "xtype": "button",
+                "text": CQ.I18n.getMessage("Go"),
+                "width": 30,
+                "handler": function() {
+                        var items = this.configPanel.items;
+                        this.chartConfig.from = this.createDateStamp(
+                            items.get("from").getValue());
+                        this.chartConfig.to = this.createDateStamp(
+                            items.get("to").getValue());
+                        this.chartConfig.aggregation = items.get("agginterval")
+                            .getValue();
+                        this.invalidateSeries();
+                        this.update();
+                    }.createDelegate(this)
+            });
+        var totalWidth = 0;
+        var itemCnt = items.length;
+        for (var i = 0; i < itemCnt; i++) {
+            if (items[i].width) {
+                totalWidth += items[i].width;
+            }
+        }
+        this.configPanel = new CQ.Ext.Panel({
+                "layout": "column",
+                "border": false,
+                "width": totalWidth,
+                "items": items
+            });
+        this.configPanel.render(this.configPanelEl);
+        this.adjustConfigPanelSize(initialSize[0]);
+        this.configPanelEl.setVisible(true);
+        this.adjustToChartConfig();
+    },
+
+    /**
+     * Gets a suitable datestamp for the specified date.
+     * @param {Date} date The date
+     * @return {String} The date stamp (yyyymmdd)
+     */
+    createDateStamp: function(date) {
+        return String(date.getFullYear() * 10000
+                + (date.getMonth() + 1) * 100
+                + date.getDate());
+    },
+
+    /**
+     * Gets a suitable Date object for the specified date stamp.
+     * @param {String} dateStamp The date stamp
+     * @return {Date} The date
+     */
+    createDate: function(dateStamp) {
+        if (typeof(dateStamp) != "string") {
+            dateStamp = String(dateStamp);
+        }
+        var year = parseInt(dateStamp.substring(0, 4), 10);
+        var month = parseInt(dateStamp.substring(4, 6), 10) - 1;
+        var day = parseInt(dateStamp.substring(6, 8), 10);
+        return new Date(year, month, day);
+    },
+
+    /**
+     * Draws the chart.
+     */
+    drawChart: function() {
+        // must be overridden by specific chart implementation
+    },
+
+    /**
+     * Common wrapper for drawChart.
+     * @private
+     */
+    drawChartBase: function() {
+        this.chartCanvas.clear();
+        this.drawChartTitle();
+        if (this.hasData && (this.series != null)) {
+            if (this.series.hasData()) {
+                try {
+                    this.drawChart();
+                } catch (e) {
+                    CQ.Log.error(e);
+                }
+            } else {
+                this.handleNoData();
+            }
+        } else {
+            if (!this.isLoadError) {
+                this.handleNoData();
+            } else {
+                this.handleLoadFailure();
+            }
+        }
+    },
+
+    createSnapshotUI: function(parentEl) {
+        this.removeSnapshotUI();
+        this.snapshotPanel = new CQ.reports.ui.SnapshotEnabler(this.report, this.height,
+                this.padding);
+        this.snapshotPanel.on("selected", function() {
+                this.update();
+            }, this);
+        this.snapshotPanel.render(parentEl);
+    },
+
+    removeSnapshotUI: function() {
+        if (this.snapshotPanel != null) {
+            this.snapshotPanel.removeAll(true);
+            this.snapshotPanel.destroy();
+            this.snapshotPanel = null;
+        }
+    },
+
+    handleNoData: function() {
+        var msgText;
+        if ((this.series == null) && !this.report.isSnapshotActive()) {
+            var parentEl = CQ.Ext.get(this.parentDom);
+            this.createSnapshotUI(parentEl);
+            this.configPanel.hide();
+        } else {
+            this.removeSnapshotUI();
+            this.configPanel.show();
+            msgText = CQ.I18n.getMessage("No data available for the selected period of time.");
+            this.chartCanvas.text(Math.round(this.width / 2), Math.round(this.height / 2),
+                    msgText).attr(this.txtAttribs);
+        }
+    },
+
+    handleLoadFailure: function() {
+        this.chartCanvas.text(Math.round(this.width / 2), Math.round(this.height / 2),
+                CQ.I18n.getMessage("Could not load snapshots.")).attr(this.txtAttribs);
+    },
+
+    createSeriesLegend: function(x, y, resolver, opts, enterFn, leaveFn, isTopAligned) {
+        if (this.series != null) {
+            var labels = this.series.getSeriesName();
+            var h = y + 10 + this.yOffs;
+            var ch = 0;
+            var txt;
+            var lineHeight = opts.lineHeight || 16;
+            var mark = opts.mark || "disc";
+            this.gLabels = this.chartCanvas.set();
+            var covers = this.chartCanvas.set();
+            for (var i = 0; i < labels.length; i++) {
+                var group = this.chartCanvas.set();
+                this.gLabels.push(group);
+                group.push(this.chartCanvas.g[mark](x + 5, h, 5).attr(resolver(i)));
+                group.push(
+                        txt = this.chartCanvas.text(x + 20, h  + opts.legendYOffs,
+                                labels[i])
+                        .attr(this.chartCanvas.g.txtattr)
+                        .attr({fill: "#000", "text-anchor": "start"}));
+                var tlh = lineHeight || ((txt.getBBox() || 12) * 1.2);
+                var bounds = group.getBBox();
+                var lblCover = this.chartCanvas.rect(bounds.x, bounds.y, bounds.width,
+                        bounds.height);
+                lblCover.attr({
+                        "fill": "#ffffff",
+                        "opacity": 0.0,
+                        "stroke-width": 0
+                    });
+                lblCover.series = i;
+                lblCover.label = group[1];
+                lblCover.group = group;
+                lblCover.hover(function() {
+                        if (enterFn) {
+                            if (this.label) {
+                                this.label.attr( {"font-weight": 800} );
+                                var bbox = this.group.getBBox();
+                                this.attr({ "width": bbox.width });
+                            }
+                            enterFn(this.series);
+                        }
+                    }, function() {
+                        if (leaveFn) {
+                            if (this.label) {
+                                this.label.attr( {"font-weight": 400} );
+                                var bbox = this.group.getBBox();
+                                this.attr({ "width": bbox.width });
+                            }
+                            leaveFn(this.series);
+                        }
+                    });
+                covers.push(lblCover);
+                h += tlh;
+                ch += tlh;
+            }
+            if (isTopAligned !== true) {
+                this.gLabels.translate.apply(this.gLabels, [0, -ch / 2]);
+                covers.translate.apply(covers, [0, -ch / 2]);
+            }
+        }
+    },
+
+    // overrides CQ.reports.Chart#update
+    update: function() {
+        this.chartCanvas.clear();
+        if (this.hasData) {
+            this.drawChartBase();
+        } else if (!this.isLoadError) {
+            this.loadChartData();
+        }
+    },
+
+    // overrides CQ.reports.Chart#clear
+    clear: function() {
+        // snapshot-based charts work differently - so we'll update the chart nevertheless
+        this.update();
+    },
+
+    /**
+     * Loads chart data from the server.
+     */
+    loadChartData: function() {
+        var url = this.report.getSnapshotDataUrl();
+        var prms = "?from=" + this.chartConfig.from;
+        prms += "&to=" + this.chartConfig.to;
+        prms += "&aggr=" + this.chartConfig.aggregation;
+        url += prms;
+        CQ.HTTP.get(url, function(options, success, response) {
+                if (success) {
+                    var chartData = CQ.Util.formatData(CQ.Ext.util.JSON.decode(
+                            response.responseText));
+                    if (chartData.success) {
+                        this.onLoadSuccess(chartData);
+                    } else {
+                        this.onLoadFailure();
+                    }
+                } else {
+                    this.onLoadFailure();
+                }
+            }, this);
+    },
+
+    onLoadSuccess: function(result) {
+        if (result != null) {
+            var snapshots = result.snapshots;
+            var scale = result.scale;
+            if (snapshots && scale) {
+                this.series = new CQ.reports.charts.SnapshotSeries(snapshots, scale,
+                        this.totals && (this.totals === true), this.seriesCnt);
+            } else {
+                this.series = null;
+            }
+            this.getChartInformation(result);
+        } else {
+            this.series = null;
+            this.title = CQ.I18n.getMessage("Historic data");
+            this.description = null;
+        }
+        this.hasData = true;
+        this.isLoadError = false;
+        this.drawChartBase();
+    },
+
+    /**
+     * Gets data required for displaying information of historic charts.
+     * @private
+     */
+    getChartInformation: function(result) {
+        this.title = (result.title ? CQ.I18n.getVarMessage(result.title)
+                : CQ.I18n.getMessage("Historic data"));
+        if (result.descr) {
+            this.description = CQ.I18n.getVarMessage(result.descr);
+        } else if (this.series != null) {
+            var dataCol = this.series.typeInfo.data[0].title;
+            var groupedCols = "";
+            var grouped = this.series.typeInfo.grouped;
+            for (var g = 0; g < grouped.length; g++) {
+                if (g > 0) {
+                    groupedCols += ", ";
+                }
+                groupedCols += "'" + CQ.I18n.getVarMessage(grouped[g].title) + "'";
+            }
+            this.description = CQ.I18n.getMessage("This report shows data taken from the<br />'{0}' column, grouped by<br />{1}.", [ dataCol, groupedCols ]);
+        }
+    },
+
+    /**
+     * @private
+     */
+    onLoadFailure: function() {
+        this.series = null;
+        this.title = CQ.I18n.getMessage("Historic data");
+        this.description = null;
+        this.hasData = false;
+        this.isLoadError = true;
+        this.drawChartBase();
+    },
+
+    // overrides CQ.reports.charts.RaphaelChart#adjustToChartDef
+    adjustToChartDef: function() {
+        CQ.reports.charts.SeriesBasedChart.superclass.adjustToChartDef.call(this);
+        this.setConfigProp(this.chartDef, "totals");
+        this.setConfigProp(this.chartDef, "series", 9, "seriesCnt");
+        this.setConfigProp(this.chartDef, "hoverLimit", 35);
+    },
+
+    adjustToChartConfig: function() {
+        var items = this.configPanel.items;
+        items.get("from").setValue(this.createDate(this.chartConfig.from));
+        items.get("to").setValue(this.createDate(this.chartConfig.to));
+        items.get("agginterval").setValue(this.chartConfig.aggregation);
+    },
+
+    adjustConfigPanelSize: function(totalWidth) {
+        var panelWidth = this.configPanel.getSize().width;
+        var x = totalWidth - panelWidth - this.configPanelPadding;
+        // var y = (this.isNarrowVersion ? 26 : 6);
+        var y = (this.layout == "vertical" ? 26 : 6);
+        this.configPanelEl.setLeftTop(x + "px", y + "px");
+    },
+
+    // overrides CQ.reports.Chart#notifyRemoved
+    notifyRemoved: function() {
+        CQ.reports.charts.SeriesBasedChart.superclass.notifyRemoved.call(this);
+        this.invalidateSeries();
+        this.configPanel.removeAll();
+        this.configPanel.destroy();
+        this.configPanelEl.remove();
+    },
+
+    // overrides CQ.reports.Chart#notifyReportFinished
+    notifyReportFinished: function() {
+        CQ.reports.charts.SeriesBasedChart.superclass.notifyReportFinished.call(this);
+        this.invalidateSeries();
+        this.update();
+    },
+
+    // override CQ.reports.chart.RaphaelChart#notifyResize
+    notifyResize: function(w, h) {
+        CQ.reports.charts.SeriesBasedChart.superclass.notifyResize.call(this, w, h);
+        this.adjustConfigPanelSize(w);
+    },
+
+    /**
+     * Invalidates the current data series. A call to {@link #update} will cause a reload
+     * of data.
+     */
+    invalidateSeries: function() {
+        this.hasData = false;
+        this.series = null;
+        this.isLoadError = false;
+    },
+
+    // overrides CQ.reports.charts.RaphaelChart#drawChartTitle
+    drawChartTitle: function() {
+        if (this.title != null) {
+            var txt = this.chartCanvas.text(this.padding, 16 + this.vertTextOffs,
+                    this.title).attr(this.titleAttribs);
+            if ((this.description != null) && !this.isNarrowVersion) {
+                var bbox = txt.getBBox();
+                var iconX = bbox.x + bbox.width + 10;
+                var size = 5;
+                var x = this.width - this.padding - 16;
+                var y = 8;
+                var img = this.chartCanvas.image(CQ.HTTP.externalize(
+                        "/libs/cq/reporting/widgets/themes/default/resources/help.png"),
+                        iconX, y, 16, 16);
+                var inFn = function() {
+                        img.popup = this.drawDescriptionPopup(
+                                iconX + 3, y + 30 + size, this.description, size);
+                    };
+                var outFn = function() {
+                        img.popup.animate({
+                                "opacity": 0
+                            }, 300, function () {
+                                this.remove();
+                            });
+                    };
+                img.hover(inFn, outFn, this, this);
+            }
+        }
+    },
+
+    /**
+     * Draws the description popup. This is an adapted version of Raphael's default
+     * popup impleentation.
+     * @private
+     */
+    drawDescriptionPopup: function(x, y, text, size) {
+        var c = this.chartCanvas;
+        var res = c.set();
+        res.push(c.path().attr({fill: "#000", stroke: "#000"}));
+        res.push(c.text(x, y, text).attr(c.g.txtattr)
+                .attr(this.popupAttribs));
+        var to = this.vertTextOffs;
+        res.update = function (X, Y) {
+            X = X || x;
+            Y = Y || y;
+            var bb = this[1].getBBox(),
+                w = bb.width / 2,
+                h = bb.height / 2,
+                dy = - 2*h;
+            var seg1 = w;
+            var seg2 = w;
+            var tw = w + size;
+            if ((X - tw) < 0) {
+                seg1 = X - size;
+                seg2 = (2 * w) - seg1;
+            }
+            var mmax = Math.max;
+            var p = ["M", X, Y - dy,
+                    "l", -mmax(seg1, size), 0,
+                    "a", size, size, 0, 0, 1, -size, -size,
+                    "l", 0, -mmax(h, size), 0, -mmax(h, size),
+                    "a", size, size, 0, 0, 1, size, -size,
+                    // "l", mmax(w, size), 0, mmax(w, size), 0,
+                    "l", seg1, 0, size, -size, size, size, seg2, 0,
+                    "a", size, size, 0, 0, 1, size, size,
+                    "l", 0, mmax(h, size), 0, mmax(h, size),
+                    "a", size, size, 0, 0, 1, -size, size,
+                    "l", -mmax(seg2, size), 0,
+                    "z"].join(","),
+                xy = {x: X - seg1, y: Y + h - size + to};
+            xy.path = p;
+            this.attr(xy);
+            return this;
+        };
+        return res.update(x, y);
+    },
+
+    // overrides CQ.reports.chart.RaphaelChart#addSpecificChartOptions
+    addSpecificChartOptions: function(opts, width, height) {
+        CQ.reports.charts.SeriesBasedChart.superclass.addSpecificChartOptions.call(this,
+                opts, width, height);
+        var seriesCnt = this.series.getSeriesCnt();
+        opts.colors = this.colorScheme.getColors(seriesCnt, false);
+    }
+
+});
+
+CQ.reports.charts.SeriesBasedChart.SNAPSHOT_DEF_URL =
+        "/libs/cq/reporting/components/commons/scheduling.infinity.json";

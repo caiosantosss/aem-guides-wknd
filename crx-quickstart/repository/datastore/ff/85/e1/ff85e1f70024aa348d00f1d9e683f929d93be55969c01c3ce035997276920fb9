@@ -1,0 +1,566 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE: All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any. The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+    var SECTION_CLASS = 'section';
+
+    /**
+     * The inline edition has started
+     *
+     * @event Document#inline-edit-start
+     */
+
+    /**
+     * Provides CRUD operations and helper functions over instances of {@link Granite.author.Editable} or implying {@link Granite.author.Editable} instances.
+     * Those operations are mostly outside the usual scope of the state update of a variable instance.
+     * NB: The Toolbar actions are now defined per layer: see {@link Granite.author.edit.ToolbarActions} for instance
+     * @namespace
+     * @alias Granite.author.editableHelper
+     *
+     */
+    ns.editableHelper = (function () {
+
+        var self = {};
+
+        self.DEFAULTS = {
+            actions: {
+                INSERT:   ns.edit.EditableActions.INSERT,
+                REFRESH:  ns.edit.EditableActions.REFRESH,
+                UPDATE:   ns.edit.EditableActions.UPDATE,
+                COPY:     ns.edit.EditableActions.COPY,
+                MOVE:     ns.edit.EditableActions.MOVE,
+                DELETE:   ns.edit.EditableActions.DELETE
+            }
+        };
+
+
+        // execute given operation on editables; and wait for every single operation
+        // to complete before continuing with another one
+        self.doBulkOperation = function doBulkOperation(operation, operationArguments, editables, callback) {
+                var index = 0,
+                    length = editables.length,
+                    deferred = $.Deferred();
+
+                (function continueOperation (index) {
+                    if (index < length) {
+                        operationArguments.unshift(editables[index]);
+                        operation.apply(null, operationArguments).always(function () { // operation = static method
+                            if (callback) {
+                                callback(editables[index]);
+                            }
+
+                            index += 1;
+                            operationArguments.shift();
+
+                            continueOperation(index);
+                        });
+                    } else {
+                        deferred.resolve();
+                    }
+                }(index));
+
+                return deferred.promise();
+            };
+
+        /**
+         * Updates passed DOM based on the Editable's configuration
+         *
+         * @memberOf Granite.author.editableHelper
+         *
+         * @param component {Granite.author.Component}
+         * @param dom {String|HTMLElement}
+         * @return {String} modified dom
+         * @private
+         */
+        self.updateDom = function updateDom(component, dom, editable) {
+            // read component information
+            var divAttributes = component.componentConfig.divAttributes || {},
+                $dom = $(dom), $newDom, newDomString, gridClasses;
+
+            $dom.toArray().some(function (html) {
+
+                // loop through the dom to find the first valid html element
+                if (html.outerHTML) {
+
+                    // update markup
+                    $newDom = $(html.outerHTML);
+
+                    // set additional div attributes
+                    $.each(divAttributes, function (attr, val) {
+                        // LEGACY hard coded section class
+                        if (attr === 'class') {
+                            var curCssClass = html.className.split(' ');
+                            var newCssClass = val.split(' ');
+                            val = '';
+
+                            // Add section class name when missing
+                            if (!$newDom[0].classList.contains(SECTION_CLASS)) {
+                                val += SECTION_CLASS + ' ';
+                            }
+
+                            val += html.className;
+
+                            for (var i=0; i < newCssClass.length; i++) {
+                                if (curCssClass.indexOf(newCssClass[i]) === -1) {
+                                    val += ' ' + newCssClass[i];
+                                }
+                            }
+                        }
+
+                        $newDom.attr(attr, val);
+                    });
+                    return true;
+                }
+            });
+
+            // this block is necessary to make the responsive grid work
+            // since the server is not aware of the context/position of the editable
+            // when it is refreshed, we have to add the responsive grid classes manually
+            // @see Granite.author.responsive
+            var newDomElement = $newDom[0];
+
+            if (ns.responsive.isResponsive(editable)) {
+                // Responsive grid support
+                ns.responsive.updateDom(editable, newDomElement);
+            }
+
+            // we need to return a string
+            newDomString = newDomElement.outerHTML;
+
+            // delete reference
+            $dom = null;
+            $newDom = null;
+
+            return newDomString;
+        };
+
+        self.getInsertFunction = function getInsertFunction(insertBehavior) {
+            return insertBehavior === ns.persistence.PARAGRAPH_ORDER.before ? 'insertBefore' :
+                    insertBehavior === ns.persistence.PARAGRAPH_ORDER.after ? 'insertAfter' : 'insertLast';
+        };
+
+        /**
+         * Refreshes all the overlays
+         *
+         * @param promise
+         * @return {$.Promise}
+         */
+        self.overlayCompleteRefresh = function overlayCompleteRefresh(promise) {
+            return promise.done(function (editable) {
+                return ns.overlayManager.reposition().then(() => editable);
+            });
+        };
+
+        /**
+         * Sets the available actions for the current context/Layer
+         *
+         * @memberOf Granite.author.editableHelper
+         *
+         * @param actions - The object containing the {@link Granite.author.ui.EditableAction}s
+         */
+        self.setUp = function (actions) {
+            $.extend(true, actions, self.DEFAULTS.actions);
+            this.actions = actions;
+        };
+
+        /**
+         * Unsets the available actions for the current context/Layer
+         *
+         * @memberOf Granite.author.editableHelper
+         */
+        self.tearDown = function () {
+            this.actions = {};
+        };
+
+        /**
+         * The object containing the {@link Granite.author.ui.EditableAction}s (Layer dependant)
+         *
+         * @type {Object}
+         * @memberOf Granite.author.editableHelper
+         */
+        self.actions = self.DEFAULTS.actions;
+
+        /**
+         * Returns the display name of the editable
+         * @param editable  Editable object
+         * @returns {String} the display name of the editable
+         * @ignore
+         */
+        self.getEditableDisplayableName = function (editable) {
+            var splittedPath = editable.type.split("/"),
+                relativePath = splittedPath[splittedPath.length - 1],
+                component = ns.components.find({resourceType: editable.type})[0],
+                componentTitle = component ? component.getTitle() : "",
+                toUpperCaseFirstLetter = function (string) {
+                    return string.charAt(0).toUpperCase() + string.slice(1);
+                };
+            // if title of component present, use it
+            if (componentTitle && componentTitle.length > 0) {
+                return Granite.I18n.get(componentTitle);
+            } else {
+                // if there is no title of the component present, derive the title from resource type
+                return toUpperCaseFirstLetter(relativePath) + " container";
+            }
+        };
+
+        /**
+         * Loads a content from a given URL and replaces the editable's DOM with the returned content
+         *
+         * @memberOf Granite.author.editableHelper
+         *
+         * @param {Granite.author.Editable} editable - {@link Granite.author.Editable} that we would like to update
+         * @param {string} url -
+         * @returns {$.Promise} - Will be either resolved or rejected depending on the success of the operation
+         */
+        self.loadContent = function (editable, url) {
+            return $.ajax({
+                type: "GET",
+                dataType: "html",
+                url: url
+            }).then(function (dom) {
+                return self.setContent(editable, dom);
+            });
+        };
+
+        /***
+         * Loads the configuration into an Editable (should mainly be used for detached Editables)
+         *
+         * NB: Inherited configs are not considered yet -- this may change in the future
+         * For a complete refresh use {@link Granite.author.editableHelper#doRefresh}
+         *
+         * @memberOf Granite.author.editableHelper
+         *
+         * @param {Granite.author.Editable} editable - {@link Granite.author.Editable} for which the configuration should be updated
+         * @returns {$.Promise} - Will be either resolved or rejected depending on the success of the operation
+         */
+        self.loadConfig = function (editable) {
+            // fetch new DOM from server
+            return ns.persistence.readParagraph(editable).then(function (data) {
+                var cfg, cfgNode, dom = $(data);
+
+                cfgNode = dom.find('cq[data-path="' + editable.path + '"]');
+                cfg = ns.configParser(cfgNode.data('config'));
+
+                editable.updateConfig(cfg);
+
+            });
+        };
+
+        /**
+         * Replaces the Editable's DOM with the given content
+         *
+         * @memberOf Granite.author.editableHelper
+         *
+         * @param {Granite.author.Editable} editable - {@link Granite.author.Editable} for which the underlying content should be updated
+         * @param {HTMLElement} content - New content
+         * @returns {$.Promise} - Will be either resolved or rejected depending on the success of the operation
+         */
+        self.setContent = function (editable, content) {
+            function process(editable) {
+                return ns.ContentFrame.executeCommand(editable.path, 'replaceContent', content)
+            }
+
+            return self.overlayCompleteRefresh(process(editable));
+        };
+
+        /**
+         * Returns the list of allowed components for the given {@link Granite.author.Editable}
+         *
+         * @param {Granite.author.Editable} editable - {@link Granite.author.Editable} from which we want the allowed components list
+         * @returns {string[]|undefined} - The list of paths of allowed components to be inserted into the given editable
+         * @deprecated
+         * @ignore
+         */
+        self.getAllowedComponents = function (editable) {
+            Granite.author.util.deprecated();
+            if (editable) {
+                return ns.components.allowedComponentsFor[editable.path];
+            }
+        };
+
+        /**
+         * Returns the style property for the given design cell.
+         *
+         * @memberOf Granite.author.editableHelper
+         *
+         * @param {Granite.author.Editable} editable - {@link Granite.author.Editable} from which we want to get a style property value
+         * @param {String} name - Name of the entry/property
+         * @return {boolean|null} inheritStyle - Should the design be inherited from the closest parent of the same resource type
+         */
+        self.getStyleProperty = function(editable, name, inheritStyle) {
+            if (!ns.pageDesign) {
+                return null;
+            }
+
+            if (editable && editable.config) {
+                var suffix = "";
+
+                // check if name is a relpath
+                var idx = name.lastIndexOf('/');
+                if (idx > 0)  {
+                    suffix = "/" + name.substring(0, idx);
+                    name = name.substring(idx + 1);
+                }
+
+                var style;
+
+                if (editable.config.policyPath) {
+                    style = ns.editableHelper.getStyleEntry(editable.config.policyPath);
+                    style = style && style[name] || null;
+                } else {
+                    style = ns.designResolver.getProperty(editable.config, ns.pageDesign, name);
+                }
+
+                if (style) {
+                    return style;
+                }
+
+                if (inheritStyle) {
+                    return self.getInheritedStyleEntry(editable, name, suffix);
+                }
+            }
+
+            return null;
+        };
+
+        /**
+         * Returns the style entry from {@link Granite.author.pageDesign} for the given path
+         *
+         * @memberOf Granite.author.editableHelper
+         *
+         * @param {string} path - Path to the design entry
+         * @return {Object} - The style entry
+         */
+        self.getStyleEntry = function(path) {
+            var segs = path.split("/");
+            var obj = ns.pageDesign;
+            for (var i=0; i<segs.length && obj; i++) {
+                obj = obj[segs[i]];
+            }
+            return obj;
+        };
+
+        /**
+         * Returns the style entry from {@link Granite.author.pageDesign} for the parents of the given Editable of the same resource type
+         *
+         * @memberOf Granite.author.editableHelper
+         *
+         * @param editable
+         * @param propertyName
+         * @param suffix
+         * @returns {*}
+         */
+        self.getInheritedStyleEntry = function(editable, propertyName, suffix) {
+            if (!editable) {
+                return null;
+            }
+
+            var parent = ns.editables.getParent(editable);
+            var obj = null;
+
+            if (parent) {
+                if (parent.config) {
+                    var style;
+                    if (parent.config.policyPath) {
+                        style = ns.editableHelper.getStyleEntry(parent.config.policyPath);
+                        style = style && style[propertyName] || null;
+                    } else {
+                        style = ns.designResolver.getProperty(parent.config, ns.pageDesign, propertyName);
+                    }
+
+                    if (style) {
+                        return style;
+                    }
+                }
+
+                obj = self.getInheritedStyleEntry(parent, propertyName, suffix);
+            }
+
+            return obj;
+        };
+
+        // "Low level" actions: perform CRUD operations on editables
+        // Those are now defined under ns.editableHelper.actions and are configurable per layer
+        // NB: To avoid breaking some behavior, those actions are still linked to their original implementation (Edit layer); see ns.edit.Actions
+        // If you want to call the true "layer sensitive" methods, use ns.editableHelper.actions instead
+
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doCopy = function (editable, insertBehavior, editableNeighbor, historyConfig) {
+            Granite.author.util.deprecated('Use Granite.author.edit.EditableActions.COPY.execute instead');
+            return ns.edit.EditableActions.COPY.execute(editable, insertBehavior, editableNeighbor, historyConfig);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doDelete = function (editables, historyConfig) {
+            Granite.author.util.deprecated('Use Granite.author.edit.EditableActions.DELETE.execute instead');
+            return ns.edit.EditableActions.DELETE.execute(editables, historyConfig);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doInsert = function (component, insertBehavior, editableNeighbor, historyConfig, additionalData) {
+            Granite.author.util.deprecated('Use Granite.author.edit.EditableActions.INSERT.execute instead');
+            return ns.edit.EditableActions.INSERT.execute(component, insertBehavior, editableNeighbor, historyConfig, additionalData);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.canInsert = function (editableBefore, componentPath, componentGroup) {
+            Granite.author.util.deprecated('Use Granite.author.edit.EditableActions.INSERT.condition instead');
+            return ns.edit.EditableActions.INSERT.condition(editableBefore, componentPath, componentGroup);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doMove = function (editable, insertBehavior, editableNeighbor, historyConfig) {
+            Granite.author.util.deprecated('Use Granite.author.edit.EditableActions.MOVE.execute instead');
+            return ns.edit.EditableActions.MOVE.execute(editable, insertBehavior, editableNeighbor, historyConfig);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doRefresh = function (editable) {
+            Granite.author.util.deprecated('Use Granite.author.edit.EditableActions.REFRESH.execute instead');
+            return ns.edit.EditableActions.REFRESH.execute(editable);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doUpdate = function (editable, properties) {
+            Granite.author.util.deprecated('Use Granite.author.edit.EditableActions.UPDATE.execute instead');
+            return ns.edit.EditableActions.UPDATE.execute(editable, properties);
+        };
+
+        // "High level" actions (involving UI mainly)
+        // Those are now defined under ns.EditorFrame.editableToolbar.config.actions and are configurable per layer (through the Toolbar constructor)
+        // NB: To avoid breaking some behavior, those actions are still linked to their original implementation (Edit layer); see ns.edit.Actions.Toolbar
+        // If you want to call the true "layer sensitive" methods, use ns.EditorFrame.editableToolbar.config.actions instead
+
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doConfigure = function (editable) {
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.CONFIGURE.execute instead');
+            return ns.edit.ToolbarActions.CONFIGURE.execute(editable);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doInPlaceEdit = function (editable) {
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.EDIT.execute instead');
+            return ns.edit.ToolbarActions.EDIT.execute(editable);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doDeleteConfirm = function () { // Works on current selection
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.DELETE.execute instead');
+            return ns.edit.ToolbarActions.DELETE.execute();
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doCopyToClipboard = function () { // Works on current selection
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.COPY.execute instead');
+            return ns.edit.ToolbarActions.COPY.execute();
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doCutToClipboard = function () { // Works on current selection
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.CUT.execute instead');
+            return ns.edit.ToolbarActions.CUT.execute();
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doPasteFromClipboard = function (editableBefore) {
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.PASTE.execute instead');
+            return ns.edit.ToolbarActions.PASTE.execute(editableBefore);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.doSelectParent = function (editable, target, selectableParents) {
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.PARENT.execute instead');
+            return ns.edit.ToolbarActions.PARENT.execute(editable, selectableParents, target);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.openInsertDialog = function (editable) {
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.INSERT.execute instead');
+            return ns.edit.ToolbarActions.INSERT.execute(editable);
+        };
+        /**
+         * @deprecated
+         * @ignore
+         */
+        self.canInPlaceEdit = function (editable) {
+            Granite.author.util.deprecated('Use Granite.author.edit.ToolbarActions.EDIT.condition instead');
+            return ns.edit.ToolbarActions.EDIT.condition(editable);
+        };
+
+        /**
+         * Only needed for PARENT action
+         *
+         * @deprecated
+         * @ignore
+         */
+        self.cleanUp = function () {
+            Granite.author.util.deprecated();
+        };
+
+        /**
+         * Not in use
+         *
+         * @deprecated
+         * @fires Document#inline-edit-start
+         * @ignore
+         */
+        self.fireInlineEdit = function (editable) {
+            Granite.author.util.deprecated();
+            var event = {};
+            event.type = "inline-edit-start";
+            event.editable = editable;
+            channel.trigger(event);
+
+        };
+
+        return self;
+    }());
+
+}(jQuery, Granite.author, jQuery(document), this));

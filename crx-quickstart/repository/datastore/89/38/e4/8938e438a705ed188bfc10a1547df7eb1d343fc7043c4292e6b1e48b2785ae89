@@ -1,0 +1,763 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+    var previousEditable = null;
+
+    var eventListenerHandles = {};
+
+    var DEFAULT_CONFIG = {
+        actions: {}
+    };
+
+    /**
+     * Creates a Toolbar object.
+     * It is usually up to the current [Layer]{@link Granite.author.Layer} to define its own Toolbar (and thus, its own ToolbarActions).
+     *
+     * @param {Object} config - The configuration object
+     * @param {Object} config.actions - The object containing the high-level {@link Granite.author.ui.ToolbarAction}s on [Editables]{@link Granite.author.Editable}.
+     *
+     * @class Granite.author.ui.Toolbar
+     * @classdesc Represents a Toolbar that pops up when an [Editable]{@link Granite.author.Editable} is selected via its [Overlay]{@link Granite.author.ui.Overlay}, and allows to perform [ToolbarActions]{@link Granite.author.ui.ToolbarAction} on this Editable.
+     *
+     * @see Granite.author.ui.ToolbarAction
+     */
+    ns.ui.Toolbar = ns.util.createClass(/** @lends Granite.author.ui.Toolbar.prototype */{
+
+        constructor: function (config) {
+            var actualConfig = $.extend(true, {}, DEFAULT_CONFIG, config);
+            this.dom = channel.find('#EditableToolbar');
+            // allow / block user interaction (clicks, keyboard shortcuts)
+            this.isDisabled = false;
+            this.config = actualConfig;
+            if (!this.config.actions) {
+                this.config.actions = {};
+            }
+
+            this._needRefocus = false;
+
+            this._currentButtons = {};
+            this._bindEvents();
+        },
+
+        /**
+         * Initialize the toolbar - Don't use it anymore: all the work is already done by the constructor
+         *
+         * @memberOf Granite.author.ui.Toolbar.prototype
+         * @deprecated
+         * @ignore
+         */
+        init: function (config) {
+            Granite.author.util.deprecated();
+            // In case the old pattern is employed: new ui.Toolbar().init()
+            if (config) {
+                this.config = config;
+            }
+
+            if (!this.config.actions) {
+                this.config.actions = {};
+            }
+
+            return this;
+        },
+
+        /**
+         * Destroys the Toolbar, unbind all events and associated UI elements
+         *
+         */
+        destroy: function () {
+            this._unbindEvents();
+            this.dom.empty();
+        },
+
+        /**
+         * Binds handlers for the Toolbar to interact with the user inputs
+         *
+         * Following events are handled:
+         * click.toolbar - actual clicks on a button.
+         * keydown.toolbar - key shortcut handling.
+         * dialog-ready.toolbar inline-edit-before-start.toolbar - block / allow interactions when dialog or inline editor is opened / closed.
+         * cq-overlays-repositioned.toolbar - reposition toolbar with overlays.
+         * cq-interaction-focus.toolbar - open toolbar on editable selection focus.
+         * cq-interaction-blur.toolbar - close toolbar when loosing editable selection.
+         *
+         * @protected
+         * @ignore
+         */
+        _bindEvents: function () {
+            var self = this;
+            eventListenerHandles['keydown'] = this.handleKeypress.bind(this);
+            this.dom.on('click.toolbar', '.cq-editable-action', this.handleEvent.bind(this));
+            // Listener in Capturing phase to make it work with Coral.Keys preventDefault on everything.
+            document.addEventListener('keydown', eventListenerHandles['keydown'], true);
+            channel.on('dialog-ready.toolbar inline-edit-before-start.toolbar', function () {
+                self.disable();
+            });
+            channel.on('dialog-closed.toolbar inline-edit-finish.toolbar inline-edit-cancel.toolbar', function () {
+                self.enable();
+
+                channel.one('cq-show-overlays.toolbar-restore-focus', function() {
+                    self._needRefocus = true;
+                });
+            });
+            channel.on('cq-overlays-repositioned.toolbar', this.reposition.bind(this));
+            channel.on('cq-interaction-focus.toolbar', function (event) {
+                self.open(event.editable);
+            });
+            channel.on('cq-interaction-blur.toolbar', this.close.bind(this));
+        },
+
+        /**
+         * Unbinds handlers for the Toolbar to interact with the user inputs
+         *
+         * @protected
+         * @ignore
+         */
+        _unbindEvents: function () {
+            this.dom.off('click.toolbar', '.cq-editable-action');
+            channel.off('dialog-ready.toolbar');
+            channel.off('dialog-closed.toolbar');
+            channel.off('inline-edit-before-start.toolbar');
+            channel.off('inline-edit-finish.toolbar');
+            channel.off('inline-edit-cancel.toolbar');
+            channel.off('cq-overlays-repositioned.toolbar');
+            channel.off('cq-interaction-focus.toolbar');
+            channel.off('cq-interaction-blur.toolbar');
+            document.removeEventListener('keydown', eventListenerHandles['keydown'], true)
+        },
+
+        /**
+         * Adds a new global action (available for all Editables)
+         *
+         * @param {String} name unique name for the action
+         * @param {Granite.author.ui.ToolbarAction} action describes the action to be added on the Toolbar
+         */
+        registerAction: function (name, action) {
+            this.config.actions[name] = action;
+        },
+
+        /**
+         * Append a button (represening an action) in the Toolbar; used while calling the [render]{@link Granite.author.ui.Toolbar#render} method on the Toolbar
+         *
+         * @param {Editable} editable
+         * @param {String} name unique name for the action
+         * @param {Granite.author.ui.ToolbarAction} action configuration object for the Toolbar
+         *
+         * @returns {jQuery} the button HTML Element
+         * @ignore
+         */
+        appendButton: function (editable, name, action) {
+            var button;
+
+            // stop in case a existing condition is invalid
+            if (action.condition && !action.condition(editable)) {
+                return null;
+            }
+
+            // add button only if a handler is existing
+            if (action.handler) {
+                button = new Coral.Button().set({
+                    variant: 'quiet',
+                    title: Granite.I18n.getVar(action.text),
+                    type: 'button'
+                });
+
+                button.setAttribute('data-action', name);
+                button.setAttribute('data-path', editable.path);
+
+                button.classList.add('cq-editable-action');
+
+                if (action.icon) {
+                    var icon = ns.ui.coralCompatibility.getIconAttribute(action.icon);
+
+                    button.setAttribute('icon', icon);
+                } else {
+                    button.label.textContent = Granite.I18n.getVar(action.text);
+                    button.classList.add('cq-EditableToolbar-text');
+                }
+
+                var $button = $(button);
+
+                // enable customizable rendering
+                if (action.render) {
+                    action.render($button, editable).appendTo(this.dom);
+                } else {
+                    $button.appendTo(this.dom);
+                }
+
+                this._currentButtons[name] = $button;
+            }
+
+            return $button;
+        },
+
+        /**
+         * Handles interactions with editable action triggers
+         * <p>expects to have data-action, data-path and optional data-param</p>
+         *
+         * @param {{}} event - the Event object
+         * @returns {boolean}
+         * @ignore
+         */
+        handleEvent: function (event) {
+            if (this.isDisabled) {
+                return false;
+            }
+
+            var target = $(event.currentTarget),
+                path = target.data('path'),
+                action = target.data('action'),
+                param = target.data('param'),
+                editable = ns.editables.find(path)[0],
+                actionObj = this.config.actions[action] || $.grep(editable.config.editConfig.actions, function (item) {
+                    return item && item.name === action;
+                })[0],
+                ret;
+
+            event.stopPropagation();
+
+            try {
+                ret = actionObj.handler.call(editable, editable, param, target);
+
+                // close toolbar if not explicitly returning "false"
+                if (ret !== false) {
+                    this.close();
+                }
+            } catch (e) {
+                // eg, if the action custom code contains ExtJS code
+                channel.trigger($.Event('error', {
+                    message: "An error has occured during execution of the selected action: " + e.message,
+                    exception: e
+                }));
+            }
+        },
+
+        /**
+         * Handles the keyboard shortcut events
+         *
+         * @param {{}} event - the Event object
+         * @ignore
+         */
+        handleKeypress: function (event) {
+            const tabKey = 9;
+            const escKey = 27;
+            const leftArrowKey = 37;
+            const upArrowKey = 38;
+            const rightArrowKey = 39;
+            const downArrowKey = 40;
+            const keyCode = event.which || event.keyCode;
+
+            if (this.dom.length && this._currentEditable && (this.dom.is(event.target) || $.contains(this.dom[0], event.target))) {
+                if (keyCode === escKey || keyCode === tabKey) {
+                    // This covers shift-tab and tab cases.
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+
+                    this._currentEditable.overlay.dom.focus();
+                    this.close();
+                    return null;
+                } else if (keyCode === leftArrowKey ||
+                    keyCode === upArrowKey ||
+                    keyCode === rightArrowKey ||
+                    keyCode === downArrowKey) {
+
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+
+                    var buttons = this.dom.find("button");
+                    var isNavigateLeft = keyCode === leftArrowKey || keyCode === upArrowKey;
+                    var focused = isNavigateLeft ? buttons.length - 1 : 0;
+                    buttons.each(function (index, element) {
+                        if (document.activeElement === element) {
+                            focused = index;
+                            $(element).attr("tabindex", '-1');
+                        }
+                    });
+
+                    var toFocus;
+                    if ((focused === 0 && isNavigateLeft) || (focused === buttons.length - 1 && !isNavigateLeft)) {
+                        toFocus = isNavigateLeft ? buttons.length - 1 : 0;
+                    } else {
+                        toFocus = isNavigateLeft ? focused - 1 : focused + 1;
+                    }
+
+                    $(buttons[toFocus]).attr('tabindex', '0').focus();
+                    return null;
+                }
+            }
+
+            var self = this,
+                key = (keyCode >= 48 && keyCode <= 57) || (keyCode >= 65 && keyCode <= 90) ?
+                    String.fromCharCode(keyCode).toLowerCase() :
+                    null,
+                keymap = {
+                    alt: event.altKey,
+                    shift: event.shiftKey,
+                    del: event.which === 8,
+                    ctrl: event.ctrlKey || event.metaKey
+                };
+            if (key) {
+                keymap[key] = true;
+            }
+            $.each(this.config.actions, function (name, obj) {
+                var i, map, ret = false, valid = true, unavailableAction;
+                if (obj.shortcut && self._currentEditable) {
+                    if (typeof obj.shortcut === 'string') {
+                        map = obj.shortcut.split('+');
+
+                        for (i = 0 ; i < map.length ; i++) {
+                            if (!keymap[map[i]]) {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if (valid) {
+                            unavailableAction = obj.condition && ns.selection.getAllSelected().some(function(editable) {
+                                return !obj.condition.call(self, editable);
+                            });
+                            ret = !unavailableAction && obj.handler.call(self, self._currentEditable);
+                        }
+
+                    } else if ($.isFunction(obj.shortcut)) {
+                        ret = obj.shortcut.call(self, self._currentEditable, keymap);
+                    }
+
+                    // close toolbar if not explicitly returning "false"
+                    if (ret !== false) {
+                        self.close();
+                    }
+                }
+            });
+        },
+
+        /**
+         * Renders the Toolbar and appends the buttons associated with the actions contained in the current configuration
+         *
+         * @param {Granite.author.Editable} editable - the source Editable
+         * @returns {Granite.author.ui.Toolbar} - the current Toolbar
+         */
+        render: function (editable) {
+            var self = this;
+
+            this._currentButtons = {};
+
+            // remove previous editable content
+            this.dom.empty();
+            for (var actionName in this.config.actions) {
+                if (this.config.actions.hasOwnProperty(actionName)) {
+                    this.config.actions[actionName].name = actionName;
+                }
+            }
+
+            // Gather all actions defined from the config and merge with those defined on the editable
+            var actionsObj = this.config.actions;
+            var availableActions = this.getAvailableActions(editable);
+            var allAvailableActions = _mergeAllAvailableActions(actionsObj, availableActions);
+
+
+            // sort the actions by index
+            var sortedActions = this._sortActions(allAvailableActions);
+
+            // Create and append the action buttons
+
+            sortedActions.forEach(function (action, index) {
+                self.appendButton(editable, action.name, action);
+            });
+
+            self._makeAccessible()
+            return this;
+        },
+
+        /**
+         * Function aggregates runtime actions needed to make the toolbar accessble.
+         * Now it performs following actions:
+         * 1. Sets tabindex for dynamic buttons for roving tabindex functionality.
+         *
+         * @private
+         */
+        _makeAccessible: function () {
+            var firstFocusable = 0;
+            var hasFocused = false;
+            var $buttons = this.dom.find("button");
+            $buttons.each(function (index, button) {
+                var $button = $(button);
+                if (index === firstFocusable) {
+                    hasFocused = true
+                    $button.attr('tabindex', '0');
+                } else {
+                    $button.attr('tabindex', '-1');
+                }
+                if (!hasFocused) {
+                    firstFocusable += 1;
+                }
+            });
+        },
+
+        /**
+         * Position the Toolbar on the passed Editable
+         *
+         * @param {Granite.author.Editable} editable - the sourceregisterAction Editable
+         * @returns {Granite.author.ui.Toolbar} - the current Toolbar
+         */
+        position: function (editable) {
+            this._currentEditable = editable || this._currentEditable;
+
+            // Don't modify the position of the toolbar if the editable or overlay aren't defined
+            if (!this._currentEditable || !this._currentEditable.overlay || !this._currentEditable.overlay.dom) {
+                return this;
+            }
+
+            // position the toolbar to the very left to let it expand the full width (needed for calc)
+            this.dom.css({
+                display: 'block',
+                top: 0,
+                left: 0
+            });
+
+            // calculate the position
+            this.dom.position({
+                'my': 'left bottom-8',
+                'at': 'left top',
+                'of': this._currentEditable.overlay.dom,
+                'collision': 'flipfit',
+                'within': '#ContentScrollView'
+            });
+
+            return this;
+        },
+
+        /**
+         * Repositions the Toolbar on its current underlying Editable (if existing)
+         *
+         */
+        reposition: function () {
+            if (!this._currentEditable || !this._currentEditable.overlay || !this._currentEditable.overlay.dom) {
+                this.close();
+            } else {
+                this.position(this._currentEditable);
+
+                if (this._needRefocus) {
+                    this.focus();
+                    this._needRefocus = false;
+                }
+            }
+        },
+
+        /**
+         * Sets focus to the first tabbable button in the toolbar
+         *
+         */
+        focus: function() {
+            var $buttons = this.dom.find("button:not([disabled])");
+            if ($buttons.length) {
+                var $tabbables = $buttons.filter(':not([tabindex="-1"])');
+                if ($tabbables.length) {
+                    $tabbables.first().focus();
+                } else {
+                    $buttons.first().focus();
+                }
+            }
+        },
+
+        /**
+         * Opens the Toolbar on the passed Editable; this will call first {@link Granite.author.ui.Toolbar#render} and then {@link Granite.author.ui.Toolbar#position}
+         *
+         *
+         * @param {Granite.author.Editable} editable - the source Editable
+         */
+        open: function (editable) {
+            if (!editable) {
+                if (this.dom) {
+                    this.dom.show();
+                }
+            } else {
+                this.render(editable);
+                this.position(editable);
+            }
+            this.focus();
+        },
+
+        /**
+         * Closes the Toolbar
+         *
+         */
+        close: function () {
+            channel.trigger($.Event("cq-close-toolbar", {
+                    editable: this._currentEditable
+                }
+            ));
+            this._currentEditable = null;
+            if (this.dom) {
+                this.dom.hide();
+            }
+        },
+
+        /**
+         *  Disables the Toolbar (blocks possible user interaction with it)
+         *
+         */
+        disable: function () {
+            previousEditable = this._currentEditable;
+            this._currentEditable = null;
+            this.isDisabled = true;
+        },
+
+        /**
+         *  Enables the Toolbar (allow user interaction with it)
+         *
+         */
+        enable: function () {
+            this._currentEditable = previousEditable;
+            previousEditable = null;
+            this.isDisabled = false;
+        },
+
+        /**
+         * Returns the button corresponding to the given name
+         *
+         * @param {string} name - Name of the button
+         * @returns {jQuery} - The button
+         * @ignore
+         */
+        getButton: function (name) {
+            return this._currentButtons[name];
+        },
+
+        /**
+         * Checks if a given action could be applied on a given Editable
+         *
+         * @memberOf Granite.author.ui.Toolbar.prototype
+         *
+         * @param {String} actionName - The name of the action
+         * @param {Granite.author.Editable} editable - The editable to perform the action
+         * @returns {Boolean} Tells if the action is (1) defined on the toolbar and (2) could be executed on the editable (depending on the action's condition)
+         * @ignore
+         */
+        checkActionCondition: function (actionName, editable) {
+            if (!this.config.actions) {
+                return false;
+            }
+            // NB: We were previously checking if the action was defined in the editable config too, but now this is supposed to be done in the action condition instead
+            var actionObj = this.config.actions[actionName];
+            var extraParams = Array.prototype.slice.call(arguments, 1, arguments.length);
+
+            return actionObj && actionObj.condition && actionObj.condition(editable, extraParams);
+        },
+
+        /**
+         * Sort actions
+         *
+         * @param {Array} allActions all available actions which keep complete actions information
+         * @returns {Array} sorted actions
+         * @protected
+         * @ignore
+         */
+        _sortActions: function (allActions) {
+            var sorted = [];
+            var categories = this._assignActionsToCategories(allActions);
+            var first = categories['first'],
+                coreLast = categories['coreLast'],
+                last = categories['last'],
+                relative = categories['relative'],
+                core = categories['core'],
+                unspecified = categories['unspecified'];
+            // note: actions setting the order property are excluded
+            core.sort(function (a, b) {
+                return ns.config.toolbarActionOrder.indexOf(a.name) - ns.config.toolbarActionOrder.indexOf(b.name);
+            });
+            sorted = first.concat(core).concat(unspecified).concat(last).concat(coreLast);
+            this._handleRelativeActions(relative, sorted);
+
+            return sorted;
+        },
+
+        _assignActionsToCategories: function (all) {
+            var unspecified = [],  // actions w/o order config
+                core = [],         // core actions (available in Granite.author.config.toolbarActionOrder)
+                first = [],        // actions with order = first
+                last = [],         // actions with order = last
+                coreLast = [],     // core actions at the very end (available in toolbarActionOrder and order = last)
+                relative = [];     // actions with relative order (after/before)
+
+            all.forEach(function (action) {
+                var order = action.order || "";
+                order = order.toLowerCase();
+                if (order === "first") {
+                    first.push(action);
+                } else if (order === "last") {
+                    if (ns.config.toolbarActionOrder.indexOf(action.name) !== -1) {
+                        coreLast.push(action);
+                    } else {
+                        last.push(action);
+                    }
+                } else if (order.indexOf("before ") === 0 || order.indexOf("after ") === 0) {
+                    relative.push(action);
+                } else if (ns.config.toolbarActionOrder.indexOf(action.name) !== -1) {
+                    core.push(action);
+                } else {
+                    unspecified.push(action);
+                }
+            });
+
+            return {
+                unspecified,
+                core,
+                first,
+                last,
+                coreLast,
+                relative
+            }
+        },
+
+        /**
+         * This function adds relatively positioned actions into target array of actions.
+         * Tries to add all relatively, unless it's impossible. Then appends the action at the end.
+         *
+         * @param relative - array of relatively target actions
+         * @param target - array consisting of actions and target for relative actions
+         * @private
+         */
+        _handleRelativeActions: function (relative, target) {
+            while (relative.length > 0) {
+                var relativeOriginalLength = relative.length
+                this._insertRelativeActions(relative, target);
+                if (relativeOriginalLength === relative.length) {
+                    // We cannot add anything more, break loop
+                    break;
+                }
+            }
+
+            if (relative.length > 0) {
+                relative.forEach(function (action) {
+                    target.push(action);
+                });
+            }
+        },
+
+        /**
+         * Inserts all relative actions that have corresponding action in target array.
+         * Relatively positioned action is an action having order attribute with value "before|after <ACTION_NAME>"
+         * There can be actions relying for other relative action yet to be added, which needs another call to this function.
+         * Nothing is added in case there are no <ACTION_NAME> matching the actions criteria.
+         *
+         * @param relative - array of relatively target actions
+         * @param target - array consisting of actions and target for relative actions
+         * @private
+         */
+        _insertRelativeActions: function (relative, target) {
+            var i, j, action, order, relation, orderName;
+            for (i = relative.length - 1 ; i >= 0 ; i -= 1) {
+                action = relative[i];
+                order = action.order.split(" ");
+                relation = order[0];
+                orderName = order[1];
+
+                for (j = 0 ; j < target.length ; j += 1) {
+                    if (target[j].name === orderName) {
+                        // add element into target
+                        target.splice(j + (relation === "before" ? 0 : 1), 0, action);
+                        // remove element from relative
+                        relative.splice(i, 1);
+                        break;
+                    }
+                }
+            }
+        },
+
+        /**
+         * Returns available actions for the given {@link Granite.author.Editable}. In case of multiple selection, it returns the intersection of available actions.
+         *
+         * <p>Here available actions means out of all the configured actions, with an editable, which can be appended in the actionbar after satisfying the condition associated with it.
+         * In order to find the intersection, 2 actions are compared based on their types,</p>
+         *      <ul>
+         *          <li>If actions are of type string, then their is plain equality check</li>
+         *          <li>Else if actions are of type object; If their names are same, actions are considered equal</li>
+         *      </ul>
+         *
+         * @memberOf Granite.author.ui.Toolbar.prototype
+         *
+         * @param {Granite.author.Editable} editable
+         * @returns {*|Array}
+         * @ignore
+         */
+        getAvailableActions: function (editable) {
+            var editToolbar = this,
+                availableActions;
+            if (ns.selection.isSingleSelection()) {
+                availableActions = editable && editable.config && editable.config.editConfig && editable.config.editConfig.actions
+                //Filtering actions for an editable using the condition associated with each one of them
+                    .filter(function (action) {
+                        var actionHandler = editToolbar.config.actions[action] || action;
+                        return !(actionHandler.condition && !actionHandler.condition(editable));
+                    });
+            } else {
+                availableActions = (ns.selection.getAllSelected()
+
+                // get the selected editables' available set of actions
+                    .map(function (editable) {
+                        //Filtering actions for all of selected editables using the condition associated with each one of them
+                        //Need not check against the condition in appendButton method.
+
+                        return editable && editable.config && editable.config.editConfig && editable.config.editConfig.actions.filter(function (action) {
+                            var actionHandler = editToolbar.config.actions[action] || action;
+                            return !(actionHandler.condition && !actionHandler.condition(editable));
+                        });
+                    })
+
+                    // intersection of all available set of actions
+                    .reduce(function (previous, current) {
+                        return previous.filter(function (previousAction) {
+                            // In case action turns out to be an object, we are checking for action's name
+                            if ($.isPlainObject(previousAction)) {
+                                var isAllowed = false;
+                                current.forEach(function (currentAction) {
+                                    if ($.isPlainObject(currentAction) && previousAction.hasOwnProperty("name") && currentAction.hasOwnProperty("name") && previousAction.name === currentAction.name) {
+                                        isAllowed = true;
+                                    }
+                                });
+                                return isAllowed;
+                            } else {
+                                return current.indexOf(previousAction) !== -1;
+                            }
+                        });
+                    }));
+            }
+            return availableActions;
+        }
+
+    });
+
+    function _mergeAllAvailableActions(actionsObj, availableActions) {
+        var all = [];
+        var actionsObjClone = $.extend(true, {}, actionsObj);
+        if (Array.isArray(availableActions)) {
+            availableActions.forEach(function (item) {
+                var action;
+
+                if (typeof item !== "string") {
+                    action = item;
+                }
+                if (action && typeof action === "object" && action.name) {
+                    actionsObjClone[action.name] = action;
+                }
+            });
+        }
+        return Object.values(actionsObjClone);
+    }
+
+}(jQuery, Granite.author, jQuery(document), this));

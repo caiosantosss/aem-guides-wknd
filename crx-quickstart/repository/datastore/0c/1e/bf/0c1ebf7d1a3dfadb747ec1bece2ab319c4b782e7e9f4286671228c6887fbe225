@@ -1,0 +1,444 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function(document, Granite, _g, $) {
+    "use strict";
+    
+    var modalTemplate = $(
+            '<div class="coral-Modal create-livecopy-wizard-modal">' +
+            '<div class="coral-Modal-header">' +
+                '<i class="coral-Modal-typeIcon coral-Icon coral-Icon--sizeS"></i>' +
+                '<h2 class="coral-Modal-title coral-Heading coral-Heading--2"></h2>' +
+            '</div>' +
+            '<div class="coral-Modal-body"></div>' +
+            '<div class="coral-Modal-footer"></div>');
+    
+    window.TargetRecommendationsWizard = window.TargetRecommendationsWizard || (function() {
+        var _self = {};
+        
+        _self.REFRESH_HANDLERS = {
+                TEMPLATES: "templates",
+                ALGORITHMS: "algorithms"
+        };
+        
+        /**
+         * Returns the content path of the current page
+         */
+        function getPagePath() {
+            var pagePath = Granite.HTTP.getPath();
+            var lastDot = pagePath.lastIndexOf(".");
+            
+            pagePath = (lastDot >= 0)
+                ? pagePath.substr(0, lastDot)
+                : pagePath;
+            
+            return pagePath;
+        }
+        
+        /**
+         * Returns the suffix from the given href url
+         */
+        function getContentPath(href) {
+            var lastDot = href.lastIndexOf(".");
+            var suffixStart = href.indexOf("/", lastDot);
+            var contentPath = (suffixStart >= 0) ? href.substr(suffixStart) : "/content";
+            
+            return contentPath;
+        }
+        
+        _self.fixLayout = function(selectorString) {
+            var selectedItems = $(selectorString).find(".selected");
+            // work around layout not being set
+            Granite.UI.Foundation.Layouts.switchLayout($(selectorString).find(".foundation-collection"), {name:"foundation-layout-list"});
+            Granite.UI.Foundation.Layouts.switchLayout($(selectorString).find(".foundation-collection"), {name:"foundation-layout-card"});
+            
+            var foundationSelections = $(selectorString + " .foundation-collection").adaptTo("foundation-selections");
+            for(var selIdx = 0 ; selIdx < selectedItems.length ; selIdx++) {
+                foundationSelections.select(selectedItems[selIdx]);
+            }
+        };
+        
+        _self.bindSelectionHandler = function(selectorString) {
+            $(selectorString + " a").off("click").on("click", function(event) {
+                return TargetRecommendationsWizard.allowSelection();
+            });
+        };
+        
+        /**
+         * Do not allow n:n selections between criteria and design
+         */
+        _self.allowSelection = function() {
+            var selectedAlgorithms = $(".recs-select-alg").find(".selected");
+            var selectedTemplates = $(".recs-select-template").find(".selected");
+            
+            // only allow one template selection if multiple algs or one algorithm if multiple templates
+            var $activeStep = $(".foundation-wizard-step.foundation-wizard-step-active");
+            if ($activeStep.find(".recs-select-template").length > 0) {
+                // allow multiple selection only if we have just one algo selected
+                return selectedAlgorithms.length <= 1
+                    || selectedTemplates.length == 0
+            } else if ($activeStep.find(".recs-select-alg").length > 0) {
+                // allow multiple only if we have one template selected
+                return selectedTemplates.length <= 1
+                    || selectedAlgorithms.length == 0;
+            }
+            
+            return false;
+        };
+        
+        _self.showStatusSelection = function(cardSelector, selectedItems) {
+            $(cardSelector).find("article").each(function(index, item) {
+                var itemId = $(item).data("foundation-collection-item-id");
+                var remove = true;
+                
+                for (var idx = 0; idx < selectedItems.length ; idx++) {
+                    if ($(selectedItems[idx]).data("foundation-collection-item-id") == itemId) {
+                        remove = false;
+                        break;
+                    }
+                }
+                
+                if (remove) {
+                    $(item).hide();
+                } else {
+                    $(item).show();
+                }
+            });
+        }
+        
+        _self.submitDialog = function(dialog) {
+
+            // display a spinner while the recommendation is being configured
+            var spinner = modalTemplate.clone();
+            spinner.appendTo("body").modal({
+                type: "default",
+                heading: "<div class=\"coral-Wait\"></div>" + Granite.I18n.get("Setting up Recommendation..."),
+                content: Granite.I18n.get("Your Recommendation is being configured..."),
+                keyboard: false,
+                buttons: [],
+                visible: true
+            });
+            
+            Granite.$.ajax({
+                type: dialog.prop("method"),
+                url: dialog.prop("action"),
+                contentType: dialog.prop("enctype"),
+                data: dialog.serialize(),
+                success: function(data, status, xhr) {
+                    spinner.modal("hide");
+                    var response = _g.shared.HTTP.eval(xhr);
+                    
+                    if (_g.shared.HTTP.isOkStatus(xhr.status)) {
+                        // close the dialog
+                        dialog.find(".cq-dialog-cancel").trigger("click");
+                        
+                        TargetRecommendations.updateRecommendation(response.recommendationId, response.recommendationName, response.recommendationMbox);
+                    } else {
+                        TargetRecommendationsWizard.showError(Granite.I18n.get("Error"),
+                                response.errorMessage);
+                    }
+                },
+                error: function(xhr) {
+                    spinner.modal("hide");
+                    var response = _g.shared.HTTP.eval(xhr);
+                    
+                    TargetRecommendationsWizard.showError(Granite.I18n.get("Error"),
+                            response.errorMessage);
+                }
+            });
+        };
+        
+        _self.showError = function(message, description) {
+            var promptConfig = {
+                title:message,
+                message: description,
+                type:Granite.author.ui.helpers.PROMPT_TYPES["ERROR"],
+                actions:[{
+                    id:"OK",
+                    text:Granite.I18n.get("Ok"),
+                    primary:true
+                }]
+            };
+
+            Granite.author.ui.helpers.prompt(promptConfig);
+        };
+        
+        _self.bindAlgorithmRefreshHandler = function() {
+            // handle the refresh button
+            $(".recs-refresh-algorithms-activator").off("click").on("click", function(e) {
+                var activator = $(e.target);
+                
+                var contentPath = activator.closest("form").attr("action");
+                contentPath = contentPath.replace(".configureRecommendation.json", "");
+                
+                var dialogPathInfo = $("[name='dialogPathInfo']");
+                var dialogPath = dialogPathInfo.val();
+                dialogPath = dialogPath.replace(dialogPathInfo.data("stripcomponentpath"), "/content/items/configureAlgorithms/items/selectAlgorithm.html");
+                
+                var algorithmContentFetchUrl = dialogPath + contentPath;
+                
+                $.get(algorithmContentFetchUrl, function(data) {
+                    var el = $(data).children();
+                    
+                    $(".recs-select-alg").empty().append(el);
+                    
+                    //el.find(".foundation-collection").cardView();
+                    Granite.UI.Foundation.Layouts.layout($(".recs-select-alg").find(".foundation-collection"));
+                    $(document).trigger("foundation-mode-change", ["selection", "recs-select-alg-collection"]);
+                    
+                    // need to re-bind the handler since the button's markup has been refreshed
+                    TargetRecommendationsWizard.bindAlgorithmRefreshHandler();
+                }.bind(this));
+                
+                return false;
+            });
+        };
+        
+        _self.bindRefreshHandler = function(type) {
+            var activatorSelector = "";
+            var endpointTerminator = "";
+            var collectionName = "";
+            var collectionContainer = "";
+            if (type == this.REFRESH_HANDLERS.ALGORITHMS) {
+                activatorSelector = ".recs-refresh-algorithms-activator";
+                endpointTerminator = "/content/items/configureAlgorithms/items/selectAlgorithm.html";
+                collectionName = "recs-select-alg-collection";
+                collectionContainer = ".recs-select-alg";
+            } else {
+                activatorSelector = ".recs-refresh-templates-activator";
+                endpointTerminator = "/content/items/configureTemplates/items/selectTemplate.html";
+                collectionName = "recs-select-template-collection";
+                collectionContainer = ".recs-select-template";
+            }
+            
+            // handle the activator click
+            $(activatorSelector).off("click").on("click", function(e) {
+                var activator = $(e.target);
+                
+                var contentPath = activator.closest("form").attr("action");
+                contentPath = contentPath.replace(".configureRecommendation.json", "");
+                
+                var dialogPathInfo = $("[name='dialogPathInfo']");
+                var dialogPath = dialogPathInfo.val();
+                dialogPath = dialogPath.replace(dialogPathInfo.data("stripcomponentpath"), endpointTerminator);
+                
+                var fetchUrl = dialogPath + contentPath;
+                $(window).trigger('loading-show');
+                $.get(fetchUrl, function(data) {
+                    var el = $(data).children();
+                    
+                    $(collectionContainer).empty().append(el);
+                    
+                    Granite.UI.Foundation.Layouts.layout($(collectionContainer).find(".foundation-collection"));
+                    $(document).trigger("foundation-mode-change", ["selection", collectionName]);
+                    
+                    // need to re-bind the handler since the button's markup has been refreshed
+                    TargetRecommendationsWizard.bindRefreshHandler(type);
+                    
+                    // re-bind the edit handlers
+                    TargetRecommendationsWizard.bindEditHandler();
+                    
+                    $(window).trigger('loading-hide');
+                }.bind(this));
+                
+                return false;
+            });
+        };
+        
+        /**
+         * Binds the edit click handler
+         */
+        _self.bindEditHandler = function() {
+            $("[data-edit-link-property]").off("click").on("click", function(e) {
+                var activator = $(e.target);
+                activator = activator.closest("button");
+
+                var linkDataProperty = activator.data("edit-link-property");
+                var linksContainer = $(".recs-recommendation-links");
+                var url = activator.data("default-url");;
+                if (linkDataProperty && linksContainer.length > 0) {
+                    url = linksContainer.data(linkDataProperty);
+                }
+
+                window.open(url, "_blank");
+            });
+        };
+        
+        /**
+         * Initializes the wizard
+         */
+        _self.setupWizard = function() {
+            // force selection mode for the grids
+            $(document).trigger("foundation-mode-change", ["selection", "recs-select-alg-collection"]);
+            
+            // hide dialog header actions (if any)
+            $(".foundation-wizard").closest(".cq-dialog").find(".cq-dialog-header-actions").hide();
+            
+            // change form action to point to the configure recs servlet
+            var form = $(".foundation-wizard").closest("form");
+            var formAction = form.attr("action");
+            if (formAction && formAction.indexOf(".configureRecommendation") < 0) {
+                form.attr("action", formAction + ".configureRecommendation.json");
+            }
+            
+            // set up target mbox name information
+            $(".recs-targeted-mbox").val($(".recs-recommendation-mbox-name").data("mbox-name"));
+            $(".recs-targeted-mbox").attr("disabled", true);
+            
+            /**
+             * Handle wizard submit action
+             */
+            var dialog = $(".foundation-wizard").closest(".cq-dialog");
+            $(".recs-configure-recommendation-command").off("click").on("click", function(e) {
+                e.preventDefault();
+                TargetRecommendationsWizard.submitDialog(dialog);
+            });
+            
+            
+            /**
+             * Bind the edit click handlers
+             */
+            TargetRecommendationsWizard.bindEditHandler();
+            
+            /**
+             * Bind the selection handler for the select algo step
+             */
+            TargetRecommendationsWizard.bindSelectionHandler(".recs-select-alg");
+            
+            /**
+             * Handle the wizard step change
+             */
+            $(".foundation-wizard").on("foundation-wizard-stepchange", function(e){
+                
+                var $activeStep = $(".foundation-wizard-step.foundation-wizard-step-active");
+                if ($activeStep.find(".recs-select-template").length > 0) {
+                    // fix layout
+                    TargetRecommendationsWizard.fixLayout(".recs-select-template");
+                    
+                    $(document).trigger("foundation-mode-change", ["selection", "recs-select-template-collection"]);
+                    
+                    TargetRecommendationsWizard.bindSelectionHandler(".recs-select-template");
+                } else if ($activeStep.find(".recs-rec-properties").length > 0) {
+                    
+                    // get selected items
+                    var selectedAlgs = $(".recs-select-alg").find(".selected");
+                    var selectedTemplates = $(".recs-select-template").find(".selected");
+                    
+                    // fix layout
+                    TargetRecommendationsWizard.fixLayout(".recs-selected-alg");
+                    TargetRecommendationsWizard.fixLayout(".recs-selected-templates");
+                    
+                    // disable clicks on cards on the last wizard step
+                    $(".recs-configuration-cards-container a").off("click").on("click", function(event) {
+                        return false;
+                    });
+                    
+                    // filter out non-selected items from the display
+                    TargetRecommendationsWizard.showStatusSelection(".recs-selected-alg", selectedAlgs);
+                    TargetRecommendationsWizard.showStatusSelection(".recs-selected-templates", selectedTemplates);
+                    
+                    // set hidden selected alg and template ids to the actual selected values
+                    var algorithmIdsValue = "";
+                    $(selectedAlgs).each(function(index, item){
+                        var algorithmId = $(item).data("foundation-collection-item-id");
+                        algorithmIdsValue += algorithmId + ",";
+                    });
+                    algorithmIdsValue = algorithmIdsValue.substring(0, algorithmIdsValue.length - 1);
+                    $(".recs-algorithm-ids").val(algorithmIdsValue);
+                    
+                    var templateNames = "";
+                    $(selectedTemplates).each(function(index, item){
+                        var templateName = $(item).data("template-name");
+                        templateNames += templateName + ",";
+                    });
+                    templateNames = templateNames.substring(0, templateNames.length - 1);
+                    $(".recs-template-names").val(templateNames);
+                    
+                    // enable the save button if we already have a recommendation name
+                    if($("[name='recommendationName']").val() != "") {
+                        $(".recs-configure-recommendation-command").removeAttr("disabled");
+                    }
+                } else {
+                    // first step of the wizard
+                    TargetRecommendationsWizard.bindSelectionHandler(".recs-select-alg");
+                }
+            });
+            
+            /*
+             * detect if there's already a recommendation linked to the component
+             * and go to the last step if we do 
+             */
+            
+            var recommendationInfo = $(".recs-recommendation-information");
+            if (recommendationInfo.length > 0) {
+                var algorithms = [];
+                var idx = 0;
+                // select algorithms
+                var algSelector = $(".recs-select-alg").find(".foundation-collection").adaptTo("foundation-selections");
+                while(recommendationInfo.data("recommendation-algorithm-" + idx)) {
+                    var algId = recommendationInfo.data("recommendation-algorithm-" + idx);
+                    algorithms.push(algId);
+                    algSelector.select($("[data-foundation-collection-item-id='" + algId + "']"));
+                    idx++;
+                }
+                
+                $(".foundation-wizard").adaptTo("foundation-wizard").next();
+                var templates = [];
+                idx = 0;
+                var templateSelectGrid = $(".recs-select-template").find(".foundation-collection").adaptTo("foundation-selections");
+                while(recommendationInfo.data("recommendation-templatename-" + idx)) {
+                    var templateName = recommendationInfo.data("recommendation-templatename-" + idx);
+                    templates.push(templateName);
+                    templateSelectGrid.select($("[data-template-name='" + templateName + "']"));
+                    idx++;
+                }
+                
+                $(".foundation-wizard").adaptTo("foundation-wizard").next();
+                
+                $("[name='recommendationName']").val(recommendationInfo.data("recommendation-name"));
+                
+                // enable the save button if we already have a recommendation name
+                if($("[name='recommendationName']").val() != "") {
+                    $(".recs-configure-recommendation-command").removeAttr("disabled");
+                }
+            }
+
+            // bind the refresh handlers
+            TargetRecommendationsWizard.bindRefreshHandler(TargetRecommendationsWizard.REFRESH_HANDLERS.ALGORITHMS);
+            TargetRecommendationsWizard.bindRefreshHandler(TargetRecommendationsWizard.REFRESH_HANDLERS.TEMPLATES);
+        };
+        
+        return _self;
+    }());
+    
+    $(document).on("foundation-selections-change", function(e) {
+        var $collection = $(e.target);
+        
+        var $selectedItems = $collection.find(".selected");
+        var nextEnabled = $selectedItems.length > 0;
+        
+        // toggle the wizard's next button
+        $(".foundation-wizard").adaptTo("foundation-wizard").toggleNext(nextEnabled);
+    });
+    
+    $(document).on("foundation-contentloaded", function (e) {
+        TargetRecommendationsWizard.setupWizard();
+    });
+    TargetRecommendationsWizard.setupWizard();
+    
+})(document, Granite, _g, Granite.$);
+

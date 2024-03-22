@@ -1,0 +1,991 @@
+/*
+ * Copyright 1997-2011 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.EditBar
+ * @extends CQ.Ext.Panel
+ * The EditBar lets the user edit content using buttons on a bar.
+ * <p>Although not listed here, EditBar has all the members of
+ * <b>{@link CQ.wcm.EditBase}</b>.</p>
+ * @constructor
+ * Creates a new EditBar.
+ * @param {Object} config The config object
+ */
+CQ.wcm.EditBar = CQ.Ext.extend(CQ.Ext.Panel, {
+    /**
+     * The placeholder used to place the edit bar beneath the content element.
+     * @private
+     * @type {CQ.Ext.Element}
+     */
+    placeholder: null,
+
+    /**
+     * Selection checkbox
+     * @private
+     * @type {CQ.Ext.form.Checkbox}
+     */
+    selectBox: null,
+
+    /**
+     * The start offset on annotations
+     * @type Number
+     * @private
+     */
+    annotationOffset: 5,
+
+    /**
+     * Defines if component is ready (has been built) or not
+     * @private
+     * @since 5.5
+     */
+    ready: false,
+
+    /**
+     * The button to expand the moreMenu
+     * @private
+     * @since 5.5
+     */
+    moreButton: null,
+
+    /**
+     * The menu for actions that do not fit on narrow edit bars
+     * @private
+     * @since 5.5
+     */
+    moreMenu: null,
+
+
+    constructor: function(config) {
+        this.dragZoneClass = CQ.wcm.EditBase.DragZone;
+        this.dropTargetClass = CQ.wcm.EditBase.DropTarget;
+
+        this.constructorStart(config);
+
+        var editBar = this;
+        this.selectBox = new CQ.Ext.form.Checkbox({
+            // Box label will be set once the actions are retrieved (see: setBoxLabel)
+            boxLabel: CQ.I18n.getMessage("{0} checkbox", ["Edit bar"], "Label of edit bar checkbox"),
+            hideLabel: true,
+            listeners: {
+                check: function(cb, checked) {
+                    if (checked) {
+                        CQ.WCM.select(editBar, true, true);
+                    } else {
+                        CQ.WCM.deselect(editBar, true);
+                    }
+                }
+            }
+        });
+
+        this.applyConfigDefaults(config, {
+            "renderTo":CQ.Util.ROOT_ID,
+            "element":null,
+            "path":"",
+            "actions": CQ.wcm.EditBase.EDITANNOTATE,
+            "childConfig": {
+                "actions": CQ.wcm.EditBase.EDITANNOTATECOPYMOVEDELETEINSERT
+            },
+            "container":"toolbar",
+            "ctrlDef":"button",
+            "toolbar": {
+                "xtype":"toolbar"
+            },
+            "button": {
+                "xtype":"button",
+                "scope":this
+            },
+            "orderable": true,
+            "listeners": {
+                // note: refreshing after copy is handled in "afterinsert"
+                "afteredit" : this.refreshSelf,
+                "afterdelete" : this.refreshSelf,
+                "afterinsert" : this.refreshCreated,
+                "aftermove" : this.refreshSelfMoved
+            },
+            "stateful": false,
+            "inlineEditing": CQ.wcm.EditBase.INLINE_MODE_AUTO,
+            "targetMode": CQ.wcm.EditBase.TARGET_MODE_GHOST,
+            "isDropTarget":true,
+            "isContained": false,
+            "containerClass": "section",
+            "cls": "cq-editbar",
+            "hideMode": "display"
+        });
+
+        if (CQ.WCM.isEditMode()) {
+            config.toolbar.items.push("->");
+            config.toolbar.items.push(this.selectBox);
+            config.toolbar.items.push("&nbsp;");
+        }
+
+        CQ.wcm.EditBar.superclass.constructor.call(this, config);
+
+        if (config.element) {
+            this.el.setStyle("visibility", "hidden");
+            this.buildPlaceholderAndElement.defer(16, this, [config.element]);
+            // reference to the ExtJS object representing the DOM element
+            this.element = CQ.Ext.get(this.element);
+        }
+        this.constructorEnd(config);
+    },
+
+    // overriding CQ.Ext.Component#initComponent
+    initComponent: function() {
+        CQ.wcm.EditBar.superclass.initComponent.call(this);
+
+        this.addEvents(
+            /**
+             * Fires before the content is edited.
+             * Return false from an event handler to cancel editing.
+             * @event beforeedit
+             * @param {CQ.wcm.EditBar} this
+             * @since 5.4
+             */
+            CQ.wcm.EditBase.EVENT_BEFORE_EDIT,
+
+            /**
+             * Fires when the content was edited.
+             * @event afteredit
+             * @param {CQ.wcm.EditBar} this
+             */
+            CQ.wcm.EditBase.EVENT_AFTER_EDIT,
+
+            /**
+             * Fires before the edit component is deleted.
+             * Return false from an event handler to cancel deletion.
+             * @event beforedelete
+             * @param {CQ.wcm.EditBar} this
+             * @since 5.4
+             */
+            CQ.wcm.EditBase.EVENT_BEFORE_DELETE,
+
+            /**
+             * Fires when the edit component was deleted.
+             * @event afterdelete
+             * @param {CQ.wcm.EditBar} this (since 5.4)
+             */
+            CQ.wcm.EditBase.EVENT_AFTER_DELETE,
+
+            /**
+             * Fires when an edit component was inserted. The inserted component
+             * can be accessed by <code>this</code>.
+             * @event afterinsert
+             * @param {String} contentPath Inserted component content path
+             * @param {Object} definition Inserted component definition
+             */
+            CQ.wcm.EditBase.EVENT_AFTER_INSERT,
+
+            /**
+             * Fires before the edit component is moved.
+             * Return false from an event handler to cancel moving.
+             * @event beforemove
+             * @param {CQ.wcm.EditBar} this
+             * @param {String} path Path of the component before which this component
+             *                      will be inserted to
+             * @since 5.4
+             */
+            CQ.wcm.EditBase.EVENT_BEFORE_MOVE,
+
+            /**
+             * Fires when the edit component was moved.
+             * @event aftermove
+             * @param {CQ.wcm.EditBar} this
+             * @param {String} path Path of the component before which this component
+             *                      has been inserted to
+             */
+            CQ.wcm.EditBase.EVENT_AFTER_MOVE,
+
+            /**
+             * Fires before the edit component is copied.
+             * Return false from an event handler to cancel copying.
+             * @event beforecopy
+             * @param {CQ.wcm.EditBar} this (the component to be copied)
+             * @param {String} path Path of the component before which the new component
+             *                      will be inserted to
+             * @since 5.4
+             */
+            CQ.wcm.EditBase.EVENT_BEFORE_COPY,
+
+            /**
+             * Fires after the edit component was copied.
+             * @event aftercopy
+             * @param {CQ.wcm.EditBar} this (the component to be copied)
+             * @param {String} path Path of the component before which the new component
+             *                      has been inserted to
+             * @param {String} newPath Path of the new, copied component
+             * @since 5.4
+             */
+            CQ.wcm.EditBase.EVENT_AFTER_COPY,
+
+            /**
+             * Fires before a component is inserted into the current edit component.
+             * Return false from an event handler to cancel insertion.
+             * @event beforechildinsert
+             * @param {CQ.wcm.EditBar} this
+             * @param {String} path The path of the inserted component
+             * @since 5.4
+             */
+            CQ.wcm.EditBase.EVENT_BEFORE_CHILD_INSERT,
+
+            /**
+             * Fires when a component was inserted into the current edit component.
+             * @event afterchildinsert
+             * @param {CQ.wcm.EditBar} this (since 5.4)
+             * @param {String} path The path of the inserted component (since 5.4)
+             */
+            CQ.wcm.EditBase.EVENT_AFTER_CHILD_INSERT,
+
+            /**
+             * Fires when the current edit component is ready (rendered and events attached).
+             * @event ready
+             * @param {CQ.wcm.EditBar} this
+             * @since 5.5
+             */
+            CQ.wcm.EditBase.EVENT_READY
+
+            );
+
+        this.on("render", function() {
+            if (!this.isActionDelete() && !this.isActionCopyMove()) {
+                // neither delete nor copy/move action: assume that editable is not draggable
+                // (fixed paragraph (e.g. page title) and drop zone for new paragraphs)
+                this.orderable = false;
+            }
+
+            if(this[CQ.wcm.msm.MSM.PARAM_LIVE_RELATIONSHIP]!=null) {
+                if(this.isActionEdit() || this.isActionDelete()) {
+                    this.handleLiveRelationship();
+                }
+            }
+            if(this.isActionInsertOnly()) {
+                var parent = this.getParent();
+                if(parent && parent.handleLiveRelationship) {
+                    parent.handleLiveRelationship(true);
+                }
+            }
+
+            //if orderable, setup drag source
+            if(this.orderable) {
+                //define the editbar as a drag zone for move
+                this.dd = this.dragZoneClass.getInstance(this.el,this,[CQ.wcm.EditBase.DD_GROUP_COMPONENT]);
+            }
+
+            var selection = CQ.WCM.getSelection();
+            selection.on("clear", this.handleSelectionClear, this);
+
+        });
+
+        // Set box label according to edit bar actions
+        this.setBoxLabel();
+
+        this.initComponentEnd();
+    },
+
+    /**
+     * Clear selection box
+     * @private
+     */
+    handleSelectionClear: function() {
+        this.selectBox.setValue(false);
+    },
+
+    /**
+     * Handles mouse over. Mainly used in nested parsys to avoid highlight of parent rollover parsys
+     * @param {CQ.Ext.EventObject} e The event object
+     * @private
+     */
+    handleMouseOver: function(e) {
+        //method is a copy of rollover#handleMouseOver. showHighlight are commented
+        if(!CQ.Ext.dd.DragDropMgr.dragCurrent && !CQ.WCM.isContentWindowLoading()) {
+            //if no current highlight
+            if(!CQ.wcm.EditRollover.currentlyHighlighted) {
+                if (CQ.wcm.EditRollover.preventNextHighlight) {
+                    CQ.wcm.EditRollover.preventNextHighlight = false;
+                } else {
+                    //this.showHighlight();
+                }
+            } else {
+                //if current highlighted object is a parent
+                if(this.isParentHighlighted()) {
+                    //hide parent highlight and show current object highlight
+                    CQ.wcm.EditRollover.currentlyHighlighted.hideHighlight();
+                    //this.showHighlight();
+                } else {
+                    if(CQ.wcm.EditRollover.currentlyHighlighted!==this) {
+                        //if not, request a highlight. Highlight will be given by current highlighted object in hideHighlight()
+                        //CQ.wcm.EditRollover.requestHighlight = this;
+                    }
+                }
+            }
+        }
+        e.stopEvent();
+    },
+
+    /**
+     * Builds the placeholder and sets the element to anchor the edit bar to.
+     * @private
+     * @param {CQ.Ext.Element/HTMLElement/String} htmlElement The element
+     */
+    buildPlaceholderAndElement: function(htmlElement) {
+        //actions on editbar element
+        if(htmlElement) {
+            this.element = CQ.Ext.get(htmlElement);
+            this.el.addClass(this.getClsPath("cq-element"));
+        }
+
+        this.element.setVisibilityMode(CQ.Ext.Element.DISPLAY);
+        this.getEl().setVisibilityMode(CQ.Ext.Element.DISPLAY);
+        if(this.isContained)
+            this.element.parent().setVisibilityMode(CQ.Ext.Element.DISPLAY);
+
+        if(this.placeholder) {
+            this.placeholder.remove();
+        }
+
+        if(!this.hidden && !this.disabled) {
+
+            //keep track that element is linked to this edit component
+            this.element.linkedEditComponent = this;
+
+            var elementWidth = this.element.getWidth();
+
+            if(elementWidth==0) {
+                if(this.isContained) {
+                    if(this.element.parent()) {
+                        if(this.element.parent().parent())
+                            elementWidth = this.element.parent().parent().getWidth();
+                        else
+                            elementWidth = this.element.parent().getWidth();
+                    }
+                } else {
+                    if(this.element.parent()) {
+                        elementWidth = this.element.parent().getWidth();
+                    }
+                }
+            }
+
+            var html = "<div class=\"" + this.getClsPath("cq-placeholder") + "\"></div>";
+            var defaultStyles = CQ.DOM.getBlockDefaultStyles();
+
+            //actions on placeholder
+            if (!this.placeholder) {
+              if (this.element.dom && (this.element.dom.tagName == "TBODY"
+								  || this.element.dom.tagName == "THEAD"
+								  || this.element.dom.tagName == "TFOOT"
+								  || this.element.dom.tagName == "TR"
+								  || this.element.dom.tagName == "TD")) { // related to bug#40069
+                var pt = this.element.parent("TABLE");
+                this.placeholder = CQ.Ext.DomHelper.insertBefore(pt, html, true);
+              } else {
+                this.placeholder = CQ.Ext.DomHelper.insertBefore(this.element, html, true);
+              }
+            }
+
+            var pStyles = CQ.Util.applyDefaults({
+                "height": this.el.getHeight() + "px",
+                "width": elementWidth + "px"
+            },defaultStyles);
+            this.placeholder.setStyle(pStyles);
+            //to be properly hidden, placeholder must have a DISPLAY visibility mode.
+            this.placeholder.setVisibilityMode(CQ.Ext.Element.DISPLAY);
+            this.placeholder.addClass(["cq-editcomponent-placeholder","cq-editbar-placeholder"]);
+
+            this.initialPlaceholderHeight = this.el.getHeight();
+
+            CQ.Util.observeComponent(this);
+
+            //actions on editbar
+
+            this.el.setStyle("position", "absolute");
+            this.el.anchorTo(this.placeholder, "tl", null, false, null);
+            this.el.setStyle("width", elementWidth + "px");
+
+            this.renderLiveStatus();
+            this.manageMoreMenu();
+
+            //define this editbar and element as a drop target for another editBar only if either INSERT action is available or
+            //this component is targeted
+            if(this.isDropTarget === true && (this.isActionInsert() || this.getTargetParent())) {
+                this.componentDropTarget = this.dropTargetClass.getInstance(this.placeholder, this, [CQ.wcm.EditBase.DD_GROUP_COMPONENT]);
+                this.elementDropTarget = this.dropTargetClass.getInstance(this.element, this, [CQ.wcm.EditBase.DD_GROUP_COMPONENT]);
+            }
+
+            this.element.on("mouseover", this.handleMouseOver, this);
+
+            this.buildSubDropTargets();
+        }
+        this.el.setStyle("visibility", "visible");
+        this.ready = true;
+        this.fireEvent(CQ.wcm.EditBase.EVENT_READY,this);
+
+    },
+
+    /**
+     * Show or hide live status
+     * @private
+     */
+    handleLiveStatus: function() {
+        if(this.enableLiveRelationship) {
+            if(this.liveStatus) {
+                var iconClass = this.liveStatusLocked ?
+                    "cq-editbar-livestatus-right-lock":
+                    "cq-editbar-livestatus-right-unlock";
+                this.liveStatus.setIconClass(iconClass);
+            }
+        }
+    },
+
+    /**
+     * Check if live status correctly displayed (value can be change inside the dialog).
+     * @private
+     */
+    observeLiveStatus: function() {
+        if (this.liveStatusRendered && this.enableLiveRelationship) {
+            if (this.liveStatusLocked) {
+                this.suspendSubDropTargets();
+            } else {
+                this.resumeSubDropTargets();
+            }
+        }
+    },
+
+    /**
+     * @private
+     */
+    renderLiveStatus: function() {
+        if (!this.liveStatusRendered && this.enableLiveRelationship) {
+            if (this.isActionEdit() || this.isActionDelete()) {
+                var tbar = this.items.items[0];
+                if(tbar) {
+                    var currentObj = this;
+                    var handler = null;
+                    var iconClass = "cq-editbar-livestatus-right-unlock";
+                    var tooltip = CQ.I18n.getMessage("Inheritance is broken at the page or parent level");
+                    if (this[CQ.wcm.msm.MSM.PARAM_LIVE_RELATIONSHIP][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_EDITABLE]) {
+                        iconClass = this.liveStatusLocked ?
+                                "cq-editbar-livestatus-right-lock":
+                                "cq-editbar-livestatus-right-unlock";
+                        handler = function() {
+                            currentObj.switchLock();
+                        };
+                        tooltip = CQ.I18n.getMessage("Click to toggle Live Copy inheritance");
+                    }
+                    //insert lock button before the checkbox
+                    var index = tbar.items.length;
+                    if( tbar.items.length > 2 ) {
+                        index = tbar.items.length - 2;
+                    }
+                    this.liveStatus = tbar.insertButton(index, {
+                        "iconCls": iconClass,
+                        "handler": handler,
+                        "tooltip": tooltip
+                    });
+                    this.doLayout();
+                }
+                this.liveStatusRendered = true;
+            }
+        }
+
+    },
+
+    /**
+     * Enables/disables items in the more menu and on the editbar depending on the
+     * editbar's width
+     * @private
+     */
+    manageMoreMenu: function() {
+        var barWidth = this.el.getWidth();
+        var tbar = this.items.items[0];
+
+        // show all buttons except more button for calculation
+        for (var i = 0; i < tbar.items.length; i++) {
+            tbar.getComponent(i).show();
+        }
+        if (this.moreButton) this.moreButton.hide();
+
+        // max left is the editbar's width plus its absolute position
+        var maxY = barWidth + this.el.getXY()[0];
+
+        // last item: edit mode > last; design mode > second last (last is more button)
+        var lastItem = tbar.getComponent(tbar.items.length - ((CQ.WCM.isEditMode() || this.moreButton == null) ? 1 : 2));
+        if (maxY < lastItem.getPosition()[0] + lastItem.getWidth()) {
+            var endIndex;
+            if (CQ.WCM.isEditMode()) {
+                // the most right items are always rendered to the editbar. these are:
+                // [more][filler][live status][select box][spacer]
+                // where "live status" is optional and "more" only exists if more menu is already rendered
+                endIndex = tbar.items.length - (this.liveStatusRendered ? 4 : 3);
+                for (var i = endIndex + 1; i < tbar.items.length; i++) {
+                    var item = tbar.getComponent(i);
+                    // subract width of the most right items (without the filler)
+                    maxY -= item.getWidth();
+                }
+                endIndex = endIndex - (this.moreButton ? 1 : 0);
+            }
+            else {
+                // e.g. design mode: all items can be moved to menu
+                endIndex = tbar.items.length - (this.moreButton ? 1 : 0);
+            }
+
+            // substract width of the more button (upcoming if first run)
+            maxY -= 20;
+
+            var hideFollowing = false;
+            var first = true;
+            if (this.moreMenu == null) {
+                // first run, menu does not exist yet
+                this.moreMenu = new CQ.Ext.menu.Menu();
+            }
+
+            for (var i = 0; i < endIndex; i++) {
+                var item = tbar.getComponent(i);
+
+                var cfg = CQ.Util.copyObject(item.initialConfig);
+
+                try {
+                    if (!hideFollowing && maxY < item.getPosition()[0] + item.getWidth()) {
+                        hideFollowing = true;
+                    }
+                }
+                catch (e) {
+                    // filler
+                }
+
+                var addSep = false;
+                if (cfg.xtype == "text" || cfg.xtype == "tbtext") {
+                    cfg.xtype = "titleseparator";
+                    cfg.title = cfg.text;
+                }
+                else if (cfg.xtype == "button" || cfg.xtype == "tbbutton" ||
+                         cfg.xtype == "splitbutton" || cfg.xtype == "tbsplitbutton") {
+                    delete cfg.xtype;
+                }
+                else if (cfg.xtype == "tbseparator") {
+                    addSep = true;
+                }
+                else {
+                    // spacers and fillers: add as separators
+                    addSep = true;
+                }
+
+                if (this.moreButton == null) {
+                    // first run, menu has to be feed
+                    if (addSep) {
+                        item.menuItem = this.moreMenu.addSeparator();
+                    }
+                    else {
+                        item.menuItem = this.moreMenu.addMenuItem(cfg);
+                    }
+                }
+
+                if (hideFollowing) {
+                    item.hide();
+                    if (addSep && first) {
+                        // hide leading separators
+                        item.menuItem.hide();
+                    }
+                    else {
+                        if (item.menuItem) item.menuItem.show();
+                        first = false;
+                    }
+                }
+                else {
+                    if (item.menuItem) item.menuItem.hide();
+                    // item itself is already shown
+                }
+            }
+
+            if (this.moreButton == null) {
+                // first run, more button does not exist yet
+                this.moreButton = tbar.insertButton(endIndex, {
+                    // span required because of a layout issue in IE 8
+                    "text": "<span style=\"font-size:1px;\">&nbsp;</span>",
+                    "menu": this.moreMenu
+                });
+            }
+            else if (hideFollowing) {
+                // there are items in menu >> show button
+                this.moreButton.show();
+            }
+            this.doLayout();
+        }
+    },
+
+    /**
+     * Observe the width of the element and adjust the editbar's width if
+     * necessary and move items that do not fit on the editbar to a menu.
+     * @since 5.5
+     */
+    observeWidth: function() {
+        // #ready is set after initial sizing in #buildPlaceholderAndElement
+        if (!this.ready) return;
+
+        // check if all buttons are visible. if not show them in a menu.
+        var barWidth = this.el.getWidth();
+        var elementWidth = this.element.getWidth();
+        if (elementWidth != 0 && barWidth != elementWidth) {
+            this.el.setStyle("width", elementWidth + "px");
+            this.manageMoreMenu();
+        }
+    },
+
+    /**
+     * Called by observer. Makes sure the edit bar is always align to
+     * its placeholder. See {@link CQ.Dialog#observe}.
+     * @private
+     */
+    observe: function() {
+        this.observeLiveStatus();
+        this.observeElementPosition();
+
+        if (!CQ.Util.isEqualPosition(this.el.getXY(),this.placeholder.getXY(),1)) {
+            this.el.alignTo(this.placeholder, "tl-tl");
+        }
+
+        // call observeWidth after observeLiveStatus because there a button can be added
+        this.observeWidth();
+    },
+
+    /**
+     * Returns the offsets for a new annotation as [x, y]
+     * @private
+     */
+    getNewAnnotationOffset: function() {
+        // place new annotations in a deck
+        this.annotationOffset += 15;
+        return [this.annotationOffset, this.annotationOffset];
+    },
+
+    /**
+     * Shows the edit bar.
+     * @param {Boolean} ignoreNested If true sub editables are not hidden (since 5.4)
+     * @public
+     */
+    show: function(ignoreNested) {
+        if(this.placeholder) {
+            this.placeholder.setVisible(true);
+            this.placeholder.show();
+        }
+        this.getEl().show();
+        CQ.WCM.showPlaceholders(this.element);
+        this.resumeDropTargets();
+
+        if (ignoreNested !== true) {
+            //finally show nested editable: this avoid sub editbars to appear at the wrong place in the page
+            var nestedEditables = CQ.WCM.getNestedEditables(this.path);
+            for(var i = 0; i < nestedEditables.length; i++) {
+                var editable = CQ.WCM.getEditable(nestedEditables[i]);
+                if( editable ) {
+                    editable.show(true);
+                }
+            }
+        }
+
+        this.showAnnotations();
+
+        return this;
+    },
+
+    /**
+     * Hides the edit bar.
+     * @param {Boolean} ignoreNested If true sub editables are not hidden (since 5.4)
+     * @public
+     */
+    hide: function(ignoreNested) {
+        if (ignoreNested !== true) {
+            //finally show nested editable: this avoid sub editbars to appear at the wrong place in the page
+            var nestedEditables = CQ.WCM.getNestedEditables(this.path);
+            for(var i = 0; i < nestedEditables.length; i++) {
+                var editable = CQ.WCM.getEditable(nestedEditables[i]);
+                if( editable ) {
+                    editable.hide(true);
+                }
+            }
+        }
+
+        this.suspendDropTargets();
+        this.getEl().hide();
+        if(this.placeholder) {
+            this.placeholder.setVisible(false);
+        }
+        CQ.WCM.hidePlaceholders(this.element);
+
+        this.hideAnnotations();
+
+        return this;
+    },
+
+    /**
+     * Converts a potentiel {@link CQ.wcm.EditRollover} menu action to a toolbar action.
+     * @param {String/Object} acionToConvert Action to convert: simple string or complex config
+     * @private
+     */
+    convertAction: function(actionToConvert) {
+        if(actionToConvert!=null) {
+            if(typeof actionToConvert == "string") {
+                var convertedAction = CQ.wcm.EditBar.ActionsConvertor[actionToConvert];
+                if(convertedAction!=null) {
+                    if(typeof convertedAction == 'string') {
+                        if(convertedAction.length>0) {
+                            return convertedAction;
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        return convertedAction;
+                    }
+                }
+            } else {
+                if(actionToConvert.xtype) {
+                    //if actions is an object with xtype equals to one of the menu xtype, convert it to the toolbar action
+                    if(CQ.wcm.EditBar.MenuXTypesToTBActions[actionToConvert.xtype]!=null) {
+                        return this.convertAction(CQ.wcm.EditBar.MenuXTypesToTBActions[actionToConvert.xtype]);
+                    }
+                } else {
+                    if (actionToConvert.handler || actionToConvert.listeners) {
+                        return actionToConvert;
+                    } else {
+                        return CQ.Util.applyDefaults(actionToConvert,{"xtype":"tbtext"});
+                    }
+                }
+            }
+        }
+        return actionToConvert;
+    },
+
+    /**
+     * Disables drag of the component
+     * @private
+     */
+    disableDrag: function() {
+        if(this.dd)
+            this.dd.lock();
+    },
+
+    /**
+     * Enables drag of the component
+     * @private
+     */
+    enableDrag: function() {
+        if(this.dd)
+            this.dd.unlock();
+    },
+
+    /**
+     * Hides the element part of the component.
+     * @param {Boolean} keepParent (optional) True to not hide parent container
+     * @param {Boolean} ignoreNested If true sub editables are not hidden (since 5.4)
+     * @private
+     */
+    hideElement: function(keepParent, ignoreNested) {
+        if (ignoreNested !== true) {
+            var nestedEditables = CQ.WCM.getNestedEditables(this.path);
+            for(var i = 0; i < nestedEditables.length; i++) {
+                var editable = CQ.WCM.getEditable(nestedEditables[i]);
+                if( editable ) {
+                    editable.hide(true);
+                    editable.hideElement(false, true);
+                }
+            }
+        }
+
+        this.element.hide();
+
+        if(keepParent!==true && this.isContained)
+            this.element.parent().hide(true);
+    },
+
+    /**
+     * Shows the element part of the component.
+     * @param {Boolean} ignoreNested If true sub editables are not hidden (since 5.4)
+     * @private
+     */
+    showElement: function(ignoreNested) {
+        if(this.isContained)
+            this.element.parent().show();
+
+        this.element.show();
+
+        if (ignoreNested !== true) {
+            //finally show nested editable: this avoid sub editbars to appear at the wrong place in the page
+            var nestedEditables = CQ.WCM.getNestedEditables(this.path);
+            for(var i = 0; i < nestedEditables.length; i++) {
+                var editable = CQ.WCM.getEditable(nestedEditables[i]);
+                if( editable ) {
+                    editable.showElement(true);
+                    editable.show(true);
+                }
+            }
+        }
+    },
+
+    /**
+     * Refreshes the component and rezise and shows placeholder.
+     * @private
+     */
+    refreshComponent: function() {
+        if(this.placeholder) {
+            this.placeholder.setHeight(this.initialPlaceholderHeight);
+            this.placeholder.show();
+        }
+    },
+
+    /**
+     * Returns the placeholder the inline dialog is anchored to.
+     * @return {CQ.Ext.Element} Placeholder
+     * @private
+     */
+    getInlinePlaceholder: function() {
+    	return this.placeholder;
+    },
+
+    /**
+     * Gets the initial height of the placeholder where inline dialog is anchored to
+     * @private
+     */
+    getInlinePlaceholderInitialHeight: function() {
+    	return this.initialPlaceholderHeight;
+    },
+
+    /**
+     * Removes the edit bar.
+     * @public
+     */
+    remove: function(ignoreNested) {
+        if (ignoreNested !== true) {
+            //first remove all nested editables to avoid JS error and inconsistencies
+            var nestedEditables = CQ.WCM.getNestedEditables(this.path);
+            for(var i = 0; i < nestedEditables.length; i++) {
+                var editable = CQ.WCM.getEditable(nestedEditables[i]);
+                if( editable ) {
+                    editable.remove(true);
+                }
+            }
+        }
+
+        this.removeDropTargets();
+        CQ.WCM.deselect(this);
+        this.removeSelectionListeners();
+        this.removeClipboardListeners();
+        CQ.WCM.unregisterDialog("editdialog-" + this.path);
+        CQ.WCM.unregisterDialog("insertdialog-" + this.path);
+        CQ.WCM.unregisterEditable(this.path);
+        CQ.Util.cancelObservation(this);
+
+        this.clearListeners();
+        CQ.Ext.ComponentMgr.unregister(this);
+
+        if (this.placeholder) {
+            CQ.Ext.destroy(this.placeholder);
+            CQ.Ext.ComponentMgr.unregister(this.placeholder);
+            delete this.placeholder;
+        }
+
+        if( this.selectBox ) {
+            CQ.Ext.destroy(this.selectBox);
+            CQ.Ext.ComponentMgr.unregister(this.selectBox);
+            delete this.selectBox;
+        }
+
+        this.removeAnnotations();
+
+        CQ.Ext.destroy(this.element);
+        CQ.Ext.ComponentMgr.unregister(this.element);
+        delete this.element;
+
+        // necessary to release anchorTo
+        this.el.removeAllListeners();
+
+        this.destroy();
+		this.purgeListeners();
+    },
+
+    /**
+     * Clears all listeners related to this component.
+     * @private
+     */
+    clearListeners: function() {
+        var selection = CQ.WCM.getSelection();
+        selection.un("clear", this.handleSelectionClear, this);
+
+        this.element.un("mouseover",this.handleMouseOver,this);
+    },
+
+    /**
+     * Sets the checkbox label
+     * @private
+     */
+    setBoxLabel: function() {
+        var label = "";
+        if (this.actions && this.actions.length > 0 && this.actions[0].xtype == "tbtext" && this.actions[0].text != "") {
+            label = this.actions[0].text.replace(/(?:<.*?>)/ig, "") + " ";
+        }
+        this.selectBox.boxLabel = CQ.I18n.getMessage("{0}edit bar checkbox", [label], "Label of edit bar checkbox");
+    }
+});
+
+CQ.Ext.reg("editbar", CQ.wcm.EditBar);
+
+//overrides current CQ.wcm.EditBar class with methods contained in CQ.wcm.EditBase.
+CQ.Ext.override(CQ.wcm.EditBar,CQ.wcm.EditBase);
+
+//configuration for action conversion
+CQ.wcm.EditBar.ActionsConvertor = new Array;
+
+//separators aliases
+CQ.wcm.EditBar.ActionsConvertor["separator"] = {"xtype": "tbseparator"};
+CQ.wcm.EditBar.ActionsConvertor["-"] = CQ.wcm.EditBar.ActionsConvertor["separator"];
+
+//spacers aliases
+CQ.wcm.EditBar.ActionsConvertor["spacer"] = {"xtype": "tbspacer"};
+CQ.wcm.EditBar.ActionsConvertor[" "] = CQ.wcm.EditBar.ActionsConvertor["spacer"];
+
+//fill aliases
+CQ.wcm.EditBar.ActionsConvertor["fill"] = {"xtype": "tbfill"};
+CQ.wcm.EditBar.ActionsConvertor["->"] = CQ.wcm.EditBar.ActionsConvertor["fill"];
+
+//no menu xtype registered for the moment in EXT, so no conversion from menu to toolbar
+CQ.wcm.EditBar.MenuXTypesToTBActions = new Array;
+
+// define a "disabled drag zone" so we can attach it to this editable when it's targeted
+// (targeted editables are unmovable)
+CQ.wcm.EditBar.DisabledDragZone = CQ.Ext.extend(CQ.Ext.dd.DragZone, {
+    constructor: function(el, config) {
+        config = config || {};
+
+        var dragEl = document.createElement("div");
+        CQ.Ext.fly(dragEl).addClass("cq-editrollover-livestatus-disabled");
+        dragEl.innerHTML = CQ.I18n.getMessage("Fixed Component");
+
+        CQ.Ext.apply(config, {
+            ddel: dragEl,
+            ddGroup: "match_nothing"
+        });
+
+        CQ.wcm.EditBar.DisabledDragZone.superclass.constructor.call(this, el, config);
+    },
+
+    getDragData: function(e) {
+        return this;
+    },
+
+    getRepairXY : function(e, data){
+        // Turn off the repair animation (which the animRepair config property fails to do since it
+        // never gets written into the StatusProxy).
+        return null;
+    }
+});
+
+
+CQ.wcm.EditBar.DisabledDragZone.getInstance = function(element) {
+    return new CQ.wcm.EditBar.DisabledDragZone(element, {});
+};

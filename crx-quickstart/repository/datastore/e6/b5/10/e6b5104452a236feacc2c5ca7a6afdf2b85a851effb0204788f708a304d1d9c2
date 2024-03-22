@@ -1,0 +1,520 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * The <code>CQ.mcm.cal.MonthLens</code> renders the month view
+ * of the calendar
+ * @class CQ.mcm.cal.MonthLens
+ * @extends CQ.mcm.cal.CalendarLens
+ */
+CQ.mcm.cal.MonthLens = CQ.Ext.extend(CQ.mcm.cal.CalendarLens, {
+
+    /**
+     * first date of displayed month
+     * @private
+     */
+    monthStart: null,
+    
+    /**
+     * start display date
+     * @private
+     */
+    start: null,
+    
+    /**
+     * end display date (+1 day)
+     * @private
+     */
+    end: null,
+	
+    /**
+     * internal month panel
+     * @private
+     */
+    monthPanel: null,
+    
+    constructor: function(config) {
+        this.store = new CQ.Ext.data.JsonStore({
+			"fields": CQ.mcm.cal.Calendar.getFields()
+		});
+		
+        config = CQ.Util.applyDefaults(config, {
+            "autoScroll": true,
+            "renderTo": CQ.Util.ROOT_ID,
+            "border": false,
+            "height": CQ.mcm.cal.Calendar.getLensHeight(),
+            "headerHeight": 20, // height of the day names header
+            "headerBorder": 2, // css border vertical sum for day names header
+            "dayBorder": 1,    // css border vertical sum for day cell
+            "dayHeaderHeight": 13, // height of the day header showing the day number
+            "eventHeight": 14 // height of a single event inside a day cell
+        });
+        
+        CQ.mcm.cal.MonthLens.superclass.constructor.call(this, config);
+    },
+	
+	// public calendar lens api
+	
+	prev: function() {
+        // Note: rendering is delayed up to renderMonth(), called upon querybuilder response
+        return this.monthStart.add(Date.MONTH, -1);
+	},
+	
+	next: function() {
+        // Note: rendering is delayed up to renderMonth(), called upon querybuilder response
+        return this.monthStart.add(Date.MONTH, 1);
+	},
+	
+	setDate: function(date) {
+        var startOfWeek = CQ.mcm.cal.Calendar.getStartOfWeek();
+        
+        var newMonthStart = date.getFirstDateOfMonth();
+        // find the first week start on or before the month start day => display start
+        // calculate the proper start week day depending on the configured start weekday        
+        var startWeekDay = newMonthStart.getDay() - startOfWeek;
+        if (startWeekDay < 0) {
+            startWeekDay += 7;
+        }
+        this.start = newMonthStart.add(Date.DAY, - startWeekDay);
+        
+        var newMonthEnd = date.getLastDateOfMonth();
+        // find the first week end after or on the month end => display end
+        var endWeekDay = newMonthEnd.getDay() - startOfWeek;
+        if (endWeekDay < 0) {
+            endWeekDay += 7;
+        }
+        // Note: the end will be the day after the last day displayed, in order
+        // to be used for the upper bound of the query and for doing getTime() < end.getTime()
+        this.end = newMonthEnd.add(Date.DAY, 6 - endWeekDay + 1);
+        
+        var oldMonthStart = this.monthStart;
+        this.monthStart = newMonthStart;
+        
+        return (!oldMonthStart || (oldMonthStart.getTime() != this.monthStart.getTime()));
+	},
+	
+	getDateDisplayText: function() {
+        // eg. "December 2009"
+	    return this.monthStart.format(CQ.mcm.cal.Calendar.getDatePattern("month"));
+	},
+	
+    getStartDate: function() {
+        return this.start;
+    },
+    
+    getEndDate: function() {
+        return this.end;
+    },
+    
+    // public lens api
+    
+    loadData: function(data) {
+        this.store.loadData(data.hits);
+        this.renderMonth();
+    },
+
+    getSelection: function() {
+        // no selection at the moment for calendar events
+        return [];
+    },
+	
+	// internal stuff
+
+	renderMonth: function() {
+        var cal = CQ.mcm.cal.Calendar;
+
+        // recreate month panel        
+		if (this.monthPanel) {
+			this.remove(this.monthPanel);
+		}
+        this.monthPanel = new CQ.Ext.Panel({
+            "cls": "cq-calendar-month",
+            "border": false,
+            "hideBorders": true,
+            "layout": "table",
+            "height": this.height,
+            "layoutConfig": {
+                "columns": 7
+            },
+            "defaults": {
+            	  "cellCls": 'cq-calendar-month-daybar'
+            }
+        });
+		this.add(this.monthPanel);
+		
+        // header with day names: Monday, Tuesday, etc.
+        for (var i = cal.getStartOfWeek(); i < cal.getStartOfWeek() + 7; i++) {
+            this.monthPanel.add({
+                "html": Date.dayNames[i % 7],
+                "cls": "cq-calendar-month-dayname",
+                "height": this.headerHeight
+            });
+        }
+		
+        // first calculate total number of days displayed, then divide by 7 to get the nr of rows
+        var MILLIS_PER_DAY = 24 * 60 * 60 * 1000.0;
+        // need to round because this will not divide evenly on months with DST change (a few hours less or more)
+        var days = Math.round((this.end.getTime() - this.start.getTime()) / MILLIS_PER_DAY);
+        var rows = Math.ceil(days / 7);
+        
+        this.dayHeight = Math.floor((this.height - this.headerHeight - this.headerBorder) / rows) - this.dayBorder;
+        this.eventsPerDay = Math.floor((this.dayHeight - this.dayHeaderHeight) / this.eventHeight);
+        
+        // ordered list of all-day events to keep the position stable across days
+        var alldayEvents = [];
+        
+        // current month
+        for (var d = this.start; d.getTime() < this.end.getTime(); d = d.add(Date.DAY, 1)) {
+            var cls = "";
+            if (d.getMonth() < this.monthStart.getMonth()) {
+                cls = "prev-month-day";
+            } else if (d.getMonth() > this.monthStart.getMonth()) {
+                cls = "next-month-day";
+            }
+            
+            var dayPanel = this.renderDay(d, alldayEvents, cls);
+            dayPanel.height = this.dayHeight;
+            this.monthPanel.add(dayPanel);
+        }
+        
+		// TODO: hack, need better way to get our container parent
+		this.findParentByType("lensdeck").doLayout();
+        //this.doLayout();
+	},
+	
+    renderDay: function(currentDay, alldayEvents, cls) {
+        // use ext domhelper notation for creating the child divs for events and co.
+        var html = [], moreHtml = [];
+        
+        // A) add bar showing day of month number
+        html.push({
+            tag: "div",
+            cls: "cq-calendar-month-daybar",
+            children: [{
+                tag: "div",
+                cls: "cq-calendar-month-day-number",
+                html: currentDay.getDate()
+            }]
+        });
+        
+        // B) all day events (1. - 4.)
+        this.renderAllDayEvents(currentDay, html, moreHtml, alldayEvents);
+        
+        // C) events with time (they are already ordered)
+        this.renderTimeEvents(currentDay, html, moreHtml);
+        
+        // finall check for too many events for the space we have
+        // (note the first element is not an event but the daybar)
+        
+        //var fullHtml = null;
+        var hiddenEvents = (html.length - 1) - this.eventsPerDay;
+        if (hiddenEvents > 0) {
+            var tmp = html, i;
+            html = [];
+            // copy only eventsPerDay-1, as we need the last space for the "more" link
+            for (i=0; i < this.eventsPerDay; i++) {
+                html[i] = tmp[i];
+            }
+            
+            // count the actual events for the "+2 more" display, skip dummy placeholders
+            hiddenEvents = 0;
+            for (i=this.eventsPerDay-1; i < moreHtml.length; i++) {
+                if (moreHtml[i].isEvent) {
+                    hiddenEvents++;
+                }
+            }
+            
+            var popupId = CQ.Ext.id();
+            // more link
+            html.push({
+                tag: "a",
+                cls: "cq-calendar-month-day-morelink",
+                href: "#",
+                html: CQ.I18n.getMessage("+{0} more", [hiddenEvents], "link to see more calendar events that don't fit into the current view"),
+                // the explicit setting of the zIndex of the parent is required as a fix for IE
+                // (otherwise the popup would pop under the table cell) 
+                onclick: "if (event) { CQ.Ext.lib.Event.stopEvent(event); } var el = document.getElementById('" + popupId + "'); el.parentNode.style.zIndex = '1'; el.style.display = 'block';"
+            });
+            // add more popup (hidden at start)
+            html.push({
+                id: popupId,
+                tag: "div",
+                cls: "cq-calendar-month-day-morepopup",
+                style: "position: absolute; top: 0; left: 0; width: 200%; z-index: 10; display: none;",
+                children: moreHtml
+            });
+            // close link
+            moreHtml.push({
+               tag: "a",
+                cls: "cq-calendar-month-day-closemorelink",
+                href: "#",
+                html: CQ.I18n.getMessage("Close"),
+                onclick: "if (event) { CQ.Ext.lib.Event.stopEvent(event); } document.getElementById('" + popupId + "').style.display = 'none'"
+            });
+        }
+        
+        return this.getDayPanel(currentDay, cls, html);
+    },
+    
+	renderAllDayEvents: function(currentDay, html, moreHtml, alldayEvents) {
+        // 1. start with the same order of allday events as on the previous day
+        var currentDayUTC = currentDay.utcDateOnly();
+        var i;
+        for (i=0; i < alldayEvents.length; i++) {
+            var ev = alldayEvents[i];
+            if (ev && !currentDayUTC.between(ev.get("start"), ev.get("end"))) {
+                // clear position
+                alldayEvents[i] = null;
+            }
+        }
+        
+        // sorts two (all-day) events by their duration
+        function sortByDuration(a, b) {
+            var durA = a.get("end").getTime() - a.get("start").getTime();
+            var durB = b.get("end").getTime() - b.get("start").getTime();
+            return durA - durB;
+        }
+        
+        // 2. find new events (starting on this day)
+        // Note: we put longer events at the beginning, so they do not end up
+        //       at the bottom of the more popup
+        var events = this.getEvents(currentDay, true);
+        events.sort("DESC", sortByDuration);
+        events.each(function(event) {
+            if (alldayEvents.indexOf(event) < 0) {
+                // not yet present, find hole to fill
+                for (var i=0; i < alldayEvents.length; i++) {
+                    if (alldayEvents[i] == null) {
+                        alldayEvents[i] = event;
+                        event = null;
+                        break;
+                    }
+                }
+                // if no hole was found, add at the end
+                if (event) {
+                    alldayEvents.push(event);
+                }
+            }
+        });
+        
+        // 3. clear empty entries at the end
+        for (i = alldayEvents.length-1; i >= 0; i--) {
+            if (alldayEvents[i]) {
+                break;
+            }
+            alldayEvents.pop();
+        }
+        
+        // 4. render collected all-day events
+        for (i=0; i < alldayEvents.length; i++) {
+            var event = alldayEvents[i];
+            if (event == null) {
+                // render dummy placeholder
+                var dummy = {
+                    tag: "div",
+                    cls: "cq-calendar-month-event"
+                };
+                html.push(dummy);
+                moreHtml.push(dummy);
+                
+            } else {
+                html.push(this.createAllDayEventDiv(event, currentDay, false));
+                moreHtml.push(this.createAllDayEventDiv(event, currentDay, true));
+            }
+        }
+	},
+	
+	createAllDayEventDiv: function(event, currentDay, isMoreHtml) {
+        var starts = this.eventStartsOnDay(currentDay, event);
+        var ends = this.eventEndsOnDay(currentDay, event);
+        
+        var startOfWeek = CQ.mcm.cal.Calendar.getStartOfWeek();
+        var isWeekStart = (currentDay.getDay() == startOfWeek);
+        var isWeekEnd = (currentDay.add(Date.DAY, 1).getDay() == startOfWeek);
+        
+        var color = CQ.mcm.cal.Calendar.getColorFor(event);
+        var h = this.eventHeight - 1;
+        
+        var elem = {
+            tag: "a",
+            href: "#",
+            cls: "cq-calendar-month-event all-day cq-ellipsis",
+            style: "height: " + h + "px; line-height: " + h + "px; background-color: #" + color + ";",
+            title: event.get("title")
+        };
+        
+        var link = CQ.mcm.cal.Calendar.getEventLink(event);
+        if (link) {
+            elem.href = link;
+        } else {
+            // Note: domhelper does not allow to set real functions for event handler, not even with "useDom=true"
+            elem.onclick = "CQ.mcm.cal.MonthLens.editEvent(event, '" + this.id + "', '" + event.id + "')";
+        }
+        
+        if (starts || isWeekStart || isMoreHtml) {
+            elem.html = event.get("title");
+        }
+        
+        var leftDiv = { tag: "div", style: "margin-bottom: 1px; ", isEvent: true };
+        var rightDiv = { tag: "div" };
+        leftDiv.children = [rightDiv];
+        rightDiv.children = [elem];
+        
+        var spritesURL = CQ.HTTP.externalize("/libs/cq/ui/resources/sprites");
+        
+        var arrowHeight = 8;
+        var arrowTop = Math.floor((h - arrowHeight) / 2);
+        var arrow = {
+            /* top */    t: arrowTop,
+            /* middle */ m: Math.floor(h / 2),
+            /* bottom */ b: arrowTop + arrowHeight
+        };
+        
+        if (starts) {
+            leftDiv.style += "margin-left: 1px; ";
+            leftDiv.style += "padding-left: 7px; ";
+            
+            leftDiv.style += "background: transparent url(" + spritesURL + ".7." + h + ".roundrect.0.0.14." + h + ".8.F." + color + ".png) no-repeat 0 0;";
+        } else if (isMoreHtml || isWeekStart) {
+            leftDiv.style += "padding-left: 12px; ";
+            leftDiv.style += "background: transparent url(" + spritesURL + ".12." + h + ".rect.0.0.12." + h + ".F." + color +
+                             ".poly.2." + arrow.m + ".7." + arrow.t + ".7." + arrow.b + ".F.white.png) no-repeat 0 0;";
+        }
+        
+        if (ends) {
+            rightDiv.style = "margin-right: 1px; ";
+            rightDiv.style += "padding-right: 7px; ";
+            rightDiv.style += "background: transparent url(" + spritesURL + ".7." + h + ".roundrect.-7.0.14." + h + ".8.F." + color + ".png) no-repeat right 0;";
+        } else if (isMoreHtml || isWeekEnd) {
+            rightDiv.style = "padding-right: 12px; ";
+            rightDiv.style += "background: transparent url(" + spritesURL + ".12." + h + ".rect.0.0.12." + h + ".F." + color +
+                              ".poly.5." + arrow.t + ".5." + arrow.b + ".10." + arrow.m + ".F.white.png) no-repeat right 0;";
+        }
+        
+        return leftDiv;
+	},
+	
+	renderTimeEvents: function(currentDay, html, moreHtml) {
+	    var timeFormat = CQ.mcm.cal.Calendar.getTimePattern("normal");
+	    var monthLensID = this.id;
+	    
+        this.getEvents(currentDay, false).each(function(event) {
+            var elem = {
+                tag: "a",
+                cls: "cq-calendar-month-event cq-ellipsis",
+                html: event.get("start").format(timeFormat) + " " + event.get("title"),
+                isEvent: true
+            };
+            elem.title = elem.html;
+            var link = CQ.mcm.cal.Calendar.getEventLink(event);
+            if (link) {
+                elem.href = link;
+            } else {
+                elem.onclick = "CQ.mcm.cal.MonthLens.editEvent(event, '" + monthLensID + "', '" + event.id + "')";
+            }
+            html.push(elem);
+            moreHtml.push(elem);
+        });
+	},
+	
+	getDayPanel: function(date, cls, html) {
+	    // check for today (in the configured timezone)
+	    var now = new Date().shift(CQ.mcm.cal.Calendar.getTimeZone());
+	    if (date.isSameDateAs(now)) {
+	        cls = (cls ? cls + " current-day" : "current-day");
+	    }
+	    
+	    var cfg = {
+            html: html,
+            bodyCfg: {
+                cls: "x-panel-body cq-calendar-month-day " + cls
+            }
+        };
+        
+        if (CQ.mcm.cal.Calendar.canCreateEvent()) {
+            cfg.createDate = date.utcDateOnly();
+            cfg.listeners = {
+                render: function() {
+                    this.el.unselectable();
+                    var date = this.createDate;
+                    this.body.on("click", function() {
+                        CQ.mcm.cal.Calendar.createEvent(date, true, null, this.body.dom, "l-r?");
+                    }, this);
+                }
+            };
+            cfg.bodyCfg.cls += " cq-calendar-create-event-highlight";
+            //cfg.bodyCfg.title = CQ.I18n.getMessage("Click to create a new event");
+        }
+        
+        return cfg;
+	},
+	
+	getEvents: function(date, isAllDay) {
+        // check if the event is on the same day
+        // TODO: this could be improved (iteration instead of query, because events are ordered)
+		return this.store.queryBy(function(event, id) {
+			var eventIsAllDay = event.get("isDate");
+			if (eventIsAllDay != isAllDay) {
+				return false;
+			}
+			
+            if (eventIsAllDay) {
+                // compare dates on UTC date basis only
+                date = date.utcDateOnly();
+                // display all-day events on every day they cover
+                return date.between(event.get("start"), event.get("end"));
+            } else {
+                // check if the date part is equal
+                return date.isSameDateAs(event.get("start"));
+            }
+            
+		}, this);
+	},
+	
+	eventStartsOnDay: function(date, event) {
+        if (event.get("isDate")) {
+            date = date.utcDateOnly();
+        }
+        return date.isSameDateAs(event.get("start"));
+	},
+	
+    eventEndsOnDay: function(date, event) {
+        if (event.get("isDate")) {
+            date = date.utcDateOnly();
+        }
+        return date.isSameDateAs(event.get("end"));
+    }
+	
+});
+
+/**
+ * Helper to edit an event from an html inline event handler, based
+ * on the component id of the month lens and the id of the event record
+ * in its store.
+ * 
+ * @private
+ * @static
+ */
+CQ.mcm.cal.MonthLens.editEvent = function(ev, id, eventId) {
+    var e = CQ.Ext.EventObject.setEvent(ev);
+    e.stopEvent();
+    
+    var monthLens = CQ.Ext.getCmp(id);
+    if (monthLens) {
+        var event = monthLens.store.getById(eventId);
+        if (event) {
+            CQ.mcm.cal.Calendar.openEvent(event, e.getTarget(), "l-r?");
+        }
+    }
+};
+
+CQ.Ext.reg("monthlens", CQ.mcm.cal.MonthLens);

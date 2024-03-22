@@ -1,0 +1,684 @@
+/*
+ ADOBE CONFIDENTIAL
+
+ Copyright 2016 Adobe Systems Incorporated
+ All Rights Reserved.
+
+ NOTICE:  All information contained herein is, and remains
+ the property of Adobe Systems Incorporated and its suppliers,
+ if any.  The intellectual and technical concepts contained
+ herein are proprietary to Adobe Systems Incorporated and its
+ suppliers and may be covered by U.S. and Foreign Patents,
+ patents in process, and are protected by trade secret or copyright law.
+ Dissemination of this information or reproduction of this material
+ is strictly forbidden unless prior written permission is obtained
+ from Adobe Systems Incorporated.
+ */
+(function(window, document, Granite, $, URITemplate) {
+    "use strict";
+
+    var registry = $(window).adaptTo("foundation-registry");
+
+    function handleMode(collection, config) {
+        var modeChangeHandler = function(e, mode, group) {
+            if (e._foundationLayoutTable) {
+                return;
+            }
+            if (mode !== "default") {
+                return;
+            }
+            if (collection[0].dataset.foundationModeGroup !== group) {
+                return;
+            }
+
+            collection.data("foundation-layout-table.internal.bulkSelection", true);
+
+            var prevSelections = collection.find(".foundation-selections-item").each(function() {
+                this.selected = false;
+            });
+
+            collection.removeData("foundation-layout-table.internal.bulkSelection");
+
+            collection.trigger("foundation-selections-change");
+        };
+
+        $(document).on("foundation-mode-change", modeChangeHandler);
+
+        return function() {
+            $(document).off("foundation-mode-change", modeChangeHandler);
+        };
+    }
+
+    function handleSelection(collection, config) {
+        var f = function(e) {
+            var detail = e.originalEvent.detail;
+            var selectionMode = collection[0].dataset.foundationSelectionsMode;
+
+            var selections = $();
+            var prevSelections = $();
+
+            if (selectionMode === "single") {
+                if (detail.oldSelection) {
+                    prevSelections = $(detail.oldSelection);
+                }
+                if (detail.selection) {
+                    selections = $(detail.selection);
+                }
+            } else {
+                prevSelections = $(detail.oldSelection);
+                selections = $(detail.selection);
+            }
+
+            prevSelections.removeClass("foundation-selections-item");
+            selections.addClass("foundation-selections-item");
+
+            if (!collection.data("foundation-layout-table.internal.bulkSelection")) {
+                changeMode(collection, false, selections, prevSelections);
+                collection.trigger("foundation-selections-change");
+            }
+        };
+
+        var escape = function() {
+            if (document.activeElement === collection[0] || collection[0].contains(document.activeElement)) {
+                collection.adaptTo("foundation-selections").clear();
+            }
+        };
+
+        collection.on("coral-table:change", f);
+        Coral.keys.on("escape", escape);
+
+        return function() {
+            collection.off("coral-table:change", f);
+            Coral.keys.off("escape", escape);
+        };
+    }
+
+    // commented top to here
+
+    function changeMode(collection, force, selections, prevSelections) {
+        var group = collection[0].dataset.foundationModeGroup;
+
+        if (!group) {
+            return;
+        }
+
+        var afterCount;
+        if (selections) {
+            afterCount = selections.length;
+        } else {
+            afterCount = collection.adaptTo("foundation-selections").count();
+        }
+
+        var beforeCount;
+        if (prevSelections) {
+            beforeCount = prevSelections.length;
+        } else {
+            beforeCount = 0;
+        }
+
+        var trigger = function(mode) {
+            var e = $.Event("foundation-mode-change");
+            e._foundationLayoutTable = true; // Mark the event so that our own handler can detect if it is triggered by us or not.
+            collection.trigger(e, [mode, group]);
+        };
+
+        if ((beforeCount === 0 || force) && afterCount > 0) {
+            trigger("selection");
+        } else if ((beforeCount > 0 || force) && afterCount === 0) {
+            trigger("default");
+        }
+    }
+
+    //Start comment
+    function handleSorting(collection, config) {
+        var f = function(e) {
+            if (config.sortMode !== "remote") {
+                return;
+            }
+
+            var paginator = collection.data("foundation-layout-table.internal.paginator");
+
+            if (!paginator) {
+                // Even if the sort mode is server, if there is no more data, sort in the client instead.
+                return;
+            }
+
+            var detail = e.originalEvent.detail;
+            var column = detail.column;
+
+            var originalSortType = column.sortableType;
+            column.sortableType = "custom";
+
+            var src = collection[0].dataset.foundationCollectionSrc;
+
+            var columnName = column.dataset.foundationLayoutTableColumnName;
+
+            var direction = (function(raw) {
+                switch(raw) {
+                    case "ascending": return "asc";
+                    case "descending": return "desc";
+                    case "default": return null;
+                }
+            })(detail.direction || detail.sortableDirection);
+
+            collection.data("foundation-layout-table.internal.paginator.sort", {
+                name: columnName,
+                direction: direction,
+                originalSortType: originalSortType
+            });
+
+            var url = URITemplate.expand(src, {
+                offset: 0,
+                limit: paginator.limit,
+                id: collection[0].dataset.foundationCollectionId,
+                sortName: columnName,
+                sortDir: direction
+            });
+
+            $.ajax({
+                url: url,
+                cache: false
+            }).then(function(html) {
+                extractItems(html).then(function(result) {
+                    var items = result.items;
+
+                    var collectionApi = collection.adaptTo("foundation-collection");
+                    collectionApi.clear();
+                    collectionApi.append(items);
+
+                    var hasMore = result.hasMore;
+                    if (hasMore === undefined) {
+                        hasMore = items.length >= paginator.limit;
+                    }
+
+                    paginator.restart(items.length, hasMore);
+
+                    column.sortableType = originalSortType;
+                });
+            }, function() {
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Fail to load data.");
+
+                var ui = $(window).adaptTo("foundation-ui");
+                ui.alert(title, message, "error");
+            });
+        };
+
+        collection.on("coral-table:beforecolumnsort", f);
+
+        return function() {
+            collection.off("coral-table:beforecolumnsort", f);
+        };
+    }
+
+    function handlePagination(collection, config, reset) {
+        var src = collection[0].dataset.foundationCollectionSrc;
+        var hasMore = collection[0].dataset.foundationLayoutCalendarHasmore;
+
+        if (!src || hasMore === "false") {
+            return;
+        }
+
+        var paginator;
+        var f = function(scrollContainer) {
+            var Paginator = $(window).adaptTo("foundation-util-paginator");
+
+            paginator = new Paginator({
+                el: scrollContainer,
+                limit: config.limit || 20,
+                resolveURL: function(paginator) {
+                    var sort = collection.data("foundation-layout-table.internal.paginator.sort");
+
+                    return URITemplate.expand(src, {
+                        offset: paginator.offset,
+                        limit: paginator.limit,
+                        id: collection[0].dataset.foundationCollectionId,
+                        sortName: sort ? sort.name : undefined,
+                        sortDir: sort ? sort.direction : undefined
+                    });
+                },
+                processResponse: function(paginator, html) {
+                    var deferred = $.Deferred();
+
+                    extractItems(html).then(function(result) {
+                        var items = result.items;
+
+                        var collectionApi = collection.adaptTo("foundation-collection");
+                        collectionApi.append(items);
+
+                        var hasMore = result.hasMore;
+                        if (hasMore === undefined) {
+                            hasMore = items.length >= paginator.limit;
+                        }
+
+                        deferred.resolve({
+                            length: items.length,
+                            hasNext: hasMore
+                        });
+                    });
+
+                    return deferred.promise();
+                }
+            });
+
+            collection.data("foundation-layout-table.internal.paginator", paginator);
+
+            setTimeout(function() {
+                var offset = collection.find(".foundation-collection-item").length;
+                paginator.start(offset);
+            }, 500);
+        };
+
+        var scrollContainer = collection.children(".coral-Table-wrapper-container");
+
+        if (scrollContainer.length) {
+            f(scrollContainer);
+        } else {
+            requestAnimationFrame(function() {
+                f(collection.children(".coral-Table-wrapper-container"));
+            });
+        }
+
+        return function() {
+            if (paginator) {
+                paginator.destroy();
+                collection.removeData("foundation-layout-table.internal.paginator");
+                collection.removeData("foundation-layout-table.internal.paginator.sort");
+            }
+        };
+    }
+
+    function extractItems(html) {
+        var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+        return parser.parse(html).then(function(fragment) {
+            var el = $(fragment).children();
+
+            if (!el.hasClass("foundation-collection")) {
+                return;
+            }
+
+            var items = el.find(".foundation-collection-item").toArray();
+
+            var hasMore = el[0].dataset.foundationLayoutTableHasmore;
+            if (hasMore === "true") {
+                hasMore = true;
+            } else if (hasMore === "false") {
+                hasMore = false;
+            }
+
+            return {
+                items: items,
+                hasMore: hasMore
+            };
+        });
+    }
+
+    function handleNavigation(collection, config) {
+        var navigate = function(itemEl) {
+            collection.adaptTo("foundation-collection-item-action").execute(itemEl);
+        };
+
+        var f = function(e) {
+            // Clicking the item means navigate.
+            // This is annoying feature as you have to check if the event target is part of actionable element.
+
+            var item = $(e.target).closest("[coral-table-rowselect], button, a, .foundation-collection-item");
+
+            if (item.hasClass("foundation-layout-table-cellwrapper")) {
+                if (e.which === 1 && !e.metaKey && !e.shiftKey && !e.altKey) {
+                    e.preventDefault();
+                    navigate(item.closest(".foundation-collection-item")[0]);
+                }
+                return;
+            }
+
+            if (item.hasClass("foundation-collection-item")) {
+                e.preventDefault();
+                navigate(item[0]);
+            }
+        };
+
+        collection.on("click", ".foundation-collection-item", f);
+
+        return function() {
+            collection.off("click", ".foundation-collection-item", f);
+        };
+    }
+
+    function handleOrdering(collection, config) {
+        var f = function(e) {
+            var detail = e.originalEvent.detail;
+            var row = detail.row;
+            var before = detail.before;
+            var oldBefore = detail.oldBefore;
+
+            var action = config.rowReorderAction;
+
+            if (!action) {
+                return;
+            }
+
+            var beforeId = before ? before.dataset.foundationCollectionItemId : undefined;
+            var beforeName = beforeId ? beforeId.substring(beforeId.lastIndexOf("/") + 1) : undefined;
+
+            var rawURL = URITemplate.expand(action, {
+                item: row.dataset.foundationCollectionItemId,
+                before: beforeId,
+                beforeName: beforeName
+            });
+
+            var url = rawURL;
+            var data;
+
+            var index = rawURL.indexOf("?");
+            if (index >= 0) {
+                url = rawURL.substring(0, index);
+                data = rawURL.substring(index + 1);
+            }
+
+            var ui = $(window).adaptTo("foundation-ui");
+
+            ui.wait();
+
+            $.ajax({
+                url: url,
+                method: "POST",
+                data: data
+            }).always(function() {
+                ui.clearWait();
+            }).fail(function() {
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Fail to reorder.");
+
+                ui.alert(title, message, "error");
+
+                if (oldBefore) {
+                    $(row).insertBefore(oldBefore);
+                } else {
+                    row.parentElement.appendChild(row);
+                }
+            });
+        };
+
+        collection.on("coral-table:roworder", f);
+
+        return function() {
+            collection.off("coral-table:roworder", f);
+        };
+    }
+// end comment
+
+
+    registry.register("foundation.layouts", {
+        name: "foundation-layout-calendar",
+        doLayout: function(el, config) {
+            var collection = $(el);
+
+            // foundation-layout-calendar is exclusive to manage the layout of foundation-collection only
+            if (!collection.hasClass("foundation-collection")) {
+                return;
+            }
+
+            if (collection.data("foundation-layout-calendar.internal.init")) {
+                return;
+            }
+
+            var stack = [];
+
+            stack.push((function() {
+                collection.data("foundation-layout-calendar.internal.stack", stack);
+
+                return function() {
+                    collection.removeData("foundation-layout-calendar.internal.stack");
+                };
+            })());
+
+            stack.push((function() {
+                collection.data("foundation-layout-calendar.internal.init", true);
+
+                return function() {
+                    collection.removeData("foundation-layout-calendar.internal.init");
+                };
+            })());
+
+            // Restore the selections before addListener to avoid listening to coral-table:change event when restoring
+            // Need to use attr here as Coral.Table may not be upgraded yet
+            if (collection[0].hasAttribute("selectable")) {
+                var selectionIds = collection.data("foundation-layout-collection-switcher.internal.selectionIds");
+                if (selectionIds) {
+                    var selections = collection.find(".foundation-collection-item").filter(function() {
+                        return selectionIds.indexOf(this.dataset.foundationCollectionItemId) >= 0;
+                    });
+
+                    selections.each(function() {
+                        $(this).attr("selected", "").addClass("foundation-selections-item");
+                    });
+                }
+            }
+
+            stack.push(handleMode(collection, config));
+            stack.push(handleSelection(collection, config));
+            stack.push(handleSorting(collection, config));
+            stack.push(handlePagination(collection, config));
+            stack.push(handleNavigation(collection, config));
+            stack.push(handleOrdering(collection, config));
+
+           // convertRow(collection);
+
+            requestAnimationFrame(function() {
+                // trigger collection event after Coral upgrade
+                changeMode(collection, true);
+                collection.trigger("foundation-selections-change");
+            });
+        },
+        clean: function(el, config) {
+            var collection = $(el);
+
+            var stack = collection.data("foundation-layout-calendar.internal.stack");
+            if (stack) {
+                Granite.UI.Foundation.Utils.everyReverse(stack, function(v) {
+                    if (v) {
+                        v();
+                    }
+                    return true;
+                });
+            }
+
+            Granite.UI.Foundation.Layouts.clean(el);
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-collection",
+        selector: ".foundation-layout-calendar.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+
+            var load = function(id, limit, restoreSelection) {
+                var src = el.dataset.foundationCollectionSrc;
+
+                if (!limit) {
+                    var config = collection.data("foundationLayout");
+                    limit = config.limit || 20;
+                }
+
+                var url = URITemplate.expand(src, {
+                    offset: 0,
+                    limit: limit,
+                    id: id
+                });
+
+                return $.ajax({
+                    url: url,
+                    cache: false
+                }).then(function(html) {
+                    var deferred = $.Deferred();
+
+                    var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+                    parser.parse(html).then(function(fragment) {
+                        var newCollection = $(fragment).children();
+
+                        if (!newCollection.hasClass("foundation-collection")) {
+                            deferred.reject(new Error("Invalid content"));
+                            return;
+                        }
+
+                        if (restoreSelection) {
+                            var selectionIds = collection.find(".foundation-selections-item").map(function() {
+                                return this.dataset.foundationCollectionItemId;
+                            }).toArray();
+
+                            // Temporary solution to restore selection without triggering "foundation-selections-change" twice
+                            newCollection.data("foundation-layout-collection-switcher.internal.selectionIds", selectionIds);
+                        }
+
+                        Granite.UI.Foundation.Layouts.cleanAll(el);
+
+                        // TBD to reuse the collection element, instead of creating a new one.
+                        newCollection.replaceAll(collection);
+
+                        requestAnimationFrame(function() {
+                            // trigger collection event after Coral upgrade
+                            newCollection.trigger("foundation-collection-navigate");
+                        });
+
+                        newCollection.trigger("foundation-contentloaded");
+
+                        if (restoreSelection) {
+                            newCollection.removeData("foundation-layout-collection-switcher.internal.selectionIds");
+                        }
+
+                        deferred.resolve(newCollection);
+                    });
+
+                    return deferred.promise();
+                }, function() {
+                    var title = Granite.I18n.get("Error");
+                    var message = Granite.I18n.get("Fail to load data.");
+
+                    var ui = $(window).adaptTo("foundation-ui");
+                    ui.alert(title, message, "error");
+                });
+            };
+
+            return {
+                append: function(items) {
+                    collection.find("tbody").append(items);
+                    convertRow(collection);
+                    collection.trigger("foundation-contentloaded");
+                },
+                clear: function() {
+                    collection.find(".foundation-collection-item").remove();
+                },
+                getPagination: function() {
+                    var paginator = collection.data("foundation-layout-calendar.internal.paginator");
+                    if (!paginator) {
+                        return null;
+                    }
+
+                    return {
+                        offset: paginator.offset,
+                        limit: paginator.limit
+                    };
+                },
+                load: function(id) {
+                    return load(id);
+                },
+                reload: function() {
+                    var limit;
+
+                    var pagination = this.getPagination();
+                    if (pagination) {
+                        limit = pagination.offset;
+                    }
+
+                    return load(el.dataset.foundationCollectionId, limit, true);
+                }
+            };
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-collection-meta",
+        selector: ".foundation-layout-calendar.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+            var meta = collection.children(".foundation-collection-meta");
+            var metaEl = meta[0];
+
+            if (!metaEl) {
+                return null;
+            }
+
+            return {
+                getElement: function() {
+                    return metaEl;
+                },
+                getTitle: function() {
+                    return metaEl.dataset.foundationCollectionMetaTitle;
+                },
+                getThumbnail: function() {
+                    return meta.children(".foundation-collection-meta-thumbnail")[0];
+                },
+                isFolder: function() {
+                    return metaEl.dataset.foundationCollectionMetaFolder === "true";
+                },
+                getRelationship: function() {
+                    return metaEl.dataset.foundationCollectionMetaRel;
+                }
+            };
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-selections",
+        selector: ".foundation-layout-calendar.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+
+            return {
+                count: function() {
+                    return collection.find(".foundation-selections-item").length;
+                },
+
+                clear: function(suppressEvent) {
+                    collection.data("foundation-layout-calendar.internal.bulkSelection", true);
+
+                    var prevSelections = collection.find(".foundation-selections-item").each(function() {
+                        this.selected = false;
+                    });
+
+                    collection.removeData("foundation-layout-calendar.internal.bulkSelection");
+
+                    changeMode(collection, false, $(), prevSelections);
+
+                    if (!suppressEvent) {
+                        collection.trigger("foundation-selections-change");
+                    }
+                },
+
+                select: function(el) {
+                    var item = $(el);
+
+                    if (!item.hasClass("foundation-collection-item")) {
+                        return;
+                    }
+
+                    el.selected = true;
+                },
+
+                deselect: function(el) {
+                    var item = $(el);
+
+                    if (!item.hasClass("foundation-collection-item")) {
+                        return;
+                    }
+
+                    el.selected = false;
+                }
+            };
+        }
+    });
+})(window, document, Granite, Granite.$, Granite.URITemplate);

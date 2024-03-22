@@ -1,0 +1,454 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+    /**
+     * @typedef {Object} Granite.author.ui.ContentTree~Element Represents a content element, part of a [DataModel]{@link Granite.author.ui.ContentTree~DataModel}.
+     * @property {string} val The internal value of content element (path of the corresponding Editable)
+     * @property {string} title The displayed title of the content element (title of the corresponding Component)
+     */
+
+    /**
+     * @typedef {Array} Granite.author.ui.ContentTree~DataModel Represents a content tree data model, composed of [Element]{@link Granite.author.ui.ContentTree~Element}s representing the content structure opened in the Editor.
+     * It is an array of [Element]{@link Granite.author.ui.ContentTree~Element}s, where container elements are structured as sub arrays (the first element of the sub array is the container itself and the rest its children).
+     *
+     * E.g. The following tree:
+     * + a
+     * + b
+     * + c
+     *  + d
+     *  + e
+     * + f
+     *
+     * would be represented as: [a, b, [c, d, e], f]
+     */
+
+    /**
+     * @typedef {Object} Granite.author.ui.ContentTree~Config Represents a content tree configuration object
+     * @property {HTMLElement} container - The container of the content tree.
+     * @property {Granite.author.Editable[]} editables - The Editable store used to derive the data model from
+     *
+     */
+
+    /**
+     * @classdesc The content tree displays the current content structure that is loaded in the [ContentFrame]{@link Granite.author.ContentFrame} in a tree view.
+     *
+     * It is located in the [SidePanel]{@link Granite.author.ui.SidePanel}
+     *
+     * Initialized on {@link Document#event:cq-editor-loaded}
+     *
+     * @class Granite.author.ui.ContentTree
+     *
+     * @param {Granite.author.ui.ContentTree~Config} config - The content tree configuration object
+     * @alias ContentTree
+     */
+    ns.ui.ContentTree = ns.util.createClass({
+
+        constructor: function (config) {
+            /**
+             * The content tree container
+             * @type {HTMLElement}
+             * @memberOf Granite.author.ui.ContentTree.prototype
+             */
+            this.container = config.container;
+
+            /**
+             * The Editable store used to derive the data model from
+             * @type {Granite.author.Editable[]}
+             * @memberOf Granite.author.ui.ContentTree.prototype
+             */
+            this.editables = config.editables;
+
+            /**
+             * The content tree data model
+             * @type {Granite.author.ui.ContentTree~DataModel}
+             * @memberOf Granite.author.ui.ContentTree.prototype
+             */
+            this.dataModel = null; // Will be instantiated in the render() method
+            /**
+             * The content tree representation
+             * @type {Coral.Tree}
+             * @memberOf Granite.author.ui.ContentTree.prototype
+             */
+            this.tree = null; // Will be instantiated in the render() method
+        },
+        /**
+         * Renders the content tree data model in the passed container
+         * @param {Granite.author.Editable[]} [editables] - The Editable store used to derive the data model from
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         */
+        render: function (editables) {
+            var self = this;
+
+            this._unbindListeners();
+
+            this.tree = new Coral.Tree();
+
+            if (editables) {
+                this.editables = editables;
+            }
+
+            this.dataModel = this._createDataModel(this.editables);
+            this.dataModel.forEach(function (element) {
+                self._renderElement(element, self.tree)
+            });
+
+            this.tree.expandAll();
+
+            this.container.innerHTML = "";
+            this.container.appendChild(this.tree);
+
+            this._bindListeners();
+        },
+
+        /**
+         * Initializes the content tree to be rendered when the according sidepanel tab is selected
+         *
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         */
+        init: function() {
+            var self = this;
+            channel.on("cq-sidepanel-tab-switched", function(event) {
+                if (event.tabName === ns.ui.SidePanel.TAB_CLASSES.CONTENT) {
+                    self.render(ns.editables);
+                }
+            })
+        },
+
+        /**
+         * Renders the [Element]{@link Granite.author.ui.ContentTree~Element} in the tree
+         *
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         * @param {Granite.author.ui.ContentTree~Element} element The Element to be rendered
+         * @param {Coral.Tree} tree Content tree
+         * @returns {Coral.Tree.Item}
+         * @private
+         */
+        _renderElement: function (element, tree) {
+            var self = this;
+
+            // If element is a container
+            if (element.constructor === Array) {
+                var head = element[0];
+                var tail = element.slice(1, element.length);
+
+                var subTree = this._addToTree(head, tree);
+
+                if (tail.length > 0) {
+                    tail.forEach(function (tailElement) {
+                        // Recursion: each element of the tail could be also a container
+                        self._renderElement(tailElement, subTree);
+                    });
+
+                }
+                return subTree;
+            } else {
+                return this._addToTree(element, tree, false);
+            }
+        },
+
+        /**
+         * Adds the given [Element]{@link Granite.author.ui.ContentTree~Element} to the given tree
+         *
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         * @param {{}} element Element to be added to the content tree
+         * @param {Coral.Tree} tree Content tree
+         * @param {boolean} [isContainer] Is the element a container
+         * @returns {Coral.Tree.Item}
+         * @private
+         */
+        _addToTree: function (element, tree, isContainer) {
+            var button = new Coral.Button();
+
+            button.set({
+                variant: "quiet",
+                icon: "wrench",
+                iconSize: "XS",
+                title: Granite.I18n.get("Configure"),
+                hidden: true
+            });
+
+            button.classList.add("editor-ContentTree-openDialog", "js-editor-ContentTree-openDialog");
+            button.setAttribute("coral-interactive", "");
+
+            var item = tree.items.add({
+                value: element.value,
+                content: {
+                    innerHTML: "<span class=\"editor-ContentTree-item u-coral-ellipsis\">" + element.title + "</span>"
+                }
+            });
+
+            item.appendChild(button);
+
+            if (isContainer !== undefined && !(isContainer)) {
+                item.setAttribute("variant", Coral.Tree.Item.variant.LEAF);
+            }
+
+            return item;
+        },
+
+        /**
+         * Get the title to be displayed in the tree item
+         *
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         * @param {Granite.author.Editable} editable
+         * @param {String} componentTitle The title of the underlaying component
+         * @protected
+         */
+        _getElementTitle: function (editable, componentTitle) {
+            // Build the title from the component title and an extract from the first visible text node in the DOM. If
+            // no visible text node is available as well for containers only the component title is used.
+
+            componentTitle = Granite.I18n.getVar(componentTitle);
+            var title = "";
+            if (!editable.config.isContainer && editable.dom) {
+                // get the extract from the DOM of editable
+                title = ns.util.getFirstVisibleTextContent(editable.dom[0]);
+            }
+
+            if (title !== "") {
+
+                // add and dye component title
+                // Rely on browser for HTML encoding of title by adding title to DOM as text and extracting back as HTML
+                var helperTempDiv = document.createElement('div');
+                helperTempDiv.textContent = title;
+
+                // cut long titles (no need for having long full texts in the tree)
+                if (helperTempDiv.textContent.length > 200) {
+                    helperTempDiv.textContent = helperTempDiv.textContent.substring(0, 200);
+                    helperTempDiv.innerHTML += "&hellip;";
+                }
+
+                title = "<span class=\"editor-ContentTree-itemTitle\">" + componentTitle + ": </span>" + helperTempDiv.innerHTML;
+            } else {
+                // no text extract; use component title
+                title = "<span class=\"editor-ContentTree-itemTitle\">" + componentTitle + "</span>";
+            }
+            return title;
+        },
+
+        _bindListeners: function () {
+            var self = this;
+            var tree = this.tree;
+            // Select the corresponding Editable overlay
+            tree.on("coral-tree:change.content-tree", function (event) {
+                var selectedItem = tree.selectedItem;
+
+                if (selectedItem) {
+                    var editable = self.editables.find(selectedItem.value)[0];
+
+                    // Simulate click on overlay to trigger the interaction logic from ns.selection
+                    if (editable &&
+                        editable.overlay &&
+                        editable.overlay.dom &&
+                        !editable.overlay.isDisabled() &&
+                        !editable.overlay.isSelected()) {
+                        editable.overlay.dom.focus().trigger("click");
+                    }
+
+                    // Enable open dialog if "configure" action is available
+                    var query = document.querySelectorAll(".js-editor-ContentTree-openDialog");
+                    for (var i = 0; i < query.length; ++i) {
+                        query[i].setAttribute("hidden", "");
+                    }
+
+                    if (ns.EditorFrame.editableToolbar &&
+                        ns.EditorFrame.editableToolbar.checkActionCondition("CONFIGURE", editable)) {
+
+                        var openDialog = selectedItem.querySelector(".js-editor-ContentTree-openDialog");
+                        if (openDialog) {
+                            openDialog.removeAttribute("hidden");
+                        }
+                    }
+                }
+            });
+
+            // Select the corresponding Tree item
+            channel.on("cq-interaction-focus.content-tree", function (event) {
+                if (!$(tree).is(":visible")) {
+                    return;
+                }
+
+                var editable = event.editable;
+
+                if (editable && editable.path) {
+                    var treeItem = tree.items.getAll().filter(function (item) {
+                        return item.value === editable.path;
+                    })[0];
+
+                    if (treeItem && !treeItem.selected) {
+                        tree.items._deselectAllExceptFirst();
+                        treeItem.selected = true;
+
+                        // Expand all parent(s)
+                        // CUI-6513 - Coral.Tree - Selecting a Tree item should expand all of its parents
+                        var treeItemParent = treeItem.parent;
+                        while (treeItemParent &&
+                        treeItemParent.constructor &&
+                        treeItemParent.constructor === Coral.Tree.Item) {
+                            treeItemParent.setAttribute("expanded", "");
+                            treeItemParent = treeItemParent.parent;
+                        }
+                    }
+                }
+            });
+
+            // Open the component dialog
+            channel.on("click.content-tree-open-dialog", ".js-editor-ContentTree-openDialog", function (event) {
+                var treeItem = event.currentTarget.closest("coral-tree-item");
+                var editable = self.editables.find(treeItem.value)[0];
+
+                // Calls the "CONFIGURE" action of the editableToolbar (Layer-sensitive call)
+                if (editable) {
+                    if (ns.EditorFrame.editableToolbar &&
+                        ns.EditorFrame.editableToolbar.checkActionCondition("CONFIGURE", editable)) {
+                        ns.EditorFrame.editableToolbar.config.actions.CONFIGURE.execute(editable);
+                    }
+                }
+            });
+
+            // Re-render the tree (if side panel is visible and content tab is selected)
+            channel.on("cq-editables-updated.content-tree", $.debounce(500, false, function () {
+                if (ns.ui.SidePanel.isOpened() === true && ns.ui.SidePanel.getSelectedTabClass() === ns.ui.SidePanel.TAB_CLASSES.CONTENT) {
+                    self.render(ns.editables);
+                }
+            }));
+        },
+
+        _unbindListeners: function () {
+            channel.off("cq-interaction-focus.content-tree");
+
+            if (this.tree) {
+                this.tree.off("coral-tree:change.content-tree");
+            }
+
+            channel.off("click.content-tree-open-dialog");
+
+            channel.off("cq-editables-updated.content-tree");
+        },
+
+        /**
+         * Creates the [DataModel]{@link Granite.author.ui.ContentTree~DataModel} to be rendered in the content tree
+         *
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         * @param {Array} editables - The array of all the editables loaded (see [editables]{@link Granite.author.editables})
+         * @returns {Granite.author.ui.ContentTree~DataModel}
+         * @private
+         * @ignore
+         */
+        _createDataModel: function (editables) {
+            var self = this;
+            var model = [];
+            // Necessary due to the flat structure (we meet the parent, consider all its children, then meet the children again)
+            var added = {};
+
+            // In editables, we know that we'll meet the parent before the children
+            editables.forEach(function (editable) {
+                self._addToDataModel(model, editable, added);
+            });
+
+            return model;
+        },
+
+        /**
+         * Adds the provided editable to the given data model
+         *
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         * @param {Granite.author.ui.ContentTree~DataModel} model
+         * @param {Granite.author.Editable} editable The Editable to be filtered or not from the data model
+         * @param {object} added Map of previously added Editables
+         * @private
+         */
+        _addToDataModel: function (model, editable, added) {
+            var self = this;
+            var modelData;
+
+            if (added[editable.path]) {
+                return;
+            }
+
+            if (!this._isDisplayable(editable)) {
+                return;
+            }
+
+            if (editable.isContainer()) {
+                var subModel = [];
+                var children = editable.getChildren();
+                modelData = this._adaptToDataModel(editable);
+
+                if (modelData) {
+                    subModel.push(modelData);
+                    children.forEach(function (child) {
+                        self._addToDataModel(subModel, child, added);
+                    });
+
+                    model.push(subModel);
+                    added[editable.path] = true;
+                }
+            } else {
+                modelData = this._adaptToDataModel(editable);
+                if (modelData) {
+                    model.push(modelData);
+                    added[editable.path] = true;
+                }
+            }
+        },
+
+        /**
+         * Indicates if the passed Editable should be filtered out from the data model to NOT be displayed in the content tree
+         * @param {Granite.author.Editable} editable The Editable to be filtered or not from the data model
+         * @returns {boolean}
+         * @protected
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         */
+        _isDisplayable: function (editable) {
+            // Only display:
+            // - editables (ignore inspectables)
+            // - containers
+            // - non containers that have actions defined on them (except "new" placeholders)
+            return (editable instanceof ns.Editable &&
+                (editable.isContainer() || (editable.hasActionsAvailable() && !editable.isNewSection())));
+        },
+
+        /**
+         * Returns an [Element]{@link Granite.author.ui.ContentTree~Element} out of an [Editable]{@link Granite.author.Editable}
+         *
+         * @memberOf Granite.author.ui.ContentTree.prototype
+         * @param {Granite.author.Editable} editable - The Editable to be adapted to the data model
+         * @returns {Granite.author.ui.ContentTree~Element}
+         * @private
+         * @ignore
+         */
+        _adaptToDataModel: function (editable) {
+            // Find the corresponding component to get its title
+            var component = ns.components.find({
+                resourceType: editable.type
+            })[0];
+
+            if (component) {
+                return {
+                    value: editable.path,
+                    title: this._getElementTitle(editable, component.getTitle()),
+                    editable: editable
+                };
+            }
+            return null;
+        }
+    });
+
+}(jQuery, Granite.author, jQuery(document), this));

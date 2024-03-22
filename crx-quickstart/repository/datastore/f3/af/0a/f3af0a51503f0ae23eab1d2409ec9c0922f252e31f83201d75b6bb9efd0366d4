@@ -1,0 +1,489 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+package libs.cq.gui.components.authoring.allowedcomponents;
+
+import com.adobe.cq.sightly.WCMUsePojo;
+import com.adobe.granite.ui.components.Value;
+import com.day.cq.wcm.api.components.Component;
+import com.day.cq.wcm.api.components.ComponentManager;
+import com.day.cq.wcm.api.components.VirtualComponent;
+import org.apache.sling.api.resource.Resource;
+import org.apache.sling.api.resource.ValueMap;
+
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+
+/**
+ * Provides the information needed to render the list of allowed components.
+ */
+public class AllowedComponents extends WCMUsePojo {
+
+    /**
+     * Name of the {@code General} component group.
+     */
+    private static final String GENERAL_GROUP_NAME = "General";
+
+    /**
+     * Prefix used for group names when persisted.
+     */
+    private static final String GROUP_PREFIX = "group:";
+
+    /**
+     * Component groups sorted by the group title.
+     */
+    private Set<GroupInfo> groups = new TreeSet<GroupInfo>();
+
+    @Override
+    public void activate() throws Exception {
+        // get all available components
+        Map<String, Component> components = getAllComponents();
+        // get selected groups and components from properties
+        Set<String> selected = getSelectedComponents();
+        // keeps track of encountered resources types
+        Set<String> resourceTypes = new HashSet<String>();
+        // stores groups indexed by their name
+        Map<String, GroupInfo> groupsMap = new HashMap<String, GroupInfo>();
+
+        // iterate over all components and build component and group info
+        for (Component component : components.values()) {
+            // filter overlaid components
+            String resourceType = getResourceType(component);
+            if (resourceTypes.contains(resourceType)) {
+                continue;
+            }
+            resourceTypes.add(resourceType);
+
+            // get the component group (the empty string represents the 'orphan group', i.e. the
+            // group containing all components that don't define a group)
+            String group = component.getComponentGroup() == null ? "" : component.getComponentGroup();
+            // filter components that are part of a hidden group
+            if (group.startsWith(".")) {
+                continue;
+            }
+
+            // create component info
+            String title = component.getTitle() == null ? component.getName() : component.getTitle();
+            String[] icons = getIcons(component, title);
+            ComponentInfo componentInfo = new ComponentInfo(title, component.getPath(), resourceType,
+                    selected.contains(component.getPath()), icons[0], icons[1], icons[2]);
+
+            // create group info if not yet existing and add component info
+            if (!groupsMap.containsKey(group)) {
+                groupsMap.put(group, new GroupInfo(group, selected.contains(GROUP_PREFIX + group)));
+            }
+            groupsMap.get(group).addComponent(componentInfo);
+        }
+        // add all groups to the sorted set
+        groups.addAll(groupsMap.values());
+
+        // for each group...
+        for (GroupInfo group : groups) {
+            ComponentInfo lastComponent = null;
+            // ...iterate over all components (sorted by title) to check if their titles are unique
+            for (ComponentInfo component : group.getComponents()) {
+                // compare the title of the current component with the last one
+                if (lastComponent != null && lastComponent.getTitle().equals(component.getTitle())) {
+                    // unset flag if the titles are equal
+                    lastComponent.setTitleUnique(false);
+                    component.setTitleUnique(false);
+                }
+                lastComponent = component;
+            }
+        }
+    }
+
+    /**
+     * Reads and returns the selected groups and components defined in the properties of the
+     * content resource.
+     *
+     * @return a set of strings containing the names of the selected groups and components
+     */
+    private Set<String> getSelectedComponents() {
+        Set<String> selected = new HashSet<String>();
+        // get content path and resource
+        String contentPath = (String) getRequest().getAttribute(Value.CONTENTPATH_ATTRIBUTE);
+        if (contentPath != null) {
+            Resource contentResource = getResourceResolver().getResource(contentPath);
+            if (contentResource != null) {
+                // get field name
+                String propertyPath = getProperties().get("name", (String) null);
+                if (propertyPath != null) {
+                    // read property from content resource
+                    ValueMap valueMap = contentResource.adaptTo(ValueMap.class);
+                    if (valueMap != null) {
+                        String[] values = valueMap.get(propertyPath, new String[]{});
+                        selected.addAll(Arrays.asList(values));
+                    }
+                }
+            }
+        }
+        return selected;
+    }
+
+    /**
+     * <p>Returns all available components.</p>
+     *
+     * <p>TODO: this code has been copied from
+     * {@link com.day.cq.wcm.core.impl.components.ComponentServlet} and should ideally be
+     * refactored to a common location.</p>
+     *
+     * @return a sorted map containing the components indexed by their paths
+     */
+    private Map<String, Component> getAllComponents() {
+        // use a tree map for the component list and order them by path.
+        // this ensures that for 2 components with the same resource type,
+        // the /apps one comes first and the /libs one is not transferred.
+        Map<String, Component> components = new TreeMap<String, Component>();
+
+        ComponentManager componentManager = getResourceResolver().adaptTo(ComponentManager.class);
+        for (Component c : componentManager.getComponents()) {
+            // Workaround for #18754: additional check for group:*
+            if (c != null && c.isAccessible() && c.isEditable()) {
+                final boolean displayVirtualsOnly = c.getProperties().get("displayVirtualsOnly", Boolean.FALSE);
+                if (!displayVirtualsOnly) {
+                    components.put(c.getPath(), c);
+                }
+                // add virtual ones
+                for (VirtualComponent v : c.getVirtualComponents()) {
+                    components.put(v.getPath(), v);
+                }
+            }
+        }
+
+        return components;
+    }
+
+    /**
+     * <p>Returns the resource type of the specified component.</p>
+     *
+     * <p>TODO: this code has been copied from
+     * {@link com.day.cq.wcm.core.impl.components.ComponentServlet} and should ideally be
+     * refactored to a common location.</p>
+     *
+     * @param c a component
+     * @return the resource type of the specified component
+     */
+    private String getResourceType(Component c) {
+        String key;
+        if (c instanceof VirtualComponent) {
+            String p = c.getPath();
+            // remove leading /libs/ or /apps/
+            key = p.substring(p.indexOf("/", 1) + 1);
+        } else {
+            key = c.getResourceType();
+        }
+        return key;
+    }
+
+    /**
+     * <p>
+     * Returns the component icons for a given component. The icon can be one of three different
+     * things (considered in this order):
+     * <ul>
+     *     <li>A CoralUI icon</li>
+     *     <li>An image</li>
+     *     <li>An abbreviation</li>
+     * </ul>
+     * </p>
+     *
+     * <p>TODO: this code has been copied from
+     * {@code /libs/cq/gui/components/authoring/componentbrowser/component/component.jsp} and
+     * should ideally be refactored to a common location.</p>
+     *
+     * @param component a component
+     * @param title the title to use for the abbreviation
+     * @return an array containing three strings (each of which can be {@code null}): an
+     *          icon, an icon path and and abbreviation
+     */
+    private String[] getIcons(Component component, String title) {
+        // look for "icon" in the following order considering the super components:
+        // - coral icon in content
+        // - abbreviation in content; an empty string cancels the inheritance and builds the abbreviation from title
+        // - touchicon.png in component location
+        // - touchicon.svg in component location
+        // if none of the above is found an abbreviation is build from the title
+
+        String icon = null;
+        String abbr = null;
+        String iconPath = null;
+
+        while (component != null) {
+            Resource compResource = component.adaptTo(Resource.class);
+            ValueMap vm = compResource.getValueMap();
+
+            icon = vm.get("cq:icon", String.class);
+            abbr = vm.get("abbreviation", String.class);
+
+            if (icon != null || abbr != null) {
+                break;
+            } else {
+                Resource png = compResource.getChild("cq:icon.png");
+                if (png != null) {
+                    iconPath = png.getPath();
+                    break;
+                } else {
+                    Resource svg = compResource.getChild("cq:icon.svg");
+                    if (svg != null) {
+                        iconPath = svg.getPath();
+                        break;
+                    }
+                }
+                component = component.getSuperComponent();
+            }
+        }
+
+        if (icon == null || "".equals(abbr)) {
+            // build abbreviation - either shorten (2 chars max) from given abbreviation or title: Image >> Im
+            if (abbr == null || "".equals(abbr)) {
+                abbr = title;
+            }
+            if (abbr.length() >= 2) {
+                abbr = abbr.substring(0, 2);
+            } else if (abbr.length() == 1) {
+                abbr = String.valueOf(abbr.charAt(0));
+            }
+        }
+
+        return new String[]{icon, iconPath, abbr};
+    }
+
+    /* API */
+
+    /**
+     * Contains the information needed to render a component group.
+     */
+    public class GroupInfo implements Comparable<GroupInfo> {
+
+        private String title;
+        private boolean isSelected;
+        private Set<ComponentInfo> components;
+        private int nbSelectedComponents;
+
+        private GroupInfo(String title, boolean isSelected) {
+            this.title = title;
+            this.isSelected = isSelected;
+            this.components = new TreeSet<ComponentInfo>();
+        }
+
+        /**
+         * Returns the title of the component.
+         *
+         * @return the component title
+         */
+        public String getTitle() {
+            return title;
+        }
+
+        /**
+         * Returns a boolean specifying whether this group is selected or not.
+         *
+         * @return {@code true} if the component is selected, {@code false} otherwise
+         */
+        public boolean isSelected() {
+            return isSelected;
+        }
+
+        /**
+         * Returns the number of selected components in this group. If the group itself is
+         * selected, then the total number of components in this group is returned.
+         *
+         * @return the number of selected components
+         */
+        public int getNbSelectedComponents() {
+            return isSelected() ? components.size() : nbSelectedComponents;
+        }
+
+        /**
+         * Adds a component to this group.
+         *
+         * @param component the component info
+         */
+        private void addComponent(ComponentInfo component) {
+            // keep track of selected components
+            if (component.isSelected()) {
+                nbSelectedComponents++;
+            }
+            components.add(component);
+        }
+
+        /**
+         * Returns the components of this group sorted by their names.
+         *
+         * @return a sorted set containing the components of this group
+         */
+        public Set<ComponentInfo> getComponents() {
+            return components;
+        }
+
+        /**
+         * Compares groups by their titles. The {@code General} group is always sorted first and
+         * the orphan group is always sorted last.
+         */
+        @Override
+        public int compareTo(GroupInfo that) {
+            if (this.title.equals(GENERAL_GROUP_NAME) || that.title.isEmpty()) {
+                return -1;
+            } else if (this.title.isEmpty() || that.title.equals(GENERAL_GROUP_NAME)) {
+                return 1;
+            }
+            return this.title.compareToIgnoreCase(that.title);
+        }
+
+    }
+
+    /**
+     * Contains the information needed to render a component.
+     */
+    public class ComponentInfo implements Comparable<ComponentInfo> {
+
+        private String title;
+        private String path;
+        private String resourceType;
+        private boolean isSelected;
+        private String icon;
+        private String iconPath;
+        private String abbreviation;
+        private boolean isTitleUnique;
+
+        private ComponentInfo(String title, String path, String resourceType, boolean isSelected,
+                              String icon, String iconPath, String abbreviation) {
+            this.title = title;
+            this.path = path;
+            this.resourceType = resourceType;
+            this.isSelected = isSelected;
+            this.icon = icon;
+            this.iconPath = iconPath;
+            this.abbreviation = abbreviation;
+            this.isTitleUnique = true;
+        }
+
+        /**
+         * Returns the title of this component.
+         *
+         * @return the component title
+         */
+        public String getTitle() {
+            return title;
+        }
+
+        /**
+         * Sets the flag specifying whether this title is unique among the components of group it
+         * belongs to or not.
+         *
+         * @param isTitleUnique {@code true} if the title is unique in the component's group,
+         *          {@code false} otherwise
+         */
+        private void setTitleUnique(boolean isTitleUnique) {
+            this.isTitleUnique = isTitleUnique;
+        }
+
+        /**
+         * Returns a boolean specifying whether the component title is unique among the components
+         * of the group it belongs to.
+         *
+         * @return {@code true} if the title is unique in the component's group, {@code false}
+         *          otherwise
+         */
+        public boolean isTitleUnique() {
+            return isTitleUnique;
+        }
+
+        /**
+         * Returns the path of the component.
+         *
+         * @return the component path
+         */
+        public String getPath() {
+            return path;
+        }
+
+        /**
+         * Returns the resource type of the component.
+         *
+         * @return the component's resource type
+         */
+        public String getResourceType() {
+            return resourceType;
+        }
+
+        /**
+         * Returns a boolean specifying whether the component is selected or not.
+         *
+         * @return {@code true} if the component is selected, {@code false} otherwise
+         */
+        public boolean isSelected() {
+            return isSelected;
+        }
+
+        /**
+         * If the component's icon is defined by a CoralUI icon, then this method returns the name
+         * of the icon, else it returns {@code null}.
+         *
+         * @return a CoralUI icon or {@code null}
+         */
+        public String getIcon() {
+            return icon;
+        }
+
+        /**
+         * If the component's icon is defined by an icon image, then this method returns the path
+         * of the image, else it returns {@code null}.
+         *
+         * @return an image path or {@code null}
+         */
+        public String getIconPath() {
+            return iconPath;
+        }
+
+        /**
+         * If the component's icon is defined by an abbreviation, then this method retuns the
+         * abbreviation, else it returns {@code null}.
+         *
+         * @return an abbreviation or {@code null}
+         */
+        public String getAbbreviation() {
+            return abbreviation;
+        }
+
+        /**
+         * Compares components by their titles, breaking ties according to their paths.
+         */
+        @Override
+        public int compareTo(ComponentInfo that) {
+            int result = this.title.compareToIgnoreCase(that.title);
+            return result != 0 ? result : this.path.compareToIgnoreCase(that.path);
+        }
+
+    }
+
+    /**
+     * Returns all component groups sorted by their titles (see
+     * {@link GroupInfo#compareTo(GroupInfo)}).
+     *
+     * @return a sorted set containing all component groups
+     */
+    public Set<GroupInfo> getGroups() {
+        return groups;
+    }
+
+}

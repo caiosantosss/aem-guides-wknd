@@ -1,0 +1,459 @@
+// Revision 90901 escapes cell content to guard against XSS; reverting to original tpl to render tags
+CQ.Ext.override(CQ.Ext.grid.GridView, {
+    cellTpl: new CQ.Ext.XTemplate(
+           '<td class="x-grid3-col x-grid3-cell x-grid3-td-{id} {css}" style="{style}" tabIndex="0" {cellAttr}>',
+           '<div class="x-grid3-cell-inner x-grid3-col-{id}" unselectable="on" {attr}>{value}</div>',
+           '</td>'
+        )
+    }
+);
+CQ.analytics.SiteCatalystPanel = CQ.Ext.extend(CQ.Ext.grid.EditorGridPanel, {
+
+    viewConfig: null,
+
+    cls: 'variablegrid',
+
+    height: 170,
+
+    autoscroll: true,
+
+    store: null,
+
+    loadMask: null,
+
+    cm: null,
+
+    constructor: function(config) {
+        config = config || { };
+
+        var grid = this;
+        CQ.Util.applyDefaults(config, {
+            collapsible: true,
+
+            viewConfig: {
+                forceFit: true
+            },
+
+            loadMask: {
+                msg: CQ.I18n.getMessage("Loading configuration...")
+            },
+
+            store: new CQ.Ext.data.JsonStore({
+                "fields": [{
+                    name: "scVar",
+                    type: "string"
+                }, {
+                    name: "componentName",
+                    type: "string"
+                }, {
+                    name: "componentIcon",
+                    type: "string"
+                }, {
+                    name: "componentFrameworkPath",
+                    type: "string"
+                }, {
+                    name: "conflict",
+                    type: "string"
+                }, {
+                    name: "cqVar",
+                    type: "string"
+                }, {
+                    name: "title",
+                    type: "string"
+                }],
+                mode: "local"
+            }),
+
+            cm: new CQ.Ext.grid.ColumnModel([
+                {
+                    dataIndex: 'title',
+                    header: CQ.I18n.getMessage('Analytics variable'),
+                    sortable: true,
+                    resizeable: true,
+                    width: '260',
+                    renderer: function(value, metaData, record, rowIndex, colIndex, store) {
+                        var conflict = record.get('conflict');
+                        var title = value;
+                        var id = CQ.Ext.id();
+                        var iconPath = CQ.HTTP.externalize('/libs/cq/ui/widgets/themes/default/icons/16x16/warning.png');
+                        var imgStyle = "visibility: hidden;";
+                        var imgTag = "<img src='" + iconPath + "' align='right' style='" + imgStyle + "'/>";
+                        var title = "<div style='float: left; padding-right: 5px;'>" + title + imgTag + "</div>";
+                        (function() {
+                            if (CQ.Ext.get(id) == null)
+                              return;
+                            var tagLabel = new CQ.tagging.TagLabel({
+                                renderTo: id,
+                                text: title,
+                                cls: '',
+                                readOnly: true,
+                                embedTextAsHTML: true,
+                                recordRef: record,
+                                highlight: function() { }
+                            });
+                            tagLabel.conflictIcon = tagLabel.getEl().child(".taglabel-mc").child("img");
+                            if (tagLabel.tip)
+                                tagLabel.tip.destroy();
+                            if (conflict) {
+                                tagLabel.tip = new CQ.Ext.ToolTip({
+                                    target: tagLabel.getEl().child(".taglabel-body"),
+                                    dismissDelay: 0,
+                                    width: 410,
+                                    closable: true,
+                                    listeners: {
+                                        show: function() {
+                                            this.autoHide = true;
+                                            var close = this.tools.close;
+                                            if (close) {
+                                                close.hide();
+                                            }
+                                        }
+                                    },
+                                    title: conflict[0],
+                                    html: conflict.slice(1).join("<br>")
+                                });
+                                tagLabel.conflictIcon.on('click', function() {
+                                    var tip = tagLabel.tip;
+                                    if (tip) {
+                                        tip.show();
+                                        tip.autoHide = false;
+                                        var close = tip.tools.close;
+                                        if (close) {
+                                            close.show();
+                                        }
+                                    }
+                                });
+                                tagLabel.conflictIcon.show();
+                            }
+                        }).defer(25);
+                        return String.format('<div id="{0}"></div>', id);
+                    }
+                }, {
+                    dataIndex: 'componentName',
+                    header: CQ.I18n.getMessage('Component'),
+                    sortable: true,
+                    resizeable: true,
+                    width: '190',
+                    lockIconPath: CQ.HTTP.externalize('/libs/cq/ui/widgets/themes/default/icons/16x16/lock.png'),
+                    renderer: function(value, metaData, record, rowIndex, colIndex, store) {
+                        var title = value;
+                        var componentIcon = record.get('componentIcon');
+                        if (componentIcon) {
+                            var imgStyle = "margin: 0px 5px; float: left;";
+                            imgStyle = "style='" + imgStyle + "'";
+                            var imgTag = "<img src='" + componentIcon + "' " + imgStyle + "/>";
+                            title = imgTag + title;
+                        }
+                        var compFwPath = record.get('componentFrameworkPath');
+                        if (grid.isInherited(compFwPath)) {
+                            var contentPath = grid.contentPath;
+                            var attr = [];
+                            attr.push(String.format("src='{0}'", this.lockIconPath));
+                            var imgStyle = "margin: 0px 5px 0px 0px; float: right;";
+                            attr.push(String.format("style='{0}'", imgStyle));
+                            var imgDblClick = "CQ.analytics.SiteCatalystPanel.statics.unlockComponent";
+                            imgDblClick += String.format('("{0}", "{1}", true)', contentPath, compFwPath);
+                            attr.push(String.format("ondblclick='{0}'", imgDblClick));
+                            var imgTag = "<img " + attr.join(' ') + "/>";
+                            title = imgTag + title;
+                        }
+                        return title;
+                    }
+                }, {
+                    dataIndex: 'cqVar',
+                    header: CQ.I18n.getMessage('CQ variable'),
+                    sortable: true,
+                    resizeable: true,
+                    width: '460',
+                    editor: new CQ.Ext.form.TextField(),
+                    renderer: function(value, metaData, record, rowIndex, colIndex, store) {
+                        if (value) {
+                            var styles = [];
+                            var handlers = [];
+                            styles.push("margin: 0px 10px; float: right;");
+                            styles.push("position: absolute; clip: rect(0 15px 15px 0);");
+                            styles.push("visibility: hidden;");
+                            handlers.push(String.format("onclick='{0}'",
+                                'CQ.analytics.SiteCatalystPanel.statics.removeScRecord(this)'));
+                            handlers = handlers.join(' ');
+                            var imgStyle = "style='" + styles.join(' ') + "'";
+                            var imgPath = CQ.HTTP.externalize('/libs/cq/tagging/widgets/themes/default/images/label/tool-sprites.gif');
+                            var imgTag = "<img src='" + imgPath + "' " + imgStyle + " " + handlers + "/>";
+                            if (!grid.isInherited(record)) {
+                                handlers = [];
+                                handlers.push(String.format("onmouseover='{0}'",
+                                    'CQ.analytics.SiteCatalystPanel.statics.actOnImg(this, "show")'));
+                                handlers.push(String.format("onmouseout='{0}'",
+                                    'CQ.analytics.SiteCatalystPanel.statics.actOnImg(this, "hide")'));
+                                metaData.attr = handlers.join(' ' );
+                            }
+                            return "<div>" + CQ.shared.XSS.getXSSValue(value) + imgTag + "</div>";
+                        } else {
+                            return value;
+                        }
+                    }
+                }
+            ])
+        });
+
+        CQ.analytics.SiteCatalystPanel.superclass.constructor.call(this, config);
+
+        this.on('beforeedit', function(e) {
+            var record = this.getStore().getAt(e.row);
+            if (this.isInherited(record))
+                e.cancel = true;
+        }, this);
+        this.on('afteredit', function(e) {
+            var record = e.record;
+            var delta = { };
+            // by popular demand, we hardcode the Page component as mother of all orphan mappings
+            var compPath = record.get('componentFrameworkPath');
+            if (compPath == undefined || compPath == '') {
+                compPath =  e.grid.contentPath + '/mappings/foundation_components_page';
+
+                record.data.componentFrameworkPath = compPath;
+                record.data.componentIcon = '/libs/foundation/components/page/icon.png';
+                record.data.componentName = 'Page';
+
+                delta['jcr:primaryType'] = 'cq:Component';
+                delta['sling:resourceType'] = 'cq/analytics/components/mappings/cqmappings';
+                delta['cq:componentPath'] = 'foundation/components/page';
+                delta['cq:componentName'] = 'Page';
+                delta['cq:componentIcon'] = '/libs/foundation/components/page/icon.png';
+            }
+            delta[record.get('scVar')] = record.get('cqVar');
+            CQ.HTTP.post(compPath,
+                function(options, success, response) {
+                    if (success) {
+                        this.commitRecord(record);
+                        conflictManager.loadConflicts(record.get('scVar'));
+                    } else {
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                            CQ.I18n.getMessage("Could not save CQ variable"));
+                    }
+                }, delta, this);
+        });
+        if (this.provider) {
+            this.store.on('load', function(store, records, options) {
+                CQ.Ext.each(records, function(item) {
+                    var scVar = item.get('scVar');
+                    if (scVar) {
+                        item.conflictHandler = function(conflict) {
+                            item.set('conflict', conflict);
+                            item.commit();
+                        };
+                        this.provider.onAvailable("mappingConflict." + scVar,
+                            item.conflictHandler, item);
+                    }
+                }, this);
+            }, this, { single: true });
+        } else {
+            console.log(CQ.I18n.getMessage("Provider not loaded"));
+        }
+        CQ.WCM.registerDropTargetComponent(this);
+    },
+
+    getDropTargets: function() {
+        var col = this.getColumnModel().findColumnIndex("cqVar");
+        var dt = [];
+        var grid = this;
+        var gridStore = this.getStore();
+        var gridView = this.getView();
+
+        for (var row = 0; row < gridStore.getTotalCount(); row++) {
+            if (this.isInherited(gridStore.getAt(row)))
+                continue;
+            var dd = new CQ.Ext.dd.DropTarget(gridView.getCell(row, col), {
+                ddGroup: "clientcontextvars",
+                store: gridStore,
+                view: gridView,
+                normalize: function() { },
+                flash: function() { },
+                notifyDrop: function(dd, e, data) {
+                    var rowIndex = this.view.findRowIndex(this.el.dom);
+                    var columnIndex = this.view.findCellIndex(this.el.dom);
+                    if (rowIndex !== false && columnIndex !== false) {
+                        var rec = this.store.getAt(rowIndex);
+                        if (rec) {
+                            var scVar = rec.get('scVar');
+                            var dropData = data.records[0];
+                            var values = {
+                                cqVar: dropData.get('name'),
+                                componentFrameworkPath: dropData.get('componentFrameworkPath')[0],
+                                componentIcon: dropData.get('componentIcon'),
+                                componentName: dropData.get('componentName')
+                            };
+                            var compFwPath = values.componentFrameworkPath;
+                            if (scVar && values.cqVar && compFwPath) {
+                                var oldCompFwPath = rec.get('componentFrameworkPath');
+                                var saveOptions = {
+                                    success: function() {
+                                        conflictManager.loadConflicts(scVar);
+                                    }
+                                };
+                                if (oldCompFwPath && oldCompFwPath != compFwPath) {
+                                    var delta = { };
+                                    delta[scVar] = ' ';
+                                    CQ.HTTP.post(oldCompFwPath,
+                                        function(options, success, response) {
+                                            if (success) {
+                                                grid.saveMapping(scVar, rec, values, saveOptions);
+                                            } else {
+                                                CQ.Notification.notify(null,
+                                                    CQ.I18n.getMessage("Could not save mapping"));
+                                            }
+                                        }, delta);
+                                } else {
+                                    grid.saveMapping(scVar, rec, values, saveOptions);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            dt.push(dd);
+        }
+        return dt;
+    },
+
+    isInherited: function(compFwPath) {
+        if (compFwPath) {
+            if (!CQ.Ext.isString(compFwPath))
+                compFwPath = compFwPath.get('componentFrameworkPath');
+        }
+        if (compFwPath) {
+            var contentPath = this.contentPath;
+            if (contentPath && compFwPath.indexOf(contentPath) != 0)
+                return true;
+        }
+        return false;
+    },
+
+    saveMapping: function(scVar, record, values, mappingOptions) {
+        mappingOptions = mappingOptions || { };
+        var delta = { };
+        delta[scVar] = values.cqVar;
+        CQ.HTTP.post(values.componentFrameworkPath,
+            function(options, success, response) {
+                if (success) {
+                    if (mappingOptions.commit !== false)
+                        this.commitRecord(record, values);
+                    if (mappingOptions.success)
+                        mappingOptions.success.call(this);
+                } else {
+                    CQ.Notification.notify(null,
+                        CQ.I18n.getMessage("Could not save mapping"));
+                }
+            }, delta, this);
+    },
+
+    removeMapping: function(record) {
+        var scVar = record.get("scVar");
+        var cqVar = record.get("cqVar");
+        var compName = record.get("componentName");
+        var compFwPath = record.get("componentFrameworkPath");
+        if (scVar) {
+            this.saveMapping(scVar, record, {
+                cqVar: " ",
+                componentFrameworkPath: compFwPath
+            }, {
+                commit: false,
+                success: function() {
+                    var conflictManager = this.conflictManager;
+                    if (conflictManager) {
+                        if (record.conflictHandler) {
+                            this.provider.unAvailable("mappingConflict." + scVar,
+                                record.conflictHandler, record);
+                        }
+                        conflictManager.removeVariable(scVar, cqVar, compName);
+                        if (conflictManager.isVariableMapped(scVar)) {
+                            this.getStore().remove(record);
+                        } else {
+                            this.commitRecord(record, {
+                                componentFrameworkPath: null,
+                                componentName: null,
+                                componentIcon: null,
+                                cqVar: null
+                            });
+                        }
+                        conflictManager.loadConflicts(scVar);
+                    }
+                }
+            });
+        }
+    },
+
+    commitRecord: function(record, values) {
+        values = values || { };
+        for (var idx in values)
+            record.set(idx, values[idx]);
+        record.commit();
+    }
+
+});
+
+CQ.analytics.SiteCatalystPanel.statics = {
+    getVariableGrid: function(htmlElement) {
+        var grid = null;
+        var el = CQ.Ext.fly(htmlElement);
+        if (el) {
+            var gridEl = el.findParent(".variablegrid", null, true);
+            if (gridEl)
+                grid = CQ.Ext.getCmp(gridEl.id);
+        }
+        return grid;
+    },
+
+    actOnImg: function(htmlElement, action) {
+        var el = CQ.Ext.fly(htmlElement);
+        if (el) {
+            var imgEl = el.child("img");
+            if (imgEl)
+                imgEl[action]();
+        }
+    },
+
+    getRecordByElement: function(grid, htmlElement) {
+        var store = grid.getStore();
+        var view = grid.getView();
+        if (store && view) {
+            var row = view.findRowIndex(htmlElement);
+            if (row !== false)
+                return store.getAt(row);
+        }
+        return null;
+    },
+
+    removeScRecord: function(htmlElement) {
+        var grid = this.getVariableGrid(htmlElement);
+        if (grid) {
+            var record = this.getRecordByElement(grid, htmlElement);
+            if (record) {
+                grid.removeMapping(record);
+            }
+        }
+    },
+
+    unlockComponent: function(pagePath, fwCompPath, isContentPath) {
+        if (isContentPath) {
+            var idx = pagePath.lastIndexOf('/');
+            pagePath = pagePath.substr(0, idx);
+        }
+        var fwCompUrl = CQ.HTTP.externalize(fwCompPath);
+        var pieces = fwCompPath.split('/');
+        if (pieces.length >= 3) {
+            pieces = pieces.slice(pieces.length - 3, pieces.length);
+            pagePath += '/' + pieces.join('/');
+            var pageUrl = CQ.HTTP.externalize(pagePath);
+            CQ.HTTP.post(fwCompUrl, function(options, success, response) {
+                if (success) {
+                    window.location.reload();
+                }
+            }, {
+                ":operation": "copy",
+                ":dest": pageUrl,
+                ":replace": "true"
+            });
+        }
+    }
+};

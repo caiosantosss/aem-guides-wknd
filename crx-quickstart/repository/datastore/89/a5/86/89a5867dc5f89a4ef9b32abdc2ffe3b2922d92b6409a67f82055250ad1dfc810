@@ -1,0 +1,1639 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * A helper class providing a basic set of utilities.
+ * @static
+ * @singleton
+ * @class CQ.Util
+ */
+CQ.utils.Util = function() {
+
+    /**
+     * Stores the different type of observations
+     * @private
+     * @type Object
+     */
+    var observations = {};
+
+    /**
+     * The pinned components.
+     * @private
+     * @type Object[]
+     */
+    var pins = [];
+
+    /**
+     * The ID of the interval in which {@link checkPins} is called.
+     * @private
+     * @type Number
+     */
+    var scrollInterval = null;
+
+    /**
+     * States whether {@link checkPins} is busy.
+     * @private
+     * @type Boolean
+     */
+    var busyCheckingPins = false;
+
+    /**
+     * States whether the pinned components need checking.
+     * @private
+     * @type Boolean
+     */
+    var checkPinsNow = false;
+
+    /**
+     * The current width of the window.
+     * @private
+     * @type Number
+     */
+    var winWidth = -1;
+
+    /**
+     * Counters to generate unique IDs.
+     * @private
+     * @type Object
+     */
+    var idCounter = {};
+
+    /**
+     * Checks if components need to be scrolled back into view after the
+     * window has been scrolled or resized.
+     * @private
+     */
+    var checkPins = function() {
+        var vpw = CQ.Ext.lib.Dom.getViewportWidth();
+        winWidth = winWidth > 0 ? winWidth : vpw;
+        if (!checkPinsNow && (CQ.utils.Util.docScrolling || vpw < winWidth)) {
+            checkPinsNow = true;
+        } else if (!busyCheckingPins && checkPinsNow) {
+            busyCheckingPins = true;
+            for (var i = 0; i < pins.length; i++) {
+                var el = pins[i].pin;
+                if (el.getEl) {
+                    el = el.getEl();
+                }
+                var box = el.getBox();
+                var offsetLeft = 0;
+                var totalWidth = box.x + box.width + CQ.themes.Dialog.CORNER_X;
+                if (winWidth < totalWidth) {
+                    // make sure we don't drop out on the right hand side
+                    offsetLeft = winWidth - totalWidth;
+                }
+                var curScroll = CQ.Ext.getDoc().getScroll();
+                var lastScroll = pins[i].scroll;
+                var offsetTop = curScroll.top - lastScroll.top;
+                offsetLeft += curScroll.left - lastScroll.left;
+                var x = (box.x + offsetLeft);
+                var y = (box.y + offsetTop);
+                el.shift({
+                    "x":x,
+                    "y":y,
+                    "duration":0.2
+                });
+                pins[i].scroll = curScroll;
+            }
+            busyCheckingPins = false;
+            checkPinsNow = false;
+        }
+        winWidth = vpw;
+    };
+
+    /**
+     * Returns an observation object for the specified interval.
+     * @private
+     * @param {String} interval The interval
+     * @return {Observation} The observation
+     */
+    var getObservation = function(interval) {
+        var name;
+        if (!interval) {
+            name = CQ.SHORT_INTERVAL;
+        } else if (typeof interval == "number" && interval > 0) {
+            name = "CUSTOM_INTERVAL_" + interval;
+        } else {
+            name = interval;
+        }
+        if (!observations[name]) {
+            var time;
+            if (typeof interval == "number" && interval > 0) {
+                time = interval;
+            } else {
+                switch (interval) {
+                    case CQ.VERY_SHORT_INTERVAL: {
+                        time = CQ.VERY_SHORT_INTERVAL_VALUE;
+                        break;
+                    }
+                    case CQ.LONG_INTERVAL: {
+                        time = CQ.LONG_INTERVAL_VALUE;
+                        break;
+                    }
+                    case CQ.VERY_LONG_INTERVAL: {
+                        time = CQ.VERY_LONG_INTERVAL_VALUE;
+                        break;
+                    }
+                    default: {
+                        time = CQ.SHORT_INTERVAL_VALUE;
+                    }
+                }
+            }
+            observations[name] = {
+                "components": [],
+                "name": name,
+                "time": time,
+                "started": false
+            };
+        }
+        return observations[name];
+    };
+
+    /**
+     * @private
+     */
+    var isCqInstance = function(item) {
+        return item instanceof CQ.Ext.util.Observable ||
+            item instanceof CQ.Ext.Element ||
+            item instanceof CQ.Ext.data.DataReader ||
+            item instanceof CQ.Class;
+    };
+
+    /**
+     * @private
+     */
+    var processIncludes = function(data) {
+        if (typeof(data) != "object") {
+            return data;
+        }
+
+        if (data.xtype == "cqinclude") {
+            if(data.path) {
+                CQ.Log.debug("CQ.utils.Util#processIncludes: processing include: {0}", data);
+
+                var path = CQ.HTTP.externalize(data.path);
+                path = CQ.HTTP.addSelector(path, "overlay");
+                data = CQ.Util.eval(path);
+            } else {
+                CQ.Log.debug("CQ.utils.Util#processIncludes: no include path defined in {0}", data[i]);
+            }
+            return processIncludes(data);
+        } else {
+            for (var i in data) {
+                if (!data[i]) {
+                    continue;
+                }
+                if (typeof(data[i]) == "object") {
+                    if (data[i].xtype) { //needed to prevent cyclic dependencies => too much recursion (maybe there is a better check)
+                        if (data[i].xtype == "cqinclude") {
+                            if (data[i].path) {
+                                CQ.Log.debug("CQ.utils.Util#processIncludes: processing include: {0}", data[i]);
+
+                                var path = CQ.HTTP.externalize(data[i].path);
+                                path = CQ.HTTP.addSelector(path, "overlay");
+                                data[i] = CQ.Util.eval(path);
+                            } else {
+                                CQ.Log.debug("CQ.utils.Util#processIncludes: no include path defined in {0}", data[i]);
+                            }
+                        }
+                        data[i] = processIncludes(data[i]);
+                    }
+                }
+            }
+        }
+        return data;
+    };
+
+    return {
+
+        /**
+         * The ID of the {@link #getRoot root element} harboring all
+         * CQ-related elements.
+         * @static
+         * @final
+         * @type String
+         */
+        ROOT_ID: "CQ",
+
+        /**
+         * The mode for {@link #formatData} to only translate the data.
+         * @static
+         * @final
+         * @type Number
+         */
+        I18N_ONLY: 1,
+
+        /**
+         * The mode for {@link #formatData} to only format the data.
+         * @static
+         * @final
+         * @type Number
+         */
+        FORMAT_ONLY: 2,
+
+        /**
+         * The parameter name suffix for properties that should not be translated.
+         * @static
+         * @final
+         * @type String
+         */
+        NO_I18N_SUFFIX: "_noI18n",
+
+        /**
+         * The parameter name suffix for translation comments for properties.
+         * @static
+         * @final
+         * @type String
+         */
+        COMMENT_I18N_SUFFIX: "_commentI18n",
+
+        /**
+         * The scrolling activity of the document.
+         * @private
+         * @static
+         * @type Boolean
+         */
+        docScrolling: false,
+
+        /**
+         * Creates a root element (<code>DIV</code>) with the
+         * {@link CQ.ROOT_ID} and appends it to the body element.
+         * This element should harbor all CQ-related elements.
+         * @private
+         * @static
+         * @return {CQ.Ext.Element} The root element
+         */
+        createRoot: function() {
+            var root = new CQ.Ext.Element(document.createElement("div"));
+            root.dom.id = CQ.utils.Util.ROOT_ID;
+            try {
+                // CQ.Ext.getBody().appendChild(root) must not be used since
+                // Element#appendChild checks if to append to the body -
+                // if yes getRoot is called -> infinite recursion
+                document.body.appendChild(root.dom);
+                return root;
+            } catch (e) {
+                return null;
+            }
+        },
+
+        /**
+         * Returns the root element harboring all CQ-related elements.
+         * @static
+         * @return {CQ.Ext.Element} The root element
+         */
+        getRoot: function() {
+            return CQ.Ext.get(CQ.utils.Util.ROOT_ID);
+        },
+
+        /**
+         * Returns true if the given item is a sort of root element.
+         * This method is used in conjunction with appending elements
+         * to the DOM. Appending to the body is intercepted and
+         * redirected to the {@link #getRoot root element}.
+         * @private
+         * @static
+         * @param {CQ.Ext.Element/HTMLElement/String} item The item or HTML ID
+         * @return {Boolean} True if the given item is a sort of root element
+         * @type Boolean
+         */
+        isRoot: function(item) {
+            return item == document.body ||
+                   item == CQ.utils.Util.ROOT_ID || //todo
+                   item == CQ.Ext.getBody();
+        },
+
+        /**
+         * Builds a component using the specified data object or URL.
+         * @static
+         * @param {Object/String} data The data object or URL
+         * @param {Boolean} noFormatting (optional) If true, data object will
+         *        not be formatted.
+         * @param {Function} callback (optional) The callback function to call
+         *        after the data object has been retrieved from the URL
+         * @param {Object} extensions (optional) The component's extensions.
+         *          Each item contains an array of config objects.<br>
+         *          Sample:
+         *<pre><code>
+{
+    "tabs": [
+         {
+            "xtype": "contentfindertab"
+         }
+    ],
+    "buttons": [
+         {
+            "xtype": "button"
+         }
+    ]
+}
+</code></pre>
+         * @return {CQ.Ext.Component} The component or, if the request is
+         *         asynchronous, the transaction ID
+         */
+        build: function(data, noFormatting, callback, debug, extensions) {
+            if (typeof data != "object") {
+                // data is a URL
+                CQ.Log.debug("CQ.utils.Util.build: retrieving component data from {0}", data);
+                try {
+                    if (callback) {
+                        // asynchronous
+                        var buildCallback = function(options, success, xhr, response) {
+                            if (success) {
+                                var component = CQ.utils.Util.build(CQ.HTTP.eval(response),
+                                        noFormatting, callback, debug, extensions);
+                                callback(component);
+                            } else {
+                                CQ.Log.error("CQ.utils.Util.build: callback failed to fetch data ({0})", response.statusText);
+                            }
+                        };
+                        return CQ.HTTP.get(data, buildCallback);
+                    } else {
+                        // synchronous
+                        return CQ.utils.Util.build(CQ.HTTP.eval(data),
+                                noFormatting, callback, debug, extensions);
+                    }
+                } catch (e) {
+                    CQ.Log.error("CQ.utils.Util.build: failed to fetch data ({0})", e.message);
+                    return null;
+                }
+            } else {
+                if (!noFormatting) {
+                    data = CQ.utils.Util.formatData(data);
+                }
+                if (debug) {
+                    data.debug = debug;
+                }
+                if (extensions) {
+                    if (!data.extensions) data.extensions = {};
+                        for (var xnName in extensions) {
+                            // multiple extensions (e.g. "toolbar", "tabs")
+                            data.extensions[xnName] = [];
+                            for (var i = 0; i < extensions[xnName].length; i++) {
+                                var xn = extensions[xnName][i];
+                                data.extensions[xnName].push(xn);
+                            }
+                    }
+                }
+                CQ.Log.info("CQ.utils.Util.build: building component of type '{0}'", data.xtype);
+                return CQ.Ext.ComponentMgr.create(data);
+            }
+        },
+
+        /**
+         * Formats and/or translates the given data object for
+         * building components. See also {@link #build}.
+         * <p>Formatting transforms jcr:primaryType into xtype, collections
+         * into arrays, and strings of numbers or booleans (e.g. "12", "true")
+         * will be converted into their respective types.</p>
+         * <p>Translation looks up values of well-known text properties (e.g.
+         * title, text, fieldLabel) in the current user's language.</p>
+         * @static
+         * @param {Object} data The data object to format
+         * @param {Number} mode (optional)<ul>
+         *        <li>{@link #FORMAT_ONLY} skips the translation</li>
+         *        <li>{@link #I18N_ONLY} skips the formatting</li></ul>
+         * @return {Object} The formatted data object
+         */
+        formatData: function(data, mode) {
+            if (!data || data.nodeType || isCqInstance(data)) {
+                return data;
+            }
+
+            if (data instanceof Array) {
+                for (var i = 0; i < data.length; i++) {
+                    data[i] = CQ.utils.Util.formatData(data[i]);
+                }
+                return data;
+            }
+
+            if (mode != CQ.Util.I18N_ONLY) {
+                // ensure xtype
+                if (!data.xtype && data["jcr:primaryType"] &&
+                        !data["jcr:primaryType"].match(/cq\:Widget/) &&
+                        data["jcr:primaryType"].indexOf("cq:") == 0) {
+                    data.xtype = data["jcr:primaryType"].toLowerCase().replace("cq:", "");
+                }
+                // use jcr:title as title if missing
+                if (data["jcr:title"] && !data.title) {
+                    data.title = data["jcr:title"];
+                }
+            }
+            data = processIncludes(data);
+
+            for (var i in data) {
+                if (!data[i]) {
+                    continue;
+                }
+                if (typeof(data[i]) == "object") {
+                    data[i] = CQ.utils.Util.formatData(data[i]);
+
+                    if (mode == CQ.Util.I18N_ONLY) {
+                        // i18n solely: do not format
+                        continue;
+                    }
+
+                    // convert objects to arrays where needed
+                    if (data[i]["jcr:primaryType"]) {
+                        //todo: option collection to simple store (e.g. combobox)
+                        if (data[i]["jcr:primaryType"].match(/cq\:.*Collection/)) {
+                            var array = [];
+                            for (var j in data[i]) {
+                                if (typeof(data[i][j]) == "object" ||
+                                        (j != "xtype" && j!= "jcr:primaryType")) {
+                                    array.push(data[i][j]);
+                                }
+                            }
+                            if (i == "items" && array.length == 1) {
+                                // set single items directly as object
+                                data[i] = array[0];
+                            }
+                            else {
+                                data[i] = array;
+                            }
+                        }
+                    }
+                }
+                else if (typeof data[i] == "string") {
+                    // add spaces in order to be able to differ between initial emtpyText
+                    // (which will not be submitted) and set value (e.g. "pink  " vs. "pink")
+                    if (i == "emptyText") {
+                        data[i] = data[i] + "  ";
+                    }
+                    // type conversions
+                    else if (data[i] == "true") {
+                        data[i] = true;
+                    } else if (data[i] == "false") {
+                        data[i] = false;
+                    } else if (i == "regex") {
+                        try {
+                            data[i] = eval(data[i]);
+                        } catch (e) { }
+                    } else if (data[i] === "0" || /^[1-9]\d+$/.test(data[i])) {
+                        // int
+                        data[i] = parseInt(data[i]);
+                    } else if (/function\(.*/.test(data[i])) {
+                        // function
+                        try {
+                            eval("data[i] = " + data[i] + ";");
+                        }
+                        catch (e) { }
+                    }
+                }
+            }
+
+            if (mode != CQ.Util.FORMAT_ONLY) {
+                // i18n
+                // property names which values have to be translated
+                var names = [
+                    "title",
+                    "text",
+                    "tooltip",
+                    "qtip",
+                    "tabTip",
+                    "fieldLabel",
+                    "fieldSubLabel",
+                    "fieldDescription",
+                    "defaultValue",
+                    "boxLabel",
+                    "regexText",
+                    "vtypeText",
+                    "emptyText",
+                    "cq:emptyText",
+                    "rootTitle",
+                    "widthPrefix",
+                    "widthSuffix",
+                    "heightPrefix",
+                    "heightSuffix",
+                    "displayMsg", // paging toolbar: start
+                    "pageText",
+                    "maxMsg",
+                    "emptyMsg",
+                    "beforePageText",
+                    "afterPageText",
+                    "firstText",
+                    "prevText",
+                    "nextText",
+                    "lastText",
+                    "html",
+                    "refreshText" // paging toolbar: end
+                ];
+                if (data["header"] && typeof data["header"] == "string") {
+                    // header prop has different usages - "string" e.g. in column models
+                    names.push("header");
+                }
+                for (var i = 0; i < names.length; i++) {
+                    var name = names[i];
+                    if (data[name + CQ.utils.Util.NO_I18N_SUFFIX]) {
+                        // do not translate names with the suffix, e.g. "title_noI18n"
+                        data[name] = data[name + CQ.utils.Util.NO_I18N_SUFFIX];
+                        delete data[name + CQ.utils.Util.NO_I18N_SUFFIX];
+                    } else if (data[name] && (typeof(data[name]) == "string")) {
+                        data[name] = CQ.I18n.getVarMessage(data[name], data[name + CQ.utils.Util.COMMENT_I18N_SUFFIX]);
+                    }
+                    if (data[name + CQ.utils.Util.COMMENT_I18N_SUFFIX]) {
+                        delete data[name + CQ.utils.Util.COMMENT_I18N_SUFFIX];
+                    }
+                }
+            }
+
+            return data;
+        },
+
+        /**
+         * Add an event listener to an obj.listeners config. This is the same as
+         * <code>obj.listeners[event] = handler</code>, but will also handle
+         * the case if there is already a listener defined for that event.
+         * The provided handler will be called when the event is triggered
+         * after the function that is already defined in the config object.
+         *
+         * <p>This method can be used on the raw config object as read from JSON, it will
+         * automatically convert string-based functions using {@link CQ.Util#formatData}.
+         *
+         * @static
+         * @param {Object} obj the config object; events are set on the "listeners" child
+         * @param {String} event name of the event for which the function should listen to
+         * @param {Function} handler function to listen for the event
+         * @since 5.6
+         */
+        addListenerToConfig: function(obj, event, handler) {
+            if (!obj.listeners) {
+                obj.listeners = {};
+            }
+            if (typeof obj.listeners !== "object") {
+                // skip case we can't handle
+                return;
+            }
+            var originalHandler = obj.listeners[event];
+            // convert any string-based function definitions first
+            if (typeof originalHandler === "string") {
+                originalHandler = CQ.Util.formatData({ fn: originalHandler }).fn;
+            }
+            if (typeof originalHandler === "function") {
+                obj.listeners[event] = function() {
+                    originalHandler.apply(this, arguments);
+                    handler.apply(this, arguments);
+                };
+            } else {
+                // can't do anything with non-functions, so just add the new one
+                obj.listeners[event] = handler;
+            }
+        },
+
+        /**
+         * Merges one object into the other. Child objects are
+         * merged recursively.
+         * <p>Example:<pre><code>
+var base = { a: "a", b: "b" };
+var upgrade = { b: "B", c: "C" };
+CQ.Util.merge(base, upgrade);
+           </code></pre>Result:<pre><code>
+{ a: "a", b: "B", c: "C" }
+           </code></pre></p>
+         * @static
+         * @param {Object} base The base object
+         * @param {Object} upgrade The upgrade object
+         * @return {Object} The merged object
+         */
+        merge: function(base, upgrade) {
+            if (!upgrade) {
+                return base;
+            }
+            if (!base) {
+                if (upgrade instanceof Array) {
+                    return upgrade;
+                }
+                base = new Object();
+            }
+            for (var name in upgrade) {
+                var value = upgrade[name];
+                if (value instanceof CQ.Ext.Component) {
+                    base[name] = value;
+                }
+                else if (value && typeof value == "object") {
+                    if (value instanceof Array) {
+                        base[name] = value;
+                    }
+                    else {
+                        base[name] = CQ.utils.Util.merge(base[name], value);
+                    }
+                }
+                else {
+                    base[name] = value;
+                }
+            }
+            return base;
+        },
+
+        /**
+         * Applies default properties if inexistent in the base object.
+         * Child objects are merged recursively.
+         * <p>Example:<pre><code>
+var base = { a: "a", b: "b" };
+var upgrade = { b: "B", c: "C" };
+CQ.Util.applyDefaults(base, upgrade);
+           </code></pre>Result:<pre><code>
+{ a: "a", b: "b", c: "C" }
+           </code></pre></p>
+         * @static
+         * @param {Object} base The base object
+         * @param {Object} defaults The defaults object
+         * @return {Object} The base object with defaults
+         */
+        applyDefaults: function(base, defaults) {
+            if (!defaults) {
+                return base;
+            }
+
+            if (defaults instanceof Array || typeof defaults != "object") {
+                if (typeof base == "undefined") {
+                    return defaults;
+                }
+                else {
+                    return base;
+                }
+            }
+
+            if (!base) {
+                base = new Object();
+            }
+
+            for (var name in defaults) {
+                var value = defaults[name];
+                if (value && typeof value == "object" &&
+                        !(value instanceof Array) && !isCqInstance(value)) {
+
+                    base[name] = CQ.utils.Util.applyDefaults(base[name], value);
+                }
+                else if (typeof base[name] == "undefined") {
+                    base[name] = value;
+                }
+            }
+            return base;
+        },
+
+        /**
+         * Replaces occurrences of <code>{n}</code> in the specified text with
+         * the texts from the snippets.
+         * <p>Example 1 (single snippet):<pre><code>
+var text = CQ.Util.patchText("{0} has signed in.", "Jack");
+           </code></pre>Result 1:<pre><code>
+Jack has signed in.
+           </code></pre></p>
+         * <p>Example 2 (multiple snippets):<pre><code>
+var text = "{0} {1} has signed in from {2}.";
+text = CQ.Util.patchText(text, ["Jack", "McFarland", "x.x.x.x"]);
+           </code></pre>Result 2:<pre><code>
+Jack McFarland has signed in from x.x.x.x.
+           </code></pre></p>
+         * @static
+         * @param {String} text The text
+         * @param {String/String[]} snippets The text(s) replacing
+         *        <code>{n}</code>
+         * @return {String} The patched text
+         */
+        patchText: function(text, snippets) {
+            return CQ.shared.Util.patchText(text, snippets);
+        },
+
+        /**
+         * Safely removes whitespace from a string (safe for null and undefined string parameters).
+         * @param {String} str The source string.
+         * @return {String} The trimmed string.
+         */
+        trim: function(str) {
+            return (str ? str.trim() : str);
+        },
+
+        /**
+         * Removes an enclosing pair of parentheses (and any adjoining whitespace) from a string.
+         * @param {String} str The source string.
+         * @return {String} The unwrapped (and trimmed) string.
+         */
+        unwrapParens: function(str) {
+            if (str && str.charAt(0) == "(" && str.charAt(str.length-1) == ")") {
+                return str.slice(1, str.length-1).trim();
+            } else {
+                return str;
+            }
+        },
+
+        /**
+         * Indicates whether or not the string represents a literal.
+         * @param {String} str The source string.
+         * @return {Boolean} True if the string is wrapped in either single or double-quotes.
+         */
+        isLiteral: function(str) {
+            if (!str) {
+                return false;
+            }
+            return ((str.charAt(0) == '"' && str.charAt(str.length-1) == '"')
+                    || (str.charAt(0) == "'" && str.charAt(str.length-1) == "'"));
+        },
+
+        /**
+         * Wraps a string in double-quotes.
+         * @param {String} str The source string.
+         * @return {String} The quoted string.
+         */
+        quote: function(str) {
+            return str ? '"' + str + '"' : str;
+        },
+
+        /**
+         * Removes enclosing single- or double-quotes from a string.
+         * @param {String} str The source string.
+         * @return {String} The un-quoted string.
+         */
+        unquote: function(str) {
+            if ((str && str.charAt(0) == "'" && str.charAt(str.length-1) == "'")
+                || (str && str.charAt(0) == '"' && str.charAt(str.length-1) == '"')) {
+                return str.slice(1, str.length-1);
+            } else {
+                return str;
+            }
+        },
+
+        /**
+         * Evaluates and returns the response text of the specified response
+         * object.
+         * @static
+         * @param {Object} response The response object
+         * @return {Object} The evaluated object
+         * @deprecated Use {@link CQ.shared.HTTP#eval} instead
+         */
+        eval: function(response) {
+            return CQ.HTTP.eval(response);
+        },
+
+        /**
+         * Evaluates and returns the specified HTML code.
+         * @static
+         * @param {String} html The HTML code
+         * @return {Object} The evaluated object
+         */
+        evalHTML: function(html) {
+            try {
+                var node = document.createElement("div");
+                node.innerHTML = html;
+                var obj = CQ.utils.Util.evalNode(node);
+                node = null;
+                return obj;
+            }
+            catch (e) {
+                return {};
+            }
+        },
+
+        /**
+         * Evaluates and returns the specified HTML node.
+         * @static
+         * @param {Node} node The document or node to parse
+         * @param {Object} obj (optional) The evaluated object if recursing
+         * @return {Object} The evaluated object
+         */
+        evalNode: function(node, obj) {
+            if (!node) {
+                return null;
+            }
+            if (obj == undefined) {
+                obj = new Object();
+            }
+            try {
+                for (var i = 0; i < node.childNodes.length; i++) {
+                    var child = node.childNodes[i];
+                    if (child.tagName) {
+                        if (child.id) {
+                            if (child.href) {
+                                obj[child.id] = child.href;
+                            }
+                            else {
+                                obj[child.id] = child.innerHTML;
+                            }
+                        }
+                        obj = CQ.utils.Util.evalNode(child, obj);
+                    }
+                }
+            }
+            catch (e) {
+
+            }
+            return obj;
+        },
+
+        /**
+         * Reloads the window or replaces its location with the specified URL.
+         * If no window is specified, the current window will be used.
+         * @static
+         * @param {Window} win (optional) The window to reload
+         * @param {String} url (optional) The URL
+         */
+        reload: function(win, url) {
+            if (!win) win = window;
+            if(CQ.WCM.getTopWindow() !== win) {
+                CQ.WCM.setContentWindowLoading(true);
+            }
+            CQ.shared.Util.reload(win, url);
+        },
+
+        /**
+         * Clears the text selection in the document. If no window is specified,
+         * the current window will be used.
+         * @static
+         * @param {Window} win (optional) The window
+         * @deprecated Use {@link CQ.DOM#clearDocumentSelection} instead
+         */
+        clearDocumentSelection: function(win) {
+            CQ.DOM.clearDocumentSelection(win);
+        },
+
+        /**
+         * Returns the context path used on the server.
+         * @static
+         * @return {String} The context path
+         * @deprecated Use {@link CQ.shared.HTTP#getContextPath} instead
+         */
+        getContextPath: function() {
+            return CQ.HTTP.getContextPath();
+        },
+
+        /**
+         * Detects the context path used on the server.
+         * @private
+         * @static
+         * @deprecated Use {@link CQ.shared.HTTP#detectContextPath} instead
+         */
+        detectContextPath: function() {
+            CQ.HTTP.detectContextPath();
+        },
+
+        /**
+         * Makes sure the specified relative URL starts with the context path
+         * used on the server. If an absolute URL is passed, it will be returned
+         * as-is.
+         * @static
+         * @param {String} url The URL
+         * @return {String} The externalized URL
+         * @deprecated Use {@link CQ.shared.HTTP#externalize} instead
+         */
+        externalize: function(url) {
+            return CQ.HTTP.externalize(url);
+        },
+
+        /**
+         * Removes scheme, authority and context path from the specified
+         * absolute URL if it has the same scheme and authority as the
+         * specified document (or the current one).
+         * @static
+         * @param {String} url The URL
+         * @param {String} doc (optional) The document
+         * @return {String} The internalized URL
+         * @deprecated Use {@link CQ.shared.HTTP#internalize} instead
+         */
+        internalize: function(url, doc) {
+            return CQ.HTTP.internalize(url, doc);
+        },
+
+        /**
+         * Removes all parts but the path from the specified URL.
+         * <p>Examples:<pre><code>
+/x/y.sel.html?param=abc => /x/y
+           </code></pre>
+         * <pre><code>
+http://www.day.com/foo/bar.html => /foo/bar
+           </code></pre><p>
+         * @static
+         * @param {String} url The URL
+         * @return {String} The path
+         * @deprecated Use {@link CQ.shared.HTTP#getPath} instead
+         */
+        getPath: function(url) {
+            return CQ.HTTP.getPath(url);
+        },
+
+        /**
+         * <p>If the <code>items</code> property of <code>config</code> is a single
+         * item (not an <code>Array</code> of multiple items) and of the given
+         * <code>xtype</code> the <code>items</code> property of
+         * <code>config</code> will be returned. Otherwise <code>null</code>.</p>
+         * <p>The sample returns the config of the tab panel:</p>
+         * <pre><code>
+CQ.Util.getSingleItemConfig({
+    xtype: "dialog",
+    items: {
+        xtype: "tabpanel"
+    }}, "tabpanel");
+</code></pre>
+         * @private
+         * @static
+         * @param {Object} config The config object
+         * @param {String} xtype The xtype to look for
+         * @return {Object|null} The items property of config if it is a single item and of the given xtype
+         */
+        getSingleItemConfig: function(config, xtype) {
+            try {
+                if (config["items"].xtype == xtype) {
+                    return config["items"];
+                }
+            }
+            catch (e) {
+                return null;
+            }
+        },
+
+        /**
+         * Returns a copy of the specified object.
+         * @static
+         * @param {Object} object The object to copy
+         * @return {Object} The copy
+         */
+        copyObject: function(object) {
+            var newObj;
+            if (object instanceof Array || CQ.Ext.isArray(object)) {
+                newObj = new Array();
+                for (var i = 0; i < object.length; i++) {
+                    if (typeof object[i] == "object" && !isCqInstance(object[i])) {
+                        newObj.push(CQ.utils.Util.copyObject(object[i]));
+                    }
+                    else {
+                        newObj.push(object[i]);
+                    }
+                }
+            }
+            else {
+                newObj = new Object();
+                for (var i in object) {
+                    if (typeof object[i] == "object" && !isCqInstance(object[i]) &&
+                            !(object[i] instanceof RegExp)) {
+                        newObj[i] = CQ.utils.Util.copyObject(object[i]);
+                    }
+                    else {
+                        newObj[i] = object[i];
+                    }
+                }
+            }
+            return newObj;
+        },
+
+        /**
+         * Returns the index of a given property value in an array.
+         * @deprecated Use {@link Array#indexOf} instead
+         * @private
+         * @static
+         * @param {Array} array The array
+         * @param {String} value The value of a property
+         * @return {Number} The index
+         * @type Number
+         */
+        indexInArray: function(array, value) {
+            for (var i = 0; i < array.length; i++) {
+                if (array[i] == value) {
+                    return i;
+                }
+            }
+            return -1;
+        },
+
+        /**
+         * Compares two values.
+         * @static
+         * @param {Object} v1 The first value
+         * @param {Object} v2 The second value
+         * @return {Number} 0 if values match, 1 if first value is greater
+         *         than second, -1 if second value is greater than first
+         */
+        compareValues: function(v1, v2) {
+            if (v1 instanceof Array && v2 instanceof Array) {
+                if (v1.length == v2.length) {
+                    for (var i = 0; i < v1.length; i++) {
+                        var check = CQ.utils.Util.compareValues(v1[i], v2[i]);
+                        if (check != 0) {
+                            return check;
+                        }
+                    }
+                    return 0;
+                } else {
+                    return v1.length > v1.length ? 1 : -1;
+                }
+            } else {
+                return v1 > v2 ? 1 : (v1 < v2 ? -1 : 0);
+            }
+        },
+
+        /**
+         * Keeps the specified component or element at its current position
+         * on the screen, repositioning it when the document gets scrolled
+         * to achieve the impression that it is actually pinned to the screen.
+         * See also {@link #unpin}.
+         * @static
+         * @param {CQ.Ext.Component/CQ.Ext.Element} item The item
+         */
+        pin: function(item) {
+
+            pins.push({
+                pin: item,
+                scroll: { top:0, left:0 }
+            });
+
+            if (!scrollInterval) {
+                CQ.Ext.EventManager.on(window, "scroll", function() {
+                    docScrolling = true;
+                    window.setTimeout(function() {
+                        docScrolling = false;
+                    }, 274);
+                });
+                scrollInterval = window.setInterval(function() {
+                    checkPins();
+                }, 195);
+            }
+        },
+
+        /**
+         * Removes the pin from the specified component or element, letting
+         * it scroll with the document again.
+         * @static
+         * @param {CQ.Ext.Component/CQ.Ext.Element} item The item
+         */
+        unpin: function(item) {
+            for (var i = 0; i < pins.length; i++) {
+                if (pins[i].pin == item) {
+                    pins.splice(i, 1);
+                    break;
+                }
+            }
+        },
+
+
+        /**
+         * Creates a unique ID by adding a counter to the specified ID.
+         * @param {String} id (optional) The base ID
+         * @static
+         * @return {String} The unique ID
+         */
+        createId: function(id) {
+            id = id ? id : "cq-id";
+            if (!idCounter[id]) {
+                idCounter[id] = 0;
+            }
+            return id + "-" + idCounter[id]++;
+        },
+
+        /**
+         * Returns true if at least one property of the first object is
+         * also a property of the second object.
+         * @static
+         * @param {Object} firstObj The first object
+         * @param {Object} secondObj The second object
+         * @param {Object} exclude (optional) The properties to exclude
+         * @return {Boolean} True if object is intersecting
+         */
+        isIntersecting: function(firstObj, secondObj, exclude) {
+            if (firstObj && secondObj) {
+                for (var prop in firstObj) {
+                    if ((!exclude || !exclude[prop]) && secondObj[prop] == firstObj[prop])
+                        return true;
+                }
+            }
+            return false;
+        },
+
+        /**
+         * Steps through all observed components and calls their
+         * observe method.
+         * <p>The interval can be one of:
+         * <ul>
+         *   <li>{@link #VERY_SHORT_INTERVAL}</li>
+         *   <li>{@link #SHORT_INTERVAL} (default)</li>
+         *   <li>{@link #LONG_INTERVAL}</li>
+         *   <li>{@link #VERY_LONG_INTERVAL}</li>
+         * </ul></p>
+         * @static
+         * @param {String} interval (optional) The interval
+         */
+        runComponentObservation: function(interval, rerun) {
+            var obs = getObservation(interval);
+            for (var i = 0; i < obs.components.length; i++) {
+                try {
+                    if (obs.components[i].observe) {
+                        obs.components[i].observe(obs.name);
+                    } else {
+                        CQ.Log.warn("CQ.Util#runComponentObservation: component has no method observe");
+                    }
+                }
+                catch (e) {
+                    CQ.Log.error("CQ.Util#runComponentObservation: observe method throws an exception: {0}",e.message);
+                }
+            }
+            if (rerun) {
+                window.setTimeout("CQ.Util.runComponentObservation('" + obs.name + "', true);", obs.time);
+            }
+        },
+
+        /**
+         * Adds a component to the list of observed components. These
+         * components are observed regulary by calling their observe method.
+         * See also {@link #runComponentObservation} and
+         * {@link #cancelObservation}.
+         * <p>Note that the observe method can be called quite often, which
+         * potentially has an impact on performance. Make sure any action
+         * performed in the observe method is really required.</p>
+         * <p>The interval can be one of:
+         * <ul>
+         *   <li>{@link #VERY_SHORT_INTERVAL}</li>
+         *   <li>{@link #SHORT_INTERVAL} (default)</li>
+         *   <li>{@link #LONG_INTERVAL}</li>
+         *   <li>{@link #VERY_LONG_INTERVAL}</li>
+         * </ul></p>
+         * @static
+         * @param {CQ.Ext.Component} component The component
+         * @param {String} interval (optional) The interval
+         */
+        observeComponent: function(component, interval) {
+            var obs = getObservation(interval);
+            for (var i = 0;  i < obs.components.length; i++) {
+                // avoid multiple addition
+                if (obs.components[i] == component) return;
+            }
+            obs.components.push(component);
+
+            if (!obs.started) {
+                obs.started = true;
+                CQ.Util.runComponentObservation(obs.name, true);
+            }
+        },
+
+        /**
+         * Removes a component from the list of observed components.
+         * <p>The interval can be one of:
+         * <ul>
+         *   <li>{@link #VERY_SHORT_INTERVAL}</li>
+         *   <li>{@link #SHORT_INTERVAL} (default)</li>
+         *   <li>{@link #LONG_INTERVAL}</li>
+         *   <li>{@link #VERY_LONG_INTERVAL}</li>
+         * </ul></p>
+         * @static
+         * @param {CQ.Ext.Component} component The component
+         * @param {String} interval (optional) The interval
+         */
+        cancelObservation: function(component, interval) {
+            var obs = getObservation(interval);
+            for (var i = 0;  i < obs.components.length; i++) {
+                if (obs.components[i] == component) {
+                    obs.components.splice(i, 1);
+                    return;
+                }
+            }
+        },
+
+        /**
+         * @static
+         * @deprecated Use CQ.endorsed.swfobject.getFlashPlayerVersion() instead.
+         */
+        getFlashVersion: function() {
+            var flashVer = null;
+            if (navigator.plugins != null && navigator.plugins.length > 0) {
+                if (navigator.plugins["Shockwave Flash 2.0"]
+                        || navigator.plugins["Shockwave Flash"]) {
+                    var swVer2 =
+                            navigator.plugins["Shockwave Flash 2.0"] ? " 2.0" : "";
+                    var flashDescription =
+                            navigator.plugins["Shockwave Flash" + swVer2].description;
+                    var descArray = flashDescription.split(" ");
+                    var tempArrayMajor = descArray[2].split(".");
+                    var versionMajor = tempArrayMajor[0];
+                    var versionMinor = tempArrayMajor[1];
+                    var versionRevision = descArray[3];
+                    if (versionRevision == "") {
+                        versionRevision = descArray[4];
+                    }
+                    if (versionRevision[0] == "d") {
+                        versionRevision = versionRevision.substring(1);
+                    } else if (versionRevision[0] == "r") {
+                        versionRevision = versionRevision.substring(1);
+                        if (versionRevision.indexOf("d") > 0) {
+                            versionRevision =
+                                versionRevision.substring(0, versionRevision.indexOf("d"));
+                        }
+                    }
+                    flashVer = [
+                        parseInt(versionMajor),
+                        parseInt(versionMinor),
+                        parseInt(versionRevision)
+                    ];
+                }
+            }
+            else if (CQ.Ext.isIE && CQ.Ext.isWindows && !CQ.Ext.isOpera) {
+                var version;
+                var axo;
+                try {
+                    // version will be set for 7.X or greater players
+                    axo = new ActiveXObject("ShockwaveFlash.ShockwaveFlash.7");
+                    version = axo.GetVariable("$version");
+                } catch (e) {
+                }
+
+                if (!version) {
+                    try {
+                        // version will be set for 6.X players only
+                        axo = new ActiveXObject("ShockwaveFlash.ShockwaveFlash.6");
+                        // installed player is some revision of 6.0
+                        // GetVariable("$version") crashes for versions 6.0.22 through 6.0.29,
+                        // so we have to be careful.
+                        // default to the first public version
+                        version = "WIN 6,0,21,0";
+                        // throws if AllowScripAccess does not exist (introduced in 6.0r47)
+                        axo.AllowScriptAccess = "sameDomain";
+                        // safe to call for 6.0r47 or greater
+                        version = axo.GetVariable("$version");
+                    } catch (e) {
+                    }
+                }
+
+                if (!version) {
+                    try {
+                        // version will be set for 4.X or 5.X player
+                        axo = new ActiveXObject("ShockwaveFlash.ShockwaveFlash.3");
+                        version = axo.GetVariable("$version");
+                    } catch (e) {
+                    }
+                }
+
+                if (!version) {
+                    try {
+                        // version will be set for 3.X player
+                        axo = new ActiveXObject("ShockwaveFlash.ShockwaveFlash.3");
+                        version = "WIN 3,0,18,0";
+                    } catch (e) {
+                    }
+                }
+
+                if (!version) {
+                    try {
+                        // version will be set for 2.X player
+                        axo = new ActiveXObject("ShockwaveFlash.ShockwaveFlash");
+                        version = "WIN 2,0,0,11";
+                    } catch (e) {
+                    }
+                }
+
+                if (version) {
+                    var platformSplit = version.split(" ");
+                    if (platformSplit.length == 2) {
+                        flashVer = platformSplit[1].split(",");
+                        for (var i = 0; i < flashVer.length; i++) {
+                            flashVer[i] = parseInt(flashVer[i]);
+                        }
+                    }
+                }
+            }
+            return flashVer;
+        },
+
+        /**
+         * Checks whether two positions are equal, accounting
+         * for the specified tolerance.
+         * @private
+         * @static
+         * @param {Array} position1 The first position
+         * @param {Array} position2 The second position
+         * @param {Number} tolerance (optional) The tolerance
+         * @return {Boolean} True if positions are equal
+         */
+        isEqualPosition: function(position1, position2, tolerance) {
+             if(!tolerance) tolerance = 0;
+             if(position1 && position2) {
+                 var xdiff = Math.abs(position1[0] - position2[0]);
+                 var ydiff = Math.abs(position1[1] - position2[1]);
+                 return (xdiff <= tolerance) && (ydiff <= tolerance);
+             }
+             return false;
+         },
+
+        /**
+         * <p>Returns the form fields of the specified container.
+         * The values are returned in arrays:</p>
+         * <p><pre>
+         {
+            nameA: [
+                "valueA"
+            ],
+            nameB: [
+                "valueB1",
+                "valueB2"
+            ]
+         }
+         </pre></p>
+         * @private
+         * @static
+         * @param {CQ.Ext.Container} container The container
+         * @param {Object} fields (optional) The form fields
+         * @return {Object} The form fields
+         */
+        findFormFields: function(container, fields) {
+            if (!container) return {};
+            if (!fields) {
+                fields = new Object();
+            }
+            if (container.items && container.items.length) {
+                for (var i = 0; i < container.items.length; i++) {
+                    var item = container.getComponent(i);
+                    if (item.isFormField) {
+                        var name = item.getName();
+                        if (!name) {
+                            // todo: investigate why name.getName() is empty
+                            // (e.g. suggest field in content finder)
+                            name = item.name;
+                        }
+                        if (fields[name] == undefined) {
+                            fields[name] = new Array();
+                        }
+                        fields[name].push(item);
+                    }
+                    else if (item.items) {
+                        fields = CQ.Util.findFormFields(item, fields);
+                    }
+                }
+            }
+            return fields;
+        },
+
+        /**
+         * Enables all form fields in the specified container.
+         * @private
+         * @static
+         * @param {CQ.Ext.Container} container The container
+         * @deprecated Use {@link CQ.Dialog#enableFields} instead
+         */
+        enableFields: function(container) {
+            var fields = CQ.Util.findFormFields(container);
+            for (var name in fields) {
+                for (var i = 0; i < fields[name].length; i++) {
+                    var field = fields[name][i];
+                    if (field) {
+                        if (field.enable) {
+                            field.enable();
+                        }
+
+                        if (field.dropTargets) {
+                            for (var i = 0; i < field.dropTargets.length; i++) {
+                                if (field.dropTargets[i].unlock)
+                                    field.dropTargets[i].unlock();
+                            }
+                        }
+                    }
+                }
+            }
+        },
+
+        /**
+         * Disables all form fields in the specified container.
+         * @private
+         * @static
+         * @param {CQ.Ext.Container} container The container
+         * @deprecated Use {@link CQ.Dialog#disableFields} instead
+         */
+        disableFields: function(container) {
+            var fields = CQ.Util.findFormFields(container);
+            for (var name in fields) {
+                for (var i = 0; i < fields[name].length; i++) {
+                    var field = fields[name][i];
+                    if (field) {
+                        if (field.disable) {
+                            field.disable();
+                        }
+
+                        if (field.dropTargets) {
+                            for (var i = 0; i < field.dropTargets.length; i++) {
+                                if (field.dropTargets[i].lock)
+                                    field.dropTargets[i].lock();
+                            }
+                        }
+                    }
+                }
+            }
+        },
+
+        /**
+         * Enables or disable a componnent
+         * @static
+         * @param {CQ.Ext.Component} component The component to enable/disable
+         * @param {boolean} enableCondition Component will be enabled if this condition is true, disabled otherwise
+         */
+        toggleComponent: function(component, enableCondition) {
+            if (component) {
+                enableCondition ? component.enable() : component.disable();
+            }
+        },
+
+        /**
+         * Logs the current user out.
+         * @static
+         * @deprecated Use {@link CQ.User#User.logout CQ.User.logout}() instead
+         */
+        logout: function() {
+             CQ.User.logout();
+         },
+
+        /**
+         * Checks if the specified mime type is accepted.
+         * @static
+         * @param {String[]} acceptPatternArray The array of patterns to check
+         * @param {String} mimeType The mime type
+         * @return {Boolean} True if mime type is accepted
+         */
+        isAcceptedMimeType: function(acceptPatternArray, mimeType) {
+            for(var i = 0;i<acceptPatternArray.length;i++) {
+                var acceptPattern = acceptPatternArray[i];
+                if (mimeType.match(acceptPattern)) {
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        /**
+         * Escapes a path for use as a URL using the standard
+         * encodeUriComponent function, but leaving the path
+         * delimiters (/) as-is.
+         * @static
+         * @param {String} path The path
+         * @return {String} The escaped path
+         * @deprecated Use {@link CQ.shared.HTTP#encodePath} instead
+         */
+        escapePath: function(path) {
+            var pathComponents = path.split("/");
+            CQ.Ext.each(pathComponents, function(item, index) {
+                    pathComponents[index] = encodeURIComponent(item);
+            });
+            return pathComponents.join("/");
+        },
+
+
+        /**
+         * Sorts the specified array of objects by their ranking properties.
+         * @static
+         * @param {Object[]} array An array of objects
+         * @return {Object[]} The sorted array
+         */
+        sortByRanking: function(array) {
+            try {
+                array.sort(function(a, b) {
+                    try {
+                        var result = a.ranking - b.ranking;
+                        if (!isNaN(result)) {
+                            return result;
+                        }
+                    }
+                    catch (e) {}
+
+                    // one or both rankings undefined or not a number
+                    var ar = isNaN(a.ranking) ? "X" : parseInt(a.ranking);
+                    var br = isNaN(b.ranking) ? "X" : parseInt(b.ranking);
+
+                    ar = ar != "X" ? ar : (br == "X" ? 0 :  br + 1);
+                    br = br != "X" ? br : ar + 1;
+                    return ar - br;
+                });
+            }
+            catch (e) {}
+            return array;
+        },
+
+        /**
+         * Returns true if the specified object is empty. Note that
+         * an undefined object will not be treated as empty.
+         * @static
+         * @param {Object} obj The object
+         * @return {Boolean} True if object is empty
+         */
+        isEmptyObject: function(obj) {
+            if(!obj) return false;
+            for (var p in obj) {
+                return false;
+            }
+            return true;
+        },
+
+        /**
+         * Returns a nicely formatted date. This function can be used
+         * directly as a renderer for widgets.
+         * @static
+         * @param {String} date The date string to format
+         * @return {String} The formatted date
+         */
+        renderDate: function(date) {
+            if (!date) {
+                return "";
+            }
+
+            var ms = new Date(date).getElapsed();
+            var seconds = Math.floor(ms / 1000);
+            var minutes = Math.floor(ms / (60 * 1000));
+            var hours =   Math.floor(ms / (60 * 60 * 1000));
+            var days =    Math.floor(ms / (24 * 60 * 60 * 1000));
+            var weeks =   Math.floor(ms / (7 * 24 * 60 * 60 * 1000));
+            var months =  Math.floor(ms / (30 * 24 * 60 * 60 * 1000));
+            var years =   Math.floor(ms / (365 * 24 * 60 * 60 * 1000));
+
+            if (seconds < 80) {
+                return CQ.I18n.getMessage("now");
+            } else if (minutes < 2) {
+                return CQ.I18n.getMessage("{0} seconds ago", "" + seconds);
+            } else if (hours < 2) {
+                return CQ.I18n.getMessage("{0} minutes ago", "" + minutes);
+            } else if (days < 2) {
+                return CQ.I18n.getMessage("{0} hours ago", "" + hours);
+            } else if (weeks < 2) {
+                return CQ.I18n.getMessage("{0} days ago", "" + days);
+            } else if (months < 2) {
+                return CQ.I18n.getMessage("{0} weeks ago", "" + weeks);
+            } else if (years < 2) {
+                return CQ.I18n.getMessage("{0} months ago", "" + months);
+            } else {
+                return CQ.I18n.getMessage("{0} years ago", "" + years);
+            }
+        },
+
+        /**
+         * Returns a human readable filesize including the unit, e.g "12 MB".
+         * @param {Number} size The filesize
+         * @return {String} The formatted filesize
+         */
+        formatFileSize: function(size) {
+            var unit;
+            if (size < 1000) {
+                // show max 3 digits; round 1000+ to 1 KB
+                unit = "bytes";
+            } else if (size < 1048576) {
+                size = Math.round(size / 1024);
+                unit = "KB";
+            } else {
+                if (size < 1073741824) {
+                    size = new String(size / 1048576);
+                    unit = "MB";
+                } else {
+                    size = new String(size / 1073741824);
+                    unit = "GB";
+                }
+                var point = size.indexOf(".");
+                if (point > 0) {
+                    if (size.charAt(point + 1) == "0") {
+                        size = size.substring(0, point);
+                    } else {
+                        size = size.substring(0, point + 2);
+                    }
+                }
+            }
+            return size + " " + unit;
+        },
+
+        /**
+         * Returns the absolute parent of the given path, at the position of the given level.
+         * @param {String} path The path whose parent to return. Must be an absolute path (start with "/").
+         * @param {Number} level The level of the parent to return.
+         * @return {String} The absolute parent or null if either the path or level are not defined, or the
+         * path doesn't start with a slash.
+         */
+        getAbsoluteParent: function(path, level) {
+
+            if (path && path.indexOf("/") == 0 && level > 0) {
+
+                var newPath = "";
+                var segments = path.split("/");
+
+                // splitting for "/" will result in an empty first segment in the array
+                // remove it
+                segments.splice(0, 1);
+
+                // check the level
+                if (level > segments.length) {
+                    return path;
+                }
+
+                var i = 0;
+                while (i <= level - 1 && i < segments.length) {
+                    newPath += "/" + segments[i];
+                    i++;
+                }
+
+                return newPath;
+            }
+
+            return path;
+        }
+
+    };
+}();
+
+// shortcut
+CQ.Util = CQ.utils.Util;
+

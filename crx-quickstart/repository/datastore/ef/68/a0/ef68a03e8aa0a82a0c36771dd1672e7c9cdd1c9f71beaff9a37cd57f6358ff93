@@ -1,0 +1,566 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2012 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(window, document, Granite, $, CUI, URITemplate) {
+    "use strict";
+
+    var ns = ".foundation-layout-card";
+    var qans = ns + "-quickactions";
+
+    function saveSelections(collection, config) {
+        if (!config.stateId) {
+            return;
+        }
+
+        var selectionIds = Array.prototype.map.call(collection.find(".foundation-selections-item"), function(v) {
+            return $(v).data("foundationCollectionItemId");
+        });
+
+        try {
+            window.sessionStorage.setItem(config.stateId + ".selections", JSON.stringify(selectionIds));
+
+            var paginator = collection.data("foundation-layout-card.internal.paginator");
+            if (paginator) {
+                window.sessionStorage.setItem(config.stateId + ".limit", paginator.offset);
+            }
+        } catch (e) {
+            if (window.console) {
+                // eslint-disable-next-line no-console
+                console.warn("Error occur saving selections", e);
+            }
+        }
+    }
+
+    function restoreSelections(collection, config) {
+        if (!config.stateId) {
+            return;
+        }
+
+        try {
+            var raw = window.sessionStorage.getItem(config.stateId + ".selections");
+            if (!raw) {
+                return;
+            }
+
+            var selectionIds = JSON.parse(raw);
+            if (!selectionIds.length) {
+                return;
+            }
+
+            var selections = collection.find(".foundation-collection-item").filter(function() {
+                return selectionIds.indexOf($(this).data("foundationCollectionItemId")) >= 0;
+            });
+
+            var cv = CUI.CardView.get(collection);
+
+            if (config.reload && !cv.isGridSelectionMode()) {
+                config.selectionMode = true;
+            }
+
+            var ln = selections.length;
+
+            selections.each(function(i) {
+                cv.select($(this), i < ln - 1);
+            });
+        } catch (e) {
+            if (window.console) {
+                // eslint-disable-next-line no-console
+                console.warn("Error occur restoring selections", e);
+            }
+        }
+    }
+
+    function addListener(collection, config) {
+        var modeChangeHandler = function(e, mode, group) {
+            if (e._foundationLayoutCard) {
+                return;
+            } // It is our event.
+            if (mode !== "default" && mode !== "selection") {
+                return;
+            }
+            if (collection.data("foundationModeGroup") !== group) {
+                return;
+            }
+
+            changeSelectionMode(collection, config, mode);
+        };
+        collection.data("foundation-layout-card.internal.modeChangeHandler", modeChangeHandler);
+        $(document).on("foundation-mode-change", modeChangeHandler);
+
+        collection.on("change:selection" + ns, function(e) {
+            if (e.moreSelectionChanges === true) {
+                return;
+            }
+            collection.trigger("foundation-selections-change");
+        });
+    }
+
+    function changeSelectionMode(collection, config, mode, noBackground, triggerEvent) {
+        var isSelection = mode === "selection";
+
+        CUI.CardView.get(collection).setGridSelectionMode(isSelection);
+
+        collection
+            .closest(".foundation-collection-container")
+            .toggleClass("mode-selection", !noBackground && isSelection);
+
+        if (isSelection) {
+            removeQuickActionsListener(collection);
+        } else {
+            addQuickActionsListener(collection);
+        }
+
+        if (config.stateId) {
+            // TODO create state api
+            $.cookie(config.stateId + ".selectionMode", mode === "selection", { expires: 7, path: "/" });
+        }
+
+        if (triggerEvent) {
+            var group = collection.data("foundationModeGroup");
+
+            var e = $.Event("foundation-mode-change");
+            // Mark the event so that our own handler can detect if it is triggered by us or not.
+            e._foundationLayoutCard = true;
+            collection.trigger(e, [ mode, group ]);
+        }
+    }
+
+    function getActions(item, collection, config) {
+        var actions = item.find(".foundation-collection-quickactions").children();
+        if (actions.length) {
+            return actions;
+        }
+
+        if (config && config.fallback) {
+            return collection
+                .siblings("[data-foundation-collection-quickactions-name~=" + config.fallback + "]")
+                .children();
+        }
+    }
+
+    function addQuickActionsListener(collection) {
+        var config = collection.data("foundationCollectionQuickactions");
+        var selectionsApi = collection.adaptTo("foundation-selections");
+        var events = $.quickaction.settings.event;
+
+        collection.on(events.openMenu.touch + qans, ".foundation-collection-item", function(event) {
+            var item = $(this);
+            var actions = getActions(item, collection, config);
+
+            if (!actions || !actions.length) {
+                return;
+            }
+
+            event.preventDefault();
+            event.stopImmediatePropagation();
+
+            $.quickaction(event, actions.map(function() {
+                var a = $(this);
+
+                return {
+                    display: a.clone(true).data("foundationCollectionItem", item[0]),
+                    pinned: !!a.data("foundationCollectionQuickactionPinned")
+                };
+            }), {
+                container: collection,
+                layout: $.quickaction.LAYOUT_CIRCLE,
+                autoClose: true,
+                displayCloseButton: true
+            });
+
+            selectionsApi.clear(true);
+            item.addClass("foundation-selections-item");
+            collection.trigger("foundation-selections-change");
+
+            collection.one("quickactionclosemenu" + qans, function() {
+                selectionsApi.clear();
+            });
+        });
+
+        if (events.openMenu.touch !== "pointerhold") {
+            collection.on(events.openMenu.pointer + qans, ".foundation-collection-item", function(e) {
+                var item = $(this);
+                var actions = getActions(item, collection, config);
+
+                if (!actions || !actions.length) {
+                    return;
+                }
+
+                e.preventDefault();
+                e.stopImmediatePropagation();
+
+                $.quickaction(e, actions.map(function() {
+                    var a = $(this);
+
+                    return {
+                        display: a.clone(true).data("foundationCollectionItem", item[0]),
+                        pinned: !!a.data("foundationCollectionQuickactionPinned")
+                    };
+                }), {
+                    container: collection,
+                    anchor: item,
+                    layout: $.quickaction.LAYOUT_BAR,
+                    autoClose: true
+                });
+            });
+        }
+    }
+
+    function removeQuickActionsListener(collection) {
+        collection.off(qans);
+    }
+
+    function handlePaging(collection, config) {
+        if (!collection.data("foundationCollectionSrc")) {
+            return;
+        }
+
+        var scrollContainer = config.scrollSrc ? collection.closest(config.scrollSrc) : collection.parent();
+
+        var Paginator = $(window).adaptTo("foundation-util-paginator");
+
+        var paginator = new Paginator({
+            el: scrollContainer,
+            limit: config.limit || 20,
+            resolveURL: function(paginator) {
+                return URITemplate.expand(collection.data("foundationCollectionSrc"), {
+                    offset: paginator.offset,
+                    limit: paginator.limit,
+                    id: collection.data("foundationCollectionId")
+                });
+            },
+            processResponse: function(paginator, html) {
+                var deferred = $.Deferred();
+
+                var processed = Granite.UI.Foundation.Utils.processHtml(html, undefined, function() {
+                    var el = $(processed);
+                    var collectionApi = collection.adaptTo("foundation-collection");
+
+                    var items = el.find(".foundation-collection").first().find(".foundation-collection-item").get();
+                    collectionApi.append(items);
+
+                    deferred.resolve({
+                        length: items.length,
+                        hasNext: items.length >= paginator.limit
+                    });
+                });
+
+                return deferred.promise();
+            }
+        });
+
+        paginator.start(
+            collection.find(".foundation-collection-item").length,
+            collection.data("foundation-layout-card.internal.paginator.initialHasNext")
+        );
+
+        collection.data("foundation-layout-card.internal.paginator", paginator);
+    }
+
+    function removeListener(collection) {
+        var modeChangeHandler = collection.data("foundation-layout-card.internal.modeChangeHandler");
+        if (modeChangeHandler) {
+            $(document).off("foundation-mode-change", modeChangeHandler);
+        }
+        collection.removeData("foundation-layout-card.internal.modeChangeHandler");
+
+        collection.off("change:selection" + ns);
+
+        removeQuickActionsListener(collection);
+    }
+
+    function reload(collection, config) {
+        var limit = (function() {
+            if (config.stateId) {
+                return window.sessionStorage.getItem(config.stateId + ".limit");
+            }
+        })() || config.limit || 20;
+
+        var id = collection.data("foundationCollectionId");
+
+        var url = URITemplate.expand(config.reload, {
+            offset: 0,
+            limit: limit,
+            id: id
+        });
+
+        return $.ajax({
+            url: url,
+            cache: false
+        }).then(function(html) {
+            var deferred = $.Deferred();
+
+            var processed = Granite.UI.Foundation.Utils.processHtml(html, undefined, function() {
+                var el = $(processed);
+
+                var oldEl = collection.closest(".foundation-collection-container");
+                if (!oldEl.length) {
+                    oldEl = collection;
+                }
+
+                el.replaceAll(oldEl);
+
+                if (!el.hasClass("foundation-collection-container")) {
+                    el.trigger("foundation-contentloaded");
+
+                    if (el.hasClass("foundation-collection")) {
+                        el.trigger("foundation-selections-change");
+                    }
+
+                    deferred.reject(new Error("Invalid content"));
+                    return;
+                }
+
+                var newCollection = el.find(".foundation-collection").first();
+                var items = newCollection.find(".foundation-collection-item");
+                var hasNext = items.length >= limit;
+
+                newCollection.data("foundation-layout-card.internal.paginator.initialHasNext", hasNext);
+
+                // foundation-contentloaded will call the doLayout, so we have to avoid double initialization
+                newCollection.data("foundation-layout-card.internal.init", true);
+                el.trigger("foundation-contentloaded");
+                el.trigger("foundation-collection-reload");
+                deferred.resolve(newCollection);
+            });
+
+            return deferred.promise();
+        }, function() {
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Fail to load data.");
+
+            var ui = $(window).adaptTo("foundation-ui");
+            ui.alert(title, message, "error");
+        });
+    }
+
+    var registry = $(window).adaptTo("foundation-registry");
+
+    registry.register("foundation.layouts", {
+        name: "foundation-layout-card",
+        doLayout: function(el, config) {
+            var collection = $(el);
+
+            if (collection.data("foundation-layout-card.internal.fromReload")) {
+                return;
+            }
+
+            // foundation-layout-card is exclusive to manage the layout of foundation-collection only
+            if (!collection.hasClass("foundation-collection")) {
+                return;
+            }
+
+            if (collection.data("foundation-layout-card.internal.init")) {
+                return;
+            }
+
+            collection.data("foundation-layout-card.internal.init", true);
+
+            var draw = function(collection) {
+                collection.closest(".foundation-collection-container").addClass("card");
+
+                if (!collection.data("cardView")) {
+                    collection.wrapInner("<div class='grid-0'>");
+                }
+
+                collection.cardView({
+                    "selectorConfig": {
+                        "itemSelector": ".foundation-collection-item",
+                        "dataContainer": "grid-0",
+                        "view": {
+                            "selectedItem": {
+                                "list": {
+                                    "cls": "foundation-selections-item selected"
+                                },
+                                "grid": {
+                                    "cls": "foundation-selections-item selected"
+                                }
+                            },
+                            "selectedItems": {
+                                "list": {
+                                    "selector": ".foundation-selections-item"
+                                },
+                                "grid": {
+                                    "selector": ".foundation-selections-item"
+                                }
+                            }
+                        },
+                        "controller": {
+                            "selectElement": {
+                                "list": ".foundation-collection-item .select",
+                                "grid": ".foundation-collection-item"
+                            },
+                            "moveHandleElement": {
+                                "list": ".foundation-collection-item > .move"
+                            },
+                            "targetToItem": {
+                                "list": function($target) {
+                                    return $target.closest(".foundation-collection-item");
+                                },
+                                "grid": function($target) {
+                                    return $target.closest(".foundation-collection-item");
+                                }
+                            },
+                            "gridSelect": {
+                                "cls": "mode-selection"
+                            }
+                        }
+                    }
+                });
+
+                var cardView = CUI.CardView.get(collection);
+
+                cardView.setDisplayMode(CUI.CardView.DISPLAY_GRID);
+
+                var selectionMode = collection.data("foundationSelectionsMode");
+                if (selectionMode) {
+                    cardView.setSelectionModeCount(selectionMode);
+                }
+
+                if (config.reload) {
+                    // Restore the selections before addListener to avoid listening to CardView's select event
+                    restoreSelections(collection, config);
+                }
+
+                addListener(collection, config);
+                changeSelectionMode(
+                    collection, config,
+                    config.selectionMode ? "selection" : "default",
+                    !config.initialSelectionModeDecoration,
+                    true
+                );
+                handlePaging(collection, config);
+
+                collection.trigger("foundation-selections-change");
+            };
+
+            if (config.reload) {
+                reload(collection, config).done(draw);
+            } else {
+                draw(collection);
+            }
+        },
+        clean: function(el, config) {
+            var collection = $(el);
+
+            saveSelections(collection, config);
+
+            Granite.UI.Foundation.Layouts.clean(el);
+
+            collection.closest(".foundation-collection-container").removeClass("card");
+            removeListener(collection);
+
+            var paginator = collection.data("foundation-layout-card.internal.paginator");
+            if (paginator) {
+                paginator.destroy();
+                collection.removeData("foundation-layout-card.internal.paginator");
+            }
+
+            collection.removeData("foundation-layout-card.internal.paginator.initialHasNext");
+            collection.removeData("foundation-layout-card.internal.init");
+
+            if (config.reload) {
+                // Only destroy when reloading for compatibility
+                CUI.CardView.get(collection).destroy();
+            }
+
+            if (config.stateId) {
+                $.removeCookie(config.stateId + ".selectionMode", { path: "/" });
+            }
+
+            // Don't clean cardView structure for now (e.g. <div class="grid-6" />) as it's too complicated
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-layout",
+        selector: ".foundation-layout-card.foundation-collection, .foundation-layout-list.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+
+            return {
+                append: function(items) {
+                    collection.adaptTo("foundation-collection").append(items);
+                },
+
+                clear: function() {
+                    collection.adaptTo("foundation-collection").clear();
+                }
+            };
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-collection",
+        selector: ".foundation-layout-card.foundation-collection, .foundation-layout-list.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+
+            return {
+                append: function(items) {
+                    CUI.CardView.get(collection).append(items);
+                    collection.trigger("foundation-contentloaded");
+                },
+
+                clear: function() {
+                    CUI.CardView.get(collection).removeAllItems();
+                }
+            };
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-selections",
+        selector: ".foundation-layout-card.foundation-collection, .foundation-layout-list.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+
+            return {
+                count: function() {
+                    return collection.find(".foundation-selections-item").length;
+                },
+
+                clear: function(suppressEvent) {
+                    CUI.CardView.get(collection).clearSelection();
+
+                    if (!suppressEvent) {
+                        collection.trigger("foundation-selections-change");
+                    }
+
+                    return this;
+                },
+
+                select: function(el) {
+                    var item = $(el);
+                    if (!item.is(".foundation-collection-item")) {
+                        return;
+                    }
+
+                    CUI.CardView.get(collection).select(item);
+                },
+
+                deselect: function(el) {
+                    var item = $(el);
+                    if (!item.is(".foundation-collection-item")) {
+                        return;
+                    }
+
+                    CUI.CardView.get(collection).deselect(item);
+                }
+            };
+        }
+    });
+})(window, document, Granite, Granite.$, CUI, Granite.URITemplate);

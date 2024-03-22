@@ -1,0 +1,953 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(document, XSS, Granite, $) {
+    "use strict";
+
+    var bCreateLanguageCopyMode = true;
+    var global_wizard_obj = null;
+    var NEW_SITE_CREATION_VARIABLE = "-1";
+    var currentSelectedConfiguration = null;
+    var ui = $(window).adaptTo("foundation-ui");
+
+    function _removeResourcePath(wizard, resourcePath) {
+        if (wizard.childResourcePageList && wizard.childResourcePageList.length > 0) {
+            for (var index = 0; index < wizard.childResourcePageList.length; index++) {
+                var currentItem = wizard.childResourcePageList[index];
+                if (currentItem.path == resourcePath) {
+                    wizard.childResourcePageList.splice(index, 1);
+                    break;
+                }
+            }
+        }
+    };
+
+    function getDropdownValue(inputClass) {
+        try {
+            var dropdown = $(inputClass)[0];
+            var retVal = dropdown.value;
+            return retVal;
+        } catch (e) {}
+        return "";
+    };
+
+    function _appendResourcePage(wizard, resourcePath, bisDeep, bDisableDeep, bRefreshUI, errMsg) {
+        var bAdded = false;
+        if (!wizard.childResourcePageList) {
+            wizard.childResourcePageList = [];
+        }
+        var newItem = {};
+        newItem.path = resourcePath;
+        newItem.disableDeep = bDisableDeep;
+        _validateResourcePage(newItem, bisDeep, errMsg);
+        if (newItem.valid) {
+            bAdded = true;
+            wizard.childResourcePageList.push(newItem);
+            if (bRefreshUI) {
+                _refreshChildPageListUI(wizard);
+            }
+        }
+        return bAdded;
+    };
+
+    function _getLanguageCopyTable(wizard) {
+        var table = wizard.find('table[is="coral-table"]');
+        return table[0];
+    };
+
+    function _getSelectedLanguageCopyItems(wizard) {
+        var languageCopyTable = _getLanguageCopyTable(wizard);
+        return languageCopyTable.selectedItems;
+    };
+
+    function _removeAllRowsFromTable(languageCopyTable) {
+        var table_body = $(languageCopyTable).find('tbody');
+        table_body.empty();
+    };
+
+    function _fillSupportedLanguageList(wizard, data) {
+        var select = wizard.find('.cq-sites-createlanguagecopy-targetlanguages')[0];
+        //get current selected values
+        var currentSelectedItems = "";
+        if (select.selectedItems != null && select.selectedItems.length > 0) {
+            for (var index = 0; index < select.selectedItems.length; index++) {
+                currentSelectedItems = currentSelectedItems + "<" + select.selectedItems[index].value + ">";
+            }
+        }
+
+        if (data) {
+            select.items.clear();
+            var langArray = data.languages;
+            wizard.supportedlanguagelistdata = data;
+            for (var index = 0; index < langArray.length; index++) {
+                var child = langArray[index];
+                var bSelectedOption = currentSelectedItems.indexOf("<" + child.lang_code + ">") != -1;
+                var item = {
+                    value: child.lang_code,
+                    selected: bSelectedOption,
+                    content: {
+                        innerHTML: child.lang_title
+                    }
+                };
+                select.items.add(item);
+            }
+        }
+    };
+
+    function _fetchSupportedLanguageList(wizard, strPathList) {
+        if (strPathList && strPathList.length > 0) {
+            ui.wait();
+            var post_url = "/libs/cq/gui/components/projects/admin/translation";
+            $.ajax({
+                url: post_url,
+                type: 'POST',
+                cache: false,
+                data: {
+                    operation: "getLanguageCopySupportedList",
+                    translationJobPath: 'dummy',
+                    srcPathList: strPathList.join()
+                },
+                success: function(data, status, request) {
+                    _fillSupportedLanguageList(wizard, data);
+                },
+                error: function(jqXHR, textStatus, errorThrown) {
+                    ui.notify(Granite.I18n.get("Error"), Granite.I18n.get("Unable to get supported language list"), "error");
+                },
+                complete: function() {
+                    ui.clearWait();
+                }
+            });
+        } else {
+            _fillSupportedLanguageList(wizard, null);
+        }
+    };
+
+    function _refreshChildPageListUI(wizard) {
+        var languageCopyTable = _getLanguageCopyTable(wizard);
+        _removeAllRowsFromTable(languageCopyTable);
+
+        //first clear all path fields
+        var input_array = wizard.find('input[name="srcPathList"]'),
+            index;
+        for (index = 0; index < input_array.length; index++) {
+            var item = input_array[index];
+            item.parentElement.removeChild(item);
+        }
+        input_array = wizard.find('input[name="shallowList"]');
+        for (index = 0; index < input_array.length; index++) {
+            var item = input_array[index];
+            item.parentElement.removeChild(item);
+        }
+
+        var strPathList = [],
+            strShallowList = [];
+        for (var index = 0; index < wizard.childResourcePageList.length; index++) {
+            var currentItem = wizard.childResourcePageList[index];
+            _appendCurrentLanguageCopyPage(wizard, languageCopyTable, currentItem);
+            strPathList.push(currentItem.path)
+            strShallowList.push(!currentItem.cache.includesubpage);
+        }
+        //we also need to get the supported language list
+        _fetchSupportedLanguageList(wizard, strPathList);
+        _appendHiddenField(wizard, 'srcPathList', strPathList.join(), strPathList.join());
+        _appendHiddenField(wizard, 'shallowList', strShallowList.join(), strShallowList.join());
+
+        wizard.find('.foundation-collection-item-includesubpage coral-switch').on('change', function(evt) {
+            var currentInput = $(evt.currentTarget);
+            var $tr = currentInput.closest('tr');
+            var currentPath = $tr.data('path');
+            var languageCopyItem = _getLanguageCopyItemFromPath(wizard, currentPath);
+            languageCopyItem.cache.includesubpage = currentInput[0].checked;
+            _updatelanguageCopyIncludeSubPageState(wizard, languageCopyItem);
+        });
+        _updateButtonStates(wizard);
+    }
+
+    function _getLanguageCopyItemFromPath(wizard, resourcePath) {
+        var retVal = null;
+        if (wizard.childResourcePageList && wizard.childResourcePageList.length > 0) {
+            for (var index = 0; index < wizard.childResourcePageList.length; index++) {
+                var currentItem = wizard.childResourcePageList[index];
+                if (currentItem.path === resourcePath) {
+                    retVal = currentItem;
+                    break;
+                }
+            }
+        }
+        return retVal;
+    };
+
+    function _validateResourcePage(currentItem, bIsDeep, errMsg) {
+        // get the jcr:title property from the content resource or the resource
+        if (!currentItem.info) {
+            var urlContentResouce = Granite.HTTP.externalize(currentItem.path + "/jcr:content.json", true);
+            var urlResouce = Granite.HTTP.externalize(currentItem.path + ".json", true);
+            var data = Granite.HTTP.eval(urlContentResouce);
+            if (!data || !data["jcr:title"]) {
+                data = Granite.HTTP.eval(urlResouce, true);
+            }
+            currentItem.info = data;
+        }
+        currentItem.valid = !!currentItem.info && !!currentItem.info["jcr:title"];
+        if (currentItem.valid) {
+            //process more data now
+            currentItem.cache = {};
+            currentItem.cache.title = XSS.getXSSValue(currentItem.info["jcr:title"]);
+            currentItem.cache.includesubpage = bIsDeep;
+            currentItem.cache.path = XSS.getXSSValue(currentItem.path);
+        }
+        else {
+            errMsg.msg = Granite.I18n.get("Resources without a jcr:title property cannot be added to the list.");
+        }
+    }
+
+    function _appendCurrentLanguageCopyPage(wizard, languageCopyTable, currentItem) {
+        languageCopyTable.multiple = true;
+        languageCopyTable.selectable = true;
+        var table_row_text = '<tr is="coral-table-row" itemprop="item" class="foundation-collection-item"></tr>';
+        var table_content_text = '<td is="coral-table-cell" class="select"><coral-checkbox coral-table-rowselect></coral-checkbox></td>' +
+            '<td class="foundation-collection-item-title" is="coral-table-cell">' + currentItem.cache.title + '</td>' +
+            '<td class="foundation-collection-item-path" is="coral-table-cell">' + currentItem.cache.path + '</td>' +
+            '<td class="foundation-collection-item-includesubpage" is="coral-table-cell"><a><coral-switch ' + (currentItem.cache.includesubpage ? "checked" : "") + '></coral-switch></a></td>';
+        var $table_row = $(table_row_text);
+        $table_row.data('path', currentItem.path);
+        languageCopyTable.items.add($table_row[0]);
+        $table_row[0].innerHTML = table_content_text;
+        if (currentItem.disableDeep) {
+            $table_row.find('coral-switch')[0].disabled = true;
+        }
+    }
+
+    function _updatelanguageCopyIncludeSubPageState(wizard, languageCopyItem) {
+        var strShallowList = [];
+        for (var index = 0; index < wizard.childResourcePageList.length; index++) {
+            var currentItem = wizard.childResourcePageList[index];
+            strShallowList.push(!currentItem.cache.includesubpage);
+        }
+        var inputList = wizard.find('input[name="shallowList"]');
+        if (inputList != null && inputList.length > 0) {
+            var currentInput = $(inputList[0]);
+            currentInput.attr("value", strShallowList.join());
+        }
+    }
+
+    function _appendHiddenField(wizard, name, pathInfo, value) {
+        var wizard_form = $(wizard[0]);
+        var i;
+        var $hiddenField = $("<input type='hidden'/>").attr("name", name);
+        wizard_form.append($hiddenField);
+        $hiddenField.data('path', pathInfo);
+        if (value !== undefined) {
+            $hiddenField.attr("value", value);
+        }
+    };
+
+    function _updateButtonStates(wizard) {
+        _updateDeleteButtonState(wizard);
+        _updateToggleButtonState(wizard);
+    };
+
+    function _updateToggleButtonState(wizard) {
+        var wizardAPI = wizard.adaptTo("foundation-wizard");
+        wizardAPI.toggleNext(wizard.childResourcePageList.length > 0);
+        setTimeout(function() {
+            wizardAPI.toggleNext(wizard.childResourcePageList.length > 0);
+        }, 0);
+    };
+
+    function _updateDeleteButtonState(wizard) {
+        var selectedLanguageCopyItems = _getSelectedLanguageCopyItems(wizard);
+        var deleteBtn = wizard.find(".foundation-collection-action-delete");
+        if (selectedLanguageCopyItems != null && selectedLanguageCopyItems.length > 0) {
+            deleteBtn.removeAttr('hidden');
+        } else {
+            deleteBtn.attr('hidden', 'hidden');
+        }
+    };
+
+    function _handleDeleteBtnClick(wizard) {
+        var selectedLanguageCopyItems = _getSelectedLanguageCopyItems(wizard);
+        if (selectedLanguageCopyItems != null && selectedLanguageCopyItems.length > 0) {
+            for (var index = 0; index < selectedLanguageCopyItems.length; index++) {
+                var currentItem = $(selectedLanguageCopyItems[index]);
+                _removeResourcePath(wizard, currentItem.data('path'));
+            }
+            _refreshChildPageListUI(wizard);
+        }
+    };
+
+    function _parse_url_params() {
+        var search_string = location.search;
+
+        function _parse_values_internal(params, pairs) {
+            var pair = pairs[0];
+            var parts = pair.split('=');
+            var key = decodeURIComponent(parts[0]);
+            var value = decodeURIComponent(parts.slice(1).join('='));
+
+            // Handle multiple parameters of the same name
+            if (typeof params[key] === "undefined") {
+                params[key] = value;
+            } else {
+                params[key] = [].concat(params[key], value);
+            }
+
+            return pairs.length == 1 ? params : _parse_values_internal(params, pairs.slice(1))
+        }
+        return search_string.length == 0 ? {} : _parse_values_internal({}, search_string.substr(1).split('&'));
+    };
+
+    function _getFormElement() {
+        var form = $(".cq-sites-createlanguagecopy-form");
+        if (form == null || form.length == 0) {
+            //this might be edit languageCopy now
+            form = $('.cq-sites-editlanguagecopy-form');
+            bCreateLanguageCopyMode = false;
+        }
+        return form;
+    };
+
+    function _getWizardFromForm(form) {
+        if(global_wizard_obj){
+            return global_wizard_obj;
+        }
+        var wizard;
+        if (bCreateLanguageCopyMode) {
+            wizard = form.find(".cq-sites-createlanguagecopy-wizard");
+        } else {
+            wizard = form.find(".cq-sites-editlanguagecopy-wizard");
+        }
+        global_wizard_obj = wizard;
+        return wizard;
+    };
+
+    function updateCloudConfigSelection(configurations, bUseOldSelection) {
+        updateSelections(configurations, bUseOldSelection, ".cq-sites-createlanguagecopy-translationprovidercredential");
+    };
+
+    function updateSelections(configurations, bUseOldSelection, identifier) {
+        var currentConfigurations = configurations;
+
+        var oldSelectionName = "";
+        if (bUseOldSelection && currentSelectedConfiguration) {
+            oldSelectionName = currentSelectedConfiguration.sites_defaultTranslationProvider;
+        }
+
+        var bSelected = false;
+        var select = $(identifier).get(0);
+        if (select) {
+            if (select.items != undefined) {
+                select.items._deselectAllExcept();
+                select.items.clear();
+            }
+        }
+
+        for (var index = 0; index < currentConfigurations.length; index++) {
+            var bSelectedOption = (index == 0);
+            if (oldSelectionName == currentConfigurations[index].title) {
+                bSelectedOption = true;
+            }
+            select.items.add({
+                selected: bSelectedOption,
+                content: {
+                    textContent: currentConfigurations[index].title || currentConfigurations[index].innerText
+                },
+                disabled: false,
+                value: currentConfigurations[index].path || currentConfigurations[index].value
+            });
+        }
+    };
+
+    function updateTranslationSettingsSelection(configurations, bUseOldSelection) {
+        var currentConfigurations = configurations;
+
+        var oldSelectionName = "";
+        if (bUseOldSelection && currentSelectedConfiguration) {
+            oldSelectionName = currentSelectedConfiguration.sites_defaultTranslationProvider;
+        }
+
+        var bSelected = false;
+        var select = $(".cq-sites-createlanguagecopy-translationsettings").get(0);
+        if (select) {
+            if (select.items != undefined) {
+                select.items._deselectAllExcept();
+                select.items.clear();
+            }
+        }
+
+        for (var index = 0; index < currentConfigurations.length; index++) {
+            var bSelectedOption = (index == 0);
+            if (oldSelectionName == currentConfigurations[index].title) {
+                bSelectedOption = true;
+            }
+            select.items.add({
+                selected: bSelectedOption,
+                content: {
+                    textContent: currentConfigurations[index].title
+                },
+                disabled: false,
+                value: currentConfigurations[index].absolutePath
+            });
+        }
+    };
+
+    function getTranslationProviderClassName() {
+        var currentMethod = getDropdownValue('.cq-sites-createlanguagecopy-translationmethod');
+        var currentTranslationProviderSpan = ".cq-sites-createlanguagecopy-translationprovider-machine";
+        if (currentMethod == 'humanTranslation') {
+            currentTranslationProviderSpan = ".cq-sites-createlanguagecopy-translationprovider-human";
+        }
+        return currentTranslationProviderSpan;
+    }
+
+    function getCloudConfigRootFromCurrentSelection() {
+        return getDropdownValue(getTranslationProviderClassName());
+    };
+
+    function updateCloudConfigDropdown(targetElement) {
+        var confPath = "";
+        if (targetElement) {
+            confPath = targetElement.values[0];
+        } else {
+            // applicable for ajax call back
+            confPath = $('.cq-cloudconfig-configpathbrowser foundation-autocomplete')[0].value;
+        }
+        var currentServiceCloudRootPath = getCloudConfigRootFromCurrentSelection();
+        if (currentServiceCloudRootPath != null && currentServiceCloudRootPath.length > 0) {
+            var url = '/libs/cq/gui/components/projects/admin/translation?operation=cloudConfigList&rootPath=' + encodeURIComponent(currentServiceCloudRootPath)
+                + "&confPath=" + encodeURIComponent(confPath);
+            var data = Granite.HTTP.eval(url);
+            updateCloudConfigSelection(data.configurations, true);
+        } else {
+            updateCloudConfigSelection([], false);
+        }
+    };
+
+    function _addCreateNewConfigSettingNow(wizard) {
+        var dropdown = wizard.find('.cq-sites-createlanguagecopy-translationsettings');
+        if (dropdown && dropdown.length > 0) {
+            dropdown = dropdown[0];
+            var item = {
+                value: NEW_SITE_CREATION_VARIABLE,
+                content: {
+                    innerHTML: Granite.I18n.get("Create new setting")
+                }
+            };
+            dropdown.items.add(item);
+        } else {
+            setTimeout(function() {
+                _addCreateNewConfigSettingNow(wizard);
+            }, 1000);
+        }
+    };
+
+    function _enableDisableInputs(wizard, elementNames, bShowCreateSettings) {
+        for (var index = 0; index < elementNames.length; index++) {
+            var elementName = elementNames[index];
+            var elementObj = wizard.find('input[name="' + elementName + '"]')[0];
+            elementObj.disabled = !bShowCreateSettings;
+        }
+    };
+
+    function _showHideCreateNewSetting(wizard, bShowCreateSettings) {
+        var settingName = wizard.find("[is='coral-textfield'][name='newSettingName']");
+        if (settingName.length > 0) {
+            settingName = settingName[0];
+        }
+        if (bShowCreateSettings) {
+            wizard.find(".cq-sites-createlanguagecopy-translationcreateconfig").show();
+            settingName.disabled = false;
+            $(settingName).removeAttr("disabled");
+            settingName.required = true;
+            settingName.value = "";
+        } else {
+            wizard.find(".cq-sites-createlanguagecopy-translationcreateconfig").hide();
+            settingName.disabled = true;
+            settingName.value = "a";
+            $(settingName).removeAttr("required");
+            $(settingName).removeAttr("invalid");
+        }
+        // _enableDisableInputs(wizard, ["translateTags","translateMetadata","translateComponent"],bShowCreateSettings);
+        var arrayList = wizard.find('.cq-sites-createlanguagecopy-newsettingfield');
+        for (var index = 0; index < arrayList.length; index++) {
+            if (bShowCreateSettings) {
+                arrayList[index].removeAttribute('disabled');
+            } else {
+                arrayList[index].setAttribute('disabled', "");
+            }
+        }
+        setTimeout(function() {
+            _revalidateUI(settingName);
+            $(settingName).trigger("change");
+        }, 1000);
+    };
+
+    function _showHideBasedOnTranslationMethod(wizard, bMachineMethodEnabled) {
+        if (bMachineMethodEnabled) {
+            wizard.find(".cq-sites-enabled-for-human").hide();
+            wizard.find(".cq-sites-enabled-for-machine").show();
+        } else {
+            wizard.find(".cq-sites-enabled-for-machine").hide();
+            wizard.find(".cq-sites-enabled-for-human").show();
+        }
+    };
+
+    function _revalidateUI(element) {
+        var api = $(element).adaptTo("foundation-validation");
+        if (api) {
+            api.checkValidity();
+            api.updateUI();
+        }
+    };
+
+    function _updateBasedOnTranslationMethod(wizard, bUpdateCloudConfig) {
+        var currentMethod = getDropdownValue('.cq-sites-createlanguagecopy-translationmethod');
+        _showHideBasedOnTranslationMethod(wizard, currentMethod != "humanTranslation");
+        if (bUpdateCloudConfig) {
+            updateCloudConfigDropdown();
+        }
+    };
+
+    function _setSelectDropdownValue(elements, newValue) {
+        try {
+            var selectedItemValue = null;
+            var selectBox = elements[0];
+            if (selectBox.items && selectBox.items.length > 0) {
+                var allItems = selectBox.items.getAll();
+                for (var index = 0; index < allItems.length; index++) {
+                    var item = allItems[index];
+                    if (item.textContent == newValue) {
+                        selectedItemValue = item.value;
+                        break;
+                    }
+                }
+            }
+            if (selectedItemValue) {
+                selectBox.value = selectedItemValue;
+            }
+        } catch (e) {}
+    };
+
+    function _updateDropdownBasedonProjectCount(wizard) {
+        var selectBox = wizard.find('.cq-sites-createlanguagecopy-existing-dropbox')[0];
+        Coral.commons.ready(selectBox, function(el) {
+            Coral.commons.nextFrame(function() {
+                if (!(selectBox.items && selectBox.items.length > 0)) {
+                    //we need to remove add to existing setting now
+                    selectBox = wizard.find('.cq-sites-createlanguagecopy-project')[0];
+                    var item = selectBox.items.getAll()[selectBox.items.length - 1]; //last item
+                    selectBox.items.remove(item);
+                }
+            });
+        });
+    }
+
+    function _onLanguageProjectDropdownClick(wizard) {
+        var projectPath = $('.cq-sites-createlanguagecopy-existing-dropbox').val();
+        var projectSettingOption = $('.cq-sites-createlanguagecopy-project').val();
+        if (projectSettingOption !== "add_existing") {
+            projectPath = "";
+        }
+        $($.find('input[name="projectFolderPath"]')[0]).val(projectPath);
+    };
+
+    /*
+     * Extracts the root link from an URL.
+     * If the URL is /sites.html/content/root/another-page the root link is sites.html
+     */
+    function _findRootLink(link) {
+        return link.substring(0, link.indexOf(".html") + ".html".length);
+    }
+
+    function _updateSuccessResponse(wizard) {
+        if (wizard.childResourcePageList && wizard.childResourcePageList.length > 0) {
+            var projectSettingOption = $('.cq-sites-createlanguagecopy-project').val();
+            var successMeta = $($('.cq-sites-createlanguagecopy-successresponse')[0]);
+            var data = JSON.parse(successMeta.attr('data-foundation-form-response-ui-success'));
+            var strMessage = Granite.I18n.get("The language copy(ies) has been created and added to the respective translation project(s).");
+            var openlink, redirectlink;
+            if (wizard.childResourcePageList.length > 0) {
+                redirectlink = _findRootLink(data.redirect) + wizard.childResourcePageList[0].path;
+            }
+            if (projectSettingOption == "add_existing") {
+                openlink = '/projects.html/content/projects';
+            } else if (projectSettingOption == "add_structure_only") {
+                //in this case we need to find the language copy
+                strMessage = Granite.I18n.get("The language copy(ies) has been created.");
+                if (wizard.supportedlanguagelistdata && wizard.supportedlanguagelistdata.paths.length > 0) {
+                    var obj = wizard.supportedlanguagelistdata.paths[0];
+                    var selected_input = $.find('.cq-sites-createlanguagecopy-targetlanguages')[0];
+                    var strValues = "";
+                    if (selected_input.selectedItems && selected_input.selectedItems.length > 0) {
+                        var newLangCode = selected_input.selectedItems[0].value;
+                        var newurl = obj.root + "/" + newLangCode + obj.relativepath;
+                        openlink = _findRootLink(data.open) + newurl;
+                    } else {
+                        openlink = data.open;
+                    }
+                }
+            } else if (projectSettingOption == "add_new" || projectSettingOption == "add_new_multi_lang") {
+                openlink = '/projects.html/content/projects';
+            }
+            data.open = Granite.HTTP.externalize(openlink);
+            data.redirect = Granite.HTTP.externalize(redirectlink);
+            data.message = strMessage;
+            successMeta.attr('data-foundation-form-response-ui-success', JSON.stringify(data));
+        }
+    }
+
+    function _updateProjectToolTip(){
+        var toolTipText = Granite.I18n.get("Multiple translation projects will be created");
+        var action = $('.cq-sites-createlanguagecopy-project').val();
+        var bTooltipRequired = true;
+        if(action == "add_new_multi_lang"){
+            toolTipText = Granite.I18n.get("Multi-language translation project will be created");
+        }
+
+        if (action === "add_structure_only") {
+            bTooltipRequired = false;
+        }
+
+        var parentBox  = $('.cq-sites-createlanguagecopy-project').parent();
+        var tooltipIcon = parentBox.find('coral-icon[icon="infoCircle"]')[0];
+        var tooltipContent = parentBox.find('coral-tooltip-content')[0];
+        tooltipContent.innerText = toolTipText;
+        bTooltipRequired ? tooltipIcon.show(): tooltipIcon.hide();
+    };
+
+    function _onSettingDropdownClick(wizard) {
+        var settingPath = $('.cq-sites-createlanguagecopy-translationsettings')[0].selectedItem.value;
+        if (settingPath == NEW_SITE_CREATION_VARIABLE) {
+            _showHideCreateNewSetting(wizard, true);
+            return;
+        }
+        var confSettingElement = $('.cq-cloudconfig-configpathbrowser foundation-autocomplete')[0];
+        var confSettingUrl = "";
+        if(confSettingElement){
+            confSettingUrl = confSettingElement.values[0];
+        }
+        if(!confSettingUrl || confSettingUrl.length==0){
+            confSettingUrl = "/libs";  //default is /libs
+        }
+
+        var urlPath = settingPath;
+        if(settingPath.charAt(0)!="/"){
+            urlPath = "/" + settingPath;
+            urlPath = confSettingUrl + "/settings" + urlPath;
+        }
+
+        $('.cq-sites-createlanguagecopy-advanced').attr('href', Granite.HTTP.externalize('/mnt/overlay/cq/translation/cloudservices/tifeditor.html'+urlPath));
+
+        if(wizard.childResourcePageList && wizard.childResourcePageList.length >0){
+            var selectedPage = wizard.childResourcePageList[0].path;
+            _showHideCreateNewSetting(wizard, false);
+            $($.find('input[name="cloudConfigPath"]')[0]).val(settingPath);
+            var url = Granite.HTTP.externalize('/libs/cq/gui/components/projects/admin/translation?operation=cloudConfigJSON&source=' + selectedPage + '&translationSetting=' + settingPath);
+            var data = Granite.HTTP.eval(url);
+            currentSelectedConfiguration = data;
+
+            wizard.find('.cq-sites-createlanguagecopy-translationmethod').val(data.sites_translationWorkflow);
+            _setSelectDropdownValue(wizard.find('.cq-sites-createlanguagecopy-translationprovider-human'), data.sites_defaultPostEditProvider);
+            _setSelectDropdownValue(wizard.find('.cq-sites-createlanguagecopy-translationprovider-machine'), data.sites_defaultTranslationProvider);
+            updateCloudConfigDropdown();
+            _updateBasedOnTranslationMethod(wizard, true);
+        }
+    };
+
+    $(function() {
+        var form = _getFormElement();
+        var wizard = _getWizardFromForm(form);
+        var ui = $(window).adaptTo("foundation-ui");
+
+        form.on("change", "[name='shallow']", function(e) {
+            // These are hidden fields
+            var sourceRolloutConfig = form[0].elements.sourceRolloutConfigs[0];
+            var sourceRolloutConfigShallow = form[0].elements.sourceRolloutConfigs[1];
+
+            sourceRolloutConfig.disabled = this.checked;
+            sourceRolloutConfigShallow.disabled = !this.checked;
+        });
+
+        wizard.find(".foundation-collection-action-delete").click(function(e) {
+            ui.prompt(Granite.I18n.get("Remove"),
+                      Granite.I18n.get("Do you really want to remove selected pages?"),
+                      "error", [{
+                    text: Granite.I18n.get("Cancel"),
+                    id: "no"
+                }, {
+                    text: Granite.I18n.get("Remove"),
+                    id: "yes",
+                    warning: true
+                }],
+                      function(btnId) {
+                          if (btnId === "yes") {
+                              _handleDeleteBtnClick(wizard);
+                          }
+                      });
+        });
+
+        wizard.on("foundation-wizard-stepchange", function(e, to, from) {
+            setTimeout(function(wizard) {
+                //we need to update the thumbnail UI as well
+                if (wizard.childResourcePageList && wizard.childResourcePageList.length > 0) {
+                    var currentPath = wizard.childResourcePageList[0].path;
+                    var src = Granite.HTTP.externalize(currentPath + ".thumb.319.319.png");
+                    $(".foundation-layout-thumbnail-image img").attr("src", src);
+                }
+                _updateSuccessResponse(wizard);
+            }, 0, wizard);
+        });
+
+        $(wizard).on('change', ".cq-cloudconfig-configpathbrowser", function(e){
+            updateProvidersUsingCaConfig(e.target);
+        });
+
+        $(".cq-sites-createlanguagecopy-projects").hide();
+        _showHideCreateNewSetting(wizard, false);
+
+        wizard.find(".cq-sites-createlanguagecopy-translationprovider-dropdown").change(function(e) {
+            updateCloudConfigDropdown();
+        });
+
+        wizard.find(".cq-sites-createlanguagecopy-existing-dropbox").change(function(e) {
+            _onLanguageProjectDropdownClick(wizard);
+        });
+
+        wizard.find('.cq-sites-createlanguagecopy-translationsettings').change(function(e) {
+            _onSettingDropdownClick(wizard);
+        }.bind(wizard));
+
+        wizard.find(".cq-sites-createlanguagecopy-translationmethod").change(function(e) {
+            _updateBasedOnTranslationMethod(wizard, true);
+        });
+        wizard.find('.cq-sites-createlanguagecopy-targetlanguages').change(function(e) {
+            var selected_input = $.find('.cq-sites-createlanguagecopy-targetlanguages')[0];
+            var strValues = "";
+            if (selected_input.selectedItems && selected_input.selectedItems.length > 0) {
+                for (var index = 0; index < selected_input.selectedItems.length; index++) {
+                    if (strValues.length > 0) {
+                        strValues = strValues + ",";
+                    }
+                    strValues += selected_input.selectedItems[index].value;
+                }
+            }
+            $($.find('input[name="languageList"]')[0]).val(strValues);
+        });
+
+        wizard.find('.cq-sites-createlanguagecopy-project').change(function(e) {
+            var action = $('.cq-sites-createlanguagecopy-project').val();
+            var bTitleRequired = false;
+            var bProjectRequired = false;
+            if (action === "add_new" || action == "add_new_multi_lang") {
+                $(".cq-sites-createlanguagecopy-projects").show();
+                $(".cq-sites-createlanguagecopy-createnew").show();
+                $(".cq-sites-createlanguagecopy-existing-div").hide();
+                bTitleRequired = true;
+            }
+            if (action === "add_existing") {
+                $(".cq-sites-createlanguagecopy-projects").show();
+                $(".cq-sites-createlanguagecopy-existing-div").show();
+                $(".cq-sites-createlanguagecopy-createnew").hide();
+                bProjectRequired = true;
+            }
+            if (action === "add_structure_only") {
+                $(".cq-sites-createlanguagecopy-projects").hide();
+            }
+            if (bTitleRequired) {
+                $.find('input[name="projectTitle"]')[0].required = true;
+            } else {
+                $($.find('input[name="projectTitle"]')[0]).removeAttr("required");
+            }
+            if (bProjectRequired) {
+                $.find('coral-select[name="project"]')[0].required = true;
+            } else {
+                $($.find('coral-select[name="project"]')[0]).removeAttr("required");
+            }
+            _revalidateUI($.find('input[name="projectTitle"]')[0]);
+            _revalidateUI($.find('coral-select[name="project"]')[0]);
+            _updateSuccessResponse(wizard);
+            $($.find('input[name="projectType"]')[0]).val(action);
+
+            _updateProjectToolTip();
+        }.bind(wizard));
+
+        $(window).adaptTo("foundation-registry").register("foundation.picker.control.action", {
+            name: "cq.sites.createlanguagecopy.addpages",
+            handler: function(name, el, config, selections) {
+                if (selections.length > 0) {
+                    ui.wait();
+                    var bAdded = false;
+                    var bRootPath = false;
+                    var errMsg = {};
+                    $.each(selections, function() {
+                        var strResourcePath = this.value;
+                        if (strResourcePath != '/content') {
+                            var currentItem = _getLanguageCopyItemFromPath(wizard, strResourcePath);
+                            if (currentItem == null) {
+                                if (_appendResourcePage(wizard, strResourcePath, true, false, false, errMsg)) {
+                                    bAdded = true;
+                                }
+                            }
+                        } else {
+                            bRootPath = true;
+                        }
+                    });
+                    ui.clearWait();
+                    if (bAdded) {
+                        _refreshChildPageListUI(wizard);
+                    } else if (!bRootPath) {
+                        ui.prompt(Granite.I18n.get("Error"),
+                                  errMsg.msg || Granite.I18n.get("Selected page(s) already exist in the list."),
+                                  "error", [{
+                                text: Granite.I18n.get("Ok"),
+                                id: "no"
+                            }]
+                        );
+                    }
+                }
+            }
+        });
+
+        // autoselect source
+        setTimeout(function() {
+            var path_array = [];
+            var url_params = _parse_url_params();
+            if (url_params && url_params['source'] && url_params['source'].length > 0) {
+                path_array = url_params['source'].split(',');
+            } else if (window.location.hash) {
+                var path = window.location.hash.substring(1);
+                path_array = path.split(',');
+            }
+            var notemplate = url_params['notemplate'];
+            if (notemplate) {
+                var templateinput = $($.find('input[name="page"][value="new"]')[0]);
+                var templateRadio = $(templateinput.closest('coral-radio')[0]);
+                templateRadio.hide();
+            }
+            if (!wizard.childResourcePageList) {
+                wizard.childResourcePageList = [];
+            }
+            if (path_array.length == 0 && window._g_initial_edit_language_copy_list && window._g_initial_edit_language_copy_list.length) {
+                //check if we have edit array with us
+                for (var index = 0; index < window._g_initial_edit_language_copy_list.length; index++) {
+                    var obj = window._g_initial_edit_language_copy_list[index];
+                    _appendResourcePage(wizard, obj.rootResource, obj.isDeep, true, false);
+                }
+                _refreshChildPageListUI(wizard);
+            } else if (path_array && path_array.length > 0) {
+                for (var index = 0; index < path_array.length; index++) {
+                    _appendResourcePage(wizard, path_array[index], true, false, false);
+                }
+                _refreshChildPageListUI(wizard);
+            }
+            //if there are some child pages added we should move to next page
+            if (wizard.childResourcePageList.length > 0 && url_params['create_nested_language_copy']) {
+                var wizardAPI = wizard.adaptTo("foundation-wizard");
+                wizardAPI.next();
+            }
+
+            setTimeout(function() {
+                _updateButtonStates(wizard);
+                _updateBasedOnTranslationMethod(wizard, false);
+                _updateProjectToolTip();
+                wizard.find('table[is="coral-table"]').on("coral-table:change", function(e) {
+                    _updateButtonStates(wizard);
+                });
+                _onSettingDropdownClick(wizard);
+                _updateDropdownBasedonProjectCount(wizard);
+                // _addCreateNewConfigSettingNow(wizard);
+            }, 0);
+        }, 1000);
+
+        form.on("change", "[name='page']", function(e) {
+            var shallow = form.find("[name='shallow']").first();
+            var liveCopy = form.find("[name='isLiveCopy']").first();
+
+            // var nextButton = wizard[0].controls.selectedItem.querySelector(".foundation-wizard-control[data-foundation-wizard-control-action='next']");
+            var nextButton = wizard.find(".foundation-layout-wizard2-controls > coral-panel[selected] .foundation-wizard-control[data-foundation-wizard-control-action='next']")[0];
+
+            if (this.value === "new") {
+
+                nextButton.label.textContent = Granite.I18n.get("Next");
+                nextButton.type = "button";
+
+                shallow.prop("disabled", true).closest(".coral-Form-fieldwrapper").attr("hidden", "");
+                liveCopy.prop("disabled", true).closest(".coral-Form-fieldwrapper").attr("hidden", "");
+            } else {
+
+                nextButton.label.textContent = Granite.I18n.get("Create");
+                nextButton.type = "submit";
+
+                shallow.prop("disabled", false).closest(".coral-Form-fieldwrapper").removeAttr("hidden");
+                liveCopy.prop("disabled", false).closest(".coral-Form-fieldwrapper").removeAttr("hidden");
+            }
+        });
+    });
+
+    var legacyTranslationSettings = null;
+    function updateProvidersUsingCaConfig(targetElement){
+        var form = _getFormElement();
+        var wizard = _getWizardFromForm(form);
+        if (legacyTranslationSettings === null) {
+            legacyTranslationSettings = $(".cq-sites-createlanguagecopy-translationsettings")[0].items.getAll();
+        }
+        var configValue = targetElement.values[0];
+        if(!!configValue) {
+            var url = "/libs/cq/gui/components/projects/admin/translation";
+            var options = {
+                url: Granite.HTTP.externalize(url),
+                data: {
+                    operation: "getTranslationConfigsFromContext",
+                    confPath: configValue,
+                    currentTime: (new Date()).getTime()
+                },
+                cache: false,
+                type: "get",
+                async: false,
+                success: function (output, textStatus, jqXHR) {
+                    ui.clearWait();
+                    updateTranslationProvidersSelection(output);
+                    $(".cq-sites-createlanguagecopy-translationprovidercredential").attr("disabled", "");
+                    $(".cq-sites-createlanguagecopy-translationsettings").attr("disabled", "");
+                    _onSettingDropdownClick(wizard);
+                },
+                error: function (xhr, error, errorThrown) {
+                    ui.clearWait();
+                    updateTranslationSettingsDropdown();
+                    $(".cq-sites-createlanguagecopy-translationprovidercredential").removeAttr("disabled");
+                    $(".cq-sites-createlanguagecopy-translationsettings").removeAttr("disabled");
+                    _onSettingDropdownClick(wizard);
+                }
+            };
+            $.ajax(options);
+        } else {
+            updateTranslationSettingsDropdown();
+            $(".cq-sites-createlanguagecopy-translationprovidercredential").removeAttr("disabled");
+            $(".cq-sites-createlanguagecopy-translationsettings").removeAttr("disabled");
+            _onSettingDropdownClick(wizard);
+        }
+    }
+
+    function updateTranslationSettingsDropdown() {
+        updateSelections(legacyTranslationSettings, true, ".cq-sites-createlanguagecopy-translationsettings");
+    }
+
+    function updateTranslationProvidersSelection(data) {
+        updateCloudConfigSelection(data.configurations, true);
+        updateTranslationSettingsSelection(data.tif, true);
+    }
+
+})(document, _g.XSS, Granite, Granite.$);

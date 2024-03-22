@@ -1,0 +1,567 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproducxtion of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(document, $) {
+    "use strict";
+
+    //used to handle events from assetpicker
+    window.addEventListener("message", receiveMessage, false);
+
+    var selectedSegmentId = null;
+    var isRemoteAsset = false;
+
+    //URL
+    var SINGLE_CARD_URL = '/mnt/overlay/dam/gui/content/s7dam/sets/singlecard/card.html/';
+
+    //DOM
+    var ASSET_LIST_ID = '#assetList',
+        ASSET_LIST_OVERLAY_ID = "#assetListOverlay",
+        ASSET_LIST_MASONRY_SELECTOR = ASSET_LIST_ID + ' > coral-masonry',
+        MASONRY_ITEM_SELECTOR = 'coral-masonry-item',
+        ASSET_LIST_MASONRY_ITEM_SELECTOR = ASSET_LIST_MASONRY_SELECTOR + ' > ' + MASONRY_ITEM_SELECTOR,
+        CORAL_CARD_SELECTOR = 'coral-card',
+        CORAL_CARD_TITLE_SELECTOR = "coral-card-title",
+        ASSET_PANEL_INSTRUCTION_ID = '#asset-panel-instructions';
+
+    //Events
+    var SV_EVENT_ASSET_SELECTED = 'sv-asset-selected',
+        SV_EVENT_ASSET_DESELECTED = 'sv-asset-deselected',
+        SV_EVENT_TIMELINE_SELECTED = 'sv-timeline-selected',
+        SV_EVENT_SEGMENT_SELECTED = 'sv-segment-selected',
+        SV_EVENT_SEGMENT_UNSELECTED =  'sv-segment-unselected',
+        SV_EVENT_MULTI_SEGMENT_SELECTED = 'sv-multi-segment-selected',
+        SV_PRODUCT_ROW_DELETED = "sv-product-row-deleted",
+        EVENT_VALIDATE_SWATCH = "sv-validate-swatches";
+
+    //Modals
+    var FAILED_TO_ADD_ASSETS_MODAL_ID = "#svideo-failed-to-add-assets-modal";
+
+    //Asset Picker
+    var CHILDREN_URL = '/_jcr_content/renditions.children.2.json';
+    var METADATA_CHILDREN_URL = '/_jcr_content.metadata.children.2.json';
+
+    $(document).one("foundation-contentloaded", function(e){
+        // disable content tab asset panel
+        if ($(ASSET_LIST_MASONRY_ITEM_SELECTOR).length > 0) {
+            $(ASSET_LIST_OVERLAY_ID).addClass("show");
+        }
+
+        isRemoteAsset = $(".dm-setup-info").data("remoteasset");
+
+        $(document).on(SV_EVENT_TIMELINE_SELECTED, cleanSelection);
+        $(document).on(SV_EVENT_SEGMENT_SELECTED, registerSegment);
+        $(document).on(SV_EVENT_SEGMENT_UNSELECTED, blockSelection);
+        $(document).on(SV_EVENT_MULTI_SEGMENT_SELECTED, blockSelection);
+
+        //re-config selection after a row is deleted by button
+        $(document).on(SV_PRODUCT_ROW_DELETED, function(e){
+            cleanSelection();
+            populateSelection();
+            $(document).trigger(EVENT_VALIDATE_SWATCH);
+        });
+
+        $('.sv-assetpicker-button').on('click', function(e) {
+            showAssetPickerModal();
+        })
+
+        $(FAILED_TO_ADD_ASSETS_MODAL_ID).find('.primary').on('click',  function(){
+            document.querySelector(FAILED_TO_ADD_ASSETS_MODAL_ID).hide();
+        });
+    });
+
+    /**
+     * Asset selector handler
+     */
+    function selectAsset(){
+
+        var $card = $(this);
+        var assetMasonryItem = $card.parent().parent();
+
+        var assetURL = assetMasonryItem.data('path');
+
+        var assetName = $card.find(CORAL_CARD_TITLE_SELECTOR).text();
+
+        function stripFileExt(string){
+            var str = string.split(".");
+            str.pop();
+            return str.join(".");
+        }
+
+        assetName = stripFileExt(assetName);
+
+        assetMasonryItem.on("click", function(e) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            this.selected = !this.selected;
+            if(this.selected) {
+                $(document).trigger({
+                'type' : SV_EVENT_ASSET_SELECTED,
+                'url' : assetURL,
+                'title' : assetName
+            });
+            } else {
+                $(document).trigger({
+                'type' : SV_EVENT_ASSET_DESELECTED,
+                'url' : assetURL,
+                'title' : assetName
+            });
+            }
+        });
+    }
+
+
+    /**
+     * Event handler for 'sv-segment-selected'.  Determine the Id of the current segment selection.  Expected to
+     * work with single segment selection.
+     * @param e Event
+     */
+    function registerSegment(e){
+        cleanSelection();
+        selectedSegmentId = (typeof e.id != 'undefined' && e.id != null ? e.id : null);
+        populateSelection();
+    }
+    function blockSelection() {
+        if ($(ASSET_LIST_MASONRY_ITEM_SELECTOR).length > 0) {
+            $(ASSET_LIST_OVERLAY_ID).addClass("show");
+        }
+
+        selectedSegmentId = null;
+        cleanSelection();
+    }
+
+    function populateSelection(){
+        var selSegment = $.sv.getSegmentByID(selectedSegmentId);
+        if (selSegment) {
+            $(ASSET_LIST_OVERLAY_ID).removeClass("show");
+        }
+
+        if (selectedSegmentId != null && typeof selSegment != 'undefined') {
+            $(ASSET_LIST_MASONRY_ITEM_SELECTOR)
+                .each( function() {
+                    if (isAssetInSegment(selSegment, $(this).data('path'))) {
+                        this.selected = true;
+
+			//setting aria-pressed to true for toggle button
+			$(this).find("a.foundation-layout-masonry-cardwrapper").attr("aria-pressed","true");
+                    }
+                });
+        }
+    }
+
+    function isAssetInSegment(segment, asset){
+        var products = segment.products;
+        var matched = false;
+        for ( var i = 0; i < products.length; i++ ){
+            if (products[i].asset == asset) {
+                matched = true;
+                break;
+            }
+        }
+        return matched;
+    }
+
+    /**
+     * Clean up selection when the user switchs timeline block
+     */
+    function cleanSelection(){
+        $(ASSET_LIST_MASONRY_ITEM_SELECTOR).each( function() {
+                        this.selected = false;
+
+			//setting aria-pressed to false for toggle button
+			$(this).find("a.foundation-layout-masonry-cardwrapper").attr("aria-pressed","false");
+                });
+    }
+
+    /**
+     * Parse asset name from base asset path
+     */
+    function parseAssetName(assetPath){
+        var trimAssetPath = $.trim(assetPath);
+        var assetName = '';
+        var assetPathParts = trimAssetPath.split('/');
+        if (assetPathParts.length == 0) {
+            return '';
+        }
+        var fileName = assetPathParts[assetPathParts.length-1];//pick last part of path
+        var fileNameParts = fileName.split('.');
+        //remove last extension
+        for (var i = 0; i < fileNameParts.length - 1; i++) {
+            assetName +=  (assetName != '' ? '.' : '') + fileNameParts[i];
+        }
+        return assetName
+    }
+
+    /**
+     * Display AssetPicker modal
+     */
+    function showAssetPickerModal() {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        //if the user closes the assetpicker by hitting 'escape', there isnt an event fired from the picker that we catch
+        //in the messages handler, so we need to manually check and unload the old iframe just in case.
+        var $staleIframeCheck = $("#assetpickeriframe");
+        if ($staleIframeCheck.length > 0) {
+            $($staleIframeCheck).remove();
+        }
+
+        var assetRoot = $("#asset-info").data("path");
+        if (assetRoot){
+            assetRoot = assetRoot.substr(0, assetRoot.lastIndexOf("/"));
+        }
+
+        var href = Granite.HTTP.externalize("/aem/assetpicker.html" + assetRoot)
+                + "?mode=multiple"
+                + "&mimetype=image*"
+                + "&alltags=true"
+                + "&root=/content/dam"
+                + "&requiredproperty=dam:s7damType"
+                + "&requiredproperty=dam:assetState=processed";
+        var $iframe = $('<iframe id="assetpickeriframe" class="cq-AssetPicker cq-AssetPicker-iframe" seamless="seamless" frameborder="0"></iframe>');
+        var $modal = $('#assetpickermodal');
+        var $modalContainer = $('#assetpickermodal #assetpickercontainer');
+        $iframe.attr("src", href).appendTo($modalContainer);
+        $modal.show();
+        ui.clearWait();
+
+        //this is a bit of a hack - need to override the margins that are added from $modal.modal('show')
+        $("#assetpickermodal").css("margin-left", "0px");
+        $("#assetpickermodal").css("margin-top", "0px");
+        $("#assetpickermodal").removeClass("hide");
+
+        // the new assetpicker does not appear to have an explicit way to disable the type selector and tag search field like the previous version.
+        // in lieu of that, we manually hide the controls. they render slightly after the iframe is loaded, which necessitates the timeout
+        setTimeout(function() {
+            $("#assetpickeriframe").contents().find('.coral-Form--graniteRail coral-accordion').hide();
+        }, 1000);
+    }
+
+    /**
+     * Receive two-part messages from the ProductPicker dialog.  The "data" part indicates the
+     * product picker path should be updated; the "config" part indicates whether or not the
+     * dialog should be closed.
+     */
+    function receiveMessage(event) {
+        var srcIframe = document.getElementById("assetpickeriframe");
+
+        if (srcIframe === null || event.origin !== location.origin || srcIframe.contentWindow !== event.source) {
+            return;
+        }
+        //sanity check for null data
+        if (event.data){
+            try{
+                var fromDam = JSON.parse(event.data);
+
+                if (fromDam.config) {
+                    var configFromDam = fromDam.config;
+
+                    if (configFromDam.action === 'close') {
+                        closePicker();
+                    } else if (configFromDam.action === 'done') {
+                        validateSelectedAssets(fromDam.data);
+                    }
+                }
+            }catch(e){
+                //fail silently...
+            }
+        }
+    }
+
+    function validateSelectedAssets(fromDamData) {
+        var filteredAssetsList = [];
+        var failedAssetListDataObj = [];
+        var asyncLoopIterator = 0;
+
+        //encapsulate logic applied after a loop iteration is completed
+        var postProcessAsyncRequest = function(found) {
+            if ($(fromDamData).get(asyncLoopIterator) != undefined) {
+                //if asset is valid, then add it to the list of filtered assets. otherwise, hold reference to report to ui
+                if (found) {
+                    filteredAssetsList.push($(fromDamData).get(asyncLoopIterator));
+                } else {
+                    failedAssetListDataObj.push($(fromDamData).get(asyncLoopIterator));
+                }
+            }
+
+            //increment index for next loop iteration
+            asyncLoopIterator++;
+
+            /*
+             if the 'asyncLoopIterator' value is the same as the original 'assetListDataObj' length, we can be sure we
+             have iterated over every node. if we have, then invoke onComplete method with filtered data list. otherwise,
+             fire next loop iteration.
+             */
+            if (asyncLoopIterator >= fromDamData.length) {
+                onProcessingComplete(filteredAssetsList);
+
+                if (failedAssetListDataObj.length > 0) {
+                    //remove old items in case dialog is invoked multiple times in one session
+                    var $failToAddDialog = $(document.querySelector(FAILED_TO_ADD_ASSETS_MODAL_ID));
+                    $failToAddDialog.find(".failed-asset-item").remove();
+
+                    //add spacer between header and failed items
+                    $failToAddDialog.find("coral-dialog-content > div").append("<div><span class='failed-asset-item'>&nbsp;</span></div>");
+
+                    //add line entry for each failed item
+                    $.each(failedAssetListDataObj, function() {
+                        $failToAddDialog.find("coral-dialog-content > div").append("<div><span class='failed-asset-item'>* " + $(this).get(0).path + "</span></div>");
+                    });
+
+                    //show error dialog
+                    document.querySelector(FAILED_TO_ADD_ASSETS_MODAL_ID).show();
+                }
+            } else {
+                iterateAsyncLoop();
+            }
+        }
+
+        //performs one async loop iteration, based on an index value derived from 'asyncLoopIterator'
+        var iterateAsyncLoop = function() {
+            var path = $(fromDamData).get(asyncLoopIterator).path;
+
+            var jsonUrl = (isRemoteAsset ? METADATA_CHILDREN_URL : CHILDREN_URL);
+
+            if ($(ASSET_LIST_MASONRY_ITEM_SELECTOR + "[data-path='" + path + "']").length > 0) {
+                //asset is already in list; therefore its good and we don't need to validate it further
+                postProcessAsyncRequest(true);
+            } else {
+                var query = $.ajax({
+                    type: "GET",
+                    url: Granite.HTTP.externalize(path + jsonUrl),
+                    error: function () {
+                        //if the request fails, then report this asset as failed
+                        postProcessAsyncRequest(false);
+                    }
+                }).done(function (data) {
+                    var found = false;
+                    //iterate over the child nodes under the asset's /rendition directory
+                    $.each(data, function () {
+                        if (!isRemoteAsset){
+                            if (this.uri.indexOf('.pyramid.tiff') > 0) {
+                                found = true;
+
+                                //break out of $.each loop
+                                return false;
+                            }
+                        }else{
+                            found = (data.metadata["dam:scene7File"] != "" && data.metadata["dam:scene7File"] != undefined);
+                        }
+
+                    });
+                    var parentFolder = window.location.pathname.split(".html")[1];
+                    var url = Granite.HTTP.externalize(parentFolder) + ".verify.s7config.match.json";
+                    $.post(url, {"paths": [path]}).done(function(res) {
+                        if(res == null || res.paths === undefined || res.paths == null) {
+                            postProcessAsyncRequest(found);
+                        } else {
+                            postProcessAsyncRequest(found && (res.paths.length == 1))
+                        }
+
+                    });
+                });
+            }
+        }
+
+        //kick off first iteration over the asset list
+        iterateAsyncLoop();
+    }
+
+    function onProcessingComplete(filteredAssetsList) {
+        function showInstruction(show) {
+            if (show) {
+                $(ASSET_PANEL_INSTRUCTION_ID).hide();
+            } else {
+                $(ASSET_PANEL_INSTRUCTION_ID).show();
+            }
+        }
+
+        var srcIframe = document.getElementById("assetpickeriframe");
+
+        // abort if asset selector is already closed
+        if (srcIframe === null) {
+            return;
+        }
+
+        $(ASSET_LIST_ID).hide();
+        var $masonry = $(ASSET_LIST_MASONRY_SELECTOR);
+		$masonry[0].setAttribute('selectionmode',"multiple");
+
+        var quickActions = '<coral-quickactions target="_prev" alignmy="left top" alignat="left top" ' +
+            'id="coral-id-28" aria-hidden="true" threshold="4" __vent-id__="521" tabindex="-1" ' +
+            'role="menu" style="width: 242px; z-index: 10010; max-width: none; left: 0px; top: 10px; ' +
+            'padding-left: 20px; visibility: visible; display: none;">' +
+            '<coral-quickactions-item icon="delete" class="foundation-anchor sv-content-delete" ' +
+            'type="button">Delete</coral-quickactions-item></coral-quickactions>';
+
+        /**
+         * Get asset masonry-item from URL.  Note that attribute data-foundation-collection-item-id may not be
+         * identical to the asset path from the Asset Selector due to encoding for localized characters.
+         * @param assetPath Asset path from Asset selector
+         * @param title Asset title
+         */
+        function getAsset(assetPath, title) {
+            var url = SINGLE_CARD_URL + assetPath;
+
+            $.get(Granite.HTTP.externalize(url))
+                .done(function (response) {
+                    var selSegment = $.sv.getSegmentByID(selectedSegmentId);
+                    var assetList = $(ASSET_LIST_ID);
+                    var $masonryItem = $(response).find(MASONRY_ITEM_SELECTOR);
+                    if ($masonryItem.length > 0) {
+                        var $card = $masonryItem.find(CORAL_CARD_SELECTOR);
+                        if ($card.length > 0) {
+                            var path = $masonryItem.data("foundation-collection-item-id");
+                            var collection = Granite.UI.Foundation.Adapters.adapt($(".sv-wizard-right .foundation-layout-masonry.foundation-collection")[0], "foundation-collection");
+                            collection.append($masonryItem);
+
+                            // find the masonryItem after attaching to DOM
+                            $masonryItem = $(ASSET_LIST_MASONRY_ITEM_SELECTOR + "[data-foundation-collection-item-id='" + path + "']");
+                            // set path and title
+                            $masonryItem.data("path", assetPath);
+                            //we want to encode the title, but we dont want to double encode. just to be sure, we decode.
+                            $masonryItem.data("title", encodeURIComponent(decodeURIComponent(title)));
+
+			    //creating this link tag as a toggle button
+                            $masonryItem.find("a.foundation-layout-masonry-cardwrapper").attr({"role":"button","aria-pressed":"false","tabindex":"0"});
+
+                            if (!$masonryItem.attr('selected')){
+                                $masonryItem.append(quickActions);
+                            }
+
+                            $masonryItem.find(".sv-content-delete").click(function(e){
+                                canDelete( $(this).parent(), assetPath, e);
+                            });
+
+                            $masonryItem.on("keydown",function(e){
+                                if (e.which === 8) {
+                            		canDelete( $(this).find(".sv-content-delete").parent(), assetPath, e);
+                                }
+                                if (e.which === 32) {
+									var assetURL = $(this).data("path");
+									var assetName = $card.find(CORAL_CARD_TITLE_SELECTOR).text();
+
+									function stripFileExt(string){
+										var str = string.split(".");
+										str.pop();
+										return str.join(".");
+									}
+
+									assetName = stripFileExt(assetName);
+									e.stopImmediatePropagation();
+									e.preventDefault();
+									this.selected = !this.selected;
+									if(this.selected) {
+										$(document).trigger({
+										'type' : SV_EVENT_ASSET_SELECTED,
+										'url' : assetURL,
+										'title' : assetName
+										});
+									} else {
+										$(document).trigger({
+										'type' : SV_EVENT_ASSET_DESELECTED,
+										'url' : assetURL,
+										'title' : assetName
+										});
+									}
+                                }
+                            });
+
+                            // override click event handler to remove navigation behavior
+                            $card.on("click", selectAsset);
+                        }
+                    }
+
+                    var hasItem = $(ASSET_LIST_MASONRY_ITEM_SELECTOR).length > 0;
+
+                    //toggle instructional text based on whether or not there is content displayed
+                    showInstruction(hasItem);
+
+                    // show overlay to block user interaction if no segment has been selected
+                    if (!selSegment && hasItem) {
+                        $(ASSET_LIST_OVERLAY_ID).addClass("show");
+                    }
+                })
+                .fail(function (response) {
+                    // TODO: display message or log an error
+                });
+        }
+
+        function canDelete(action, assetPath, e){
+            //stop the default behavior from foundation - it will cause errors
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            var prods = $.sv.getSegmentByID(selectedSegmentId);
+            for (var i = 0; i < prods.length; i++){
+                var prod = prods[i];
+                //if they match, we're using it so do not allow delete
+                if (prod.asset === assetPath){
+                    return false;
+                }
+            }
+            $(action).parent().remove();
+        }
+
+        // To put the jQuery's Ajax setup in synchronous mode
+        $.ajaxSetup({
+            async:false
+        });
+
+        for (var i = 0; i < filteredAssetsList.length; i++) {
+            // preserve same path as from Asset Selector
+            var filteredPath = filteredAssetsList[i].path;
+
+            // check if the item is already in DOM
+            var found = false;
+            $(ASSET_LIST_MASONRY_ITEM_SELECTOR).each(function() {
+                if ($(this).data("path") == filteredPath) {
+                    found = true;
+                    return false;
+                }
+            });
+
+            if (!found) {
+                getAsset(filteredPath, filteredAssetsList[i].title);
+            }
+        }
+
+        // To put the jQuery's Ajax setup back to asynchronous mode
+        $.ajaxSetup({
+            async:true
+        });
+
+        //unhide the asset panel
+        $(ASSET_LIST_ID).show();
+        closePicker();
+    }
+
+    function closePicker(){
+        var srcIframe = document.getElementById("assetpickeriframe");
+
+        // abort if asset selector is already closed
+        if (srcIframe === null) {
+            return;
+        }
+
+        //unload iframe data
+        srcIframe.contentDocument.documentElement.innerHTML = "";
+        $(srcIframe).remove();
+
+        //hide modal
+        $('#assetpickermodal').hide();
+
+        populateSelection();
+    }
+
+}(document, Granite.$));

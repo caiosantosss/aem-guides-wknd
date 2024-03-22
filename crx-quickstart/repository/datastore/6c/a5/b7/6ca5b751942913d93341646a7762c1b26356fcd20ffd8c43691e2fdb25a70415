@@ -1,0 +1,482 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.security.AuthorizablesPanel
+ * @extends CQ.Ext.Panel
+ * @since 5.4
+ * The Authorizables Panel provides a panel with a grid and an appropriate quick view.
+ * @constructor
+ * Creates a new Authorizables Panel.
+ * @param {Object} config The config object
+ */
+CQ.security.AuthorizablesPanel = CQ.Ext.extend(CQ.Ext.Panel, {
+
+    constructor: function(config) {
+        var panel = this;
+        this.rows = [];
+
+        // currently it is impossible to set members limit per QuickView - therefore overwrite
+        config.quickViewCfg = config.quickViewCfg || {};
+        // Removing the hardcoded limit
+        //config.quickViewCfg.membersLimit = CQ.security.AuthorizablesPanel.QUICKVIEW_MEMBERSLIMIT;
+
+        this.quickView = CQ.Util.build(CQ.Util.applyDefaults(config.quickViewCfg,  {
+            "xtype": "panel",
+            "cls": "cq-security-authorizables-qv",
+            "quickViewGrid": this,
+            "region": "east",
+            "border": true,
+            "autoScroll": true,
+            "props": "*,members", // props to return, default: all but members
+            "servletSelector": "userprops", // ((home)).userprops.json
+            "width": CQ.security.themes.AuthorizablesPanel.QUICKVIEW_WIDTH,
+            "margins": CQ.security.themes.AuthorizablesPanel.QUICKVIEW_MARGINS,
+            "padding": CQ.security.themes.AuthorizablesPanel.QUICKVIEW_PADDING,
+            "collapsed": true,
+            "collapseMode": "mini",
+            "collapsible": true,
+            "hideCollapseTool": true,
+            "split": true,
+            "animate": true,
+            // helpers to indicate if the QV has been collapsed by the user or programmatically
+            "collapsedByUser": false,
+            "collapsingByDeselection": true,
+            "listeners": {
+                "collapse": function() {
+                    // collapsingByDeselction is set when CQ is collapsed programmatically
+                    this.collapsedByUser = !this.collapsingByDeselection;
+                    this.collapsingByDeselection = false;
+                },
+                "beforeexpand": function() {
+                    if (this.collapsedByUser) {
+                        this.collapsedByUser = false;
+                        panel.showQuickView();
+                    }
+                    this.collapsedByUser = false;
+                    return true;
+                }
+            }
+        }));
+        var rows = CQ.Util.build(this.getQuickViewConfig(config.quickViewRows, this.rows));
+        this.quickView.add(rows);
+
+        this.grid = CQ.Util.build(CQ.Util.applyDefaults(config.gridConfig,  {
+            "xtype": "securitygrid",
+            "region": "center",
+            "margins": CQ.security.themes.AuthorizablesPanel.GRID_MARGINS,
+            "border": true,
+            "quickView": this.quickView,
+            "listeners": {
+                "rowclick": function(grid, index) {
+                    panel.showQuickView();
+                }
+            }
+        }));
+
+        config = CQ.Util.applyDefaults(config,  {
+            "layout": "border",
+            "border": false,
+            "cls": "cq-security-authorizables",
+            "items": [
+                this.grid,
+                this.quickView
+            ]
+        });
+
+        // init component by calling super constructor
+        CQ.security.AuthorizablesPanel.superclass.constructor.call(this, config);
+
+    },
+
+    // generic show for users and groups
+    showQuickView: function() {
+        var sel = this.grid.getSelectionModel().getSelections();
+        if (sel.length == 0) {
+            this.quickView.collapsingByDeselection = true;
+            this.quickView.collapse();
+            this.clearQuickView();
+            this.quickView.doLayout();
+            return;
+        }
+        else if (this.quickView.collapsedByUser) {
+            return;
+        }
+
+        this.quickView.path = sel[sel.length - 1].id;
+        this.quickView.expand();
+        this.refreshQuickView();
+    },
+
+    refreshQuickView: function() {
+        if (!this.quickView.path) return;
+        var url = this.quickView.path + "." + this.quickView.servletSelector + ".json";
+        url = CQ.HTTP.addParameter(url, "props", this.quickView.props);
+        // Removing the hardcoded limit
+        //url = CQ.HTTP.addParameter(url, "ml", this.quickView.membersLimit);
+        url = CQ.HTTP.noCaching(url);
+        var resp = CQ.HTTP.eval(url);
+
+        for (var i = 0; i < this.rows.length; i++) {
+            var value = resp[this.rows[i].dataIndex];
+            if (this.rows[i].renderer) {
+                value = this.rows[i].renderer(value, resp);
+            }
+            value = value || value == 0 ? value : "";
+            if (!this.rows[i].labelItem) {
+                // hide 2 colspan cols if they have no value
+                if (!value) this.rows[i].valueItem.hide();
+                else this.rows[i].valueItem.show();
+            }
+            this.rows[i].valueItem.updateHtml(value);
+        }
+        this.quickView.doLayout();
+    },
+
+    // generic clear for users and groups
+    clearQuickView: function() {
+        for (var i = 0; i < this.rows.length; i++) {
+            if (!this.rows[i].labelItem && i != 0) {
+                // hide 2 colspan cols
+                // assuming i == 0 is title column > do not hide
+                this.rows[i].valueItem.hide();
+            }
+            this.rows[i].valueItem.updateHtml("&nbsp;");
+        }
+    },
+
+    // get config for the quick view
+    getQuickViewConfig: function(config, rows) {
+        var items = [];
+        var cfg = config;
+        if (!cfg) cfg = [];
+        for (var i = 0; i < cfg.length; i++) {
+            var c = this.getQuickViewRowConfig(cfg[i], CQ.security.AuthorizablesPanel.QUICKVIEW_ROWS);
+
+            // #33176 - MCM console vulnerable to XSS
+            CQ.shared.XSS.updatePropertyName(c, "dataIndex");
+
+            var row = this.createQuickViewRow(c);
+            rows.push(row);
+            if (row.labelItem) items.push(row.labelItem);
+            items.push(row.valueItem);
+        }
+
+        return {
+            "xtype": "panel",
+            "layout": "table",
+            "border": false,
+            "bodyCfg": {
+                "cls": this.id + "-body-padding"
+            },
+            "layoutConfig": {
+                columns: 2
+            },
+            "items": items
+        };
+
+    },
+
+    // get the config for a single quick view row
+    getQuickViewRowConfig: function(cfg, prefs) {
+        var pref = null;
+        if (typeof cfg == "string") {
+            pref = cfg;
+        }
+        else if (typeof cfg == "object") {
+            if (cfg.usePredefined) {
+                pref = cfg.usePredefined;
+            }
+        }
+        if (pref && prefs[pref]) {
+            var prefCfg = CQ.Util.copyObject(prefs[pref]);
+            // overlay config options
+            for (var prop in cfg) {
+                if (prop == "usePredefined") continue;
+                prefCfg[prop] = cfg[prop];
+            }
+            return prefCfg;
+        }
+        else {
+            return cfg;
+        }
+    },
+
+    createQuickViewRow: function(row) {
+        if (!row.id) row.id = row.dataIndex;
+        if (!row.dataIndex) row.dataIndex = row.id;
+
+        if (!row.labelItem && row.label) {
+            row.labelItem = new CQ.Static({
+                "cls": row.labelCls ? row.labelCls : "cq-security-quickview-topline",
+                "text": row.label
+            });
+        }
+        if (!row.valueItem) {
+            row.valueItem = new CQ.Static({
+                "cls": row.valueCls ? row.valueCls : ("cq-security-quickview-" + (row.labelItem ? "topline" : "2cols")),
+                "html": "",
+                "noWrap": row.noValueWrap !== false && row.labelItem,
+                "colspan": row.labelItem ? 1 : 2
+            });
+        }
+        return row;
+    }
+
+});
+
+
+CQ.Ext.reg("securityauthorizablespanel", CQ.security.AuthorizablesPanel);
+
+// the max of members to display in quick view
+CQ.security.AuthorizablesPanel.QUICKVIEW_MEMBERSLIMIT = 2000;
+
+/**
+ *
+ * rowCfg = {
+ *      dataIndex: "name",
+ *      label: "Label", // leave empty for a 2 columns td
+ *      noLabelWrap: false, // false to not wrap the label (defaults to true)
+ *      labelCls: "" // to override the default CSS label class
+ *      noValueWrap: false, // false to not wrap the value (defaults to true)
+ *      valueCls: "", // to override the default CSS value class
+ *      renderer: function(v, resp) {}
+ * }
+ */
+CQ.security.AuthorizablesPanel.QUICKVIEW_ROWS = {
+    "name": {
+        "dataIndex": "name",
+        "valueCls": "cq-security-quickview-title",
+        "renderer": function(v, resp) {
+            return CQ.security.AuthorizablesPanel.QUICKVIEW_ROWS.renderItem(resp, this.xssProtect);
+        }
+//        "id": "name",
+//        "renderer": function(v, resp) {
+        //todo: current userprops servlet already returns a calculated name
+//            var name = [];
+//            if (resp.givenName) name.push(resp.givenName);
+//            if (resp.familyName) name.push(resp.familyName);
+//            if (name.length == 0) name.push(resp.id);
+//            return name.join(" ");
+//        }
+    },
+    "picture": {
+        "dataIndex": "picturePath",
+        "valueCls": "cq-security-quickview-picture",
+        "renderer": function(v, resp) {
+            if (v) {
+                var ext = resp["pictureExt"];
+                var mod = resp["pictureMod"]; // mod date / cache killer
+                var url = CQ.HTTP.externalize(v) + "/image.prof.thumbnail.96." + ext + "/" + mod + "." + ext;
+                return '<img src="' + url + '" height="96" width="96">';
+            }
+            else {
+                return '';
+            }
+        }
+    },
+    "email": {
+        "dataIndex": "email",
+        "renderer": function(v) {
+            return v ? '<a href="mailto:' + v + '">' + v + '</a>' : v;
+        }
+    },
+    "created": {
+        "dataIndex": "jcr:created",
+        "label": CQ.I18n.getMessage("Created"),
+        "renderer": function(v) {
+            try {
+                return CQ.wcm.SiteAdmin.formatDate(new Date(v));
+            } catch (e) {
+                return "";
+            }
+        }
+    },
+    "lastModified": {
+        "dataIndex": "cq:lastModified",
+        "label": CQ.I18n.getMessage("Last modified"),
+        "renderer": function(v) {
+            try {
+                return CQ.wcm.SiteAdmin.formatDate(new Date(v));
+            } catch (e) {
+                return "";
+            }
+        }
+    },
+    "birthday": {
+        "dataIndex": "birthday",
+        "label": CQ.I18n.getMessage("Date of Birth"),
+        "renderer": function(v) {
+            try {
+                var formattedDate = new Date(v);
+                if(formattedDate == "Invalid Date"){
+					return v;
+                }
+                var fmt = CQ.I18n.getMessage("d-M-Y", null, "Date format for ExtJS SiteAdmin (short, eg. two-digit year, http://extjs.com/deploy/ext/docs/output/Date.html)");
+                return formattedDate.format(fmt);
+            } catch (e) {
+                return "";
+            }
+        }
+    },
+
+    "gender": {
+        "dataIndex": "gender",
+        "label": CQ.I18n.getMessage("Gender"),
+	 "renderer": function(v) {
+            try {
+                if(v == "male"){
+ 					return CQ.I18n.get("Male");
+                }
+                if(v == "female"){
+ 					return CQ.I18n.get("Female");
+                }
+            } catch (e) {
+                return "";
+            }
+        }
+
+    },
+    "createdBy": {
+        "dataIndex": "jcr:createdBy",
+        "label": CQ.I18n.getMessage("Created by")
+    },
+    "lastModifiedBy": {
+        "dataIndex": "cq:lastModifiedBy",
+        "label": CQ.I18n.getMessage("Last modified by")
+    },
+    "members": {
+        "id": "members",
+        "label": CQ.I18n.getMessage("Members"),
+        "renderer": function(v, resp) {
+            try {
+                if (resp.membersTotal >= CQ.security.AuthorizablesPanel.QUICKVIEW_MEMBERSLIMIT) {
+                    return CQ.security.SecurityAdmin.formatMax(resp.membersTotal);
+                }
+                else return resp.membersTotal;
+            } catch (e) {
+                return 0;
+            }
+
+        }
+    },
+    "description": {
+        "dataIndex": "aboutMe"
+    },
+    "csv": {
+        "id": "csv",
+        "label": CQ.I18n.getMessage("Imported CSV")
+    },
+    "memberships": {
+        "dataIndex": "memberOf",
+        "renderer": function(v, resp) {
+            var str;
+            var admin = window.CQ_SecurityAdmin;
+            var userName = CQ.security.AuthorizablesPanel.QUICKVIEW_ROWS.renderItem(resp, this.xssProtect);
+            if (v.length == 0) {
+                return admin.getMsg(admin.X_NOT_MEMBER_OF_ANY, [userName]);
+            } else if (v.length == 1) {
+                str = admin.getMsg(admin.X_IS_MEMBER_OF, [userName]);
+            } else {
+                str = admin.getMsg(admin.X_IS_MEMBER_OF_Y_GROUPS, [userName, v.length]) + "</br>";
+            }
+            str += '<div class="cq-security-quickview-memberships">';
+            var respId = resp[CQ.shared.XSS.getXSSPropertyName("id")];
+            for (var i = 0; i < v.length; i++) {
+                var groupName = CQ.shared.XSS.getXSSTablePropertyValue(v[i], "name", 70);
+                str += '<span class="cq-security-quickview-remove" onclick="CQ.security.SecurityAdmin.removeMembership(\'' + v[i].home + '\',\'' + groupName + '\',\'' + respId + '\',\'' + userName + '\',true);"></span>';
+                str += '<span class="cq-security-grid-link cq-security-quickview-membership" onclick="CQ.security.SecurityAdmin.showGroupInGrid(\'' + v[i].home + '\');">' + groupName + '</span>';
+            }
+            str += "</div>";
+            return str;
+        }
+    },
+    "renderItem": function(resp, xssProtect) {
+        var givenName = xssProtect ? CQ.shared.XSS.getXSSPropertyName("givenName") : "givenName";
+        var familyName = xssProtect ? CQ.shared.XSS.getXSSPropertyName("familyName") : "familyName";
+        var name = xssProtect ? CQ.shared.XSS.getXSSPropertyName("name") : "name";
+        if(resp[givenName]) {
+            return CQ.I18n.getMessage(
+                "{0} {1}",
+                [resp[givenName], resp[familyName]],
+                "name display order: {0} is the given (first) name, {1} the family (last) name"
+            );
+        }
+        return resp[name] == "" ? resp.id : resp[name];
+    },
+    "plainMemberships": {
+        "dataIndex": "memberOf",
+        "renderer": function(v, resp) {
+            var str;
+            var admin = window.CQ_SecurityAdmin;
+            var userName = this.xssProtect ? resp[CQ.shared.XSS.getXSSPropertyName("name")] : resp.name;
+            if (v.length == 0) {
+                return admin.getMsg(admin.X_NOT_MEMBER_OF_ANY, [userName]);
+            } else if (v.length == 1) {
+                str = admin.getMsg(admin.X_IS_MEMBER_OF, [userName]);
+            } else {
+                str = admin.getMsg(admin.X_IS_MEMBER_OF_Y_GROUPS, [userName, v.length]) + "</br>";
+            }
+            str += '<div class="cq-security-quickview-indented">';
+            for (var i = 0; i < v.length; i++) {
+                var memberName = CQ.shared.XSS.getXSSTablePropertyValue(v[i], "name", 70);
+                str += memberName + "<br>";
+            }
+            str += "</div>";
+            return str;
+
+        }
+    },
+    "membershipsForGroups": {
+        "dataIndex": "memberOf",
+        "renderer": function(v, resp) {
+            var str;
+            var admin = window.CQ_SecurityAdmin;
+            var listName = this.xssProtect ? resp[CQ.shared.XSS.getXSSPropertyName("name")] : resp.name;
+            if (v.length == 0) {
+                return admin.getMsg(admin.GROUP_X_NOT_MEMBER_OF_ANY, [listName]);
+            } else if (v.length == 1) {
+                str = admin.getMsg(admin.GROUP_X_IS_MEMBER_OF, [listName]);
+            } else {
+                str = admin.getMsg(admin.GROUP_X_IS_MEMBER_OF_Y_GROUPS, [listName, v.length]) + "</br>";
+            }
+            str += '<div class="cq-security-quickview-memberships">';
+            for (var i = 0; i < v.length; i++) {
+                var memberName = CQ.shared.XSS.getXSSTablePropertyValue(v[i], "name", 70);
+                str += '<span class="cq-security-quickview-remove" onclick="CQ.security.SecurityAdmin.removeMembership(\'' + v[i].home + '\',\'' + memberName + '\',\'' + resp.id + '\',\'' + listName + '\',false);"></span>';
+                str += '<span class="cq-security-grid-link cq-security-quickview-membership" onclick="CQ.security.SecurityAdmin.showGroupInGrid(\'' + v[i].home + '\');">' + memberName + '</span>';
+            }
+            str += "</div>";
+            return str;
+        }
+    },
+    //todo: demo script hack
+    "address": {
+        "dataIndex": "streetAddress",
+        "renderer": function(v, resp) {
+            var s = "";
+            var email = this.xssProtect ? resp[CQ.shared.XSS.getXSSPropertyName("email")] : resp.email;
+            s += email ? '<a href="mailto:' + email + '">' + email + '</a><br><br>' : "";
+            s += v ? v + "<br>" : "";
+            var city = this.xssProtect ? resp[CQ.shared.XSS.getXSSPropertyName("city")] : resp.city;
+            var region = this.xssProtect ? resp[CQ.shared.XSS.getXSSPropertyName("region")] : resp.region;
+            var postalCode = this.xssProtect ? resp[CQ.shared.XSS.getXSSPropertyName("postalCode")] : resp.postalCode;
+            s += city ? city + "<br>" : "";
+            s += region ? region + " " : "";
+            s += postalCode ? postalCode + "<br>" : "";
+            s += resp.country ? resp.country + "<br>" : "";
+            s += s ? "<br>" : "";
+            return s;
+        }
+
+    }
+};

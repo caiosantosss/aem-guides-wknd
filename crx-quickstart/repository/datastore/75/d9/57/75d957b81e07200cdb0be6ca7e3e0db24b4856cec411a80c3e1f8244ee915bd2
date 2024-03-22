@@ -1,0 +1,616 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2015 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+---%><%! public static final String ISREMOTE = "isremote";
+%><%@page import="java.util.Date,
+                  java.util.Set,
+                  org.apache.sling.api.SlingException,
+                  java.lang.NumberFormatException,
+                  java.util.HashSet,
+                  org.apache.sling.api.resource.ResourceResolverFactory,
+                  org.slf4j.Logger,
+                  com.day.cq.dam.commons.util.UIHelper,
+                  com.day.cq.dam.api.checkout.AssetCheckoutService,
+                  com.day.cq.dam.api.processingstate.provider.AssetProcessingStateProvider,
+                  com.day.cq.dam.scene7.api.model.Scene7PublishStatus,
+                  com.day.cq.dam.scene7.api.constants.Scene7Constants"%>
+<%@taglib prefix="cq" uri="http://www.day.com/taglibs/cq/1.0"%><%
+%><%@include file="/libs/dam/gui/coral/components/admin/contentrenderer/base/init/base.jsp"%><%
+%><%@include file="/libs/dam/gui/coral/components/admin/contentrenderer/base/assetBase.jsp"%><%
+%><%--###
+Asset Base Initializer
+=========
+
+This JSP is initializing all the attaribues expected by ../assetBase.jsp, it is expected to evaluate asset properties & perform performance incentive tasks at this JSP, hence it should not be triggered more than once per resource.
+
+###--%><%
+
+ boolean is3D = S73DHelper.isS73D(resource);
+ request.setAttribute(IS_3D_ASSET, is3D);
+
+ boolean isMissingDependencies = false;
+ if(is3D)
+     isMissingDependencies = S73DHelper.isUnResolved(resource);
+ request.setAttribute(IS_MISSING_DEPENDENCIES, isMissingDependencies);
+
+
+ String metadataPath = resource.getPath() + "/jcr:content/metadata/";
+ Resource metadataResc = resourceResolver.getResource(metadataPath);
+ Node metadataNode = metadataResc != null ? metadataResc.adaptTo(Node.class) : null;
+ Authorizable authUser = resourceResolver.adaptTo(Authorizable.class);
+ String remoteMountPoint = (String)request.getAttribute(REMOTE_DAM_MOUNTPOINT);
+ if(remoteMountPoint == null && remoteDamConfProvider != null) {
+     if (remoteDamConfProvider.isConfigured(resourceResolver, null)) {
+         remoteMountPoint = remoteDamConfProvider.getRemoteDamMountPoint(resourceResolver, null);
+     } else {
+         remoteMountPoint = "INVALID PATH";
+     }
+     request.setAttribute(REMOTE_DAM_MOUNTPOINT, remoteMountPoint);
+ }
+
+ String mimeType = "";
+ // display mime type is shown on card (in grid view) and in list view
+    String displayMimeType="";
+    Resource lookupResource = resourceResolver.getResource("/mnt/overlay/dam/gui/content/assets/jcr:content/mimeTypeLookup");
+
+    boolean canCompare = false;
+    String[] comparableMimeTypes = {
+            "image/jpeg",
+            "image/jpg",
+            "image/png",
+            "image/gif",
+            "image/bmp",
+            "image/tiff",
+            "image/vnd.adobe.photoshop",
+            "application/x-photoshop",
+            "application/photoshop",
+            "application/psd",
+            "image/psd"
+    };
+    boolean canFindSimilar = false;
+    String[] visualImageTypes = comparableMimeTypes;
+
+    attrs.add("data-timeline", true);
+
+    //mimeType
+    if (is3D) {
+            Resource assetContent = resource.getChild("jcr:content");
+            displayMimeType = (assetContent != null) ? assetContent.getValueMap().get("dam:s7damType", "").toUpperCase() : "";
+            String extension = FilenameUtils.getExtension(resource.getName());
+            if (!extension.isEmpty()) {
+                displayMimeType += " (" + extension + ")";
+            }
+    } else if(asset != null && isIdsTemplateAsset(asset.adaptTo(Node.class))) {
+	    // for indesign templates, display the dam:templateType
+        displayMimeType = getTemplateType(asset).toUpperCase();
+        if(asset.getMimeType() != null) {
+            mimeType = asset.getMimeType();
+        }
+    } else if (asset != null && asset.getMimeType() != null) {
+        mimeType = asset.getMimeType();
+        String ext = mimeType.substring(mimeType.lastIndexOf('/') + 1, mimeType.length());
+        if((displayMimeType = UIHelper.lookupMimeType(ext,lookupResource,true)) == null) {
+            displayMimeType = "";
+        }
+        if (displayMimeType.length() == 0 && mimeType.startsWith("image")) {
+            displayMimeType = "IMAGE";
+        } else if (displayMimeType.length() == 0 && mimeType.startsWith("text")) {
+            displayMimeType = "DOCUMENT";
+        } else if (displayMimeType.length() == 0 && (mimeType.startsWith("video") || mimeType.startsWith("audio"))) {
+            displayMimeType = "MULTIMEDIA";
+        } else if (displayMimeType.length() == 0 && mimeType.startsWith("application")) {
+            int idx_1 = ext.lastIndexOf('.');
+            int idx_2 = ext.lastIndexOf('-');
+            int lastWordIdx = (idx_1 > idx_2)?idx_1:idx_2;
+            displayMimeType = ext.substring(lastWordIdx+1).toUpperCase();
+        }
+    }
+
+    if (displayMimeType.equals("SNIPPET") && this.isSnippetTemplate(resource)) {
+        displayMimeType = "SNIPPET TEMPLATE";
+    }
+
+    if (contains(comparableMimeTypes, mimeType)) {
+        canCompare = true;
+    }
+    attrs.addOther("can-compare", String.valueOf(canCompare));
+
+    final String SIMSEARCHFEATURE = "com.adobe.dam.asset.similaritysearch.feature.flag";
+    if (featureManager != null 
+    && featureManager.getFeature(SIMSEARCHFEATURE) != null
+    && featureManager.isEnabled(SIMSEARCHFEATURE)) {
+        if (contains(visualImageTypes, mimeType)) {
+            canFindSimilar = true;
+        }
+    }
+    String sCanFindSimilar = String.valueOf(canFindSimilar);
+    attrs.addOther("can-findsimilar", sCanFindSimilar);
+    metaAttrs.add("can-findsimilar", sCanFindSimilar);
+    request.setAttribute(CAN_FINDSIMILAR, sCanFindSimilar);
+    if (metadataNode != null) {
+        String sHasFeat = String.valueOf(metadataNode.hasNode("imageFeatures"));
+        attrs.addOther("has-features", sHasFeat);
+        metaAttrs.add("has-features", sHasFeat);
+        request.setAttribute(HAS_FEATURES, sHasFeat);
+
+        String sHasPredictedTags = String.valueOf(metadataNode.hasNode("predictedTags"));
+        attrs.addOther("has-predicted-tags", sHasPredictedTags);
+        metaAttrs.add("has-predicted-tags", sHasPredictedTags);
+        request.setAttribute(HAS_PREDICTED_TAGS, sHasPredictedTags);
+    }
+
+
+    if (displayMimeType.equals("SNIPPET") && this.isSnippetTemplate(resource)) {
+        displayMimeType = "SNIPPET TEMPLATE";
+    }
+
+   request.setAttribute(MIMETYPE, mimeType);
+
+    if (displayMimeType.length() == 0 && asset != null && asset.getName() != null) {
+        String filename = asset.getName();
+        String ext = filename.substring(filename.lastIndexOf(".") + 1, filename.length());
+        if((displayMimeType = UIHelper.lookupMimeType(ext,lookupResource,true)) == null) {
+            displayMimeType = "";
+        }
+    }
+
+//Check if Annotate operation is applicable for Asset
+    boolean canAnnotate = false;
+    String[] annotatableMimeTypes = { "image/jpeg", "image/jpg", "image/png", "image/gif", "video/mp4", "video/ogg" };
+    if (hasAddChild &&  hasModifyProperties) {
+        if (contains(annotatableMimeTypes, mimeType) || (asset != null && UIHelper.getBestfitRendition(asset, 319) != null)) {
+            canAnnotate = true;
+        }
+    }
+
+ request.setAttribute(CAN_ANNOTATE, canAnnotate);
+
+
+//Check if Edit operation is applicable for Asset
+    boolean canEdit = false;
+    boolean canEditMetadata = false;
+    boolean isLocked = isLockingEnabled(resourceResolver) && isLocked(resourceResolver, resourceNode);
+    boolean isEditablePrintAsset = false;
+    if (hasModifyProperties && hasVersionMgmt && !isLocked) {
+         isEditablePrintAsset = isEditablePrintAsset(resourceNode);
+    }
+    // attempt to find a editor that can handle this resource if has the
+    // permission to edit
+    if (hasModifyProperties && hasVersionMgmt) {
+        canEditMetadata = true;
+        if (!isLocked) {
+            if (mimeType.startsWith("video")) {
+                // DMVideo is availabe for edit
+                final String DAM_S7DAMTYPE = S7damConstants.PN_S7_TYPE;
+                Resource jcrContent = resourceResolver.getResource(resource.getPath() + "/" + JcrConstants.JCR_CONTENT);
+                ValueMap properties = jcrContent.getValueMap();
+                canEdit = properties.containsKey(DAM_S7DAMTYPE);
+                if (canEdit){
+                    String damType = properties.get(DAM_S7DAMTYPE).toString();
+                    if (null != damType && !damType.isEmpty()){
+                        canEdit = !damType.toLowerCase().equals(DamConstants.ACTIVITY_TYPE_ASSET);
+                    }
+                }
+
+            } else if(isEditablePrintAsset){
+                canEdit = true;
+            } else {
+                Resource editors = resource.getResourceResolver().getResource("/libs/dam/gui/content/assets/editors");
+                for (Iterator<Resource> it = editors.listChildren(); it.hasNext();) {
+                    Resource child = it.next();
+                    Config editorPropCfg = new Config(child);
+                    String[] mimeTypes = editorPropCfg.get("mimetypes", String[].class);
+                    if (mimeTypes != null && contains(mimeTypes, mimeType)) {
+                        canEdit = true;
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (hasModifyProperties) {
+        canEditMetadata = true;
+    }
+
+ request.setAttribute(IS_EDITABLE_PRINT_ASSET, isEditablePrintAsset);
+ request.setAttribute(CAN_EDIT, canEdit);
+
+boolean isAssetExpired = false;
+boolean isSubAssetExpired = false;
+boolean isAssetSubAsset = false;
+Calendar assetExpiryTime = null;
+boolean isDownloadAllowedForAdmins = false;
+
+if (null != resourceNode) {
+    assetExpiryTime = DamUtil.getExpiryTime(asset);
+    request.setAttribute(ASSET_EXPIRY_TIME, assetExpiryTime);
+    if (null != assetExpiryTime) {
+        isAssetExpired = DamUtil.isExpiredAsset(asset);
+    }
+
+    if (!isAssetExpired) {
+        isSubAssetExpired = DamUtil.isExpiredSubAsset(resource);
+    }
+
+    if (isDAMAdmin) {
+        isDownloadAllowedForAdmins = true;
+    }
+    request.setAttribute(IS_ASSETEXPIRED, isAssetExpired);
+    request.setAttribute(IS_SUBASSET_EXPIRED, isSubAssetExpired);
+    request.setAttribute(IS_DOWNLOAD_ALLOWED_FOR_ADMINS, isDAMAdmin);
+}
+
+    isAssetSubAsset = isSubAsset(resource);
+    type = isAsset && isAssetSubAsset ? "subasset" : "asset";
+    request.setAttribute(TYPE, type);
+
+    Asset parentAsset = null;
+    if (isAssetSubAsset) {
+        Resource parentResource = resource.getParent().getParent(); //since immediate parent is subaasets
+        parentAsset = parentResource.adaptTo(Asset.class);
+    }
+
+    //DM Set Manual Thumbnail
+    Asset dmSetManualThumbnailAsset = null;
+
+//product, size, width & height
+    long width = 0;
+    long height = 0;
+    String size = "0.0 B";
+    long bytes=0;
+    boolean isProduct = false;
+    String dmSetManualThumbnail = "";
+    if (metadataNode != null) {
+        String resName = resource.getName();
+        //dimensions
+        long xDim = getLongProperty(resName, metadataNode, "exif:PixelXDimension", 0L, log);
+        width = getLongProperty(resName, metadataNode, "tiff:ImageWidth", xDim, log);
+        long yDim = getLongProperty(resName, metadataNode, "exif:PixelYDimension", 0L, log);
+        height = getLongProperty(resName, metadataNode, "tiff:ImageLength", yDim, log);
+        bytes = getLongProperty(resName, metadataNode, "dam:size", 0L, log);
+        //size
+        try {
+            if (bytes == 0 && asset.getOriginal() != null) {
+                bytes = asset.getOriginal().getSize();
+            }
+            size = UIHelper.getSizeLabel(bytes, slingRequest);
+        } catch(Exception e) {
+            log.error("Exception while calculating size of asset [{}]: ", resName, e);
+        }
+        try {
+            dmSetManualThumbnail = DamUtil.getValue(metadataNode, "manualThumbnail", "");
+            if (!dmSetManualThumbnail.isEmpty()) {
+                Resource manualThumbResource = resourceResolver.getResource(dmSetManualThumbnail);
+                dmSetManualThumbnailAsset = manualThumbResource.adaptTo(Asset.class);
+            }
+        } catch(SlingException e){
+            log.warn("Unable to retrieve thumbnail for asset [{}] due to: {}", resName, e.getMessage());
+        } catch(Exception e) {
+            log.error("Exception while retrieving thumbnail for asset [{}]: ", resName, e);
+        }
+
+       try {
+            isProduct = !DamUtil.getValue(metadataNode,"cq:productReference", "").isEmpty();
+        } catch(Exception e) {
+           log.error("Exception while checking product reference for asset [{}]: ", resName, e);
+       }
+    }
+    request.setAttribute(WIDTH, width);
+    request.setAttribute(HEIGHT, height);
+    request.setAttribute(BYTES, bytes);
+    request.setAttribute(SIZE, size);
+    request.setAttribute(MANUAL_THUMBNAIL_ASSET, dmSetManualThumbnailAsset);
+
+    metaAttrs.add("data-asset-size", size);
+//resolution
+    String resolution = "";
+    if (width != 0 && height != 0) {
+        resolution = UIHelper.getResolutionLabel(width, height, slingRequest);
+    }
+    resolution = resolution.replaceAll(",", "");
+    request.setAttribute(RESOLUTION, resolution);
+
+    // Check subassets
+    boolean hasSubassets = false;
+    if (resource.getChild("subassets") != null){
+        hasSubassets = true;
+    }
+    ValueMap vm = resource.adaptTo(ValueMap.class);
+    // asset created date
+    Calendar created = vm.get("jcr:created", Calendar.class);
+    long createdLong = (null != created) ? created.getTimeInMillis() : 0;
+    String createdStr = new Date(createdLong).toInstant().toString();
+    
+    // asset last modification
+    String lastModifiedBy = "";
+    long assetLastModification = asset.getLastModified();
+    if (assetLastModification == 0) {
+        assetLastModification = createdLong;
+    }
+    request.setAttribute(ASSET_LAST_MODIFICATION, assetLastModification);
+    String lastModified = new Date(assetLastModification).toInstant().toString();
+    request.setAttribute(LAST_MODIFIED, lastModified);
+    String assetModifier = asset.getModifier();
+    if (StringUtils.isNotBlank(assetModifier)) {
+        String storedFormattedName = (String) request.getAttribute(assetModifier);
+        if (StringUtils.isBlank(storedFormattedName)) {
+            lastModifiedBy = AuthorizableUtil.getFormattedName(resource.getResourceResolver(), assetModifier);
+            request.setAttribute(assetModifier, lastModifiedBy);
+        } else {
+            lastModifiedBy = storedFormattedName;
+        }
+    } else {
+        assetModifier = "";
+    }
+     // Also check asset modifier should not be empty. see CQ-39542
+     if (!"".equals(assetModifier) && upm.getUserProperties(assetModifier, "profile") == null) {
+            lastModifiedBy = i18n.get("External User");
+      }
+
+ //comments
+        CommentManager cm = sling.getService(CommentManager.class);
+        final CommentCollection collection = cm.getCollection(resource, CommentCollection.class);
+        int commentsCount = 0;
+        if (null != collection) {
+            commentsCount = collection.getCommentList().size();
+        }
+        request.setAttribute(COMMENTS_COUNT, commentsCount);
+
+//Content Fragment
+  request.setAttribute(IS_CONTENT_FRAGMENT, isContentFragment);
+
+    //Dynamic Media
+    //Check DM Set
+    boolean isDMSet = S7SetHelper.isS7Set(resource);
+    String s7damType = "";
+    String dmAssetType = "";
+    String dms7RemoteID = "";
+    String dms7RemoteBaseAsset = "";
+    String dms7RemoteAssetType = "";
+    boolean dynamicVideo = false;
+    if (resourceNode.hasNode(JcrConstants.JCR_CONTENT) &&
+            resourceNode.getNode(JcrConstants.JCR_CONTENT).hasProperty("dam:s7damType")) {
+        s7damType = resourceNode.getNode(JcrConstants.JCR_CONTENT).getProperty("dam:s7damType").getString();
+    }
+    //remote counted as set
+    if (s7damType.equalsIgnoreCase("remote")) {
+        isDMSet = true;
+        dms7RemoteID = DamUtil.getValue(metadataNode, "dam:scene7File", "");
+        dms7RemoteBaseAsset = DamUtil.getValue(metadataNode, "dam:scene7FirstRelated", "");
+        //get dam:s7damType from metadata to aid rendering of viewer preset rail in detail page
+        dms7RemoteAssetType = DamUtil.getValue(metadataNode, "dam:s7damType", "");
+    }
+    request.setAttribute(IS_DM_SET, isDMSet);
+    request.setAttribute(S7_DAM_TYPE, s7damType);
+
+    //Get set type as displayMimeType for DM Set
+    if (isDMSet) {
+        //Override displayMimeType for set
+        displayMimeType = s7damType;
+        if (s7damType.equalsIgnoreCase("remote")) {
+            displayMimeType = "Set";
+        }
+        // set editing requires remove nodes
+        canEdit = hasJcrWrite;
+        if (s7damType.equalsIgnoreCase("CarouselSet")) {
+            //carousel set editor key
+            attrs.add("data-editorkey", "carouselset");
+        }
+        else {
+            //generic set editor key
+            attrs.add("data-editorkey", "set");
+        }
+        dmAssetType = "set";
+    }
+    else {
+        //default editor
+        attrs.add("data-editorkey", "");
+        if ((mimeType.contains("video") || mimeType.equals("application/mxf")) && (enabledDynamicMedia || enabledS7config) &&
+                (s7damType.equals(S7damConstants.S7_VIDEO_AVS) || s7damType.equals(S7damConstants.S7_VIDEO))) {
+            dmAssetType = "video";
+            dynamicVideo = true;
+            // set editing requires remove nodes
+            canEdit = hasJcrWrite;
+            //video editor key
+            attrs.add("data-editorkey", "video");
+        }
+        else if (!s7damType.isEmpty()) {
+            dmAssetType = s7damType;
+        }
+    }
+    request.setAttribute(ISREMOTE, enabledS7config);
+    request.setAttribute(DM_ASSET_TYPE, dmAssetType);
+    request.setAttribute(DYNAMIC_VIDEO, dynamicVideo);
+    //flag for publish to indicate that the asset is DM asset + type of DM Asset
+    metaAttrs.add("data-dm-asset-type", dmAssetType);
+    metaAttrs.add("data-asset-mimetype", mimeType);
+
+//Checkout Status
+boolean isCheckedOut = false;
+boolean canCheckOut = false;
+boolean canCheckIn = false;
+boolean parentIsCheckedOut = false;
+
+AssetCheckoutService assetCheckoutService = sling.getService(AssetCheckoutService.class);
+if (assetCheckoutService != null) {
+    isCheckedOut = assetCheckoutService.isCheckedOut(asset);
+    if (!isAssetSubAsset) {
+        canCheckOut = assetCheckoutService.canCheckOut(asset, p);
+        canCheckIn = assetCheckoutService.canCheckIn(asset, p);
+    }
+
+    if (parentAsset != null) {
+        parentIsCheckedOut = assetCheckoutService.isCheckedOut(parentAsset);
+    }
+}
+
+String checkedOutBy = "";
+String checkedOutByFormatted = "";
+boolean checkedOutByCurrentUser = false;
+boolean isParentAssetCheckedOutByCurrentUser = false;
+
+if (isCheckedOut) {
+    checkedOutBy = assetCheckoutService.getCheckedOutBy(asset);
+    checkedOutByFormatted = AuthorizableUtil.getFormattedName(resource.getResourceResolver(), checkedOutBy);
+    checkedOutByCurrentUser = authUser.getID().equals(checkedOutBy);
+}
+
+if (parentIsCheckedOut) {
+    String parentAssetCheckedOutBy = assetCheckoutService.getCheckedOutBy(parentAsset);
+    isParentAssetCheckedOutByCurrentUser = authUser.getID().equals(parentAssetCheckedOutBy);
+}
+
+request.setAttribute(IS_CHECKED_OUT, isCheckedOut);
+request.setAttribute(CAN_CHECK_OUT, canCheckOut);
+request.setAttribute(CAN_CHECK_IN, canCheckIn);
+request.setAttribute(CHECKED_OUT_BY, checkedOutBy);
+request.setAttribute(CHECKED_OUT_BY_FORMATTED, checkedOutByFormatted);
+request.setAttribute(CHECKED_OUT_BY_CURRENT_USER, checkedOutByCurrentUser);
+request.setAttribute(IS_PARENT_ASSET_CHECKED_OUT, parentIsCheckedOut);
+request.setAttribute(IS_PARENT_ASSET_CHECKED_OUT_BY_CURRENT_USER, isParentAssetCheckedOutByCurrentUser);
+
+metaAttrs.addOther("can-compare", String.valueOf(canCompare));
+metaAttrs.add("data-asset-is-sub-asset", isAssetSubAsset);
+metaAttrs.add("data-asset-is-checked-out", isCheckedOut);
+metaAttrs.add("data-asset-can-check-out", canCheckOut);
+metaAttrs.add("data-asset-can-check-in", canCheckIn);
+metaAttrs.add("data-asset-checked-out-by", checkedOutBy);
+metaAttrs.add("data-asset-checked-out-by-formatted", checkedOutByFormatted);
+metaAttrs.add("data-asset-checked-out-by-current-user", checkedOutByCurrentUser);
+metaAttrs.add("data-parent-asset-is-checked-out", parentIsCheckedOut);
+metaAttrs.add("data-parent-asset-checked-out-by-current-user", isParentAssetCheckedOutByCurrentUser);
+metaAttrs.add("data-msm-is-livecopy", isLiveCopy);
+
+boolean isWorkflowActive = false;
+boolean isWorkflowFailure = false;
+String assetProcessingState = "";
+
+AssetProcessingStateProvider assetStateProvider = sling.getService(AssetProcessingStateProvider.class);
+
+if (assetStateProvider.isProcessing(asset)) {
+    isWorkflowActive = true;
+}
+
+if (resourceNode.hasNode(JcrConstants.JCR_CONTENT)) {
+    // For video in Dynamic Media run modes only
+    // identify a video in workflow with error (including warning) status or not "Finished" but no in workflow
+    if (mimeType.contains("video") && (enabledDynamicMedia || enabledS7config)) {
+        if (resourceNode.getNode(JcrConstants.JCR_CONTENT).hasProperty("status")) {
+            String assetStatus = resourceNode.getNode(JcrConstants.JCR_CONTENT).getProperty("status").getString();
+            if (assetStatus.indexOf("Error") == 0 || (!isWorkflowActive && !assetStatus.equals("Finished"))) {
+                isWorkflowFailure = true;
+            }
+        }
+    }
+}
+
+metaAttrs.add("data-workflow-active", isWorkflowActive);
+metaAttrs.add("data-workflow-failure", isWorkflowFailure ? "true" : "false");
+
+//Navigation Href
+final String ASSET_DETAILS_VANITY = "/assetdetails.html";
+final String CONTENT_FRAGMENT_EDITOR_VANITY = "/editor.html";
+final String DM_SET_PREVIEW_VANITY = "/mnt/overlay/dam/gui/content/s7dam/sets/setpreview.html";
+String navigationHref = request.getContextPath() + ASSET_DETAILS_VANITY + Text.escapePath(resource.getPath());
+String dmRemoteThumbnail = null;
+if (isContentFragment) {
+    navigationHref = request.getContextPath() + CONTENT_FRAGMENT_EDITOR_VANITY + Text.escapePath(resource.getPath());
+    canEdit = hasJcrWrite;
+} else if (isDMSet) {
+    if (s7damType.equalsIgnoreCase("remote")) {
+        if (!dms7RemoteBaseAsset.isEmpty()) {
+            //link base on remote base asset in jcr + dam:s7damType to render viewer preset rail
+            navigationHref = request.getContextPath() + DM_SET_PREVIEW_VANITY + Text.escapePath(dms7RemoteBaseAsset) + ".remoteset/" + dms7RemoteID + "?remoteassettype=" + dms7RemoteAssetType;
+            //For remote set case, we will use remote path for editor
+            attrs.add("data-remotepath", Text.escapePath(dms7RemoteBaseAsset) + ".remoteset/" + dms7RemoteID);
+        }
+        else {
+            navigationHref = request.getContextPath() + DM_SET_PREVIEW_VANITY + Text.escapePath(resource.getPath()) + ".remoteset/" + dms7RemoteID ;
+            canEdit = false; //cannot edit set that doesn't have member in JCR
+        }
+        dmRemoteThumbnail = request.getContextPath() + "/is/image/" + dms7RemoteID;
+    }
+    else {
+        navigationHref = request.getContextPath() + DM_SET_PREVIEW_VANITY + Text.escapePath(resource.getPath());
+    }
+}
+
+//Remote thumbnail
+request.setAttribute(REMOTE_THUMBNAIL, dmRemoteThumbnail);
+
+// Asset Status Property {Approved/Rejected}
+ String status = ResourceUtil.getValueMap(metadataResc).get("dam:status", "");
+ request.setAttribute(STATUS, status);
+ metaAttrs.addOther("status", status);
+
+//Asset Rating
+double averageRating = 0.0;
+if (resource.getChild("jcr:content")!=null){
+    averageRating = resource.getChild("jcr:content").getValueMap().get("averageRating", 0.0);
+}
+request.setAttribute(AVERAGE_RATING, averageRating);
+
+// Zip Archive
+boolean isArchive = this.isArchive(metadataResc);
+request.setAttribute(IS_ARCHIVE, isArchive);
+
+//Creative Rating
+double creativeRating = 0.0;
+if (resource.getChild("jcr:content")!=null){
+    creativeRating = resource.getChild("jcr:content/metadata").getValueMap().get("xmp:Rating", 0.0);
+}
+request.setAttribute(CREATIVE_RATING, creativeRating);
+
+// some assets are not downloadable: e.g. dynamicmedia set
+boolean isDownloadable = !isDMSet;
+request.setAttribute(IS_DOWNLOADABLE, isDownloadable);
+// Snippet Template
+boolean isSnippetTemplate = this.isSnippetTemplate(resource);
+request.setAttribute(IS_SNIPPET_TEMPLATE, isSnippetTemplate);
+// Adobe Stock Assets
+boolean isStockAsset = StockUtil.isStockAsset(resource);
+boolean isStockAssetLicensed = false;
+boolean isStockAccessible = false;
+request.setAttribute(IS_STOCK_ASSET, isStockAsset);
+if (isStockAsset) {
+    String stockId = ResourceUtil.getValueMap(metadataResc).get(StockUtil.PN_STOCK_ID, "");
+    String stockPath = StockUtil.STOCK_ROOT_PATH + "/" + stockId;
+    metaAttrs.addOther("stock-asset", String.valueOf(isStockAsset));
+    metaAttrs.addOther("stock-id", stockId);
+    metaAttrs.addOther("stock-path", stockPath);
+    // License State
+    isStockAssetLicensed = StockUtil.isStockAssetLicensed(resource);
+    request.setAttribute(IS_STOCK_ASSET_LICENSED, isStockAssetLicensed);
+    metaAttrs.addOther("stock-asset-licensed", String.valueOf(isStockAssetLicensed));
+    // License Permissions
+    isStockAccessible = StockUtil.isStockAccessible(resource.getResourceResolver());
+    request.setAttribute(STOCK_ACCESSIBLE, isStockAccessible);
+}
+
+%>
+<%!
+    private Long getLongProperty(String resName, Node metadataNode, String propertyName, Long defaultValue, Logger log) {
+        Long propertyValue = defaultValue;
+        String propertyValueStr = "";
+        try {
+            propertyValueStr = DamUtil.getValue(metadataNode, propertyName, "" + defaultValue);
+            propertyValue = Long.valueOf(propertyValueStr);
+        } catch(NumberFormatException e) {
+            log.warn("Invalid value [{}] specified for a metadata property [{}] of asset [{}]: {}", propertyValueStr, propertyName, resName, e.getMessage());
+        } catch(Exception e) {
+            log.error("Error while reading metadata property [{}] of asset [{}]", propertyName, resName, e);
+        }
+        return propertyValue;
+    }  
+%>

@@ -1,0 +1,784 @@
+/*
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2020 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(document, $, Promise) {
+    "use strict";
+    var TOTAL_MINUTES_PER_DAY = 1440;
+    var UI_DATE_FORMAT = "YYYY-MM-DD HH:mm";
+    var UI_VALUE_DATE_FORMAT = "YYYY-MM-DD[T]HH:mmZ";
+    var LOCALIZED_WEEK_ARRAY = [ Granite.I18n.get("Sunday"), Granite.I18n.get("Monday"), Granite.I18n.get("Tuesday"),
+        Granite.I18n.get("Wednesday"), Granite.I18n.get("Thursday"), Granite.I18n.get("Friday"),
+        Granite.I18n.get("Saturday") ];
+
+    $(document).on("click", ".cq-bulkimport-actions-checkhealth-activator", runCheckHealth);
+    $(document).on("click", ".cq-bulkimport-actions-dryrun-activator", function() {
+        checkThenRun(runDryRun);
+    });
+    $(document).on("click", ".cq-bulkimport-actions-assetslist-activator", openViewAssets);
+    $(document).on("click", ".cq-bulkimport-actions-jobstatus-activator", showJobHistory);
+
+    $(document).on("click", ".cq-bulkimport-actions-run-activator", function() {
+        checkThenRun(preDryRun);
+    });
+    $(document).on("click", ".cq-bulkimport-actions-stop-activator", showStopJobDialog);
+    $(document).on("click", ".cq-bulkimport-actions-cancel-schedule-activator", showCancelScheduleDialog);
+    $(document).on("click", ".cq-bulkimport-actions-delete-activator", showDeleteConfigDialog);
+    $(document).on("click", ".cq-bulkimport-actions-schedule-activator", function() {
+        checkThenRun(showScheduleDialog);
+    });
+
+    $(document).on("foundation-contentloaded", function() {
+        $(".foundation-collection-item").each(function() {
+            var scheduledJob = $(this).find("coral-card").data("scheduled-job");
+            if (scheduledJob) {
+                var serverTimezoneOffset = $(this).find("coral-card").data("timezone-offset");
+                var scheduledDescription = convertToScheduleDescription(scheduledJob, serverTimezoneOffset);
+                $(this).find("coral-card-property[icon=publishSchedule] > coral-card-property-content")
+                    .text(scheduledDescription);
+            }
+        });
+    });
+
+    // 1. check
+    function runCheckHealth() {
+        checkThenRun(function() {
+            popupSuccess(Granite.I18n.get("Import source confirmed."));
+        });
+    }
+
+    function checkThenRun(successHandler) {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        var configInfo = getSelectedConfigInfo();
+        var configPath = configInfo.configPath;
+        var title = configInfo.title;
+
+        $.ajax({
+            url: Granite.HTTP.externalize(configPath + ".importCheck.json"),
+            type: "GET",
+            success: function(data, textStatus, jqXHR) {
+                ui.clearWait();
+                if (data.health) {
+                    successHandler(configPath, title);
+                } else {
+                    if (data.message) {
+                        popupError(data.message);
+                    } else {
+                        popupError(Granite.I18n.get("Failed to connect, please check configuration"));
+                    }
+                }
+            },
+            error: function(response) {
+                ui.clearWait();
+                popupError(Granite.I18n.get("Failed to connect, please check configuration"));
+            }
+        });
+    }
+
+    // pre dry run with timeout
+    function preDryRun(configPath, title) {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        $.ajax({
+            url: Granite.HTTP.externalize(configPath + ".importDryRun.json"),
+            type: "GET",
+            timeout: 30000,
+            success: function(data) {
+                ui.clearWait();
+                showRunJobDialog(configPath, title, data);
+            },
+            error: function(data) {
+                ui.clearWait();
+                showRunJobDialog(configPath, title, data);
+            }
+        });
+    }
+
+    // 2. dry run
+    function runDryRun(configPath) {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        $.ajax({
+            url: Granite.HTTP.externalize(configPath + ".importDryRun.json"),
+            type: "GET",
+            timeout: 30000,
+            success: function(data, textStatus, jqXHR) {
+                ui.clearWait();
+                popupDryRunResult(data);
+            },
+            error: function(response) {
+                ui.clearWait();
+                popupError(Granite.I18n.get("Failed in dry run job."));
+            }
+        });
+    }
+
+    function popupDryRunResult(data) {
+        var dryRunMessage = "";
+        if (data.foldersWithManyAssets) {
+            dryRunMessage += "<p>" + Granite.I18n.get("Warning: ") +
+            Granite.I18n.get("You are about to import more than 1,000 assets into a single folder, " +
+             "which is not aligned with AEM best practices.") + "</p>" +
+             "<p>" + Granite.I18n.get("Folders With Many Assets : ") + data.foldersWithManyAssets;
+        }
+        if (data.exceed) {
+            dryRunMessage += "<p>" + Granite.I18n.get("There are too many assets to derive an estimation.") + "</p>";
+        } else {
+            dryRunMessage += "<p>" + Granite.I18n.get("Total Assets in import source: ") + data.totalAsset + "</p>" +
+                "<p>" + Granite.I18n.get("Total size in import source: ") + data.totalSize + "</p>" +
+                "<p>" + Granite.I18n.get("Total assets will be imported: ") + data.resolvedTotalAsset + "</p>" +
+                "<p>" + Granite.I18n.get("Total size will be imported: ") + data.resolvedTotalSize + "</p>";
+            if (data.totalDeletion && data.totalDeletion > 0) {
+                dryRunMessage += "<p>" + Granite.I18n.get("Total import source will be deleted: ") +
+                    data.totalDeletion + "</p><p>" +
+                    Granite.I18n.get("Total size of import source will be deleted: ") + data.totalDeletionSize + "</p>";
+            }
+            dryRunMessage += "<p>" + Granite.I18n.get("Estimated time: ") + data.estimatedTime + "</p>";
+        }
+
+        new Coral.Dialog().set({
+            variant: "success",
+            header: {
+                innerHTML: Granite.I18n.get("Dry Run Result")
+            },
+            content: {
+                innerHTML: dryRunMessage
+            },
+            footer: {
+                innerHTML: "<button is=\"coral-button\" coral-close size=\"M\">" +
+                    Granite.I18n.get("Close") + "</button>"
+            }
+        }).show();
+    }
+
+    // 3. view assets
+    function openViewAssets() {
+        var selections = $(".foundation-selections-item");
+        var item = $(selections[0]);
+        var targetFolder = item.find("coral-card").data("target-folder");
+        if (targetFolder) {
+            location.href = Granite.HTTP.externalize("/assets.html" + targetFolder);
+        } else {
+            popupError(Granite.I18n.get("Could not find target folder."));
+        }
+    }
+
+    // 4. job history
+    function showJobHistory() {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        var configPath = getSelectedConfigInfo().configPath;
+
+        $.ajax({
+            url: Granite.HTTP.externalize(configPath + ".importJob.json"),
+            type: "POST",
+            data: {
+                operation: "list"
+            },
+            success: function(response) {
+                ui.clearWait();
+                showJobHistoryDialog(response.jobs, configPath);
+            },
+            error: function(response) {
+                ui.clearWait();
+                popupError(Granite.I18n.get("Cannot find any job."));
+            }
+        });
+    }
+
+    function showJobHistoryDialog(jobs, configPath) {
+        $("#jobHistoryDialog").each(function() {
+            var $this = $(this);
+            $this.hide();
+            $this.remove();
+        });
+        var dialog = new Coral.Dialog().set({
+            id: "jobHistoryDialog",
+            header: {
+                innerHTML: Granite.I18n.get("Job History")
+            }
+        });
+        document.body.appendChild(dialog);
+        dialog.content.appendChild(createJobListSelect(jobs));
+
+        dialog.footer.appendChild(function() {
+            var cancelBtn = new Coral.Button();
+            cancelBtn.label.textContent = Granite.I18n.get("Cancel");
+            cancelBtn.on("click", function() {
+                dialog.hide();
+            });
+            return cancelBtn;
+        }());
+
+        dialog.footer.appendChild(function() {
+            var button = new Coral.Button();
+            button.label.textContent = Granite.I18n.get("Open");
+            button.variant = "warning";
+            button.on("click", function() {
+                openJobDetailPage(configPath);
+                dialog.hide();
+            });
+            return button;
+        }());
+
+        dialog.show();
+    }
+
+    function createJobListSelect(jobs) {
+        var jobSelect = new Coral.Select().set({
+            name: "job",
+            style: "width: 300px;"
+        });
+        for (var i = 0; i < jobs.length; i++) {
+            var job = jobs[i];
+            jobSelect.items.add({
+                content: {
+                    innerHTML: job.created + " (" + job.jobState + ")"
+                },
+                value: job.id
+            });
+        }
+        return jobSelect;
+    }
+
+    function openJobDetailPage(configPath) {
+        var jobId = $("coral-select[name=job]")[0].value;
+        if (jobId) {
+            location.href = Granite.HTTP.externalize("/mnt/overlay/dam/gui/content/bulkimport/jobdetails.html?jobid=" +
+                jobId + "&config=" + configPath);
+        } else {
+            popupError(Granite.I18n.get("There isn't running job."));
+        }
+    }
+
+    // 5. Run
+    function showRunJobDialog(configPath, title, data) {
+        var ui = $(window).adaptTo("foundation-ui");
+        var message = createEl("div");
+        createEl("p").text(Granite.I18n.get("You are going to run the following job:")).appendTo(message);
+        createEl("p").html(createEl("b").text(title)).appendTo(message);
+
+        if (data.foldersWithManyAssets) {
+            createEl("p").text(Granite.I18n.get("Warning: ") + " " +
+            Granite.I18n.get("You are about to import more than 1,000 assets into a single folder, " +
+             "which is not aligned with AEM best practices.")).appendTo(message);
+            createEl("p").text(Granite.I18n.get("Folders With Many Assets : ") +
+            " " + data.foldersWithManyAssets).appendTo(message);
+        }
+
+        ui.prompt(Granite.I18n.get("Run"), message.html(), "notice", [
+            {
+                text: Granite.I18n.get("Cancel")
+            }, {
+                text: Granite.I18n.get("Run"),
+                warning: true,
+                handler: function() {
+                    makeRequest(configPath, "run", Granite.I18n.get("Failed to run job."));
+                }
+            }]);
+    }
+
+    function makeRequest(configPath, operation, errorMessage) {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        $.ajax({
+            url: Granite.HTTP.externalize(configPath + ".importJob.json"),
+            type: "POST",
+            data: {
+                operation: operation
+            },
+            success: function(data) {
+                ui.clearWait();
+                location.reload();
+            },
+            error: function() {
+                ui.clearWait();
+                popupError(errorMessage);
+            }
+        });
+    }
+
+    // 6. Stop
+    function showStopJobDialog() {
+        var configInfo = getSelectedConfigInfo();
+        var message = createEl("div");
+        createEl("p").text(Granite.I18n.get("You are going to stop the job:")).appendTo(message);
+        createEl("p").html(createEl("b").text(configInfo.title)).appendTo(message);
+
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.prompt(Granite.I18n.get("Stop Import Job"), message.html(), "notice", [
+            {
+                text: Granite.I18n.get("Cancel")
+            }, {
+                text: Granite.I18n.get("Stop"),
+                warning: true,
+                handler: function() {
+                    makeRequest(configInfo.configPath, "stop", Granite.I18n.get("Failed in stop job."));
+                }
+            }]);
+    }
+
+    // 7. Cancel Schedule
+    function showCancelScheduleDialog() {
+        var configInfo = getSelectedConfigInfo();
+        var message = createEl("div");
+        createEl("p").text(Granite.I18n.get("You are going to cancel the schedule:")).appendTo(message);
+        createEl("p").html(createEl("b").text(configInfo.title)).appendTo(message);
+
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.prompt(Granite.I18n.get("Cancel Schedule"), message.html(), "notice", [
+            {
+                text: Granite.I18n.get("Cancel")
+            }, {
+                text: Granite.I18n.get("Submit"),
+                warning: true,
+                handler: function() {
+                    makeRequest(configInfo.configPath, "cancel", Granite.I18n.get("Failed to cancel schedule."));
+                }
+            }]);
+    }
+
+    // 8. delete config
+    function showDeleteConfigDialog() {
+        var message = createEl("div");
+        var intro = createEl("p").appendTo(message);
+        var selections = $(".foundation-selections-item");
+        if (selections.length === 1) {
+            intro.text(Granite.I18n.get("You are going to delete the following item:"));
+        } else {
+            intro.text(Granite.I18n.get("You are going to delete the following {0} items:", selections.length));
+        }
+        var list = [];
+
+        for (var i = 0, ln = selections.length; i < ln; i++) {
+            var title = $(selections[i]).find(".foundation-collection-item-title").text();
+            list.push(createEl("b").text(title).prop("outerHTML"));
+        }
+
+        createEl("p").html(list.join("<br>")).appendTo(message);
+
+        var ui = $(window).adaptTo("foundation-ui");
+
+        var paths = [];
+        var items = $(".foundation-selections-item");
+        if (items.length) {
+            items.each(function() {
+                var item = $(this);
+                var itemPath = item.data("foundation-collection-item-id");
+                paths.push(itemPath);
+            });
+
+            ui.prompt(Granite.I18n.get("Delete"), message.html(), "notice", [{
+                text: Granite.I18n.get("Cancel")
+            }, {
+                text: Granite.I18n.get("Delete"),
+                warning: true,
+                handler: function() {
+                    deleteConfig(paths);
+                }
+            }]);
+        }
+    }
+
+    function deleteConfig(paths) {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        var promises = [];
+
+        var deleteConfigRequest = $.ajax({
+            url: Granite.HTTP.externalize("/bin/wcmcommand"),
+            type: "POST",
+            data: {
+                _charset_: "UTF-8",
+                cmd: "deletePage",
+                path: paths,
+                force: true,
+                checkChildren: true
+            }
+        });
+        promises.push(deleteConfigRequest);
+
+        paths.forEach(function(configPath) {
+            promises.push($.ajax({
+                url: Granite.HTTP.externalize(configPath + ".importJob.json"),
+                type: "POST",
+                data: {
+                    operation: "cleanup",
+                    configPath: configPath
+                }
+            }));
+        });
+        // until
+        Promise.all(promises).then(function() {
+            location.reload();
+        });
+    }
+
+    // 9. schedule dialog
+    function showScheduleDialog(configPath) {
+        var selections = $(".foundation-selections-item");
+        var item = $(selections[0]);
+        var scheduleJob = item.find("coral-card").data("scheduled-job");
+        var serverTimezoneOffset = item.find("coral-card").data("timezone-offset");
+        var sasTokenExipry = item.find("coral-card").data("sas-token-expiry");
+
+        $("#scheduleJobDialog").each(function() {
+            var $this = $(this);
+            $this.hide();
+            $this.remove();
+        });
+        var dialog = new Coral.Dialog().set({
+            id: "scheduleJobDialog",
+            header: {
+                innerHTML: Granite.I18n.get("Schedule Job")
+            }
+        });
+        document.body.appendChild(dialog);
+
+        var dialogContent = dialog.content;
+
+        var contentForm = dialogContent.appendChild(document.createElement("form"));
+        contentForm.action = configPath + ".importRun.json";
+        contentForm.method = "POST";
+        contentForm.encType = "application/x-www-form-urlencoded";
+
+        contentForm.appendChild(createTypeRadios());
+        createScheduleFields(contentForm, sasTokenExipry);
+
+        // hidden: operation
+        contentForm.appendChild(function() {
+            var dom = document.createElement("input");
+            dom.type = "hidden";
+            dom.name = "operation";
+            dom.value = "schedule";
+            return dom;
+        }());
+
+        contentForm.appendChild(function() {
+            var dom = document.createElement("input");
+            dom.type = "hidden";
+            dom.name = "timezoneOffset";
+            dom.value = new Date().getTimezoneOffset();
+            return dom;
+        }());
+
+        dialog.footer.appendChild(function() {
+            var cancelButton = new Coral.Button();
+            cancelButton.label.textContent = Granite.I18n.get("Cancel");
+            cancelButton.on("click", function() {
+                dialog.hide();
+            });
+            return cancelButton;
+        }());
+
+        dialog.footer.appendChild(function() {
+            var submitButton = new Coral.Button();
+            submitButton.label.textContent = Granite.I18n.get("Submit");
+            submitButton.variant = "warning";
+            submitButton.on("click", function() {
+                var data = $(contentForm).serialize();
+                submitSchedule(configPath, data);
+                dialog.hide();
+            });
+            return submitButton;
+        }());
+
+        $("coral-radio[name=type]").on("change", toggleFields);
+        if (scheduleJob) {
+            loadSavedScheduledJob(scheduleJob, serverTimezoneOffset);
+        }
+        toggleFields();
+
+        dialog.show();
+    }
+
+    function createScheduleFields(contentForm, sasTokenExpiry) {
+        // datetime
+        contentForm.appendChild(createDivider());
+        contentForm.appendChild(function() {
+            return new Coral.Datepicker().set({
+                placeholder: Granite.I18n.get("Choose a date"),
+                type: "datetime",
+                name: "date",
+                value: new Date(),
+                valueFormat: UI_VALUE_DATE_FORMAT,
+                displayFormat: UI_DATE_FORMAT,
+                startDay: "0",
+                max: sasTokenExpiry
+            });
+        }());
+
+        // week
+        contentForm.appendChild(createDivider());
+        contentForm.appendChild(createWeekSelect());
+
+        // time, used for weekly, daily
+        contentForm.appendChild(createDivider());
+        contentForm.appendChild(function() {
+            return new Coral.Datepicker().set({
+                type: "time",
+                name: "time",
+                valueFormat: "HH:mm",
+                displayFormat: "HH:mm"
+            });
+        }());
+
+        // minute, used for hourly
+        var minutesDiv = contentForm.appendChild(document.createElement("div"));
+        $(minutesDiv).addClass("minutes-div");
+        createEl("label").text(Granite.I18n.get("Run job every hour at X minute")).appendTo(minutesDiv);
+        createEl("br").appendTo(minutesDiv);
+        minutesDiv.appendChild(function() {
+            return new Coral.NumberInput().set({
+                placeholder: Granite.I18n.get("Enter minute (default 0)"),
+                min: 0,
+                max: 59,
+                name: "minute"
+            });
+        }());
+    }
+
+    function loadSavedScheduledJob(scheduleJob, serverTimezoneOffset) {
+        var infoArr = scheduleJob.split(",");
+        var resultArr = [];
+        var type = infoArr[0];
+        $("input[name=type][value=" + type + "]").prop("checked", true);
+        if (type === "DATE") {
+            $("coral-datepicker[name=date]")[0].value = infoArr[1];
+        } else if (type === "HOURLY") {
+            resultArr = adjustToClientTime(1, 0, infoArr[4], serverTimezoneOffset);
+            $("coral-numberinput[name=minute]")[0].value = resultArr[2];
+        } else if (type === "DAILY") {
+            resultArr = adjustToClientTime(1, infoArr[3], infoArr[4], serverTimezoneOffset);
+            $("coral-datepicker[name=time]")[0].value = resultArr[1] + ":" + resultArr[2];
+        } else if (type === "WEEKLY") {
+            resultArr = adjustToClientTime(infoArr[2], infoArr[3], infoArr[4], serverTimezoneOffset);
+            $("coral-datepicker[name=time]")[0].value = resultArr[1] + ":" + resultArr[2];
+            $("coral-select[name=week]")[0].value = resultArr[0];
+        }
+    }
+
+    function convertToScheduleDescription(scheduleJob, serverTimezoneOffset) {
+        var infoArr = scheduleJob.split(",");
+        var resultArr = [];
+        var type = infoArr[0];
+        $("input[name=type][value=" + type + "]").prop("checked", true);
+        if (type === "DATE") {
+            return Granite.I18n.get("Date at ") + moment(new Date(infoArr[1])).format(UI_DATE_FORMAT);
+        } else if (type === "HOURLY") {
+            resultArr = adjustToClientTime(1, 0, infoArr[4], serverTimezoneOffset);
+            return Granite.I18n.get("Hourly at minute ") + resultArr[2];
+        } else if (type === "DAILY") {
+            resultArr = adjustToClientTime(1, infoArr[3], infoArr[4], serverTimezoneOffset);
+            return Granite.I18n.get("Daily at ") + resultArr[1] + ":" + resultArr[2];
+        } else if (type === "WEEKLY") {
+            resultArr = adjustToClientTime(infoArr[2], infoArr[3], infoArr[4], serverTimezoneOffset);
+            return Granite.I18n.get("Weekly at ") + LOCALIZED_WEEK_ARRAY[resultArr[0] - 1] + " " +
+                resultArr[1] + ":" + resultArr[2];
+        }
+    }
+
+    function adjustToClientTime(serverWeek, serverHour, serverMinute, serverTimezoneOffset) {
+        var serverTimeInMinutes = parseInt(serverHour) * 60 + parseInt(serverMinute);
+        // The javascript time-zone offset in minutes is from local time to UTC, it's opposite value to Java offset
+        var aggregatedOffset = new Date().getTimezoneOffset() + serverTimezoneOffset;
+        var clientTimeInMinutes = serverTimeInMinutes - aggregatedOffset;
+        var clientWeek = serverWeek;
+        if (clientTimeInMinutes < 0) {
+            clientTimeInMinutes = clientTimeInMinutes + TOTAL_MINUTES_PER_DAY;
+            clientWeek--;
+            if (clientWeek === 0) {
+                clientWeek = 7;
+            }
+        } else if (clientTimeInMinutes > TOTAL_MINUTES_PER_DAY) {
+            clientTimeInMinutes = clientTimeInMinutes - TOTAL_MINUTES_PER_DAY;
+            clientWeek++;
+            if (clientWeek === 8) {
+                clientWeek = 1;
+            }
+        }
+        var clientHour = Math.floor(clientTimeInMinutes / 60);
+        var clientMinute = clientTimeInMinutes % 60;
+        return [ clientWeek, clientHour, clientMinute ];
+    }
+
+    function createTypeRadios() {
+        var typeRadio = document.createElement("div");
+        typeRadio.classList.add("coral-Form-field", "coral-RadioGroup", "coral-RadioGroup--vertical");
+        typeRadio.appendChild(function() {
+            return new Coral.Radio().set({
+                label: {
+                    innerHTML: Granite.I18n.get("Specific Date and Time")
+                },
+                name: "type",
+                value: "DATE",
+                checked: true
+            });
+        }());
+        typeRadio.appendChild(function() {
+            return new Coral.Radio().set({
+                label: {
+                    innerHTML: Granite.I18n.get("Hourly")
+                },
+                name: "type",
+                value: "HOURLY"
+            });
+        }());
+        typeRadio.appendChild(function() {
+            return new Coral.Radio().set({
+                label: {
+                    innerHTML: Granite.I18n.get("Daily")
+                },
+                name: "type",
+                value: "DAILY"
+            });
+        }());
+        typeRadio.appendChild(function() {
+            return new Coral.Radio().set({
+                label: {
+                    innerHTML: Granite.I18n.get("Weekly")
+                },
+                name: "type",
+                value: "WEEKLY"
+            });
+        }());
+        return typeRadio;
+    }
+
+    function createDivider() {
+        var para = document.createElement("p");
+        para.style = "margin: 0.5rem;";
+        return para;
+    }
+
+    function createWeekSelect() {
+        var weekSelect = new Coral.Select().set({
+            name: "week"
+        });
+        for (var i = 0; i < 7; i++) {
+            weekSelect.items.add({
+                content: {
+                    innerHTML: LOCALIZED_WEEK_ARRAY[i]
+                },
+                value: i + 1
+            });
+        }
+        return weekSelect;
+    }
+
+    function toggleFields() {
+        if ($("coral-radio[name=type]")[0]) {
+            var scheduleType = $("coral-radio[name=type] :checked").val();
+            if (scheduleType === "DATE") {
+                $("coral-datepicker[name=date]").show();
+                $("coral-select[name=week]").hide();
+                $("coral-datepicker[name=time]").hide();
+                $(".minutes-div").hide();
+            } else if (scheduleType === "HOURLY") {
+                $("coral-datepicker[name=date]").hide();
+                $("coral-select[name=week]").hide();
+                $("coral-datepicker[name=time]").hide();
+                $(".minutes-div").show();
+            } else if (scheduleType === "DAILY") {
+                $("coral-datepicker[name=date]").hide();
+                $("coral-select[name=week]").hide();
+                $("coral-datepicker[name=time]").show();
+                $(".minutes-div").hide();
+            } else if (scheduleType === "WEEKLY") {
+                $("coral-datepicker[name=date]").hide();
+                $("coral-select[name=week]").show();
+                $("coral-datepicker[name=time]").show();
+                $(".minutes-div").hide();
+            }
+        }
+    }
+
+    function submitSchedule(configPath, data) {
+        if ($("coral-radio[name=type] :checked").val() === "DATE") {
+            var submitDate = new Date($("coral-datepicker[name=date]").val());
+            var gap = new Date().getTime() - submitDate.getTime();
+            if (gap > 0) {
+                popupError(Granite.I18n.get("Please specify valid future date time."));
+                return;
+            }
+        }
+
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+
+        $.ajax({
+            url: Granite.HTTP.externalize(configPath + ".importJob.json"),
+            type: "POST",
+            data: data,
+            success: function() {
+                location.reload();
+            },
+            error: function() {
+                ui.clearWait();
+                popupError(Granite.I18n.get("Failed to run."));
+            }
+        });
+    }
+
+    // utils
+    function createEl(name) {
+        return $(document.createElement(name));
+    }
+
+    function getSelectedConfigInfo() {
+        var selections = $(".foundation-selections-item");
+        var item = $(selections[0]);
+        var configPath = item.data("foundation-collection-item-id");
+        var title = item.find(".foundation-collection-item-title").text();
+        return {
+            configPath: configPath,
+            title: title
+        };
+    }
+
+    function popupSuccess(message) {
+        new Coral.Dialog().set({
+            variant: "success",
+            header: {
+                innerHTML: Granite.I18n.get("Success")
+            },
+            content: {
+                innerHTML: "<p>" + message + "</p>"
+            },
+            footer: {
+                innerHTML: "<button is=\"coral-button\" coral-close size=\"M\">" +
+                    Granite.I18n.get("Close") + "</button>"
+            }
+        }).show();
+    }
+
+    function popupError(message) {
+        new Coral.Dialog().set({
+            variant: "error",
+            header: {
+                innerHTML: Granite.I18n.get("Error")
+            },
+            content: {
+                innerHTML: "<p>" + message + "</p>"
+            },
+            footer: {
+                innerHTML: "<button is=\"coral-button\" variant=\"primary\" " +
+                    "coral-close size=\"M\">" + Granite.I18n.get("Ok") + "</button>"
+            }
+        }).show();
+    }
+})(document, Granite.$, window.Promise);

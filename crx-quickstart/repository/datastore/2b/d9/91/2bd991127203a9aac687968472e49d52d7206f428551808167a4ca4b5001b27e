@@ -1,0 +1,1453 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2015 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(window, document, Granite, jquery, URITemplate) {
+    "use strict";
+
+    /** @type {JQueryStatic} */
+    var $ = jquery;
+
+    /**
+     * @typedef {Object} State
+     * @property {HTMLElement} collectionEl
+     * @property {JQuery} collection
+     * @property {Config} config
+     * @property {boolean} bulkSelection
+     * @property {boolean} bulkLoading
+     * @property {Object} [paginator]
+     * @property {Object} [lazyLoader]
+     * @property {Array<Function>} stack
+     */
+
+    /**
+     * @typedef {Object} Config
+     * @property {string} sortMode
+     * @property {number} limit
+     * @property {number} size
+     * @property {string} rowReorderAction
+     * @property {string} trackingFeature
+     * @property {string} trackingElement
+     */
+
+    /**
+     * @typedef {Object} SortConfig
+     * @property {String} sortBy
+     * @property {String} sortOrder
+     */
+
+    var stateMap = new WeakMap();
+    var registry = $(window).adaptTo("foundation-registry");
+
+    /**
+     * Handles the mode change.
+     *
+     * @param {State} state of collection element
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleMode(state) {
+        var collection = state.collection;
+
+        var modeChangeHandler = function(e, mode, group) {
+            if (e._foundationLayoutTable) {
+                return;
+            }
+            if (mode !== "default") {
+                return;
+            }
+            if (state.collectionEl.dataset.foundationModeGroup !== group) {
+                return;
+            }
+
+            state.bulkSelection = true;
+
+            collection.find(".foundation-selections-item").each(function(i, itemEl) {
+                itemEl.selected = false;
+            });
+
+            state.bulkSelection = false;
+
+            collection.trigger("foundation-selections-change");
+            trackEvent("change", collection, state.config, null, { method: "modeChange" });
+        };
+
+        $(document).on("foundation-mode-change", modeChangeHandler);
+
+        return function() {
+            $(document).off("foundation-mode-change", modeChangeHandler);
+        };
+    }
+
+    /**
+     * Handles the selection logic.
+     *
+     * @param {State} state of collection element
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleSelection(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var maskEl = $(document.createElement("div")).addClass("foundation-ui-mask");
+
+        var f = function(e) {
+            if (state.bulkLoading) {
+                return;
+            }
+
+            var detail = e.originalEvent.detail;
+            var selectionMode = collectionEl.dataset.foundationSelectionsMode;
+
+            var selections = $();
+            var prevSelections = $();
+
+            if (selectionMode === "single") {
+                if (detail.oldSelection) {
+                    prevSelections = $(detail.oldSelection);
+                }
+                if (detail.selection) {
+                    selections = $(detail.selection);
+                }
+            } else {
+                prevSelections = $(detail.oldSelection);
+                selections = $(detail.selection);
+            }
+
+            prevSelections.removeClass("foundation-selections-item");
+            selections.addClass("foundation-selections-item");
+
+            var isSelectAllMode = collectionEl.dataset.foundationSelectionsSelectallMode === "true";
+            var selectionsChange = function() {
+                changeMode(collection, false, selections, prevSelections);
+                collection.trigger("foundation-selections-change");
+                trackEvent("change", collection, state.config, null, { method: "handleSelection" });
+            };
+
+            if (!state.bulkSelection && !isSelectAllMode) {
+                if (state.lazyLoader && hasLazyOrPendingItems(collection)) {
+                    state.bulkLoading = true;
+
+                    // `ui.wait()` cannot be used here.
+                    // Lazy loading a large number of items will block the UI thread, freezing the wait animation.
+                    // So, just use a plain back drop without animation.
+                    maskEl.appendTo(document.body);
+
+                    var continueWithSelectionWorkflow = function(loadedItemEls) {
+                        var lastItemIndex = loadedItemEls.length - 1;
+                        loadedItemEls.forEach(function(itemEl, index) {
+                            itemEl.set("selected", true, index !== lastItemIndex);
+                            itemEl.classList.add("foundation-selections-item");
+                        });
+
+                        alignColumnCells(collection);
+                        state.bulkLoading = false;
+                        // The items from the selections might be out of date
+                        // (lazy loaded items were replaced with loaded items)
+                        // but the number of elements is the same so this is not a problem at the moment
+                        selectionsChange();
+                        maskEl.detach();
+                    };
+
+                    state.lazyLoader.loadItems(selections.toArray()).then(continueWithSelectionWorkflow);
+                } else {
+                    selectionsChange();
+                }
+            } else if (isSelectAllMode) {
+                selectionsChange();
+            }
+        };
+
+        var escape = function() {
+            if (document.activeElement === collectionEl || collectionEl.contains(document.activeElement)) {
+                collection.adaptTo("foundation-selections").clear();
+            }
+        };
+
+        collection.on("coral-table:change", f);
+        Coral.keys.on("escape", escape);
+
+        // Handle the select all mode from the coral table header checkbox as well
+        var selectAll = collection.find("[coral-table-select]").on("change.foundation-layout-table", function(e) {
+            // Prevent Coral behavior and use the select all behavior
+            e.stopPropagation();
+            var selectionsAPI = collection.adaptTo("foundation-selections");
+            if (this.checked) {
+                collectionEl.dataset.foundationSelectionsSelectallMode = "true";
+                selectionsAPI.selectAll();
+            } else {
+                selectionsAPI.clear();
+            }
+        });
+
+        return function() {
+            collection.off("coral-table:change", f);
+            Coral.keys.off("escape", escape);
+            selectAll.off("change.foundation-layout-table");
+        };
+    }
+
+    /**
+     * Changes the mode.
+     *
+     * @param {JQuery} collection
+     * @param {Boolean} force
+     * @param {JQuery} [selections]
+     * @param {JQuery} [prevSelections]
+     */
+    function changeMode(collection, force, selections, prevSelections) {
+        var group = collection[0].dataset.foundationModeGroup;
+
+        if (!group) {
+            return;
+        }
+
+        var afterCount;
+        if (selections) {
+            afterCount = selections.length;
+        } else {
+            afterCount = collection.adaptTo("foundation-selections").count();
+        }
+
+        var beforeCount;
+        if (prevSelections) {
+            beforeCount = prevSelections.length;
+        } else {
+            beforeCount = 0;
+        }
+
+        var trigger = function(mode) {
+            var e = $.Event("foundation-mode-change");
+            // Mark the event so that our own handler can detect if it is triggered by us or not.
+            e._foundationLayoutTable = true;
+            collection.trigger(e, [ mode, group ]);
+        };
+
+        if ((beforeCount === 0 || force) && afterCount > 0) {
+            trigger("selection");
+        } else if ((beforeCount > 0 || force) && afterCount === 0) {
+            trigger("default");
+        }
+    }
+
+    /**
+     * @param {JQuery} collection
+     * @returns {Boolean}
+     */
+    function hasLazyOrPendingItems(collection) {
+        return collection.has(".foundation-collection-item.is-lazyLoaded," +
+            ".foundation-collection-item.is-pending").length > 0;
+    }
+
+    /**
+     * Handles the sorting logic.
+     *
+     * @param {State} state of collection element
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleSorting(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+
+        var sort = function(event) {
+            if (collectionEl !== event.target) {
+                return;
+            }
+
+            var detail = event.originalEvent.detail;
+            var columnName = detail.column.dataset.foundationLayoutTableColumnName;
+            var sortOrder = getSortOrderValueFromDirection(detail.direction || detail.sortableDirection);
+            var sortAPI = collection.adaptTo("foundation-collection-sort");
+
+            sortAPI.doSort(columnName, sortOrder) && event.preventDefault();
+        };
+
+        // sync column direction for first time.
+        if (collectionEl.dataset.foundationCollectionSortby && collectionEl.dataset.foundationCollectionSortorder) {
+            requestAnimationFrame(function() {
+                syncColumnDirectionWithSortOrder(collectionEl,
+                    collectionEl.dataset.foundationCollectionSortby,
+                    collectionEl.dataset.foundationCollectionSortorder);
+            });
+        }
+
+        collection.on("coral-table:beforecolumnsort", sort);
+        return function() {
+            collection.off("coral-table:beforecolumnsort", sort);
+        };
+    }
+
+    /**
+     * Handles the pagination logic.
+     *
+     * @param {State} state of collection element
+     * @returns {Function} callback function which destroy the paginator and lazyloader objects
+     */
+    function handlePagination(state) {
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+
+        if (!src) {
+            return;
+        }
+
+        var f = function(scrollContainer) {
+            var Paginator = $(window).adaptTo("foundation-util-paginator");
+
+            var performSelection;
+
+            state.paginator = new Paginator({
+                el: scrollContainer[0],
+                limit: state.config.limit || 20,
+                size: state.config.size,
+                wait: function() {
+                    collectionEl.dataset.graniteCollectionIsLoading = "true";
+                    return {
+                        clear: function() {
+                            collectionEl.dataset.graniteCollectionIsLoading = "false";
+                        }
+                    };
+                },
+                resolveURL: function(paginator) {
+                    var sortAPI = collection.adaptTo("foundation-collection-sort");
+                    var sortValues = sortAPI.getSortValues();
+                    return URITemplate.expand(src, {
+                        offset: paginator.offset,
+                        limit: paginator.limit,
+                        size: paginator.size,
+                        id: collectionEl.dataset.foundationCollectionId,
+                        sortName: sortValues["sortBy"],
+                        sortDir: sortValues["sortOrder"]
+                    });
+                },
+                processResponse: function(paginator, html) {
+                    var deferred = $.Deferred();
+
+                    collectionEl.dataset.graniteCollectionIsLoading = "true";
+
+                    extractItems(html).then(function(result) {
+                        var itemEls = result.items;
+
+                        performSelection = $.Deferred();
+                        appendItems(state, collection, state.config, itemEls, performSelection.promise());
+
+                        var hasMore = result.hasMore;
+                        if (hasMore === undefined) {
+                            hasMore = itemEls.length >= paginator.limit;
+                        }
+
+                        collectionEl.dataset.graniteCollectionIsLoading = "false";
+
+                        deferred.resolve({
+                            length: itemEls.length,
+                            hasNext: hasMore
+                        });
+                    });
+
+                    return deferred.promise();
+                },
+                onNewPage: function() {
+                    collection.trigger("foundation-collection-newpage");
+                    trackEvent("newpage", collection, state.config);
+
+                    performSelection.resolve();
+                }
+            });
+
+            var offset = collection.find(".foundation-collection-item").length;
+
+            // hasMore is true by default, hence we need to check using "false"
+            var hasMore = collectionEl.dataset.foundationLayoutTableHasmore !== "false";
+
+            // layout is forced to avoid loading of second page
+            collectionEl.resetLayout(true);
+            state.paginator.start(offset, hasMore, false, 500);
+
+            var LazyLoader = $(window).adaptTo("foundation-collection-lazyloader");
+
+            state.lazyLoader = new LazyLoader({
+                scrollSrc: scrollContainer[0],
+                getItems: function() {
+                    return collectionEl.items.getAll();
+                },
+                load: function(lazyLoader, config) {
+                    var sortAPI = collection.adaptTo("foundation-collection-sort");
+                    var sortValues = sortAPI.getSortValues();
+                    var url = URITemplate.expand(src, {
+                        offset: config.offset,
+                        limit: config.limit,
+                        size: config.size,
+                        id: collectionEl.dataset.foundationCollectionId,
+                        sortName: sortValues["sortBy"],
+                        sortDir: sortValues["sortOrder"]
+                    });
+
+                    return $.ajax(url)
+                        .then(function(html) {
+                            return extractItems(html);
+                        })
+                        .then(function(result) {
+                            return result.items;
+                        });
+                },
+                onReplace: function() {
+                    convertRow(collection);
+                    collection.trigger("foundation-contentloaded");
+                },
+                setupListeners: function(lazyLoader, perform) {
+                    collection.on("foundation-collection-navigate", perform);
+                    collection.on("coral-table:columnsort", perform);
+
+                    return function() {
+                        collection.off("foundation-collection-navigate", perform);
+                        collection.off("coral-table:columnsort", perform);
+                    };
+                }
+            });
+
+            state.lazyLoader.start();
+        };
+
+        var scrollContainer = collection.children("[coral-table-scroll]");
+
+        collectionEl.scrollContainer = scrollContainer[0];
+
+        if (scrollContainer.length) {
+            f(scrollContainer);
+        } else {
+            requestAnimationFrame(function() {
+                f(collection.children("[coral-table-scroll]"));
+            });
+        }
+
+        return function() {
+            if (state.paginator) {
+                state.paginator.destroy();
+            }
+            if (state.lazyLoader) {
+                state.lazyLoader.destroy();
+            }
+        };
+    }
+
+    /**
+     * @param {String} html
+     */
+    function extractItems(html) {
+        var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+        return parser.parse(html).then(function(fragment) {
+            var el = $(fragment).children();
+
+            if (!el.hasClass("foundation-collection")) {
+                return;
+            }
+
+            var items = el.find(".foundation-collection-item").toArray();
+
+            var hasMore = el[0].dataset.foundationLayoutTableHasmore;
+            if (hasMore === "true") {
+                hasMore = true;
+            } else if (hasMore === "false") {
+                hasMore = false;
+            }
+
+            return {
+                items: items,
+                hasMore: hasMore
+            };
+        });
+    }
+
+    /**
+     * @param {State} state
+     * @param {JQuery} collection
+     * @param {Config} config
+     * @param {Array<HTMLElement>} itemEls
+     * @param {JQueryPromise} [performSelection]
+     */
+    function appendItems(state, collection, config, itemEls, performSelection) {
+        collection.find("tbody").append(itemEls);
+        // let coral mutation observer execute its code before selecting items
+        // else it will trigger coral-table:change event for each item
+        // run this code in microtask queue
+        Promise.resolve().then(function() {
+            // Automatically select all the new items when in selectall mode
+            if (itemEls.length && collection[0].dataset.foundationSelectionsSelectallMode === "true") {
+                itemEls.forEach(function(itemEl) {
+                    if (!itemEl.classList.contains("is-lazyLoaded") && !itemEl.classList.contains("is-pending")) {
+                        // Silently select the item to prevent calling our own change handler
+                        itemEl.set("selected", true, true);
+                        itemEl.classList.add("foundation-selections-item");
+                    }
+                });
+
+                var lazyLoaderPromise = $.when();
+                if (state.lazyLoader) {
+                    lazyLoaderPromise = state.lazyLoader.loadItems(itemEls).then(function(loadedItemEls) {
+                        var deferred = $.Deferred();
+
+                        // let coral mutation observer execute its code before selecting items
+                        // else it will trigger coral-table:change event for each item
+                        // run this code in microtask queue
+                        Promise.resolve().then(function() {
+                            convertRow(collection);
+                            alignColumnCells(collection);
+                            detectVariant(collection);
+
+                            loadedItemEls.forEach(function(itemEl) {
+                                // Silently select the item to prevent calling our own change handler
+                                itemEl.set("selected", true, true);
+                                itemEl.classList.add("foundation-selections-item");
+                            });
+                            deferred.resolve();
+                        });
+
+                        return deferred.promise();
+                    });
+                }
+
+                $.when(lazyLoaderPromise, performSelection).then(function() {
+                    collection.trigger("foundation-selections-change");
+                    trackEvent("change", collection, config, null, { method: "append" });
+                });
+            }
+
+            convertRow(collection);
+            alignColumnCells(collection);
+            detectVariant(collection);
+            collection.trigger("foundation-contentloaded");
+        });
+    }
+
+    /**
+     * @param {State} state of collection element
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleNavigation(state) {
+        var collection = state.collection;
+
+        var navigate = function(itemEl) {
+            collection.adaptTo("foundation-collection-item-action").execute(itemEl);
+        };
+
+        var f = function(e) {
+            // Clicking the item means navigate.
+
+            var item = $(e.target).closest("[coral-table-rowselect], button, a, .foundation-collection-item");
+
+            if (item.hasClass("foundation-layout-table-cellwrapper")) {
+                if (e.which === 1 && !e.metaKey && !e.shiftKey && !e.altKey) {
+                    e.preventDefault();
+                    navigate(item.closest(".foundation-collection-item")[0]);
+                }
+                return;
+            }
+
+            if (item.hasClass("foundation-collection-item")) {
+                e.preventDefault();
+                navigate(item[0]);
+            }
+        };
+
+        collection.on("click", ".foundation-collection-item", f);
+
+        return function() {
+            collection.off("click", ".foundation-collection-item", f);
+        };
+    }
+
+    /**
+     * @param {State} state of collection element
+     * @returns {Function} callback function which removes the added event handler
+     */
+    function handleOrdering(state) {
+        var collection = state.collection;
+
+        var f = function(e) {
+            var detail = e.originalEvent.detail;
+            var row = detail.row;
+            var before = detail.before;
+            var oldBefore = detail.oldBefore;
+
+            var action = state.config.rowReorderAction;
+
+            if (!action) {
+                return;
+            }
+
+            var beforeId = before ? before.dataset.foundationCollectionItemId : undefined;
+            var beforeName = beforeId ? beforeId.substring(beforeId.lastIndexOf("/") + 1) : undefined;
+
+            var rawURL = URITemplate.expand(action, {
+                item: row.dataset.foundationCollectionItemId,
+                before: beforeId,
+                beforeName: beforeName
+            });
+
+            var url = rawURL;
+            var data;
+
+            var index = rawURL.indexOf("?");
+            if (index >= 0) {
+                url = rawURL.substring(0, index);
+                data = rawURL.substring(index + 1);
+            }
+
+            trackEvent("roworder", collection, state.config, null, { before: beforeId });
+
+            var ui = $(window).adaptTo("foundation-ui");
+
+            ui.wait();
+            $.ajax({
+                url: url,
+                method: "POST",
+                data: data
+            }).always(function() {
+                ui.clearWait();
+                collection.trigger("foundation-collection-reload");
+                trackEvent("reload", collection, state.config);
+            }).fail(function() {
+                var title = Granite.I18n.get("Error");
+                var message = Granite.I18n.get("Fail to reorder.");
+
+                ui.alert(title, message, "error");
+
+                if (oldBefore) {
+                    $(row).insertBefore(oldBefore);
+                } else {
+                    row.parentElement.appendChild(row);
+                }
+            });
+        };
+
+        collection.on("coral-table:roworder", f);
+
+        return function() {
+            collection.off("coral-table:roworder", f);
+        };
+    }
+
+    /**
+     * Temporary solution to text-align cells content based on their column alignment property.
+     * This is done because Coral.Table removed its feature "alignment".
+     *
+     * @param {JQuery} collection
+     */
+    function alignColumnCells(collection) {
+        collection.find("col[is=coral-table-column]").each(function(i, column) {
+            var index = i + 1;
+            var columnAlignment = column.getAttribute("alignment");
+
+            collection
+                // eslint-disable-next-line max-len
+                .find("th[is=coral-table-headercell]:nth-child(" + index + "), td[is=coral-table-cell]:nth-child(" + index + ")")
+                .each(function() {
+                    var alignment = this.getAttribute("alignment");
+                    // Default alignment for cells is "column"
+                    if (!alignment || alignment === "column") {
+                        this.setAttribute("alignment", columnAlignment);
+                    }
+                });
+        });
+    }
+
+    /**
+     * Temporary solution to detect and set the table variant automatically. This used to be set independently for each
+     * row before the feature was removed from Coral.Table.
+     *
+     * @param {JQuery} collection
+     */
+    function detectVariant(collection) {
+        if (collection.find("td[is=coral-table-cell][coral-table-rowselect]").length) {
+            collection.attr("variant", "list");
+        }
+    }
+
+    /**
+     * Temporary solution to make wrap the title cell in a <a>.
+     * This is done so that the user can leverage the native <a> behaviour,
+     * such as opening the item in a new browser tab.
+     *
+     * @param {JQuery} collection
+     */
+    function convertRow(collection) {
+        /** @type {HTMLElement} */
+        var titleEl = document.querySelector(".granite-collection-pagetitle");
+
+        collection.find("tr.foundation-collection-navigator").each(function() {
+            var navigator = $(this);
+
+            // Assume the first non select cell is a title cell.
+            navigator.children("td:not([coral-table-rowselect]):not(:has([coral-table-rowselect]))").first().wrapInner(
+                function() {
+                    var td = $(this);
+
+                    if (td.find("a").length) {
+                        return;
+                    }
+
+                    var el = document.createElement("a");
+                    el.className = "foundation-layout-table-cellwrapper";
+
+                    var href = navigator[0].dataset.foundationCollectionNavigatorHref;
+
+                    if (href) {
+                        el.target = navigator[0].dataset.foundationCollectionNavigatorTarget;
+                    } else {
+                        if (!titleEl) {
+                            return;
+                        }
+                        if (!collection.is(titleEl.dataset.graniteCollectionPagetitleTarget)) {
+                            return;
+                        }
+                        href = URITemplate.expand(titleEl.dataset.graniteCollectionPagetitleSrc, {
+                            id: navigator.closest(".foundation-collection-item")[0].dataset.foundationCollectionItemId
+                        });
+                    }
+
+                    el.href = href;
+
+                    return $(el);
+                });
+        });
+    }
+
+    /**
+     * Used to track the event performed by user.
+     * This function tracks interactions with table layout
+     * OMEGA Implementation
+     *
+     * @param {String} trackAction action performed by user
+     * @param {JQuery} collection table collection
+     * @param {Config} config table configuration
+     * @param {HTMLElement} collectionItem table child item which user
+     * @param {Object} attributes optional extra information that needs to be sent
+     */
+    function trackEvent(trackAction, collection, config, collectionItem, attributes) {
+        var trackType = "table";
+        var trackElement = config.trackingElement;
+
+        if (trackAction === "change") {
+            trackType = "table-row";
+        } else if (trackAction === "roworder") {
+            trackType = "table-row";
+        } else if (trackAction === "sort") {
+            trackType = "table-column";
+            trackElement = attributes.sortBy;
+        }
+
+        var trackData = {
+            element: trackElement || "No element defined",
+            type: trackType,
+            action: trackAction,
+            widget: {
+                name: config.trackingElement || config.name || "foundation-layout-table",
+                type: "table"
+            },
+            feature: config.trackingFeature || "No feature defined",
+            attributes: attributes || {}
+        };
+
+        $(window).adaptTo("foundation-tracker").trackEvent(trackData);
+    }
+
+    /**
+     * provides sortOrder value from given table column direction
+     *
+     * @param {String} direction sortDirection of table column
+     * @returns {String} sortOrder value
+     */
+    function getSortOrderValueFromDirection(direction) {
+        switch (direction) {
+            case Coral.Table.Column.sortableDirection.DESCENDING:
+                return "desc";
+            case Coral.Table.Column.sortableDirection.ASCENDING:
+                return "asc";
+            case Coral.Table.Column.sortableDirection.DEFAULT:
+                return null;
+        }
+    }
+
+    /**
+     * provides column direction from given sort value
+     *
+     * @param {String} sort order value
+     * @returns {String} direction table column direction
+     */
+    function getColumnSortDirectionFromSortOrder(sortOrder) {
+        switch (sortOrder) {
+            case "desc":
+                return Coral.Table.Column.sortableDirection.DESCENDING;
+            case "asc":
+                return Coral.Table.Column.sortableDirection.ASCENDING;
+            case "default":
+            case null:
+                return Coral.Table.Column.sortableDirection.DEFAULT;
+        }
+    }
+
+    /**
+     * Sort the collection based on passed on sortConfig
+     *
+     * @param {State} state of collection element
+     * @param {SortConfig} sortConfig sorting configuration
+     * @param {Boolean} true, if all items are loaded and use coral sorting mechanism to sort.
+     * @returns {JQueryPromise} jQuery promise object, resolves when sorting completes
+     */
+    function performSort(state, sortConfig, clientSide) {
+        var collectionEl = state.collectionEl;
+        var collection = state.collection;
+        var lastRequest;
+
+        var sortBy = sortConfig.sortBy;
+        var sortOrder = sortConfig.sortOrder;
+
+        if (clientSide) {
+            var direction = getColumnSortDirectionFromSortOrder(sortOrder);
+
+            var columnSelector = "colgroup > col[is='coral-table-column']" +
+                "[data-foundation-layout-table-column-name='" + sortBy + "']";
+            var columnEl = collectionEl.querySelector(columnSelector);
+
+            if (!columnEl || !document.body.contains(columnEl) || columnEl.sortableDirection === direction) {
+                return $.Deferred().reject();
+            }
+            columnEl.sortableDirection = direction;
+
+            return $.Deferred().resolve();
+        } else {
+            var paginator = state.paginator;
+            var src = collectionEl.dataset.foundationCollectionSrc;
+            var ui = $(window).adaptTo("foundation-ui");
+
+            var url = URITemplate.expand(src, {
+                offset: 0,
+                limit: paginator.limit,
+                size: paginator.size,
+                id: collectionEl.dataset.foundationCollectionId,
+                sortName: sortBy,
+                sortDir: sortOrder
+            });
+
+            lastRequest && lastRequest.abort();
+            lastRequest = $.ajax({
+                url: url,
+                cache: false
+            });
+
+            ui.wait();
+
+            trackEvent("sort", collection, state.config, null, { sortBy: sortBy, sortOrder: sortOrder });
+
+            return lastRequest.then(function(html) {
+                extractItems(html).then(function(result) {
+                    var items = result.items;
+                    var collectionAPI = collection.adaptTo("foundation-collection");
+                    var hasMore = result.hasMore;
+
+                    collectionAPI.clear();
+                    collectionAPI.append(items);
+
+                    if (hasMore === undefined) {
+                        hasMore = items.length >= paginator.limit;
+                    }
+                    collectionEl.resetLayout(true);
+                    paginator.restart(items.length, hasMore);
+                });
+            }, function(request, status) {
+                if (status !== "abort") {
+                    var title = Granite.I18n.get("Error");
+                    var message = Granite.I18n.get("Fail to load data.");
+                    ui.alert(title, message, "error");
+                }
+            }).always(function() {
+                ui.clearWait();
+            });
+        }
+    }
+
+    /**
+     * Sync column direction w.r.t sort order
+     *
+     * @param {HTMLElement} collectionEl collection element whose column needs to be synced
+     * @param {String} columnName column name
+     * @param {String} sortOrder direction of column
+     */
+    function syncColumnDirectionWithSortOrder(collectionEl, columnName, sortOrder) {
+        var direction = getColumnSortDirectionFromSortOrder(sortOrder);
+
+        var columnSelector = "colgroup > col[is='coral-table-column']" +
+            "[data-foundation-layout-table-column-name='" + columnName + "']";
+        var columnEl = collectionEl.querySelector(columnSelector);
+
+        if (!columnEl || !document.body.contains(columnEl) || columnEl.sortableDirection === direction) {
+            return;
+        }
+        var sortableType = columnEl.sortableType;
+        columnEl.sortableType = "custom";
+        columnEl.sortableDirection = direction;
+        columnEl.sortableType = sortableType;
+    }
+
+    /**
+     * checks whether all collections items needs to selected.
+     *
+     * @param {HTMLElement} collectionEl element of collection
+     * @returns {Boolean} true if, all collections items needs to selected.
+     *
+    function isSelectAllMode(collectionEl) {
+        return collectionEl.dataset.foundationSelectionsSelectallMode === "true";
+    } */
+
+    /**
+     * Determines whether all collection items are loaded or not.
+     * This will consider the pagination and lazyloaded items as well,
+     * if collection hasMore items or lazyloaded items, it will return <code>false</code>
+     *
+     * @param {HTMLElement} collectionEl collection element
+     * @returns {Boolean} <code>true</code> if all collection items are loaded
+     */
+    function isAllLoaded(collectionEl) {
+        var collection = $(collectionEl);
+        var collectionAPI = collection.adaptTo("foundation-collection");
+        var pagination = collectionAPI.getPagination();
+
+        if (!pagination) {
+            return true;
+        }
+
+        var items = collection.find(".foundation-collection-item");
+
+        if (items.is(".is-lazyLoaded, .is-pending")) {
+            return false;
+        }
+
+        if (pagination.hasNext === null && pagination.guessTotal !== -1) {
+            return !(pagination.guessTotal > items.length);
+        } else {
+            return pagination.hasNext === false;
+        }
+    }
+
+    /**
+     * loads the corresponding id items into masonry, to reload pass the current layout id.
+     *
+     * @param {State} state of masonry layout
+     * @param {String} id whose items needs to be loaded
+     * @param {Integer} limit number of items needs to loaded. Useful while reloading
+     * @param {Boolean} restoreSelection In case selections needs to be restored
+     * @returns {JQueryPromise<HTMLElement>} jQuery promise object, resolves with new loaded collection
+     */
+    function load(state, id, limit, restoreSelection) {
+        var config = state.config;
+        var collection = state.collection;
+        var collectionEl = state.collectionEl;
+        var src = collectionEl.dataset.foundationCollectionSrc;
+        var size = config.size;
+
+        if (!src) {
+            return $.Deferred().reject().promise();
+        }
+
+        if (!limit) {
+            limit = config && config.limit || 20;
+        }
+
+        var sortValues = collection.adaptTo("foundation-collection-sort").getSortValues();
+
+        var url = URITemplate.expand(src, {
+            offset: 0,
+            limit: limit,
+            size: size,
+            id: id,
+            sortName: sortValues["sortBy"],
+            sortDir: sortValues["sortOrder"]
+        });
+
+        return $.ajax({
+            url: url,
+            cache: false
+        }).then(function(html) {
+            var deferred = $.Deferred();
+
+            var parser = $(window).adaptTo("foundation-util-htmlparser");
+
+            parser.parse(html).then(function(fragment) {
+                var newCollection = $(fragment).children();
+
+                if (!newCollection.hasClass("foundation-collection")) {
+                    deferred.reject(new Error("Invalid content"));
+                    return;
+                }
+
+                if (restoreSelection) {
+                    var selectionIds = collection.find(".foundation-selections-item").map(function() {
+                        return this.dataset.foundationCollectionItemId;
+                    }).toArray();
+
+                    // Temporary solution to restore selection
+                    // without triggering "foundation-selections-change" twice.
+                    newCollection.data(
+                        "foundation-layout-collection-switcher.internal.selectionIds",
+                        selectionIds
+                    );
+                }
+                collection.trigger("foundation-collection-reload");
+                trackEvent("reload", collection, config);
+                newCollection.data("foundation-layout-collection.internal.columnviewLoaded", true);
+                Granite.UI.Foundation.Layouts.cleanAll(collectionEl);
+
+                // TBD to reuse the collection element, instead of creating a new one.
+                newCollection.replaceAll(collection);
+
+                // trigger collection event after Coral upgrade
+                requestAnimationFrame(function() {
+                    newCollection.trigger("foundation-collection-navigate");
+                    trackEvent("navigate", collection, config);
+                });
+
+                newCollection.trigger("foundation-contentloaded");
+
+                if (restoreSelection) {
+                    newCollection.removeData("foundation-layout-collection-switcher.internal.selectionIds");
+                }
+
+                deferred.resolve(newCollection[0]);
+            });
+
+            return deferred.promise();
+        }, function() {
+            var title = Granite.I18n.get("Error");
+            var message = Granite.I18n.get("Fail to load data.");
+
+            var ui = $(window).adaptTo("foundation-ui");
+            ui.alert(title, message, "error");
+        });
+    }
+
+    registry.register("foundation.layouts", {
+        name: "foundation-layout-table",
+        doLayout: function(el, cfg) {
+            var collection = $(el);
+
+            /** @type {Config} */
+            var config = cfg;
+
+            // foundation-layout-table is exclusive to manage the layout of foundation-collection only
+            if (!collection.hasClass("foundation-collection")) {
+                return;
+            }
+
+            if (stateMap.has(el)) {
+                return;
+            }
+
+            var state = {
+                collectionEl: el,
+                collection: collection,
+                config: config,
+                stack: [],
+                bulkSelection: false,
+                bulkLoading: false
+            };
+            stateMap.set(el, state);
+
+            // Restore the selections before addListener to avoid listening to coral-table:change event when restoring
+            // Need to use attr here as Coral.Table may not be upgraded yet
+            if (state.collectionEl.hasAttribute("selectable")) {
+                var selectionIds = collection.data("foundation-layout-collection-switcher.internal.selectionIds");
+                if (selectionIds) {
+                    var selections = collection.find(".foundation-collection-item").filter(function() {
+                        return selectionIds.indexOf(this.dataset.foundationCollectionItemId) >= 0;
+                    });
+
+                    selections.each(function() {
+                        $(this).attr("selected", "").addClass("foundation-selections-item");
+                    });
+                }
+            }
+
+            var columns = collection.find("[data-foundation-layout-table-column-name]").toArray();
+            var columnNames = columns.map(function(itemEl) {
+                return itemEl.dataset.foundationLayoutTableColumnName;
+            }).join(",");
+            var hiddenColumnNames = columns
+                .filter(function(itemEl) {
+                    return itemEl.hidden;
+                })
+                .map(function(itemEl) {
+                    return itemEl.dataset.foundationLayoutTableColumnName;
+                })
+                .join(",");
+            trackEvent("init", collection, config, null, { columns: columnNames, hiddenColumns: hiddenColumnNames });
+
+            state.stack.push(handleMode(state));
+            state.stack.push(handleSelection(state));
+            state.stack.push(handleSorting(state));
+            state.stack.push(handlePagination(state));
+            state.stack.push(handleNavigation(state));
+            state.stack.push(handleOrdering(state));
+
+            convertRow(collection);
+            detectVariant(collection);
+            alignColumnCells(collection);
+
+            requestAnimationFrame(function() {
+                // trigger collection event after Coral upgrade
+                changeMode(collection, true);
+                collection.trigger("foundation-collection-newpage");
+                trackEvent("newpage", collection, config);
+                collection.trigger("foundation-selections-change");
+                trackEvent("change", collection, config, null, { method: "init" });
+                collection.trigger("foundation-collection-sort:changed");
+            });
+        },
+
+        /*
+            clear the items of list view
+        */
+        clearItems: function(el) {
+            el.items.clear();
+        },
+
+        clean: function(el, config) {
+            var state = stateMap.get(el);
+
+            if (state) {
+                stateMap.delete(el);
+
+                Granite.UI.Foundation.Utils.everyReverse(state.stack, function(v) {
+                    if (v) {
+                        v();
+                    }
+                    return true;
+                });
+            }
+
+            Granite.UI.Foundation.Layouts.clean(el);
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-collection",
+        selector: ".foundation-layout-table.foundation-collection",
+        adapter: function(el) {
+            var state = stateMap.get(el);
+            var collection = state.collection;
+            var collectionEl = state.collectionEl;
+            var config = state.config;
+
+            return {
+                append: function(items) {
+                    appendItems(state, collection, config, items);
+                },
+                clear: function() {
+                    collection.find(".foundation-collection-item").remove();
+                },
+                getPagination: function() {
+                    var paginator = state.paginator;
+
+                    if (!paginator) {
+                        return null;
+                    }
+
+                    var guessTotal = parseInt(collection.attr("data-foundation-layout-table-guesstotal") || "-1", 10);
+
+                    var hasNext;
+                    if (guessTotal === -1) {
+                        hasNext = paginator.hasNext;
+                    } else if (paginator.offset >= guessTotal) {
+                        hasNext = paginator.hasNext;
+                    } else {
+                        hasNext = null;
+                    }
+
+                    return {
+                        offset: paginator.offset,
+                        limit: paginator.limit,
+                        guessTotal: guessTotal === -1 ? guessTotal : Math.max(paginator.offset, guessTotal),
+                        hasNext: hasNext
+                    };
+                },
+                isAllLoaded: function() {
+                    return isAllLoaded(el);
+                },
+                load: function(id) {
+                    return load(state, id);
+                },
+                reload: function() {
+                    var limit;
+
+                    var pagination = this.getPagination();
+                    if (pagination) {
+                        limit = pagination.offset;
+                    }
+                    return load(state, collectionEl.dataset.foundationCollectionId, limit, true);
+                }
+            };
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-collection-meta",
+        selector: ".foundation-layout-table.foundation-collection",
+        adapter: function(el) {
+            var collection = $(el);
+            var meta = collection.find("> caption > .foundation-collection-meta");
+            var metaEl = meta[0];
+
+            if (!metaEl) {
+                return null;
+            }
+
+            return {
+                getElement: function() {
+                    return metaEl;
+                },
+                getTitle: function() {
+                    return metaEl.dataset.foundationCollectionMetaTitle;
+                },
+                getThumbnail: function() {
+                    return meta.children(".foundation-collection-meta-thumbnail")[0];
+                },
+                isFolder: function() {
+                    return metaEl.dataset.foundationCollectionMetaFolder === "true";
+                },
+                getRelationship: function() {
+                    return metaEl.dataset.foundationCollectionMetaRel;
+                }
+            };
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-selections",
+        selector: ".foundation-layout-table.foundation-collection",
+        adapter: function(el) {
+            var state = stateMap.get(el);
+            var collection = state.collection;
+            var collectionEl = state.collectionEl;
+            var config = state.config;
+
+            return {
+                count: function() {
+                    if (collectionEl.dataset.foundationSelectionsSelectallMode === "true") {
+                        var collectionAPI = collection.adaptTo("foundation-collection");
+                        var paginationAPI = collectionAPI.getPagination();
+                        if (paginationAPI && paginationAPI.guessTotal !== -1) {
+                            // only subtract those items which are not selectable items
+                            var deselectedItemsCount =
+                                collection.find(".foundation-collection-item:not(.foundation-selections-item)").length;
+                            return paginationAPI.guessTotal - deselectedItemsCount;
+                        }
+                    }
+                    return collection.find(".foundation-selections-item").length;
+                },
+
+                selectAll: function(suppressEvent) {
+                    state.bulkSelection = true;
+
+                    var prevSelections = collection.find(".foundation-selections-item");
+
+                    var notSelected = collection
+                        .find(".foundation-collection-item:not(.foundation-selections-item)" +
+                            ":not(.is-lazyLoaded):not(.is-pending)").each(function(index) {
+                            // Select silently all the items but the first to prevent triggering our own change handler
+                            if (index > 0) {
+                                this.set("selected", true, true);
+                            }
+                        });
+                    var selections = prevSelections.add(notSelected);
+
+                    var placeholders = collection
+                        .find(".foundation-collection-item.is-lazyLoaded,.foundation-collection-item.is-pending");
+
+                    if (placeholders.length) {
+                        // `ui.wait()` cannot be used here.
+                        // Lazy loading a large number of items will block the UI thread, freezing the wait animation.
+                        // So, just use a plain back drop without animation.
+                        var mask = $(document.createElement("div"))
+                            .addClass("foundation-ui-mask")
+                            .append('<coral-wait size="L" centered></coral-wait>');
+
+                        mask.appendTo(document.body);
+
+                        state.lazyLoader.loadItems(placeholders.toArray()).then(function(loadedItemEls) {
+                            Promise.resolve().then(function() {
+                                loadedItemEls.forEach(function(itemEl) {
+                                    // Select silently all the items to prevent triggering our own change handler
+                                    itemEl.set("selected", true, true);
+                                    itemEl.classList.add("foundation-selections-item");
+                                });
+                                // Then select the first element, but this time do trigger the other events.
+                                notSelected.first().prop("selected", true);
+                                state.bulkSelection = false;
+
+                                changeMode(collection, false, collection.find(".foundation-selections-item"),
+                                    prevSelections);
+
+                                if (!suppressEvent) {
+                                    collection.trigger("foundation-selections-change");
+                                    trackEvent("change", collection, config, null, { method: "selectAll" });
+                                }
+
+                                mask.detach();
+                            });
+                        });
+                    } else {
+                        // then select the first element, but this time do trigger the other events.
+                        notSelected.first().prop("selected", true);
+                        state.bulkSelection = false;
+
+                        changeMode(collection, false, selections, prevSelections);
+
+                        if (!suppressEvent) {
+                            collection.trigger("foundation-selections-change");
+                            trackEvent("change", collection, config, null, { method: "selectAll" });
+                        }
+                    }
+                },
+
+                isAllSelected: function() {
+                    var isSelectAllMode = collectionEl.dataset.foundationSelectionsSelectallMode === "true";
+                    var collectionAPI = collection.adaptTo("foundation-collection");
+                    var paginationAPI = collectionAPI.getPagination();
+                    var hasItemsToLoad = paginationAPI ? paginationAPI.hasNext : false;
+                    var itemsCount = collection.find(".foundation-collection-item").length;
+                    var selectedItemsCount = collection.find(".foundation-selections-item").length;
+                    if (itemsCount > 0) {
+                        // when everything loaded in the UI is selected
+                        if (itemsCount === selectedItemsCount) {
+                            // in select all mode everything is or will be selected
+                            return isSelectAllMode ? true : !hasItemsToLoad;
+                        }
+                    }
+                    return false;
+                },
+
+                clear: function(suppressEvent) {
+                    state.bulkSelection = true;
+
+                    var prevSelections = collection.find(".foundation-selections-item").each(function(index) {
+                        // deselect all the elements but the first,
+                        // but mark them as not selected silently, without triggering any other events
+                        if (index > 0) {
+                            this.set("selected", false, true);
+                        }
+                    });
+
+                    // then deselect the first element, but this time do trigger the other events.
+                    prevSelections.first().prop("selected", false);
+
+                    state.bulkSelection = false;
+
+                    changeMode(collection, false, $(), prevSelections);
+
+                    if (!suppressEvent) {
+                        collection.trigger("foundation-selections-change");
+                        trackEvent("change", collection, config, null, { method: "selectAll" });
+                    }
+                },
+
+                select: function(el) {
+                    var item = $(el);
+
+                    if (!item.hasClass("foundation-collection-item")) {
+                        return;
+                    }
+
+                    el.selected = true;
+                },
+
+                deselect: function(el) {
+                    var item = $(el);
+
+                    if (!item.hasClass("foundation-collection-item")) {
+                        return;
+                    }
+
+                    el.selected = false;
+                }
+            };
+        }
+    });
+
+    registry.register("foundation.adapters", {
+        type: "foundation-collection-sort",
+        selector: ".foundation-layout-table.foundation-collection",
+        adapter: function(collectionEl) {
+            var collection = $(collectionEl);
+            var state = stateMap.get(collectionEl);
+
+            return {
+                isSorted: function(sortBy, sortOrder) {
+                    var currentSortValues = this.getSortValues();
+                    if (currentSortValues["sortBy"] === sortBy &&
+                        currentSortValues["sortOrder"] === sortOrder) {
+                        return true;
+                    }
+                    return false;
+                },
+                getSortValues: function() {
+                    return {
+                        sortBy: collectionEl.dataset.foundationCollectionSortby || null,
+                        sortOrder: collectionEl.dataset.foundationCollectionSortorder || null
+                    };
+                },
+                doSort: function(sortBy, sortOrder, columnName) {
+                    columnName = !columnName ? sortBy : columnName;
+
+                    if (!sortBy || !sortOrder) {
+                        sortBy = sortOrder = null;
+                    }
+
+                    if (!this.isSorted(sortBy, sortOrder) && !(state.config.sortMode !== "remote")) {
+                        if (sortBy === null && sortOrder === null) {
+                            delete collectionEl.dataset.foundationCollectionSortby;
+                            delete collectionEl.dataset.foundationCollectionSortorder;
+                        } else {
+                            collectionEl.dataset.foundationCollectionSortby = sortBy;
+                            collectionEl.dataset.foundationCollectionSortorder = sortOrder;
+                        }
+
+                        // var paginator = state.paginator;
+                        var sortConfig = {
+                            sortBy: sortBy,
+                            sortOrder: sortOrder
+                        };
+
+                        var beforeEvent = $.Event("foundation-collection-sort:beforeChange", {
+                            sortName: sortBy,
+                            sortDir: sortOrder
+                        });
+
+                        collection.trigger(beforeEvent);
+
+                        // eslint-disable-next-line max-len
+                        performSort(state, sortConfig, false /* !paginator.hasNext && !hasLazyOrPendingItems(collection) */)
+                            .fail(function() {
+                                // preventative check.
+                            }).then(function() {
+                                collection.trigger("foundation-collection-sort:changed");
+                            });
+                        syncColumnDirectionWithSortOrder(collectionEl, columnName, sortOrder);
+                        return true;
+                    }
+                    return false;
+                }
+            };
+        }
+    });
+})(window, document, Granite, Granite.$, Granite.URITemplate);

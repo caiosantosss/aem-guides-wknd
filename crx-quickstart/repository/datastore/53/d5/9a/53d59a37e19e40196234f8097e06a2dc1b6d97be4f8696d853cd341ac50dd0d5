@@ -1,0 +1,675 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (window, document, Granite, $) {
+    "use strict";
+
+    //DOM
+	var ASSET_LIST_ID = '#set-assetlist',
+        ASSET_PREVIEW_ID = '#set-assetpreview',
+        ASSET_ADD_BTN = '.set-addasset',
+        ASSET_DEL_BTN = '#set-deleteasset',
+        DM_SETUP_INFO = '.dm-setup-info',
+        ASSET_REMOVE_SWATCH = '#set-removeswatch',
+        ASSET_TAB = 'coral-tab[icon="image"]',
+        ASSET_ERR_DIALOG = '#set-invalid-dialog',
+        ASSET_ERR_LIST  = '#set-invalid-assetlist',
+        ASSET_ERR_MSG = '#set-invalid-assetmsg',
+        ASSET_SORT_BTN = '#set-assetlist-sort';
+
+    //Key
+	var ASSET_TYPE_KEY = 'asset-type',
+        ASSET_PATH_KEY = 'asset-path',
+        ASSET_JCR_PATH_KEY = 'assetJcrpath',
+        ASSET_NAME_KEY = 'asset-name';
+
+    //Paths
+    var AUTHOR_IS_ROOT = Granite.HTTP.externalize('/is/image');
+
+    //events
+    var EVENT_LAUNCH_PICKER = 'dm-launch-picker',
+        EVENT_PICK_ASSET = 'dm-asset-picked',
+        EVENT_INVALID_ASSET = 'dm-invalid-asset',
+        EVENT_ERROR_MSG = 'dm-set-error-msg';
+
+    //matching editor set type to allow member type
+    var SET_TYPE_MIMETYPE = {
+        'imageset': ['image'],
+        'spinset': ['image'],
+        'mixedmediaset': ['image', 'video', 'spinset', 'imageset']
+    }
+
+    var wait;
+    //Sorting icons
+    var SORT_ICON = {
+        'default': 'none',
+        'asc': 'asc',
+        'desc': 'desc'
+    }
+
+    var selectedItem = 0,
+        enabledAutoSort = false, //enable/disable auto sort - enable only for new set
+        justPickAsset = false, // only do auto sort when new asset is added
+        skipAutoSort = false; //skip auto sort after sort already called
+
+    $(document).one('foundation-contentloaded', function() {
+        enableResetSwatch(false);
+        enableDelete(false);
+        $(document).on('click', ASSET_ADD_BTN, addAssets);
+        $(document).on('click', ASSET_REMOVE_SWATCH, removeSwatch);
+        $(document).on('click', ASSET_DEL_BTN, deleteAsset);
+        $(document).on(EVENT_INVALID_ASSET, showAssetPickerError);
+        $(document).on('click', ASSET_SORT_BTN, function() {
+            sortAssets(false);
+        });
+    });
+
+    $(document).one($.s7dm.datactl.event.DATA_LOADED, function(){
+        var assetType = $(DM_SETUP_INFO).data(ASSET_TYPE_KEY);
+        assetType = assetType.toLowerCase();
+        var initAssetData = buildSlideData( getAssetList($.s7dm.datactl.data.getItems()),
+                                            $.s7dm.datactl.data.getOrder() );
+        initAssetData['reorder'] = updateOrder;
+        initAssetData['select'] = selectItem;
+        initAssetData['slideLabel'] = 'Asset';
+        //check to enable swatch picker
+        if (enableSwatch(assetType)) {
+        	initAssetData['innerSelect'] = selectSwatch;
+        }
+        initAssetData['assetRoot'] = AUTHOR_IS_ROOT;
+        initAssetData['axis'] = 'y';
+		$(ASSET_LIST_ID).slideController(initAssetData);
+        $('#set-viewtabs').on('coral-tabview:change', switchTab);
+        adjustSortBtn();
+        if ($.s7dm.datactl.data.getItemCount() === 0) {
+            enabledAutoSort = true; //only new set gets auto-sort
+        }
+
+    });
+
+    $(document).on($.s7dm.datactl.event.DATA_CHANGED, function(){
+        var modifiedData = buildSlideData( getAssetList($.s7dm.datactl.data.getItems()),
+                                            $.s7dm.datactl.data.getOrder() );
+        //rebuild slide controller with new data
+		$(ASSET_LIST_ID).slideController(modifiedData);
+        //only enable delete when there is asset and in asset tab
+        enableDelete(($.s7dm.datactl.data.getOrderedItemsCount() > 0) && $(ASSET_TAB).attr('selected'));
+        //call sort when auto sort is enabled, with some items, and not skip
+        if ( enabledAutoSort
+            && $.s7dm.datactl.data.getOrderedItemsCount() > 0
+            && !skipAutoSort
+            && justPickAsset ) {
+            $(ASSET_SORT_BTN).data('sort-order', 'asc');
+            setTimeout(function() {
+                sortAssets(true);
+            }, 500);//delay auto-sorting
+            justPickAsset = false;
+        }
+        else {
+            skipAutoSort = false;
+            adjustSortBtn();
+        }
+    });
+
+
+	/**
+     * update order to datactl
+     */
+    function updateOrder(e) {
+        skipAutoSort = true; //skip auto sortfor update order
+        $(document).trigger($.s7dm.datactl.event.buildReorder(e.order));
+    }
+
+
+    /**
+     * Event handler for slide selection
+     * @param {Event} e event object for slide selection event
+     *
+     */
+    function selectItem(e){
+        if( $.type(e.selectedItem) !== 'undefined') {
+            selectedItem = e.selectedItem;
+			var item = $.s7dm.datactl.data.getItem(selectedItem);
+            if (item && item.swatch && $(ASSET_TAB).attr('selected')) {
+                //only enable delete when there is asset
+        		enableDelete($.s7dm.datactl.data.getOrderedItemsCount() > 0);
+                enableResetSwatch(true);
+            }
+            else {
+                enableResetSwatch(false);
+            }
+            if (item && $(ASSET_TAB).attr('selected')) {
+            	enableDelete(true);
+            }
+
+        }
+    }
+
+    /**
+     * Build data for slide component
+     * @param {Array} array of asset path
+     * @param {Array} array of asset order
+     * @return {Object} slide data @see slide component for structure
+     */
+    function buildSlideData(assetList, order){
+        var labels = [],
+            thumbs = [];
+
+        for (var i = 0; i < assetList.length; i++) {
+            labels.push(assetList[i] ? extractLabel(assetList[i]) : '');
+            //Create thumbnail for slide component
+            if (assetList[i] && assetList[i].indexOf('/') != 0) {
+                //single image or video
+                thumbs.push('/is/image' + (assetList[i].indexOf('/') != 0 ? '/' : '') + assetList[i] + '?wid=31&hei=31');
+            }
+            else if (assetList[i]) {
+                //set thumb
+                thumbs.push(Granite.HTTP.externalize(assetList[i] + '/jcr:content/renditions/cq5dam.thumbnail.48.48.png'));
+            }
+            else {
+                thumbs.push('');
+            }
+        }
+
+        return { 'assets': thumbs,
+            	 'order': order,
+                 'labels': labels };
+    }
+
+	/**
+     * Get asset list from data items
+     * @param {Array} Array of asset item based on data model in model.js
+     * @return {Array} list of asset path
+     */
+    function getAssetList(items){
+        var assets = [];
+        for (var i = 0; i < items.length; i++) {
+            assets.push(items[i] ? items[i].assetId : null);
+        }
+        return assets;
+    }
+
+    /**
+     * @private
+     * enable reset swatch button
+     * @param {Boolean} enabled true to enable swatch reset
+     */
+    function enableResetSwatch(enabled) {
+        if (enabled) {
+			$(ASSET_REMOVE_SWATCH).show();
+        }
+        else {
+			$(ASSET_REMOVE_SWATCH).hide();
+        }
+    }
+
+    /**
+     * Switch asset tab
+     *
+     */
+    function switchTab(){
+        if ($(ASSET_TAB).attr('selected')){
+			enableResetSwatch(false);
+            enableDelete(false);
+        }
+        else {
+			var item = $.s7dm.datactl.data.getItem(selectedItem);
+            if (item && item.swatch) {
+                enableResetSwatch(true);
+            }
+        	enableDelete($.s7dm.datactl.data.getOrderedItemsCount() > 0);
+        }
+    }
+
+	/**
+     * Enable delete button
+     * @param {Boolean} enabled true to enable button
+     */
+    function enableDelete(enabled){
+        if (enabled) {
+			$(ASSET_DEL_BTN).show();
+        }
+        else {
+			$(ASSET_DEL_BTN).hide();
+        }
+    }
+
+    /**
+     * Delete asset based on current selected item via datactl
+     */
+    function deleteAsset() {
+        var modEvent = $.s7dm.datactl.event.buildModItem(selectedItem);
+        $(document).trigger(modEvent);
+    }
+
+
+    /**
+     * Add assets to launch asset picker
+     */
+	function addAssets() {
+        var assetType = $(DM_SETUP_INFO).data(ASSET_TYPE_KEY);
+        assetType = assetType.toLowerCase();
+        var mimeType = SET_TYPE_MIMETYPE[assetType];
+        wait = new Coral.Wait().set({
+            centered: true,
+            size: "L"
+        });
+        launchAssetPicker(mimeType, 'multiple', processAssets, function(){
+            														showOverlayLoadingSlide(true,wait);
+        															selectAssetTab();
+        														});
+    }
+
+    /**
+     * Pick swatch
+     */
+    function selectSwatch(){
+        // only image can be a swatch and only single pick
+        launchAssetPicker(['image'], 'single', pickSwatch);
+    }
+
+    /**
+     * @private
+     * Asset picker launcher
+     * @param {Array} array of mime type in lower case
+     * @param {String} picker mode, which can be either 'single' or 'multiple'
+     * @param {Function} callback callback function
+     * @param {Funcion} beforeCallback a function to be called before picker processing done
+     */
+    function launchAssetPicker(mimeType, mode, callback, beforeCallback) {
+        $(document).trigger({'type': EVENT_LAUNCH_PICKER,
+                             'mimeType': mimeType,
+                             'mode': mode,
+                             'root': getAssetRoot(),
+                             'callback': callback,
+                             'beforeCallback': beforeCallback});
+    }
+
+    /**
+     * @private
+     * @param {String} path path to get label from
+     * @return {String} label based on path
+     */
+    function extractLabel(path) {
+        var label = '';
+        if (path.length > path.lastIndexOf('/') + 1) {
+            label = path.substring(path.lastIndexOf('/') + 1);
+        }
+        return label;
+    }
+
+
+    /**
+     * @private
+     * Trigger data mod event in datactl to add assets based on data from assset picker
+     * @param {Array} json data from asset picker
+     */
+    function processAssets(json){
+        var parentFolder = window.location.pathname.split(".html")[1];
+        var url = Granite.HTTP.externalize(parentFolder) + ".verify.s7config.match.json";
+        var pathsToCheck = json.map(function (v) {
+            return v.path;
+        });
+        var params = {
+            "paths": pathsToCheck
+        };
+        $.post(url, params).done(function(res){
+
+            if(res == null) {
+                //some failure occurred fail this;
+                _processAssets(json, pathsToCheck);
+            } else {
+                var assetsMatchingS7ConfigOfSet = res.paths;
+                var unmatchedAssets = []
+                for (var i = 0; i < json.length; i++ ){
+                    var isValid = false;
+                    for(var j =0; j < assetsMatchingS7ConfigOfSet.length; j++) {
+                        if(json[i].path == assetsMatchingS7ConfigOfSet[j]) {
+                            isValid = true;
+                        }
+                    }
+                    json[i].valid = isValid;
+                    if(!isValid) {
+                        unmatchedAssets.push(json[i].path);
+                    }
+                }
+                _processAssets(json, unmatchedAssets);
+            }
+        });
+    }
+
+    function _processAssets(json, differentCompanyAssets) {
+        var invalidAssets = [];
+        var duplicatedAsset = [];
+        var validAssets = [];
+        var specialAssets = [];
+        var currentAssetList = getAssetList($.s7dm.datactl.data.getOrderedItems());
+        for ( var i = 0; i < json.length; i++ ){
+            var valid = json[i].valid;
+            if (valid) { //only valid item can be added to prevent non-DM items
+                
+                // check if the asset has comma in the name or path. comma holds special meaning while rendering sets
+                // through imageserver, so we should not allow assets with comma to be added in sets.
+                if (hasSpecialCharacter(json[i].path)) {
+                    specialAssets.push(json[i].path);
+                } else if (!isDuplicated(currentAssetList, json[i].assetId)) {
+                    validAssets.push(json[i]);
+                } else {
+                    //check duplicate
+                    duplicatedAsset.push(json[i].assetId);
+                }
+            }
+            else {
+                invalidAssets.push(json[i].path);
+            }
+        }
+        if (validAssets.length > 0) {
+            var modEvent = null;
+            if (validAssets.length > 1) {
+                //bulk add
+                var newItems = [];
+                for (var i = 0; i < validAssets.length; i++) {
+                    newItems.push($.s7dm.datactl.data.buildItem({'asset': validAssets[i].path, 'assetId': validAssets[i].assetId}));
+                }
+                modEvent = $.s7dm.datactl.event.buildBulkModItems(newItems);
+
+            }
+            else {
+                //single asset add
+                var newItem = $.s7dm.datactl.data.buildItem({'asset': validAssets[0].path, 'assetId': validAssets[0].assetId});
+                modEvent = $.s7dm.datactl.event.buildModItem(-1, newItem);
+            }
+            justPickAsset = true;
+            $(document).trigger(modEvent);
+        }
+
+        if(differentCompanyAssets.length > 0) {
+            $(document).trigger( { 'type': EVENT_INVALID_ASSET,
+                'list': differentCompanyAssets,
+                'errorType': 'differentCompany' });
+        } else if (invalidAssets.length > 0) {
+            $(document).trigger( { 'type': EVENT_INVALID_ASSET,
+                                   'list': invalidAssets,
+                                   'errorType': 'invalid' });
+        } else if (duplicatedAsset.length > 0) {
+            $(document).trigger( { 'type': EVENT_INVALID_ASSET,
+                                   'list': duplicatedAsset,
+                                   'errorType': 'duplicated' });
+        } else if (specialAssets.length > 0) {
+            $(document).trigger( { 'type': EVENT_INVALID_ASSET,
+                                   'list': specialAssets,
+                                   'errorType': 'special' });
+        }
+
+        showOverlayLoadingSlide(false,wait);
+        selectAssetTab();
+    }
+
+    /**
+     * @private
+     * Check if the asset to be added to set contain a comma in its name or path.
+     */
+    function hasSpecialCharacter(assetPath) {
+        return assetPath.includes(",");
+    }
+
+    function showOverlayLoadingSlide(shown,wait){
+        if (shown) {
+            $(ASSET_LIST_ID).append(wait);
+        }
+        else {
+            $(ASSET_LIST_ID).find(wait).remove();
+        }
+    }
+
+
+    /**
+     * @private
+     * Add swatch to the current selected item based on asset picker
+     * @param {Array} json array of asset from picker
+     *
+     */
+    function pickSwatch(json) {
+        //only dm asset can be added as a swatch
+        if (json[0].valid) {
+        	updateSwatch(json[0].path, json[0].assetId);
+        }
+        else {
+            $(document).trigger( { 'type': EVENT_INVALID_ASSET,
+                                   'list': [json[0].path],
+                                   'errorType': 'invalid' });
+
+        }
+    }
+
+    /**
+     * @private
+     * Remove swatch from the current selected item.
+     */
+    function removeSwatch() {
+        updateSwatch(null, null);
+    }
+
+    /**
+     * @private
+     * Trigger data mod event in datactl to update swatch
+     * @param {String} swURL swatch URL or null to remove
+     * @param {String} swId swatch ID
+     */
+    function updateSwatch(swURL, swId) {
+        var currentItem = $.s7dm.datactl.data.getItem(selectedItem);
+        currentItem = $.parseJSON(JSON.stringify(currentItem));
+        currentItem['swatch'] = swURL;
+        currentItem['swatchId'] = swId;
+        var modEvent = $.s7dm.datactl.event.buildModItem(selectedItem, currentItem);
+		$(document).trigger(modEvent);
+    }
+
+
+    function selectAssetTab(){
+        if (!$(ASSET_TAB).attr('selected')) {
+			$(ASSET_TAB).trigger('click');
+        }
+    }
+
+    function isDuplicated(list, url) {
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] == url) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Show asset picker error dialog for duplicated or invalid assets
+     */
+    function showAssetPickerError(e) {
+        var errorMsg = '',
+            errorList = '';
+ 	      if (e.errorType == 'invalid') {
+            errorMsg = Granite.I18n.get('The following selected assets are not Dynamic Media assets and could not be used:');
+        } else if (e.errorType == 'duplicated') { //prevent adding duplicate asset
+            errorMsg = Granite.I18n.get('The following selected assets are already in the set:');
+        } else if (e.errorType == 'special') {
+            errorMsg = Granite.I18n.get('The following selected asset(s) contain comma and could not be used:');
+        } else if (e.errorType == 'differentCompany') {
+            errorMsg = Granite.I18n.get('The following selected asset(s) belong to a different company and could not be used:');
+        }
+
+        if (e.list) {
+            errorList = '<ul>';
+            for(var i = 0; i < e.list.length; i++) {
+                errorList += '<li>' +  e.list[i] + '</li>';
+            }
+            errorList += '</ul>';
+        }
+
+        if (errorMsg != '' && errorList != '') {
+            $(document).trigger( {'type': EVENT_ERROR_MSG,
+                                  'errorTitle': Granite.I18n.get('Selected assets not added'),
+                                  'errorMsg': errorMsg,
+                                  'errorList': errorList});
+        }
+    }
+
+    /**
+     * @private
+     * Sorting assets
+     * If they are not sorted yet, sort will start from ascending order
+     * @param {Boolean} isBackground informs if the reorder is a background operation
+     *          and is being triggered as a rearrangement due to some other user action.
+     */
+    function sortAssets(isBackground){
+        if ($.s7dm.datactl.data.getOrderedItemsCount() <= 1) {
+            return;
+        }
+        var sortOrder = $(ASSET_SORT_BTN).data('sort-order') || 'asc';
+        var items = $.s7dm.datactl.data.getItems();
+        var sortableItems = {};
+        var sortableLabel = [];
+        var newOrder = [];
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != null) {
+                var label = extractLabel(items[i].path);
+                label = label.toLowerCase();
+                if (isExistLabel(sortableLabel, label)) {
+                    label += Date.now();
+                }
+                sortableLabel.push(label);
+                sortableItems[label] = i;
+            }
+        }
+		sortableLabel = sortableLabel.sort();
+        if (sortOrder == 'desc') {
+            sortableLabel = sortableLabel.reverse();
+            $(ASSET_SORT_BTN).data('sort-order', 'asc');
+        }
+        else if (sortOrder == 'asc') {
+            $(ASSET_SORT_BTN).data('sort-order', 'desc');
+        }
+        else {
+            $(ASSET_SORT_BTN).data('sort-order', '');
+        }
+        for (var i = 0; i < sortableLabel.length; i++) {
+            var label = sortableLabel[i];
+            newOrder.push(sortableItems[label]);
+        }
+        skipAutoSort = true; //skip auto sort after sorting is called
+        $(document).trigger($.s7dm.datactl.event.buildReorder(newOrder, isBackground));
+    }
+
+    /**
+     * Check for existing label in the list with different case
+     */
+    function isExistLabel(labels, label){
+        for (var i=0; i < labels.length; i++){
+            if (labels[i] == label) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @private
+     * Adjust sorting button
+     */
+    function adjustSortBtn() {
+        if (isSort('asc')) {
+            $(ASSET_SORT_BTN).data('sort-order', 'asc');
+            $(ASSET_SORT_BTN).attr('order', 'asc');
+        }
+        else if (isSort('desc')) {
+            $(ASSET_SORT_BTN).data('sort-order', 'desc');
+            $(ASSET_SORT_BTN).attr('order', 'desc');
+        }
+        else {
+            $(ASSET_SORT_BTN).data('sort-order', '');
+            $(ASSET_SORT_BTN).attr('order', '');
+        }
+    }
+
+    /**
+     * @private
+     * Check sorting order
+     * @param {String} sortOrder sorting order direction 'asc' or 'desc'
+     * @return {Boolean} true when the current orderedItems match with sorting order.
+     */
+    function isSort(sortOrder){
+        var items = $.s7dm.datactl.data.getOrderedItems();
+        var labels = [],
+            sortedLabels = [];
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != null) {
+                var label = extractLabel(items[i].path);
+                label = label.toLowerCase();
+                labels.push(label);
+                sortedLabels.push(label);
+            }
+        }
+        sortedLabels = sortedLabels.sort();
+        if (sortOrder == 'asc') {
+            sortedLabels = sortedLabels.reverse();
+        }
+        for ( var i=0; i < labels.length; i++) {
+            if (labels[i] != sortedLabels[i]){
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Get asset root for picker
+     * @return root folder for picker
+     */
+    function getAssetRoot(){
+        var assetPath = $(DM_SETUP_INFO).data(ASSET_JCR_PATH_KEY),
+            assetName = $(DM_SETUP_INFO).data(ASSET_NAME_KEY);
+        if (assetPath.indexOf('.remoteset') > 0) {
+            //adjust folder location for remote set
+            var pathParts = assetPath.split('/');
+            assetPath = '';
+            for (var i = 0; i < pathParts.length; i++) {
+                if (pathParts[i].indexOf('.remoteset') > 0) {
+                    break;
+                }
+                if (pathParts[i] != '') {
+                    assetPath += '/' + pathParts[i];
+                }
+            }
+        }
+        if (typeof assetName != 'undefined') {
+            assetPath = assetPath.substring(0, assetPath.length - assetName.length);
+        }
+        return assetPath;
+    }
+
+    /**
+     * @private
+     * @param {String} assetType - asset type to check for enable/disable swatch picker
+     * @return {Boolean} true only new image set OR edit image set for DM OR existing swatch set for DMS7
+     *
+     */
+    function enableSwatch(assetType){
+        //check for path base edit first
+        var isPathEdit = ($(DM_SETUP_INFO).data(ASSET_JCR_PATH_KEY) != $(DM_SETUP_INFO).data(ASSET_PATH_KEY));
+        if (isPathEdit) {
+            return ($.s7dm.datactl.data.getItem(0).swatch != null && assetType == 'imageset');
+        }
+        return (assetType == 'imageset');
+    }
+
+})(window, document, Granite, $);

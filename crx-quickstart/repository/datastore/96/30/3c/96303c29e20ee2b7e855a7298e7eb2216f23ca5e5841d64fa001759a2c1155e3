@@ -1,0 +1,518 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(window, document, Granite, $) {
+    "use strict";
+
+    var updateRequiredSelector  = "[data-update-is-required='true']",
+        reloadRequiredSelector  = "[data-reload-is-required='true']",
+        cardSelector            = "coral-card-info" + updateRequiredSelector,
+        cardReloadSelector      = "coral-card-info" + reloadRequiredSelector,
+        listItemSelector        = ".encodingstatus div" + updateRequiredSelector,
+        listItemReloadSelector  = ".encodingstatus div" + reloadRequiredSelector,
+        configDataRel           = "dam-chunkfileupload",
+        CONST_JSON    			= "json",
+    // value of status property in jcr:content of video asset
+        CONST_STATUS   			= "status",
+        CONST_STATUS_UPLOADING  = "Start uploading",
+        CONST_STATUS_ENCODING   = "Start encoding",
+        CONST_STATUS_ERROR      = "Error",
+        CONST_STATUS_FINISHED 	= "Finished",
+        CONST_STATUS_ERROR_DETAIL_NO_ENCODING = "No Encoding",
+    // value of dam:assetState property in jcr:content of asset processed by transient workflow
+        CONST_DAM_ASSET_STATE   = "dam:assetState",
+        CONST_DAM_ASSET_STATE_PROCESSED = "processed",
+    // indices of views
+        CONST_UI_CARD           = 0,
+        CONST_UI_LIST           = 1,
+    // localized values for displaying status in different views: card, list
+        CONST_LABEL_FINISHED    = [Granite.I18n.get("Encoding Completed"), Granite.I18n.get("Completed")],
+        CONST_LABEL_ERROR       = [Granite.I18n.get("Encoding process failed"), Granite.I18n.get("Process failed")],
+        CONST_LABEL_ERROR_NO_ENCODE =  [Granite.I18n.get("No encodings processed"), Granite.I18n.get("No encodings processed")],
+    // others
+        DATA_UPDATE_IS_REQUIRED = "updateIsRequired",
+        DATA_POLL_INTERVAL_CONF = "uploadstatuspollinterval";
+
+    // Estimated percentage for upload
+    var UPLOAD_PERCENTAGE = 10;
+
+    var intervalPollForStatus   = null;
+    var curFolder               = null;
+    // view type selectors
+    var viewType, // type of view: card, list
+        selector,
+        reloadSelector,
+        getSelector;
+
+    //URL
+    var SINGLE_CARD_URL = '/mnt/overlay/dam/gui/content/s7dam/sets/singleassetcard/card.html';
+
+
+    // we need to avoid to cache this js file
+    $(document).on("foundation-contentloaded", function(){
+        // determine if this is list view or card view and setup the corresponding selector and handler functions
+        determineViewType();
+
+        // default to card
+        var $rel 				= $(selector);
+        var interval			= 5000; //default
+        //var maxPollError 		= 5; 	//TODO: need to change to the config (maybe)
+        var updateAssetList		= [];
+        var $element;
+        var updateIsRequired;
+        var reloadIsRequired;
+        var assetRes;
+
+        // render asset card with initial status
+        updateAssets();
+
+        reloadIsRequired 	= $(reloadSelector);
+
+        if (reloadIsRequired && reloadIsRequired.length > 0) {
+            var timeoutID = setTimeout(function() {
+                var collection;
+                if (viewType === CONST_UI_LIST) {
+                    collection = Granite.UI.Foundation.Adapters.adapt($(".cq-damadmin-admin-childpages.foundation-layout-table.foundation-collection")[0],
+                        "foundation-collection");
+                } else {
+                    collection = Granite.UI.Foundation.Adapters.adapt($(".cq-damadmin-admin-childpages.foundation-layout-masonry.foundation-collection")[0],
+                        "foundation-collection");
+                }
+                if (collection) {
+                    collection.reload();
+                }
+                clearTimeout(timeoutID);
+            }, 10000);  // time should >= the time use in isRecentCreated to optimize reloading.
+        }
+
+
+        // To gather the videos need to get updated
+        for (var i = 0; i < $rel.length; i++){
+            $element = $($rel[i]);
+
+            updateIsRequired 	= $element.data(DATA_UPDATE_IS_REQUIRED);
+            assetRes 			= $element.closest("[data-foundation-collection-item-id]").data("foundationCollectionItemId");
+
+            if(updateIsRequired) { //TODO: only poll for the card that is loaded to UI
+                updateAssetList.push(assetRes);
+            }
+        }
+
+        if (updateAssetList.length > 0) {
+            // To get poll interval conf
+            interval = $(configDataRel).data(DATA_POLL_INTERVAL_CONF);
+            interval = interval === null ? 5000 : interval;
+
+            if(intervalPollForStatus === null){
+                intervalPollForStatus = setInterval(function(){updateEncodingStatus(updateAssetList)}, interval);
+            }
+        }
+    });
+
+    /**
+     * Determine view type: card (default), list and initialize selector and function for calculating selector for an asset *
+     */
+    function determineViewType() {
+
+        if ($("coral-masonry").length > 0) {
+            viewType = CONST_UI_CARD;
+            selector = cardSelector;
+            reloadSelector = cardReloadSelector;
+            getSelector = getCardSelector;
+        } else {
+            viewType = CONST_UI_LIST;
+            selector = listItemSelector;
+            reloadSelector = listItemReloadSelector;
+            getSelector = getListItemSelector;
+        }
+    }
+
+    /**
+     * @param updateAssetList
+     */
+    function updateEncodingStatus(updateAssetList) {
+        var assetRes    = updateAssetList[0];
+        if (assetRes) {
+            curFolder = assetRes.substring(0, assetRes.lastIndexOf("/"));
+
+            // To skip updating if the user moves away from the uploading folder
+            var ASSETS_URL = "assets.html";
+            if ($(location).attr('pathname').split(ASSETS_URL)[1] !== encodeURI(curFolder)) {
+                return;
+            }
+
+            var url = curFolder + ".2." + CONST_JSON + "?_ck=" + Date.now();
+
+            // to get the folder level data from JCR. This includes all the required data needed for the encoded videos
+            var data = getCurrentFolderInfo(url);
+
+            // to process and update the encoded video status
+            processResultAndUpdateStatus(updateAssetList, data);
+        }
+        // to check if all the encoded videos are done
+        isAllFinished(updateAssetList);
+    }
+
+    /**
+     * To retrieve and update the video asset status based on the return folder data
+     * @param updateAssetList Array of assets that need single card update
+     * @param data
+     */
+    function processResultAndUpdateStatus(updateAssetList, data){
+        var JCR_CONTENT                 = "jcr:content";
+        var LIST_THUMBNAIL_RENDITION    = '/jcr:content/renditions/cq5dam.thumbnail.48.48.png';
+        var RESPONSEJSON                = "responseJSON";
+
+        // check if view type has been switched
+        determineViewType();
+
+        // To put the jQuery's Ajax setup in synchronous mode
+        $.ajaxSetup({
+            async:false
+        });
+
+        if (data.hasOwnProperty(RESPONSEJSON)) {
+            var respJson = data[RESPONSEJSON];
+            // loop backward to avoid side-effect array re-indicing after removing assets that have
+            // been processed
+            for (var i = updateAssetList.length - 1; i >= 0; i--){
+                var relativePath = updateAssetList[i];
+                var assetName = relativePath.substring(relativePath.lastIndexOf("/")+1, relativePath.length);
+                if (respJson !== undefined && respJson[assetName] !== undefined) {
+                    var jcrContent = respJson[assetName][JCR_CONTENT];
+                    // status is from non-transient DM Encode Video workflow processing
+                    var status = jcrContent[CONST_STATUS];
+                    // dam:assetState is from transient workflow processing
+                    var damAssetState = jcrContent[CONST_DAM_ASSET_STATE];
+
+                    // use relative path to find unique card info
+                    var $element       = $(getSelector(relativePath));
+
+                    if (status) {
+                        // update status to card element
+                        $element.data(CONST_STATUS, status);
+                        updateSingleAsset($element);
+                    } else if (CONST_DAM_ASSET_STATE_PROCESSED === damAssetState) {
+                        // transient workflow has completed, treat as status === finished
+                        $element.data(CONST_STATUS, CONST_STATUS_FINISHED);
+                        updateSingleAsset($element);
+                    }
+
+                    if ((status && (status === CONST_STATUS_FINISHED || status.indexOf(CONST_STATUS_ERROR) === 0)) ||
+                        (damAssetState && (damAssetState === CONST_DAM_ASSET_STATE_PROCESSED))) {
+                        if ((status && (status === CONST_STATUS_FINISHED)) ||
+                            (damAssetState && (damAssetState === CONST_DAM_ASSET_STATE_PROCESSED))) {
+                            // update video thumbnail in card view
+                            if (viewType === CONST_UI_LIST) {
+                                // update video thumbnail in list view
+                                var thumbnail = $element.closest(".foundation-collection-item")
+                                    .find(".foundation-collection-item-thumbnail");
+                                var thumbnailUrl = relativePath + LIST_THUMBNAIL_RENDITION + "?ch_ck = " + Date.now();
+                                thumbnail.attr("src", Granite.HTTP.externalize(thumbnailUrl));
+                            } else {
+                                // To call the assetcard content component for a composed html file after encoding is done,
+                                // then replace the asset card with the updated html
+                                var url = SINGLE_CARD_URL + relativePath;
+                                $.get(Granite.HTTP.externalize(url), function (res) {
+                                    // escape single quote in asset name
+                                    var original = $("[data-foundation-collection-item-id='" + relativePath.replace(/(')/g, '\\$1') + "']");
+                                    var replacement = $(res).find("coral-masonry-item")
+
+                                    // replace only if both original asset card and single asset card exist
+                                    // if either is not present, the asset should have been deleted externally
+                                    // from a different browser window or by another user.
+                                    if (original.length > 0 && replacement.length > 0) {
+                                        original.replaceWith(replacement);
+
+                                        if (status) {
+                                            // register the play button to use BasicVideoViewer for playback
+                                            var playButtonDiv = replacement.find(".video-playback");
+                                            if (playButtonDiv.length > 0) {
+                                                playButtonDiv.on("click", function(event) {
+                                                    event.preventDefault();
+                                                    event.stopPropagation();
+                                                    $(document).trigger('dm-video-play', [$(event.target)]);
+                                                });
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        // remove asset from update list regardless so it will not keep polling indefinitely
+                        updateAssetList.splice(i, 1);
+
+                        $element.data(DATA_UPDATE_IS_REQUIRED, "false");
+                    }
+                } else {
+                    // remove non-exist assets
+                    updateAssetList.splice(i, 1);
+                }
+            }
+        }
+
+/*
+        // re-adapt masonry to foundation-collection API to
+        // 1) have foundation-layout-masonry-cardwrapper injected
+        // 2) trigger card-banner.jsp to refresh list of assets in workflow - this will help reflect the failed asset
+        // if encoding workflow does not always exit with "Finished" or "Error" status.
+        var collection = Granite.UI.Foundation.Adapters.adapt($(".foundation-layout-masonry.foundation-collection")[0],
+            "foundation-collection");
+        if (collection) {
+            collection.reload();
+        }
+*/
+
+        // To put the jQuery's Ajax setup back to asynchronous mode
+        $.ajaxSetup({
+            async:true
+        });
+    }
+
+    /**
+     * Analyze the video processing status retrieved from the jcr:content node of the asset and format it into
+     * user-friendly format for display on UI
+     * @param status Status to analyze
+     * @return JSON object containing formatted status and other attributes required for UX, null if status is invalid
+     */
+    function formatStatus(status) {
+        var result = null;
+
+        if (status) {
+            result = {};
+
+            if (status === CONST_STATUS_FINISHED) {
+                result.text = CONST_LABEL_FINISHED[viewType];
+                result.icon = "check";
+                result.statusClass = "success"
+            } else if (status.indexOf(CONST_STATUS_ERROR) === 0) {
+                // to check if "status" has detailed info
+                var startIdx        = status.indexOf("[");
+                var endIdx          = status.indexOf("]");
+                // extract status detailed information
+                var detailedInfo    = ((startIdx !== -1 && endIdx !== -1) ? status.substring(startIdx + 1, endIdx) : "");
+
+                // default error message
+                result.text = CONST_LABEL_ERROR[viewType];
+                result.icon = "alert";
+                result.statusClass = "error";
+
+                // provide different error message for "No Encoding" from
+                // either no DMCS setup or no video profile associated to the parent folder.
+                if (detailedInfo !== "") {
+                    result.detailedInfo = detailedInfo;
+                    if (detailedInfo === CONST_STATUS_ERROR_DETAIL_NO_ENCODING) {
+                        result.text = CONST_LABEL_ERROR_NO_ENCODE[viewType];
+                        result.statusClass = "warning";
+                    }
+                }
+            } else {
+                // encoding - % complete
+                var percentage;
+                result.icon = "clock"
+                result.statusClass = "encoding";
+                if (status === CONST_STATUS_UPLOADING) {
+                    percentage = 0;
+                } else if (status === CONST_STATUS_ENCODING) {
+                    // approximate percentage to the estimated percentage for uploading
+                    percentage = UPLOAD_PERCENTAGE;
+                } else if (status.indexOf("% complete") != -1 || status.indexOf("% progress") != -1) {
+                    // adjust encoding percentage with the estimate for upload
+                    var str = status;
+                    var res = str.match(/([0-9]+(\.*[0-9]+)*)\s*%/g);
+                    if (res.length > 0) {
+                        var sPercentage = parseInt(res[0].split("%")[0]);
+                        percentage = Math.floor(sPercentage * (100 - UPLOAD_PERCENTAGE) / 100 + UPLOAD_PERCENTAGE);
+                    }
+                } else if (status.indexOf("% upload") != -1) {
+                    // adjust upload percentage with the estimate for upload
+                    var str = status;
+                    var res = str.match(/([0-9]+(\.*[0-9]+)*)\s*%/g);
+                    if (res.length > 0) {
+                        var sPercentage = parseInt(res[0].split("%")[0]);
+                        percentage = Math.floor(sPercentage * UPLOAD_PERCENTAGE / 100);
+                    }
+                } else {
+                    // unknown status
+                    console.log("Unknown status: " + status);
+                    return null;
+                }
+
+                result.percentage = percentage;
+                result.text = Granite.I18n.get("Processing Video - {0}%", [percentage], "percentage");
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * To call ajax once on the assets' folder info from jcr to get all the assets data needed.
+     * Do not send ajax request for each of video assets, which can cause severe performance problem
+     * @param url
+     * @returns {*}
+     */
+    function getCurrentFolderInfo(url){
+        return $.ajax({
+            "async": false,
+            "type": "GET",
+            "dataType": "json",
+            "url": url,
+            "success": function (result) {
+                return result;
+            },
+            "error": function (jqXHR, textStatus, errorThrown) {
+                //TODO something ... e.g. if the times of fail is acculated to a certain point, it might be a network or server issue.
+                // The interval will stop
+            }
+        });
+
+    }
+
+    /**
+     * To get the asset card selector based on the asset resource
+     * @param assetRes Relative path of the asset
+     * @returns {string}
+     */
+    function getCardSelector(assetRes){
+        // escape single quote in asset name
+        return "[data-foundation-collection-item-id='" + assetRes.replace(/(')/g, '\\$1') + "'] coral-card-info";
+    }
+
+    /**
+     * To get the asset list item selector based on the asset resource
+     * @param assetRes Relative path of the asset
+     * @returns {string}
+     */
+    function getListItemSelector(assetRes) {
+        // escape single quote in asset name
+        return "[data-foundation-collection-item-id='" + assetRes.replace(/(')/g, '\\$1') + "'] .encodingstatus > div";
+    }
+
+    /**
+     * To check if all the video assets are done with encoding. If it is true, refresh the page
+     * @param updateAssetList
+     */
+    function isAllFinished(updateAssetList){
+        //TODO: var failCounter = parseInt($(".assetCardInfo").data("failCounter"));
+        var allFinished = true;
+        var status;
+        for (var i = 0; i < updateAssetList.length; i++){
+            var element = $(getSelector(updateAssetList[i]));
+            status = element.data(CONST_STATUS);
+            if (!status || (status !== CONST_STATUS_FINISHED && status.indexOf(CONST_STATUS_ERROR) !== 0)){
+                allFinished = false;
+                break;
+            }
+        }
+
+        //if (allFinished || failCounter >= maxPollFail){
+        if (allFinished){
+            var collection = Granite.UI.Foundation.Adapters.adapt($(".cq-damadmin-admin-childpages.foundation-layout-masonry.foundation-collection")[0],
+                "foundation-collection");
+            if (collection) {
+                collection.reload();
+            }
+
+            clearInterval(intervalPollForStatus);
+            intervalPollForStatus = null;
+        }
+    }
+
+
+    /**
+     Update visual elements according to the status data property for all monitored assets.
+     */
+    function updateAssets() {
+        // update card elements
+        $(cardSelector).each(function(){
+            updateSingleAsset($(this));
+        });
+
+        // update list item elements
+        $(listItemSelector).each(function(){
+            updateSingleAsset($(this));
+        });
+    }
+
+    /*
+     Update visual elements according to the status data property for a single asset in card view and list view.
+     TODO: extend function to modify visual element for list view
+     */
+    function updateSingleAsset(element) {
+        var status = element.data(CONST_STATUS);
+
+        // convert status to verbose format
+        var formattedStatus = formatStatus(status);
+        var statusText = formattedStatus ? formattedStatus.text : formattedStatus;
+
+        if (viewType === CONST_UI_LIST) {
+            if (formattedStatus) {
+                // update class
+                element.removeClass("encoding");
+                element.removeClass("success");
+                element.removeClass("error");
+                element.addClass(formattedStatus.statusClass);
+
+                // update icon
+                $(element.find("coral-icon")).attr("icon", formattedStatus.icon);
+                $(element.find("coral-icon")).attr("title", statusText);
+
+                // update text
+                element.find("span").text(formattedStatus.text);
+
+                // update percentage to progress bar
+                var progressBar = $(element.find(".encodingprogress"));
+                if (progressBar.length > 0) {
+                    progressBar.attr("value", formattedStatus.percentage);
+                    progressBar.attr("title",
+                        Granite.I18n.get("{0}%", [formattedStatus.percentage], "percent"));
+                }
+            }
+        } else {
+            // display formatted status
+            if (statusText) {
+                element.find("coral-alert-content").text(statusText);
+            }
+
+            var banner = element.find("coral-alert");
+            if (status != null && status.indexOf(CONST_STATUS_ERROR) === 0) {
+                // change card banner color for encoding failure
+                var _variant = "error";
+                // update error detail info
+                if (formattedStatus.detailedInfo) {
+                    // use warning for 'No Encoding'
+                    element.find("coral-alert-content").prop("title", formattedStatus.detailedInfo);
+                    if (formattedStatus.detailedInfo === CONST_STATUS_ERROR_DETAIL_NO_ENCODING) {
+                        _variant = "warning";
+                    }
+                }
+                banner.attr("variant", _variant);
+            } else {
+                if (banner.length > 0) {
+                    banner.removeAttr("variant");
+
+                    if (status === CONST_STATUS_FINISHED) {
+                        // hide card banner for finished asset
+                        element.find("coral-alert").remove();
+                    }
+                }
+            }
+        }
+    }
+
+}(window, document, Granite, Granite.$));
+

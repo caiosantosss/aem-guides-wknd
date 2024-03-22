@@ -1,0 +1,868 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2011 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+
+/**
+ * The <code>CQ.mcm.cal.CampaignLens</code> renders the month view
+ * of the calendar
+ * @class CQ.mcm.cal.CampaignLens
+ * @extends CQ.mcm.cal.CalendarLens
+ */
+CQ.mcm.cal.CampaignLens = CQ.Ext.extend(CQ.mcm.cal.CalendarLens, {
+
+    /**
+     * first date of displayed month
+     * @private
+     */
+    monthStart: null,
+
+    /**
+     * start display date
+     * @private
+     */
+    start: null,
+
+    /**
+     * end display date (+1 day)
+     * @private
+     */
+    end: null,
+
+    /**
+     * internal month panel
+     * @private
+     */
+    panel: null,
+
+    constructor: function(config) {
+        // custom calendar qb query, hence custom fields as well (on/offTime instead of start/end)
+        var fields = [
+            // we cannot use jcr:title/jcr:path directly as the xtemplate used by
+            // the DataViewLens cannot handle field names with ':' inside
+            { "name": "path", "mapping": "jcr:path" },
+            { "name": "jcr:permissions" },
+
+            { "name": "pagePath", "mapping": "jcr:path",
+              "convert": function(v) {
+                  return v.substring(0, v.length - "/jcr:content".length);
+              }
+            },
+
+            { name: "campaignpath", "mapping": "jcr:path",
+              convert: function(v) {
+                    // getting: /content/campaigns/(-brand-/)?-campaign-/teaserpagename/jcr:content
+                    // want substring till end of campaign
+                    var pos = v.indexOf("/jcr:content");
+                    // go back till next '/'
+                    pos = pos - 1;
+                    while (pos > 0 && v.charAt(pos) != '/') {
+                        pos--;
+                    }
+                    if (v.charAt(pos) == '/') {
+                        return v.substring(0, pos);
+                    } else {
+                        return "";
+                    }
+              }
+            },
+
+            { name: "defaultRecipientList" },
+
+            { name: "type", "mapping": "sling:resourceType",
+              convert: function(v) {
+                    if (v == "cq/personalization/components/teaserpage") {
+                        return "teaser";
+                    } else if (v == "twitter/components/post") {
+                        return "twitter";
+                    } else {
+                        // TODO here the type determination should use supertypes (which needs to run on server)
+                        return "newsletter";
+                    }
+              }
+            },
+
+            "accountPath",
+
+            { "name": "title", "mapping": "jcr:title" },
+
+            { "name": "onTime",  "type": "date" },
+            { "name": "offTime", "type": "date" }
+        ];
+        this.store = new CQ.Ext.data.JsonStore({
+            "fields": fields
+        });
+
+        config = CQ.Util.applyDefaults(config, {
+            "autoScroll": true,
+            "renderTo": CQ.Util.ROOT_ID,
+            "border": false,
+//            "height": CQ.mcm.cal.Calendar.getLensHeight(),
+            "headerHeight": 45, // height of the day names header
+            "headerBorder": 2, // css border vertical sum for day names header
+            "dayBorder": 1,    // css border vertical sum for day cell
+            "dayHeaderHeight": 13, // height of the day header showing the day number
+            "teaserHeight": 20 // height of a single event inside a day cell
+        });
+
+        CQ.mcm.cal.CampaignLens.superclass.constructor.call(this, config);
+
+        this.touchpointStore.on("load", function() {
+            this.renderTable();
+        }, this);
+
+        var colors = ["d3ea9a", "d96666", "maroon", "99BBE8"];
+        var colIndex = 0;
+
+        // name => title
+        this.campaigns = {};
+        var json = CQ.HTTP.eval("/content/campaigns.2.json");
+        for (var n in json) {
+            if (!json.hasOwnProperty(n)) {
+                continue;
+            }
+            var o = json[n];
+            if (typeof o === "object") {
+                if (o["jcr:primaryType"] === "cq:Page") {
+                    this.campaigns[n] = {
+                        title: o["jcr:content"]["jcr:title"],
+                        color: colors[colIndex]
+                    };
+                    // next color, round-robin
+                    colIndex++;
+                    if (colIndex >= colors.length) {
+                        colIndex = 0;
+                    }
+                }
+            }
+        }
+        // console.log("Lens campaigns:", this.campaigns);
+    },
+
+    // public calendar lens api
+
+    prev: function() {
+        // Note: rendering is delayed up to renderTable(), called upon querybuilder response
+        return this.monthStart.add(Date.MONTH, -1);
+    },
+
+    next: function() {
+        // Note: rendering is delayed up to renderTable(), called upon querybuilder response
+        return this.monthStart.add(Date.MONTH, 1);
+    },
+
+    setDate: function(date) {
+        var startOfWeek = CQ.mcm.cal.Calendar.getStartOfWeek();
+
+        var newMonthStart = date.getFirstDateOfMonth();
+        // find the first week start on or before the month start day => display start
+        // calculate the proper start week day depending on the configured start weekday
+        var startWeekDay = newMonthStart.getDay() - startOfWeek;
+        if (startWeekDay < 0) {
+            startWeekDay += 7;
+        }
+        this.start = newMonthStart.add(Date.DAY, - startWeekDay);
+
+        var newMonthEnd = date.getLastDateOfMonth();
+        // find the first week end after or on the month end => display end
+        var endWeekDay = newMonthEnd.getDay() - startOfWeek;
+        if (endWeekDay < 0) {
+            endWeekDay += 7;
+        }
+        // Note: the end will be the day after the last day displayed, in order
+        // to be used for the upper bound of the query and for doing getTime() < end.getTime()
+        this.end = newMonthEnd.add(Date.DAY, 6 - endWeekDay + 1);
+
+        var oldMonthStart = this.monthStart;
+        this.monthStart = newMonthStart;
+
+        var doUpdate = (!oldMonthStart || (oldMonthStart.getTime() != this.monthStart.getTime()));
+
+        // HACK: modify query
+        var qb = CQ.search.Util.getQueryBuilder();
+
+        function removeHidden(name) {
+            var form = qb.form;
+            var field = form.findField(name);
+            if (field) {
+                form.remove(field);
+                field.destroy();
+            }
+        }
+
+        qb.setHidden("type", "cq:PageContent");
+        if(this.planner.currentRootPath.length > 0)
+            qb.setHidden("path", this.planner.currentRootPath);
+        else qb.setHidden("path", "/content/campaigns");
+        qb.setHidden("1_group.p.or", "true");
+        // TODO use plugin architecture here - probably by doing the search in the experiences servlet
+        qb.setHidden("1_group.1_property", "sling:resourceType");
+        qb.setHidden("1_group.1_property.value", "cq/personalization/components/teaserpage");
+        qb.setHidden("1_group.2_property", "sling:resourceType");
+        qb.setHidden("1_group.2_property.value", "mcm/components/newsletter/page");
+        qb.setHidden("1_group.3_property", "teaserPageType");
+        qb.setHidden("1_group.3_property.value", "newsletter");
+        qb.setHidden("1_group.4_property", "teaserPageType");
+        qb.setHidden("1_group.4_property.value", "tweet");
+
+        // clear unused
+        removeHidden("event.from");
+        removeHidden("event.to");
+        removeHidden("1_orderby");
+        removeHidden("2_orderby");
+        removeHidden("group.1_path");
+        removeHidden("group.p.or");
+
+        qb.setHidden("2_group.p.or", "true");
+        qb.setHidden("2_group.property", "onTime");
+        qb.setHidden("2_group.property.operation", "exists");
+        qb.setHidden("2_group.property.value", "false");
+        qb.setHidden("2_group.daterange.property", "onTime");
+        qb.setHidden("2_group.daterange.upperOperation", "<");
+        // overwrite function
+        CQ.mcm.cal.Calendar.setUpperDateBound = function(date) {
+            qb.setHidden("2_group.daterange.upperBound", date.format("Y-m-d"));
+        };
+
+        qb.setHidden("3_group.p.or", "true");
+        qb.setHidden("3_group.property", "offTime");
+        qb.setHidden("3_group.property.operation", "exists");
+        qb.setHidden("3_group.property.value", "false");
+        qb.setHidden("3_group.daterange.property", "offTime");
+        qb.setHidden("3_group.daterange.lowerOperation", ">=");
+        // overwrite function
+        CQ.mcm.cal.Calendar.setLowerDateBound = function(date) {
+            qb.setHidden("3_group.daterange.lowerBound", date.format("Y-m-d"));
+        };
+
+        qb.setHidden("orderby", "@onTime");
+
+        return doUpdate;
+    },
+
+    getDateDisplayText: function() {
+        // eg. "December 2009"
+        return this.monthStart.format(CQ.mcm.cal.Calendar.getDatePattern("month"));
+    },
+
+    getStartDate: function() {
+        return this.start;
+    },
+
+    getEndDate: function() {
+        return this.end;
+    },
+
+    // public lens api
+
+    loadData: function(data) {
+
+        try{
+            this.store.loadData(data.hits);
+            this.renderTable();
+        }catch(e) {
+            console.error(e);
+        }
+    },
+
+    getSelection: function() {
+        // no selection at the moment for calendar events
+        return [];
+    },
+
+    // internal stuff
+
+    oneDayBefore: function(date) {
+        return date.add(Date.DAY, -1);
+    },
+
+    renderTable: function() {
+        var cal = CQ.mcm.cal.Calendar;
+
+        // recreate month panel
+        if (this.panel) {
+            this.remove(this.panel);
+        }
+
+        var weeks = [], i = 0;
+        // current month, in weeks
+        for (var d = this.start; d.getTime() <= this.end.getTime(); d = d.add(Date.DAY, 7)) {
+            weeks[i++] = d;
+        }
+
+        this.panel = new CQ.Ext.Panel({
+            "cls": "cq-calendar-month cq-calendar-mcm-border",
+            "border": false,
+            "hideBorders": true,
+            "layout": "table",
+//            "height": this.height,
+            height: "100%",
+            "layoutConfig": {
+                "columns": weeks.length // 1 col for campaigns + weeks-1
+            }
+        });
+        this.add(this.panel);
+
+        // header row ----------------------------------------------------------
+
+        this.panel.add(new CQ.Ext.BoxComponent({
+                cellCls: "cq-calendar-mcm-col-header-cell",
+                autoEl: {
+                    tag: "div",
+                    html: "",
+                    cls: "cq-calendar-header-title",
+                    height: this.headerHeight
+                }
+        }));
+        var baseColors = ["cq-calendar-mcm-uneven-bg", ""];
+        var colorChooser = 0;
+        var weekExtraCls = [];
+        for (var i=0; i < weeks.length - 1; i++) {
+            weekExtraCls.push(baseColors[colorChooser]);
+            colorChooser = (colorChooser + 1) % baseColors.length;
+            var weekStr;
+            var weekEnd = this.oneDayBefore(weeks[i+1]);
+            if (weeks[i].getMonth() != weekEnd.getMonth()) {
+                weekStr = CQ.mcm.cal.multiDateFormat(
+                    "1F 1d - 2M 2d",
+                    [weeks[i], weekEnd]
+                );
+            } else {
+                weekStr = CQ.mcm.cal.multiDateFormat(
+                    "1F 1d - 2d",
+                    [weeks[i], weekEnd]
+                );
+            }
+
+            // calculate the week of year based on the next day to prevent any issues with the startOfWeek value
+            var weekOfYear = weeks[i].add(Date.DAY, 1).getWeekOfYear();
+            var cwString = "CW " + weekOfYear;
+            var currentWeek = this.inWeek(new Date(), weeks[i], weekEnd);
+            var yellowStyleStr = currentWeek ? ' style="background-image: url(\'' + CQ.HTTP.externalize('/libs/mcm/widgets/themes/default/resources/grid3-hrow2-green.gif') + '\');" ' : '';
+            var lighterYellowStyleStr = currentWeek ? ' style="background-color: #ebf0de;" ' : '';
+
+            this.panel.add(new CQ.Ext.BoxComponent({
+                autoEl: {
+                    tag: "div",
+                    html: new CQ.Ext.XTemplate('<div class="x-grid3-header cq-calendar-mcm-cw-header"{style1}>{cw}</div>'
+                        + '<div class="cq-calendar-mcm-week-header"{style2}>{weekdates}</div>').apply({
+                    cw: cwString,
+                    weekdates: weekStr,
+                    style1: yellowStyleStr,
+                    style2: lighterYellowStyleStr
+                    }),
+                    height: this.headerHeight
+                }
+            }));
+        }
+
+        // campaign rows -----------------------------------------------------
+
+        var campaignCount = 0;
+        for (var c in this.campaigns) {
+            campaignCount++;
+        }
+
+        // old: this.rowHeight = Math.floor((this.height - this.headerHeight - this.headerBorder) / campaignCount) - this.dayBorder;
+        this.rowHeight = 80;
+
+        var that = this;
+        // one row per touchpoint
+        this.touchpointStore.each(function(touchpoint) {
+            var parentPath = this.planner.currentRootPath;
+
+            // add cell to touchpoint col
+            var colHtml = "<b>" + touchpoint.data.title + "</b><br/>";
+            if(touchpoint.data.pagetitle && touchpoint.data.pagetitle != "")
+                colHtml += CQ.I18n.get("Page: ") + "<a href='" + CQ.HTTP.externalize(touchpoint.data.pageuri) + ".html'>" + touchpoint.data.pagetitle + "</a><br/>";
+            if(touchpoint.data.channel && touchpoint.data.channel != "")
+                colHtml += "<span class='cq-campaignlens-channel-header-text'>" + CQ.I18n.get("Channel: ") + touchpoint.data.channel + "</span>";
+
+            var teasers = this.store.queryBy(function(teaser, id) {
+                // return true if teaser runs on this touchpoint (channel matches)
+                return (teaser.get("type") == "newsletter" && touchpoint.data.id == teaser.get("defaultRecipientList"))
+                    || (teaser.get("type") == "teaser" && touchpoint.data.channel == "Web")
+                    || (teaser.get("type") == "twitter" && touchpoint.data.id == teaser.get("accountPath"));
+            });
+            // once a teaser was drawn it needs to occupy the whole row, this stores these positions
+            var teaserInRowList = [];
+            var teaserInRowMap = {};
+            var cells = []; // filled for the drawing afterwards
+            var maxTeasersInCell = 0; // need to find this before drawing, so cannot draw and get info in the same run
+
+            // week columns
+            for (var i=0; i < weeks.length - 1; i++) {
+                var teaser = new Array();
+                var weekEnd = this.oneDayBefore(weeks[i+1]);
+
+                var currentWeek = this.inWeek(new Date(), weeks[i], weekEnd);
+
+                var matchingTeaserMap = {};
+
+                teasers.each(function(t) {
+                    var on = t.get("onTime");
+                    var off = t.get("offTime");
+                    if(!on && !off) {
+                        t.set("onTime", this.start.add(Date.DAY, -1));
+                        t.set("offTime", this.end.add(Date.DAY, 1));
+                        teaser.push(t);
+                        matchingTeaserMap[t.get("path")] = true;
+                    }else if( (off && off.getTime() > weeks[i].getTime() && on.getTime() < weeks[i+1].getTime()) || // time span event
+                            (on.getTime() >= weeks[i].getTime() && on.getTime() < weeks[i+1].getTime()) ){ // time point event
+                        if(! off)
+                            t.set("offTime", on);
+                        teaser.push(t);
+                        matchingTeaserMap[t.get("path")] = true;
+                    }
+                }, this);
+
+                var html = [];
+                var highestIndex = -1;
+
+                for (var j = 0; j < teaserInRowList.length; j++) {
+                    var curr = teaserInRowList[j];
+                    if ( curr && matchingTeaserMap[curr.get("path")] ) {
+                        // ok, should be drawn normally
+                        highestIndex = j;
+                    } else {
+                        // free entry in row
+                        if (curr) {
+                            delete teaserInRowMap[curr.get("path")];
+                        }
+                        teaserInRowList[j] = null;
+                    }
+                }
+                // shrink the list:
+                if (highestIndex < teaserInRowList.length-1) {
+                    for (var j = teaserInRowList.length-1; j>highestIndex; j--) {
+                        teaserInRowList.pop();
+                    }
+                }
+
+                var currentWeekStyle = null;
+                if (currentWeek) {
+                    currentWeekStyle = {"background-color": "#faffee"};
+                }
+                var firstEmptyTry = 0;
+                try {
+                    for(var teaserI = 0; teaserI < teaser.length; teaserI++) {
+                       var aTeaser = teaser[teaserI];
+
+                       if ( ! teaserInRowMap[aTeaser.get("path")] ) {
+                           // find empty spot to put teaser into:
+                           while (firstEmptyTry < teaserInRowList.length
+                               && teaserInRowList[firstEmptyTry] != null) {
+
+                               firstEmptyTry++;
+                           }
+                           if (firstEmptyTry == teaserInRowList.length) {
+                               teaserInRowList.push(aTeaser);
+                           } else {
+                               teaserInRowList[firstEmptyTry] = aTeaser;
+                           }
+
+                           teaserInRowMap[aTeaser.get("path")] = true;
+                        }
+                    }
+
+                if (teaser.length > 0 || html.length > 0) {
+
+                    for (var j = 0; j < teaserInRowList.length; j++) {
+                        var curr = teaserInRowList[j];
+                        if ( curr ) {
+                            // ok, should be drawn normally
+                            var color = touchpoint.data.color;
+                            if (curr.get("campaignpath") != this.planner.currentRootPath) {
+                                color = "888";
+                            }
+                            html.push(
+                                this.createTeaserDiv(curr, weeks[i], weeks[i+1], color,
+                                    i==0 /* first week? */) );
+                        } else {
+                            // only occupy space
+                            html.push(
+                                this.createDummyTeaserDiv(weeks[i], weeks[i+1]));
+                        }
+                    }
+
+                    if (teaserInRowList.length > maxTeasersInCell) {
+                        maxTeasersInCell = teaserInRowList.length;
+                    }
+
+                    var cellDef = {
+                        emptyCell: false,
+                        onTime: weeks[i],
+                        offTime: weeks[i+1],
+                        html: html,
+                        currentWeekStyle: currentWeekStyle,
+                        weekExtraCls: weekExtraCls[i]
+                    };
+                    cells.push(cellDef);
+
+                } else {
+                    var cellDef = {
+                        emptyCell: true,
+                        onTime: weeks[i],
+                        offTime: weeks[i+1],
+                        currentWeekStyle: currentWeekStyle,
+                        weekExtraCls: weekExtraCls[i]
+                    };
+                    cells.push(cellDef);
+                }
+                } catch (e) {
+                    console.log("during assembly of information: ", e);
+                }
+            }
+
+
+            // now do the drawing
+            try {
+            var rowHeight = this.rowHeight;
+            var neededVSpace =
+                maxTeasersInCell * this.teaserHeight // space for teasers
+                + maxTeasersInCell * 2 // 2px space between teasers
+                + 5 + 5; // lower border and upper border
+            if (neededVSpace > rowHeight) {
+                rowHeight = neededVSpace;
+            }
+
+           this.panel.add(new CQ.Ext.BoxComponent({
+//                cellStyle: "vertical-align: middle;",
+                cellCls: "cq-campaign-touchpoint-row-header-cell",
+                autoEl: {
+                    tag: "div",
+                    href: parentPath + ".html",
+                    html: colHtml, //this.campaigns[c].title,
+                    cls: "cq-calendar-mcm-row-header-cell",
+                    height: rowHeight
+                }
+            }));
+
+            for (var i=0; i < cells.length; i++) {
+                var currCell = cells[i];
+
+                if ( ! currCell.emptyCell) {
+
+                    // max to ensure that margins are covered (only approximately)
+                    var emptyVSpace = Math.max(10,rowHeight - currCell.html.length*(2+this.teaserHeight));
+                    currCell.html.push({
+                        html: "",
+                        cls: "cq-campaign-empty-teaser-cell",
+                        height: emptyVSpace,
+                        style: "height: " + emptyVSpace + "px;",
+                        // Note: domhelper does not allow to set real functions for event handler, not even with "useDom=true"
+                        onclick: "CQ.mcm.cal.CampaignLens.handleCreatePageDialogClick(event, '" + this.id + "','" + parentPath + "', "
+                            + currCell.onTime.getTime() + ", " + currCell.offTime.getTime() + ")"
+                    });
+
+                    this.panel.add(new CQ.Ext.BoxComponent({
+                        cellCls: "cq-campaign-touchpoint-row-cell",
+                        html: currCell.html,
+                        cls: "cq-campaign-teaser-cell " + currCell.weekExtraCls,
+                        height: rowHeight,
+                        style: currCell.currentWeekStyle
+                    }));
+                } else {
+                    this.panel.add(new CQ.Ext.BoxComponent({
+                        cellCls: "cq-campaign-touchpoint-row-cell",
+                        html: "",
+                        cls: "cq-campaign-teaser-cell cq-campaign-empty-teaser-cell " + currCell.weekExtraCls,
+                        style: currCell.currentWeekStyle,
+                        height: rowHeight,
+                        onTime: currCell.onTime,
+                        offTime: currCell.offTime,
+                        parentPath: parentPath,
+                        listeners: {
+                            render: function(c) {
+                                var el = c.getEl();
+                                el.unselectable();
+                                var date = this.createDate;
+                                that.setOnClickPageCreateDialog(el, this);
+                            }
+                        }
+                    }));
+                }
+
+            }
+            } catch (e) {
+                console.log("during drawing:", e);
+            }
+
+
+        }, this);
+
+
+        this.findParentByType("lensdeck").doLayout();
+    },
+
+    setOnClickPageCreateDialog: function(where, scope) {
+        var that = this;
+        where.on("click", function() {
+            CQ.mcm.cal.CampaignLens.createPageDialog(that.id, this.parentPath, this.onTime, this.offTime);
+        }, scope);
+    },
+
+    inWeek: function(date, weekStart, weekEnd) {
+        var t = date.getTime();
+        return t >= weekStart.getTime() && t <= weekEnd.getTime();
+    },
+
+    createDummyTeaserDiv: function(weekStart, weekEnd) {
+        return this.createTeaserDiv(null, weekStart, weekEnd, -1, null);
+    },
+
+    createTeaserDiv: function(teaser, weekStart, weekEnd, color, firstDisplayedWeek) {
+
+        var spritesURL = CQ.HTTP.externalize("/libs/cq/ui/resources/sprites");
+
+        try {
+
+        var starts = null;
+        var ends = null;
+        var timePointEvent = null;
+
+        var h = this.teaserHeight;
+
+        var elemStyle = "height: " + h + "px; line-height: " + h + "px;";
+
+        if (color != -1) {
+            starts = this.inWeek(teaser.get("onTime"), weekStart, weekEnd);
+            ends = this.inWeek(teaser.get("offTime"), weekStart, weekEnd);
+            timePointEvent = (teaser.get("onTime").getTime() == teaser.get("offTime").getTime());
+
+            var elemTitle = teaser.get("title");
+            if(timePointEvent) {
+                elemStyle += "color: #315c00;";//"color: #" + color + ";";
+                elemTitle = teaser.get("onTime").format("D d") + ": " + elemTitle;
+
+            } else elemStyle += "color: #315c00;background-color: #" + color + ";";
+
+
+            var elem = {
+                tag: "a",
+                href: "#",
+                cls: "cq-calendar-month-event all-day cq-ellipsis",
+                style: elemStyle,
+                title: teaser.get("title")
+            };
+
+            // Note: domhelper does not allow to set real functions for event handler, not even with "useDom=true"
+            elem.onclick = "CQ.mcm.cal.CampaignLens.editEvent(event, '" + this.id + "', '" + teaser.id + "')";
+
+
+            if (starts || firstDisplayedWeek) {
+                elem.html = elemTitle;
+                if (!starts && firstDisplayedWeek) {
+                    elem.style += "padding-left: 3px; ";
+                }
+            }
+        } else {
+            // placeholder to keep the row empty
+            var elem = {
+                tag: "a",
+                href: "#",
+                cls: "cq-campaign-empty-teaser-cell cq-calendar-month-event all-day cq-ellipsis",
+                style: elemStyle
+            };
+            // Note: domhelper does not allow to set real functions for event handler, not even with "useDom=true"
+            elem.onclick = "CQ.mcm.cal.CampaignLens.handleCreatePageDialogClick(event, '" + this.id + "','" + this.planner.currentRootPath + "', "
+                + weekStart.getTime() + ", " + weekEnd.getTime() + ")";
+        }
+
+        var leftDiv = { tag: "div", style: "margin-bottom: 2px; ", isEvent: true };
+
+        if(color == -1) {
+            // create placeholder-div
+            var rightDiv = { tag: "div" };
+            leftDiv.children = [rightDiv, elem];
+            rightDiv.style = "width: 14px; height: " + h + "px;float: left; ";
+
+        } else if (timePointEvent) {
+            var rightDiv = { tag: "div" };
+            leftDiv.children = [rightDiv, elem];
+
+            rightDiv.style = "margin-left: 3px; ";
+//            rightDiv.style += "padding-left: 7px; ";
+            rightDiv.style += "background: transparent url(" + spritesURL + ".14." + h + ".roundrect.0.0.14.14.10.F." + color + ".png) no-repeat 0 3px;";
+            rightDiv.style += "margin-right: 3px; ";
+//            rightDiv.style += "padding-right: 7px; ";
+            rightDiv.style += "width: 14px; height: " + h + "px;float: left; ";
+        } else {
+
+            var rightDiv = { tag: "div" };
+            leftDiv.children = [rightDiv];
+            rightDiv.children = [elem];
+
+            if (starts) {
+                leftDiv.style += "margin-left: 3px; ";
+                leftDiv.style += "padding-left: 7px; ";
+                leftDiv.style += "background: transparent url(" + spritesURL + ".7." + h + ".roundrect.0.0.14." + h + ".10.F." + color + ".png) no-repeat 0 0;";
+            }
+
+            if (ends) {
+                rightDiv.style = "margin-right: 3px; ";
+                rightDiv.style += "padding-right: 7px; ";
+                rightDiv.style += "background: transparent url(" + spritesURL + ".7." + h + ".roundrect.-7.0.14." + h + ".10.F." + color + ".png) no-repeat right 0;";
+            }
+        }
+
+        return leftDiv;
+
+        } catch (e) {
+            console.log(e);
+        }
+    }
+
+});
+
+//
+// STATIC methods, called directly from HTML
+//
+
+CQ.mcm.cal.CampaignLens.handleCreatePageDialogClick = function(ev, id, parentPath, weekStartMillis, weekEndMillis) {
+    var weekStart = new Date(weekStartMillis);
+    var weekEnd = new Date(weekEndMillis);
+
+    var e = CQ.Ext.EventObject.setEvent(ev);
+    e.stopEvent();
+    CQ.mcm.cal.CampaignLens.createPageDialog(id, parentPath, weekStart, weekEnd);
+};
+
+CQ.mcm.cal.CampaignLens.createPageDialog = function(campaignLensId, parentPath, onTime, offTime) {
+    CQ.mcm.Util.createPageAndOpenPropsDialog("Create Experience", parentPath, function() {
+            CQ.mcm.cal.CampaignLens.refresh(campaignLensId, parentPath);
+    },
+    function() {
+        CQ.Ext.Msg.alert(
+            CQ.I18n.getMessage("Error"),
+            CQ.I18n.getMessage("Could not create page.")
+        );
+    },
+    this,
+    {
+        "onTime": onTime.format('Y-m-d\\TH:i:s.000P'),
+        "offTime": offTime.format('Y-m-d\\TH:i:s.000P'),
+        "onTime@TypeHint": "Date",
+        "offTime@TypeHint": "Date"
+    });
+};
+
+CQ.mcm.cal.CampaignLens.refresh = function(campaignLensId, pathToRefresh) {
+
+    var campaignLens = CQ.Ext.getCmp(campaignLensId);
+    if (campaignLens && campaignLens.planner) {
+        campaignLens.planner.refreshData();
+    }
+
+    CQ.event.EventAdmin.sendEvent( new CQ.event.Event( "com/day/mcm/REFRESH", {
+        path: pathToRefresh
+    }) );
+
+    CQ.mcm.cal.Calendar.update();
+};
+
+CQ.mcm.cal.CampaignLens.editEvent = function(ev, id, teaserId) {
+    var e = CQ.Ext.EventObject.setEvent(ev);
+    e.stopEvent();
+
+    var campaignLens = CQ.Ext.getCmp(id);
+    if (!campaignLens) {
+        return;
+    }
+    var teaser = campaignLens.store.getById(teaserId);
+    if (!teaser) {
+        return;
+    }
+
+    var dialog;
+
+    var config = {
+        xtype: "dialog",
+        buttons: [
+            {
+                xtype: "button",
+                text: CQ.I18n.getMessage("Delete"),
+                handler: function() {
+                    CQ.Ext.Msg.confirm(
+                        CQ.I18n.getMessage("Delete teaser"),
+                        CQ.I18n.getMessage("Are you sure you want to delete this teaser?"),
+                        function (button) {
+                            if (button == "yes") {
+                                dialog.hide();
+                                CQ.Ext.Ajax.request({
+                                    "url":CQ.HTTP.externalize("/bin/wcmcommand"),
+                                    "method":"POST",
+                                    "callback":function(options, success, xhr) {
+                                        var response = CQ.HTTP.buildPostResponseFromHTML(xhr.responseText);
+                                        var status = response.headers[CQ.utils.HTTP.HEADER_STATUS];
+                                        if (status == 200) {
+                                            CQ.mcm.cal.CampaignLens.refresh(id, teaser.get("pagePath"));
+                                        }
+                                    },
+                                    "params":{
+                                        "path": [teaser.get("pagePath")],
+                                        "_charset_":"utf-8",
+                                        "cmd":"deletePage",
+                                        "force": true
+                                    },
+                                    "scope":this
+                                });
+                            }
+                        }
+                    ).setIcon(CQ.Ext.Msg.QUESTION);
+                }
+            },
+            CQ.Dialog.OK,
+            CQ.Dialog.CANCEL
+        ],
+        okText: CQ.I18n.getMessage("Save"),
+        items: {
+            xtype: "panel",
+            items: [
+                {
+                    name: "onTime",
+                    xtype: "datetime",
+                    fieldLabel: CQ.I18n.getMessage("On Time")
+                },{
+                    name: "offTime",
+                    xtype: "datetime",
+                    fieldLabel: CQ.I18n.getMessage("Off Time")
+                },{
+                    name: "onTime@TypeHint",
+                    value: "Date",
+                    ignoreData: true,
+                    xtype: "hidden"
+                },{
+                    name: "offTime@TypeHint",
+                    value: "Date",
+                    ignoreData: true,
+                    xtype: "hidden"
+                }
+            ]
+        }
+    };
+    dialog = CQ.WCM.getDialog(config);
+    dialog.success = function(form, action) {
+        CQ.mcm.cal.CampaignLens.refresh(id, teaser.get("pagePath"));
+    };
+    dialog.failure = function(form, action) {
+        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"), "Could not update on/off times.");
+    };
+    dialog.loadContent(teaser.get("path"));
+    dialog.show();
+};
+
+CQ.Ext.reg("campaignlens", CQ.mcm.cal.CampaignLens);

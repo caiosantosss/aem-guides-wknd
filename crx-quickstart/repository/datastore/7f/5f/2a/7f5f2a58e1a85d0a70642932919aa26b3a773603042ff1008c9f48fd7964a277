@@ -1,0 +1,452 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2019 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function($, undefined) {
+
+    window.ContentInsight = $.extend({}, window.ContentInsight);
+
+    // private variables
+    var deltaX = 0;
+
+    /**
+    @classdesc <p><span id="timeframe-label">A timeframe widget</span></p>
+
+    <div class="timeframe" data-init="timeframe">
+      <input name="start" type="date" />
+      <input name="end" type="date" />
+      <select name="granularity">
+        <option value="hour">Hour</option>
+        <option value="day">Day") %></option>
+        <option value="week">Week") %></option>
+        <option value="month">Month</option>
+        <option value="quarter">Quarter</option>
+        <option value="year">Year</option>
+      </select>
+      <div class="items">
+        <div class="item-group">
+          <span data-start-date="2013-01-01" data-end-date="2013-03-12">Root Version</span>
+          <span data-start-date="2013-03-12" data-end-date="2013-04-04">Draft</span>
+          <span data-start-date="2013-04-04" data-end-date="2013-11-21">Final Review</span>
+        </div>
+        <div class="item-group">
+          <span data-start-date="2012-06-21" data-end-date="2013-10-03">Production</span>
+        </div>
+        <div class="item-group">
+          <span data-start-date="2013-10-03">New version 2</span>
+        </div>
+      </div>
+    </div>
+
+    @desc Creates a timeframe from a div
+    @constructs
+ 
+    @param {Element}  el                         DOM Element
+    @param {Object}   options                    Component options
+    @param {boolean} [options.selectable=false]  Should a time period be selectable
+    @param {string}  [options.perdiodStartDate]  The selected start date
+    @param {string}  [options.periodEndDate]     The selected end date
+    @param {string}  [options.granularity=week]  The timeframe's granularity, i.e. day, week, month, quarter, year
+    @param {string}  [options.initialDate]       The timeframe's initially focused date (beginning of timeframe by default)
+    **/
+    ContentInsight.Timeframe = function(el, options) {
+        var that = this;
+
+        this.defaults = {
+            selectable : false,
+            periodsEndDate : new Date(),
+            granularity : 'week',
+            initialDate : null,
+            dateFormats : {
+                hour : 'HH:mm',
+                day : 'DD',
+                week : '[W]WW',
+                month : 'MMM',
+                quarter : 'MMM',
+                year : 'YYYY'
+            },
+            separatorDateFormats : {
+                hour : 'LL',
+                day : 'MMM YYYY',
+                week : 'YYYY',
+                month : 'YYYY',
+                quarter : 'YYYY',
+                year : ''
+            }
+        };
+        this.$element = $(el);
+
+        // sane defaults for the options
+        this.options = $.extend({}, this.defaults, options);
+        this.options.element = this.$element.get(0);
+
+        // turn dates into moments
+        if (this.options.periodsStartDate) {
+            this.options.periodsStartDate = moment(this.options.periodsStartDate);
+        }
+        this.options.periodsEndDate = moment(this.options.periodsEndDate);
+
+        // find date inputs and get selected start/end date
+        var $inputs = this.$element.find('input[type=date]');
+        this.$startInput = $($inputs.get(0));
+        this.$endInput = $($inputs.get(1));
+
+        var startDateValue = this.$startInput[0].getAttribute("value") || this.$startInput.val();
+
+        var endDateValue = this.$endInput[0].getAttribute("value") || this.$endInput.val();
+
+        this.startDate = moment(startDateValue);
+        if (!this.startDate || !this.startDate.isValid()) {
+            this._setStartDate(this.options.periodsStartDate);
+        }
+        this.$startInput.change();
+
+        this.endDate = moment(endDateValue);
+        if (!this.endDate || !this.endDate.isValid()) {
+            this._setEndDate(new Date());
+        }
+        this.$endInput.change();
+
+        this.$granularityInput = this.$element.find('select[name=granularity]');
+        if (!this.$granularityInput.val()) {
+            this.$granularityInput.val(this.options.granularity);
+        } else {
+            this.options.granularity = this.$granularityInput.val();
+        }
+        this.$granularityInput.change();
+
+        // if the element doesn't have an id, build a unique id using new Date().getTime()
+        var elementId = this.$element.attr('id');
+        if (!elementId) {
+            this.$element.attr("id", "timeframe-" + new Date().getTime());
+            elementId = this.$element.attr('id');
+        }
+
+        this._renderMissingElements();
+        this._renderPeriods();
+        this._positionItems();
+        this._positionPeriodSelector();
+
+        // set initial scroll offset
+        this.options.initialDate = moment(this.options.initialDate);
+        if(this.options.initialDate && this.options.initialDate.isValid()) {
+            this.$element.scrollLeft(this._dateToOffset(this.options.initialDate));
+        }
+
+        // set up event handling
+        this.$periodSelectorLeftHandle.on("touchstart mousedown MSPointerDown pointerdown", this._mouseDown.bind(this, this.$periodSelectorLeftHandle, true));
+        this.$periodSelectorRightHandle.on("touchstart mousedown MSPointerDown pointerdown", this._mouseDown.bind(this, this.$periodSelectorRightHandle, false));
+
+        // listen for changes to input fields' values
+        this.$startInput.on('change', function() {
+            var startDateValue = this.$startInput[0].getAttribute("value");
+            this.setStartDate(startDateValue);
+            this.$element.trigger("timeframe-change");
+        }.bind(this));
+        this.$endInput.on('change', function() {
+            var endDateValue = this.$endInput[0].getAttribute("value");
+            this.setEndDate(endDateValue);
+            this.$element.trigger("timeframe-change");
+        }.bind(this));
+
+        this.$granularityInput.on('change', function() {
+            this.setGranularity(this.$granularityInput.val());
+            this.$element.trigger("timeframe-change");
+        }.bind(this));
+    };
+
+    ContentInsight.Timeframe.prototype.setStartDate = function(startDate) {
+        this._setStartDate(startDate);
+        this._positionPeriodSelector();
+    };
+
+    ContentInsight.Timeframe.prototype.setEndDate = function(endDate) {
+        this._setEndDate(endDate);
+        this._positionPeriodSelector();
+    };
+
+    ContentInsight.Timeframe.prototype.setGranularity = function(granularity) {
+        this.options.granularity = granularity;
+        this.$granularityInput.val(granularity);
+
+        this._renderPeriods();
+        this._positionItems();
+        this._positionPeriodSelector();
+    };
+
+    ContentInsight.Timeframe.prototype._renderMissingElements = function() {
+        if (!this.$element.find("input").length) {
+            this.$startInput = $('<input type="date">');
+            this.$endInput = $('<input type="date">');
+        }
+
+        // add container DIVs
+        this.$items = this.$element.find('.items');
+        this.$periods = $('<div>').addClass('periods');
+        if (!this.$items.length) {
+            this.$element.append(this.$periods);
+        } else {
+          this.$items.before(this.$periods);
+        }
+
+        // add period selector
+        if(this.options.selectable) {
+            this.$element.append('<div class="period-selector"><span id="period-selector-start"></span><span id="period-selector-end"></span></div>');
+        }
+        this.$periodSelector = this.$element.find('.period-selector');
+        this.$periodSelectorLeftHandle = this.$element.find('#period-selector-start');
+        this.$periodSelectorRightHandle = this.$element.find('#period-selector-end');
+
+        // wrap all container elements in a DIV for transformations
+        this.$content = this.$element.find('> *').wrapAll('<div class="timeframe-content"></div>').parent();
+
+        // add tooltip to period selector handles
+        this.$periodSelectorLeftHandle.append('<coral-tooltip placement="right" target="#period-selector-start"></coral-tooltip>');
+        this.$periodSelectorRightHandle.append('<coral-tooltip placement="left" target="#period-selector-end"></coral-tooltip>');
+    };
+
+    ContentInsight.Timeframe.prototype._renderPeriods = function() {
+        var start = this._getPeriodsStart(),
+            iter = moment(this.options.periodsStartDate),
+            end = this._getPeriodsEnd();
+
+        this.$periods
+            .empty()
+            .removeClass("hours days weeks months quarters years")
+            .addClass(this.options.granularity + 's');
+
+        // fill with element for each period
+        while (start <= iter && iter <= end) {
+            var $period = $('<span>').html(iter.format(this.options.dateFormats[this.options.granularity]));
+
+            // add date information for start of major period, e.g. year
+            if (this._firstInPeriod(iter)) {
+                $period.prepend('<span class="separator">' + iter.format(this.options.separatorDateFormats[this.options.granularity]) + '</span>');
+            }
+
+            // accommodate for months length by add specific class
+            if (this.options.granularity === 'month') {
+                $period.addClass('month' + moment(iter).endOf(this.options.granularity).date());
+            }
+
+            this.$periods.append($period);
+
+            // moment.js is using plural form for date manipulations
+            iter.add(this.options.granularity + 's', 1);
+        }
+
+        // store width of periods container for offset calculations
+        this.periodsWidth = this.$periods.innerWidth();
+    };
+
+    ContentInsight.Timeframe.prototype._positionItems = function() {
+        var that = this,
+            $itemList = this.$items.find('span');
+
+        // set position of each item according to start and end dates
+        $itemList.each(function(index) {
+            var $item = $(this),
+                start = $item.data('start-date') ? moment($item.data('start-date')) : that._getPeriodsStart(),
+                end = $item.data('end-date') ? moment($item.data('end-date')) : that._getPeriodsEnd();
+
+            $item.css({
+                left: that._dateToOffset(start) + 'px',
+                width: that._dateToOffset(end) - that._dateToOffset(start) + 'px'
+            });
+        });
+    };
+
+    ContentInsight.Timeframe.prototype._positionPeriodSelector = function() {
+        this.periodSelectorLeft = this._dateToOffset(this.startDate);
+        this.periodSelectorWidth = this._dateToOffset(this.endDate) - this.periodSelectorLeft;
+
+        this.$periodSelector.css({
+            left: this.periodSelectorLeft,
+            width: this.periodSelectorWidth
+        });
+    };
+
+    ContentInsight.Timeframe.prototype._updateTooltip = function($handle, show, date) {
+        var tt = $handle.find('coral-tooltip');
+        if (date) {
+            tt.html(date.format('LL'));
+        }
+        tt.get(0).open = show;
+    };
+
+    ContentInsight.Timeframe.prototype._mouseDown = function($handle, isStart, event) {
+        deltaX = 0;
+        this.startX = event.pageX || event.originalEvent.pageX;
+
+        // handle touch events
+        if (event.originalEvent.targetTouches) {
+            this.startX = event.originalEvent.targetTouches.item(0).pageX;
+        }
+
+        // register move and end event handlers
+        $(window).on("touchmove mousemove MSPointerMove pointermove", this._mouseMove.bind(this, $handle, isStart));
+        $(window).on("touchend mouseup MSPointerUp pointerup", this._mouseUp.bind(this, $handle, isStart));
+
+        // show tooltip
+        if (isStart) {
+            this._updateTooltip($handle, true, this._offsetToDate(this.periodSelectorLeft));
+        } else {
+            this._updateTooltip($handle, true, this._offsetToDate(this.periodSelectorLeft + this.periodSelectorWidth));
+        }
+
+        event.preventDefault();
+    };
+
+    ContentInsight.Timeframe.prototype._mouseMove = function($handle, isStart, event) {
+        var pageX = event.pageX || event.originalEvent.pageX,
+            left, width;
+
+        // handle touch events
+        if (event.originalEvent.targetTouches) {
+            pageX = event.originalEvent.targetTouches.item(0).pageX;
+        }
+
+        deltaX = pageX - this.startX;
+        left = this._ensureBounds(0, this.periodsWidth, this.periodSelectorLeft + deltaX);
+
+        if (isStart) {
+            width = this._ensureBounds(0, this.periodsWidth - left, this.periodSelectorWidth - deltaX);
+
+            this.$periodSelector.css('left', left + 'px');
+            this.$periodSelector.css('width', width + 'px');
+        } else {
+            width = this._ensureBounds(0, this.periodsWidth - this.periodSelectorLeft, this.periodSelectorWidth + deltaX);
+
+            this.$periodSelector.css('width', width + 'px');
+        }
+
+        // show tooltip
+        if (isStart) {
+            this._updateTooltip($handle, true, this._offsetToDate(left));
+        } else {
+            this._updateTooltip($handle, true, this._offsetToDate(this.periodSelectorLeft + width));
+        }
+
+        event.preventDefault();
+    };
+
+    ContentInsight.Timeframe.prototype._mouseUp = function($handle, isStart, event) {
+        $(window).off("mousemove touchmove MSPointerMove pointermove");
+        $(window).off("mouseup touchend MSPointerUp pointerup");
+
+        var allowedPeriodEnd = new Date().getTime();
+        var allowedPeriodStart = this.options.periodsStartDate.toDate().getTime();
+
+        if (isStart) {
+            var newStartTime = this._offsetToDate(this.periodSelectorLeft + deltaX).toDate().getTime();
+
+            // don't allow if new start is > current date
+            if (newStartTime >= allowedPeriodStart
+                  && newStartTime <= allowedPeriodEnd) {
+                this.periodSelectorLeft += deltaX;
+                this.periodSelectorWidth -= deltaX;
+
+                this._setStartDate(this._offsetToDate(this.periodSelectorLeft));
+                this.$startInput.change();
+            } else {
+                // restore original positions
+                this.$periodSelector.css('left', this.periodSelectorLeft + 'px');
+                this.$periodSelector.css('width', this.periodSelectorWidth + 'px');
+            }
+        } else {
+            var newEndTime = this._offsetToDate(this.periodSelectorLeft + this.periodSelectorWidth + deltaX).toDate().getTime();
+
+            // don't allow if new start is > current date
+            if (newEndTime >= allowedPeriodStart
+                  && newEndTime <= allowedPeriodEnd) {
+                this.periodSelectorWidth += deltaX;
+
+                this._setEndDate(this._offsetToDate(this.periodSelectorLeft + this.periodSelectorWidth));
+                this.$endInput.change();
+            } else {
+              // restore original positions
+              this.$periodSelector.css('width', this.periodSelectorWidth + 'px');
+            }
+        }
+
+        // hide tooltip
+        this._updateTooltip($handle, false);
+
+        event.preventDefault();
+    };
+
+    ContentInsight.Timeframe.prototype._setStartDate = function(date) {
+        this.startDate = moment(date);
+        this.$startInput.val(this.startDate.format('YYYY-MM-DD HH:mm'));
+        this.$startInput[0].setAttribute("value", this.startDate.format('YYYY-MM-DD HH:mm'));
+    };
+
+    ContentInsight.Timeframe.prototype._setEndDate = function(date) {
+        var isHour = this.options.granularity === 'hour';
+
+        this.endDate = moment(date).endOf(isHour ? 'hour' : 'day');
+        this.$endInput.val(this.endDate.format('YYYY-MM-DD HH:mm'));
+        this.$endInput[0].setAttribute("value", this.endDate.format('YYYY-MM-DD HH:mm'));
+    };
+
+    ContentInsight.Timeframe.prototype._getPeriodsStart = function() {
+        return moment(this.options.periodsStartDate).startOf(this.options.granularity);
+    };
+
+    ContentInsight.Timeframe.prototype._getPeriodsEnd = function() {
+        return moment(this.options.periodsEndDate).endOf(this.options.granularity);
+    };
+
+    // translate a date into an offset on the timeframe
+    ContentInsight.Timeframe.prototype._dateToOffset = function(date) {
+        var start = this._getPeriodsStart(), end = this._getPeriodsEnd(), length = end.unix() - start.unix();
+        return (date.unix() - start.unix()) / length * this.periodsWidth;
+    };
+
+    // translate an offset on the timeframe into a date
+    ContentInsight.Timeframe.prototype._offsetToDate = function(offset) {
+        var start = this._getPeriodsStart(), end = this._getPeriodsEnd(), length = end .unix() - start.unix();
+        return moment.unix(start.unix() + (offset / this.periodsWidth) * length);
+    };
+
+    // ensure that value stays in bounds
+    ContentInsight.Timeframe.prototype._ensureBounds = function(lower, upper, value) {
+        return Math.min(upper, Math.max(lower, value));
+    };
+
+    // check if date is the first in a period
+    ContentInsight.Timeframe.prototype._firstInPeriod = function(date) {
+        var key = this.options.granularity === 'day' ? 'date' : this.options.granularity;
+
+        if (key === 'month') {
+            // months start from 0
+            return date.get(key) === 0;
+        } else if (key === 'year') {
+            // a year is never considered to be the first in a period
+            return false;
+        } else {
+            return date.get(key) === 1;
+        }
+    };
+
+
+    $(document).ready(function() {
+        $(".timeframe[data-init~='timeframe']").each(function(idx, el) {
+            new ContentInsight.Timeframe($(this), $(this).data());
+        });
+    });
+
+}(window.jQuery));

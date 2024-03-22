@@ -1,0 +1,830 @@
+CQ.scene7 = CQ.scene7 || {};
+CQ.scene7.dynamicImageHelper = {};
+
+/**
+ * Mark a flag if the unsharp mask fields need to be disabled after submitting the empty values
+ */
+CQ.scene7.dynamicImageHelper.reDisableUnsharpMaskFieldsAfterSubmission = false;
+
+/**
+ * Enables the size, image format and sharpening fields before submit if an image preset is selected
+ *  so their empty values would get submitted
+ *
+ */
+CQ.scene7.dynamicImageHelper.enableFieldsForSubmission = function(dialog) {
+    if (!dialog) {
+        return;
+    }
+
+    // always submit the unsharp values and breakpoints
+    var fieldNames = ["./unsharpMaskAmount", "./unsharpMaskRadius", "./unsharpMaskThreshold", "./breakpoints"];
+
+    // if an image preset is selected, enable the fields so they'll get submitted
+    var selectedImagePreset = CQ.scene7.dynamicImageHelper.getChildBy(dialog, "name", "./s7ImagePreset");
+    if (selectedImagePreset && "" != selectedImagePreset.getValue()) {
+        fieldNames.push("./width");
+        fieldNames.push("./height");
+        fieldNames.push("./outputFormat");
+        fieldNames.push("./sharpeningMode");
+    }
+
+    for (var fieldNameIdx = 0 ; fieldNameIdx < fieldNames.length ; fieldNameIdx++) {
+        var field = CQ.scene7.dynamicImageHelper.getChildBy(dialog, "name", fieldNames[fieldNameIdx]);
+        if (field) {
+
+            if (fieldNames[fieldNameIdx] == "./unsharpMaskAmount" && field.disabled) {
+                CQ.scene7.dynamicImageHelper.reDisableUnsharpMaskFieldsAfterSubmission = true;
+            }
+
+            field.setDisabled(false);
+        }
+    }
+};
+
+/**
+ * Disables the size, image format and sharpening fields after submission if an image preset is selected
+ */
+CQ.scene7.dynamicImageHelper.disableFieldsAfterSubmission = function(dialog) {
+    var selectedImagePreset = CQ.scene7.dynamicImageHelper.getChildBy(dialog, "name", "./s7ImagePreset");
+    if (selectedImagePreset && "" != selectedImagePreset.getValue()) {
+        CQ.scene7.dynamicImageHelper.updatePresetPrecedence(dialog, selectedImagePreset.getValue());
+    }
+
+    // re-disable unsharp mask fields, if needed
+    if (CQ.scene7.dynamicImageHelper.reDisableUnsharpMaskFieldsAfterSubmission) {
+        CQ.scene7.dynamicImageHelper.reDisableUnsharpMaskFieldsAfterSubmission = false;
+
+        var unsharpMaskFieldNames = ["./unsharpMaskAmount", "./unsharpMaskRadius", "./unsharpMaskThreshold"];
+        for (var fieldNameIdx = 0 ; fieldNameIdx < unsharpMaskFieldNames.length ; fieldNameIdx++) {
+            var field = CQ.scene7.dynamicImageHelper.getChildBy(dialog, "name", unsharpMaskFieldNames[fieldNameIdx]);
+            if (field) {
+                field.setDisabled(true);
+            }
+        }
+    }
+};
+
+/**
+ * Handler for the "beforesubmit" event of the component edit dialog
+ */
+CQ.scene7.dynamicImageHelper.beforeDialogSubmit = function(dialog) {
+
+    if (!dialog) {
+        return;
+    }
+
+    // check the success and failure handlers
+    var oldSuccessHandler = dialog.success;
+    var oldFailureHandler = dialog.failure;
+
+    if (typeof dialog.dynamicImageHandlers == "undefined") {
+        // update handlers
+        dialog.success = function(form, dialogResponse) {
+            // disable the fields if needed
+            CQ.scene7.dynamicImageHelper.disableFieldsAfterSubmission(dialog);
+
+            // call old handler
+            if (oldSuccessHandler) {
+                oldSuccessHandler.call(this, form, dialogResponse);
+            } else if (dialog.responseScope && dialog.responseScope.success) {
+                dialog.responseScope.success.call(this, form, dialogResponse);
+            }
+        };
+
+        dialog.failure = function(form, dialogResponse) {
+            // disable the fields if needed
+            CQ.scene7.dynamicImageHelper.disableFieldsAfterSubmission(dialog);
+
+            // call old handler
+            if (oldFailureHandler) {
+                oldFailureHandler.call(this, form, dialogResponse);
+            } else if (dialog.responseScope && dialog.responseScope.failure) {
+                dialog.responseScope.failure.call(this, form, dialogResponse);
+            }
+        };
+
+        dialog.dynamicImageHandlers = true;
+    }
+
+    // enable the fields
+    CQ.scene7.dynamicImageHelper.enableFieldsForSubmission(dialog);
+};
+
+/**
+ * Construct a config object based on the current field values in the edit dialog
+ */
+CQ.scene7.dynamicImageHelper.getImageConfig = function(component) {
+    var tabPanel = component.findParentByType("tabpanel");
+    var imgConfig = {};
+    if (tabPanel) {
+        var configMapArray = [
+            {
+                componentName: "./width",
+                objectKey: "width"
+            },
+            {
+                componentName: "./height",
+                objectKey: "height"
+            },
+            {
+                componentName: "./s7ImagePreset",
+                objectKey: "s7ImagePreset"
+            },
+            {
+                componentName: "./outputFormat",
+                objectKey: "outputFormat"
+            },
+            {
+                componentName: "./jpegQuality",
+                objectKey: "jpegQuality"
+            },
+            {
+                componentName: "./sharpeningMode",
+                objectKey: "sharpeningMode"
+            },
+            {
+                componentName: "./unsharpMaskAmount",
+                objectKey: "unsharpMaskAmount"
+            },
+            {
+                componentName: "./unsharpMaskRadius",
+                objectKey: "unsharpMaskRadius"
+            },
+            {
+                componentName: "./unsharpMaskThreshold",
+                objectKey: "unsharpMaskThreshold"
+            },
+            {
+                componentName: "./urlModifiers",
+                objectKey: "urlModifiers"
+            },
+            {
+                componentName: "./breakpoints",
+                objectKey: "breakpoints"
+            }
+        ];
+
+        for (var idx = 0 ; idx < configMapArray.length ; idx ++) {
+            var componentSearchResult = tabPanel.find("name", configMapArray[idx].componentName);
+            if (componentSearchResult && componentSearchResult.length > 0) {
+                imgConfig[configMapArray[idx].objectKey] = componentSearchResult[0].getValue();
+            }
+        }
+    }
+
+    return imgConfig;
+};
+
+CQ.scene7.dynamicImageHelper.s7DropUpdateFormParams = function(comp) {
+    // if we have valid dimension, update the advanced tab
+    var tabPanel = comp.findParentByType("tabpanel");
+    if (tabPanel) {
+        var advancedTabSearch = tabPanel.find("title", "Advanced");
+        var advancedTab = undefined;
+        if (advancedTabSearch && advancedTabSearch.length > 0) {
+            advancedTab = advancedTabSearch[0];
+        }
+        if (advancedTab) {
+            var imageWidthFormField = CQ.scene7.dynamicImageHelper.getChildBy(advancedTab, "name", "./imageWidth");
+            if (imageWidthFormField && comp.imageWidth > 0) {
+                imageWidthFormField.setValue(comp.imageWidth);
+            }
+
+            var imageHeightFormField = CQ.scene7.dynamicImageHelper.getChildBy(advancedTab, "name", "./imageHeight");
+            if (imageHeightFormField && comp.imageHeight > 0) {
+                imageHeightFormField.setValue(comp.imageHeight);
+            }
+        }
+        //hide image preset when set is dropped into component
+        var s7SettingTabSearch = tabPanel.find("title", "Scene7 Settings");
+        var s7SettingTab = undefined;
+        if (s7SettingTabSearch && s7SettingTabSearch.length > 0) {
+            s7SettingTab = s7SettingTabSearch[0];
+        }
+        if (s7SettingTab) {
+            var imagePreset = CQ.scene7.dynamicImageHelper.getChildBy(s7SettingTab, "name", "imagePresetsHbox");
+            if (comp.assetType.indexOf("image") == 0) {
+                imagePreset.show();
+            }
+            else {
+                imagePreset.hide();
+            }
+        }
+    }
+};
+
+/**
+ * Loads the SPS image presets for a given S7 config and updates the image presets combo with the new values
+ * @param {String} s7ConfigPath - the Scene7 configuration for which the presets need to be fetched
+ * @param {String} currentImagePreset - the selected image preset for this dynamic image
+ * @param {CQ.form.Selection} presetSelectWidget - the image preset combo that will be updated with the preset values
+ *
+ */
+CQ.scene7.dynamicImageHelper.loadImagePresets = function(s7ConfigPath, currentImagePreset, presetSelectWidget) {
+
+    if (!s7ConfigPath
+        || !presetSelectWidget) {
+        return;
+    }
+
+    CQ.scene7.dynamicImageHelper.populateImagePresets(s7ConfigPath + "/jcr:content.imagepresets.json",
+        currentImagePreset, presetSelectWidget, "presetName");
+};
+
+/**
+ * Loads image presets from DAM and updates the image presets combo with the new values
+ * @param {String} currentImagePreset - the selected image preset for this dynamic image
+ * @param {CQ.form.Selection} presetSelectWidget - the image preset combo that will be updated with the preset values
+ */
+CQ.scene7.dynamicImageHelper.loadDAMImagePresets = function(currentImagePreset, presetSelectWidget) {
+    if (!presetSelectWidget) {
+        return;
+    }
+
+    CQ.scene7.dynamicImageHelper.populateImagePresets("/libs/settings/dam/dm/imageserver/jcr:content/macros.children.2.json?props=id",
+        currentImagePreset, presetSelectWidget, "id");
+};
+
+/**
+ * Populates the image presets select widget using a given endpoint to load the selection items
+ * @param {String} presetsEndpoint - URL where to load the presets from
+ * @param {String} currentImagePreset - the selected image preset for this dynamic image
+ * @param {CQ.form.Selection} presetSelectWidget - the image preset combo that will be updated with the preset values
+ * @param {String} presetNameJSONKey - key containing the name of the preset to be found in the returned JSON
+ */
+CQ.scene7.dynamicImageHelper.populateImagePresets = function(presetsEndpoint, currentImagePreset, presetSelectWidget, presetNameJSONKey) {
+    // do a hit to load the presets
+    CQ.HTTP.get(presetsEndpoint, function(options, success, xhr, response) {
+        var newPresetOptions = [{
+            text: 'None',
+            value: ''}];
+
+        if (success) {
+            var jsonResponse = JSON.parse(xhr.responseText);
+            if (jsonResponse && jsonResponse.length) {
+                for (var imgPresetIdx = 0 ; imgPresetIdx < jsonResponse.length ; imgPresetIdx++) {
+                    var imgPresetJson = jsonResponse[imgPresetIdx];
+                    if (imgPresetJson[presetNameJSONKey]) {
+                        newPresetOptions.push({
+                            text: imgPresetJson[presetNameJSONKey],
+                            value: imgPresetJson[presetNameJSONKey]});
+                    }
+                }
+            }
+        }
+
+        presetSelectWidget.setOptions(newPresetOptions);
+
+        if (currentImagePreset) {
+            presetSelectWidget.setValue(currentImagePreset);
+        }
+    });
+};
+
+
+/**
+ * Loads viewer presets from DAM and updates the viewer presets combo with the new values
+ * @param {String} currentViewerPreset - the selected viewer preset for this dynamic image
+ * @param {CQ.form.Selection} presetSelectWidget - the viewer preset combo that will be updated with the preset values
+ * @param {String} assetType - current asset type to filter preset
+ */
+CQ.scene7.dynamicImageHelper.loadDAMViewerPresets = function(currentViewerPreset, presetSelectWidget, assetType) {
+    if (!presetSelectWidget) {
+        return;
+    }
+
+    CQ.scene7.dynamicImageHelper.populateViewerPresets("/etc/dam/presets/viewer.children.2.json?include=isactive,true",
+        currentViewerPreset, presetSelectWidget, "id", "uri", assetType);
+};
+
+
+/**
+ * Populates the viewer presets select widget using a given endpoint to load the selection items
+ * @param {String} presetsEndpoint - URL where to load the presets from
+ * @param {String} currentViewerPresetValue - the selected viewer preset for this dynamic image
+ * @param {CQ.form.Selection} presetSelectWidget - the image preset combo that will be updated with the preset values
+ * @param {String} presetNameJSONKey - key containing the name of the preset to be found in the returned JSON
+ * @param {String} presetPathJSONKey - key containing the uri of the preset to be found in the returned JSON
+ * @param {String} assetType - asset type to be used to filter the viewer preset list
+ */
+CQ.scene7.dynamicImageHelper.populateViewerPresets = function( presetsEndpoint,
+                                                               currentViewerPresetValue,
+                                                               presetSelectWidget,
+                                                               presetNameJSONKey,
+                                                               presetPathJSONKey,
+                                                               assetType ) {
+    presetSelectWidget.presetData = [];
+    // Load the viewer presets
+    CQ.HTTP.get(presetsEndpoint, function(options, success, xhr, response) {
+        var newPresetOptions = [{
+            text: 'None',
+            value: ''}];
+        if (success) {
+            var jsonResponse = JSON.parse(xhr.responseText);
+            if (jsonResponse && jsonResponse.length ) {
+                for (var viewerPresetIdx = 0 ; viewerPresetIdx < jsonResponse.length ; viewerPresetIdx++) {
+                    var viewerPresetItem = jsonResponse[viewerPresetIdx];
+                    if (viewerPresetItem[presetNameJSONKey]) {
+                        // For value, we use id|category.
+                        // Since we don't allow | as viewer preset name, | can be safely used as a delimiter
+                        var viewerPresetCat = viewerPresetItem['jcr:content']['category']
+                        viewerPresetCat = viewerPresetCat.toLowerCase();
+                        if ( viewerPresetCat !== 'image_set' ) {
+                            viewerPresetCat = viewerPresetCat.replace('_set', '');
+                        }
+                        viewerPresetCat = viewerPresetCat.replace('_', '');
+                        var presetFullValue = viewerPresetItem[presetNameJSONKey]
+                            + '|' + viewerPresetCat
+                            + '|' + viewerPresetItem[presetPathJSONKey];
+                        presetSelectWidget.presetData.push({
+                            text: viewerPresetItem[presetNameJSONKey],
+                            value: presetFullValue,
+                            assetType: viewerPresetCat });
+                    }
+                }
+            }
+        }
+
+        CQ.scene7.dynamicImageHelper.renderViewerPreset(currentViewerPresetValue, presetSelectWidget, assetType);
+    });
+};
+
+/**
+ * Render viewer presets
+ * @param {String} currentViewerPreset - the selected viewer preset for this dynamic image
+ * @param {CQ.form.Selection} presetSelectWidget - the viewer preset combo that will be updated with the preset values
+ * @param {String} assetType - current asset type to filter preset
+ */
+CQ.scene7.dynamicImageHelper.renderViewerPreset = function (currentViewerPresetValue, presetSelectWidget, assetType) {
+
+    var newPresetOptions = [{
+        text: 'None',
+        value: ''}];
+    var presetData = presetSelectWidget.presetData;
+    if ( assetType === 'zoom' ) {
+        assetType = 'imageset';
+    }
+    for (var viewerPresetIdx = 0 ; viewerPresetIdx < presetData.length ; viewerPresetIdx++) {
+        var presetItem = presetData[viewerPresetIdx];
+        if ( ( ( assetType === 'image' || assetType === '' ) &&
+            ( presetItem.assetType === 'zoom' || presetItem.assetType === 'flyoutzoom' ) ) ||
+            ( assetType === presetItem.assetType ) ) {
+            newPresetOptions.push({
+                text: presetItem.text,
+                value: presetItem.value});
+        }
+    }
+
+    presetSelectWidget.setOptions(newPresetOptions);
+
+    if (currentViewerPresetValue) {
+        presetSelectWidget.setValue(currentViewerPresetValue);
+    }
+}
+
+
+/**
+ * Selection change handler for the dynamic image output format field
+ */
+CQ.scene7.dynamicImageHelper.outputFormatSelectionChange = function(selectWidget, value, isChecked) {
+
+    if (!selectWidget) {
+        return;
+    }
+
+    // search for the container panel
+    var parentPanel = selectWidget.findParentByType("panel");
+
+    if(parentPanel) {
+        // call the enable/disable jpeg quality method
+        CQ.scene7.dynamicImageHelper.enableDisableJpegQuality(parentPanel, "jpeg" == value);
+    }
+};
+
+/**
+ * Selection change handler for the sharpening mode selector
+ */
+CQ.scene7.dynamicImageHelper.sharpeningModeSelectionChange = function(selectWidget, value, isChecked) {
+    if (!selectWidget) {
+        return;
+    }
+
+    // search for the container panel
+    var parentPanel = selectWidget.findParentByType("panel");
+
+    // update unsharp masking selectors status
+    CQ.scene7.dynamicImageHelper.enableDisableUnsharpMask(parentPanel, ("unsharpMask" == value));
+
+};
+
+/**
+ * Enable or disable the unsharp mask selectors based on the received boolean parameter
+ * @parma tabPanel {CQ.Ext.Panel}
+ *          panel widget under which unsharp mask sliders will be searched
+ * @param {Boolean} enabled
+ *          flag indicating if the sliders need to be enabled or not
+ */
+CQ.scene7.dynamicImageHelper.enableDisableUnsharpMask = function(tabPanel, enabled) {
+    if (tabPanel) {
+
+        var sharpeningModeFields = tabPanel.find("name", "./sharpeningMode");
+        var selectedSharpeningMode = "";
+        if (sharpeningModeFields && sharpeningModeFields.length > 0) {
+            var sharpeningModeSelectWidget = sharpeningModeFields[0];
+            selectedSharpeningMode = sharpeningModeSelectWidget.getValue();
+        }
+
+        enabled = enabled && "unsharpMask" == selectedSharpeningMode;
+
+        var amountField = CQ.scene7.dynamicImageHelper.getChildBy(tabPanel, "name", "./unsharpMaskAmount");
+        if (amountField) {
+            // update amount slider widget state
+            if (!enabled) {
+                amountField.setValue(0);
+            }
+            CQ.scene7.dynamicImageHelper.updateSlider(amountField, !enabled, true);
+        }
+
+        var radiusField = CQ.scene7.dynamicImageHelper.getChildBy(tabPanel, "name", "./unsharpMaskRadius");
+        if (radiusField) {
+            // update radius slider widget state
+            if (!enabled) {
+                radiusField.setValue(0);
+            }
+            CQ.scene7.dynamicImageHelper.updateSlider(radiusField, !enabled, true);
+        }
+
+        var thresholdField = CQ.scene7.dynamicImageHelper.getChildBy(tabPanel, "name", "./unsharpMaskThreshold");
+        if (thresholdField) {
+            // update threshold slider widget state
+            if (!enabled) {
+                thresholdField.setValue(0);
+            }
+            CQ.scene7.dynamicImageHelper.updateSlider(thresholdField, !enabled, true);
+        }
+    }
+};
+
+/**
+ *
+ * Enables or disables the jpeg quality field, based on the value of the received boolean
+ * @parma tabPanel {CQ.Ext.Panel}
+ *          panel widget under which the jpeg quality will be searched
+ * @param {Boolean} jpegQualityEnabled
+ *          if true the field will be enabled, if false it will be disabled
+ */
+CQ.scene7.dynamicImageHelper.enableDisableJpegQuality = function(tabPanel, jpegQualityEnabled) {
+
+    if (!tabPanel) {
+        return;
+    }
+
+    // enable or disable the jpeg quality field based on the selected format
+    var outputFormatFieldsSearchResults = tabPanel.find("name", "./outputFormat");
+    var selectedFormat = "";
+    if (outputFormatFieldsSearchResults && outputFormatFieldsSearchResults.length > 0) {
+        var outputFormatWidget = outputFormatFieldsSearchResults[0];
+        selectedFormat = outputFormatWidget.getValue();
+    }
+
+    jpegQualityEnabled = jpegQualityEnabled && "jpeg" == selectedFormat;
+
+    var jpegQualityFields = tabPanel.find("name", "./jpegQuality");
+
+    if (jpegQualityFields && jpegQualityFields.length > 0) {
+        var jpegQualityWidget = jpegQualityFields[0];
+
+        // update slider widget state
+        CQ.scene7.dynamicImageHelper.updateSlider(jpegQualityWidget, !jpegQualityEnabled, true);
+    }
+};
+
+/**
+ *
+ * Enables or disables the viewer preset dropdown, based on the value of the received boolean
+ * @parma tabPanel {CQ.Ext.Panel}
+ *          panel widget under which the viewer preset dropdown will be searched
+ * @param {Boolean} viewerPresetEnabled
+ *          if true the field will be enabled, if false it will be disabled
+ */
+CQ.scene7.dynamicImageHelper.enableDisableViewerPreset = function(tabPanel, viewerPresetEnabled) {
+
+    if (!tabPanel) {
+        return;
+    }
+
+    var viewerPresetCombo = tabPanel.find("name", "viewerPresetCombo");
+    if (viewerPresetCombo && viewerPresetCombo.length > 0) {
+        if (viewerPresetEnabled) {
+            viewerPresetCombo[0].enable();
+        }
+        else {
+            viewerPresetCombo[0].disable();
+        }
+    }
+}
+
+/**
+ *
+ * Enables or disables the image preset dropdown, based on the value of the received boolean
+ * @parma tabPanel {CQ.Ext.Panel}
+ *          panel widget under which the image preset dropdown will be searched
+ * @param {Boolean} imagePresetEnabled
+ *          if true the field will be enabled, if false it will be disabled
+ */
+CQ.scene7.dynamicImageHelper.enableDisableImagePreset = function(tabPanel, imagePresetEnabled) {
+
+    if (!tabPanel) {
+        return;
+    }
+
+    var imagePresetCombo = tabPanel.find("name", "imagePresetCombo");
+    if (imagePresetCombo && imagePresetCombo.length > 0) {
+        if (imagePresetEnabled) {
+            imagePresetCombo[0].enable();
+        }
+        else {
+            imagePresetCombo[0].disable();
+        }
+    }
+}
+
+
+/**
+ * Helper method to update the state of a {CQ.Ext.form.SliderField} widget
+ * @param {CQ.Ext.form.SliderField} sliderWidget - the slider
+ * @param {Boolean} disabled - boolean indicating if the slider needs to be disabled or not
+ * @param {Boolean} updateValue - boolean indicating if the underlying slider will need to be updated (the thumb does not always reflect the current value...)
+ */
+CQ.scene7.dynamicImageHelper.updateSlider = function(sliderWidget, disabled, updateValue) {
+    if (!sliderWidget) {
+        return;
+    }
+
+    // update disabled state
+    sliderWidget.setDisabled(disabled);
+
+    var slider = sliderWidget.slider;
+    if (slider && updateValue == true) {
+        // update the slider thumb
+        var currentValue = sliderWidget.getValue();
+        slider.setValue(currentValue, false);
+        slider.moveThumb(0, slider.translateValue(currentValue), false);
+    }
+};
+
+/**
+ * Searches a parent component for a child having a given property name and value
+ * @param {CQ.Ext.Container} parent - container component under which the search will be performed
+ * @param {String} childSearchPropName - property name what will be searched in the children
+ * @param {String} childSearchPropValue - property value that will be searched in the children
+ * @return {CQ.Ext.Component} the first child component that has childSearchPropName = childSearchPropValue or undefined if no match is found
+ */
+CQ.scene7.dynamicImageHelper.getChildBy = function(parent, childSearchPropName, childSearchPropValue) {
+    if (parent && parent.find) {
+        var childSearchResultArray = parent.find(childSearchPropName, childSearchPropValue);
+
+        if (childSearchResultArray && childSearchResultArray.length > 0) {
+            return childSearchResultArray[0];
+        }
+    }
+
+    return undefined;
+};
+
+/**
+ * Updates the values and states for the size, image format and image sharpness based on wether a preset is selected or not
+ * Preset has precedence, so if one is selected the size, format and sharpness are disabled
+ */
+CQ.scene7.dynamicImageHelper.updatePresetPrecedence = function(dialog, selectedPreset) {
+    var disableFields = "" != selectedPreset;
+
+    if (dialog) {
+
+        var fieldNames = ["./width", "./height", "./outputFormat", "./sharpeningMode"];
+        for (var fieldNameIdx = 0 ; fieldNameIdx < fieldNames.length ; fieldNameIdx++) {
+            var field = CQ.scene7.dynamicImageHelper.getChildBy(dialog, "name", fieldNames[fieldNameIdx]);
+            if (field) {
+                if (disableFields) {
+                    field.setValue("");
+                }
+                field.setDisabled(disableFields);
+            }
+        }
+    }
+};
+
+CQ.scene7.dynamicImageHelper.activateAdvancedTab = function(panel) {
+    var dialog = panel.findParentByType("dialog");
+    if (dialog) {
+        var selectedImagePreset = CQ.scene7.dynamicImageHelper.getChildBy(dialog, "name", "./s7ImagePreset");
+        if (selectedImagePreset) {
+            CQ.scene7.dynamicImageHelper.updatePresetPrecedence(dialog, selectedImagePreset.getValue());
+        }
+    }
+};
+
+/**
+ * Initializes the image presets taking into account the status of Dynamic Media
+ * @param imagePresetsPanel - the panel holding the image presets settings
+ * @param {CQ.form.Selection} presetSelectWidget - the image preset combo that will be updated with the preset values
+ * @param {String} currentImagePreset - the selected image preset for this dynamic image
+ * @param {Boolean} dynamicMediaMode - wether the component is in DM mode or not
+ */
+CQ.scene7.dynamicImageHelper.initImagePresetsPanel = function(imagePresetsPanel, presetSelectWidget, selectedImagePreset, dynamicMediaMode) {
+    // check if Dynamic Media is enabled
+    if (dynamicMediaMode) {
+        // use DAM to get the presets
+        if (CQ.S7
+            && CQ.S7.isDynamicMediaEnabled()) {
+            CQ.scene7.dynamicImageHelper.loadDAMImagePresets(selectedImagePreset, presetSelectWidget);
+        }
+    } else {
+        // use S7 Saas config to get the presets
+        // also add the S7 cloud config selection combo, the presets are fetched based on that config
+        var s7CloudConfigCombo = new CQ.cloudservices.Scene7CloudConfigurationCombo({
+            "fieldLabel": CQ.I18n.getMessage("Scene7 Configuration"),
+            "fieldDescription": CQ.I18n.getMessage("Scene7 Configuration used to fetch the active image presets from SPS"),
+            "rootPath": "/etc/cloudservices/scene7",
+            "name": "S7ImpTemplateConfigSelector",
+            "selectFirst": true,
+            "clearEnabled": false,
+            "valueNotFoundText": CQ.I18n.getMessage("None"),
+            "width": 200,
+            "tpl":new CQ.Ext.XTemplate(
+                '<tpl for=".">',
+                '<div class="workflow-model-item x-combo-list-item">',
+                '<div class="workflow-model-title">{title:this.formatStr}</div>',
+                '<div style="clear:both"></div>',
+                '</div>',
+                '</tpl>',
+                '<div style="height:5px;overflow:hidden"></div>',
+                {
+                    formatStr:function(v) {
+                        return (v!== null) ? v : "";
+                    }
+                }
+            ),
+            "listeners": {
+                select: function (combo, record, index ) {
+                    var selectedConfig = combo.getValue();
+
+                    CQ.scene7.dynamicImageHelper.loadImagePresets(selectedConfig, selectedImagePreset, presetSelectWidget);
+                },
+                change: function(store, newValue, oldValue ) {
+                    CQ.scene7.dynamicImageHelper.loadImagePresets(newValue, selectedImagePreset, presetSelectWidget);
+                }
+            }
+        });
+
+        imagePresetsPanel.add(s7CloudConfigCombo);
+    }
+};
+
+/**
+ * Initializes the viewer presets taking into account the status of Dynamic Media
+ * @param viewerPresetsPanel - the panel holding the image presets settings
+ * @param {CQ.form.Selection} presetSelectWidget - the viewer preset combo that will be updated with the preset values
+ * @param {String} selectedViewerPreset - the selected viewer preset for this dynamic image
+ * @param {String} assetType - current asset type
+ */
+CQ.scene7.dynamicImageHelper.initViewerPresetsPanel = function(viewerPresetsPanel, presetSelectWidget, selectedViewerPreset, assetType) {
+    // check if Dynamic Media is enabled
+    if (CQ.S7
+        && CQ.S7.isDynamicMediaEnabled()) {
+        // use DAM to get the presets
+        CQ.scene7.dynamicImageHelper.loadDAMViewerPresets(selectedViewerPreset, presetSelectWidget, assetType);
+    }
+    else {
+        //No viewer preset for non-DAM for now
+        viewerPresetsPanel.hide();
+    }
+};
+
+CQ.scene7.dynamicImageHelper.initS7ImagePanel = function(panel, dynamicMediaMode) {
+    var imagePresetsPanel = panel.find("name", "imagePresetsHbox");
+    var viewerPresetsPanel = panel.find("name", "viewerPresetsHbox");
+    var enableViewerPresets = dynamicMediaMode;
+    var tabpanel = panel.findParentByType("tabpanel");
+    if ( tabpanel ) {
+        tabpanel = panel.findParentByType("dialog");
+    }
+    var assetTypePanel = panel.find("name", "./assetType");
+    var assetType = "";
+    if (assetTypePanel && assetTypePanel.length > 0) {
+        assetType = assetTypePanel[0].getValue();
+    }
+
+    var selectedImagePreset = "",
+        selectedViewerPreset = "";
+    if (imagePresetsPanel && imagePresetsPanel.length > 0) {
+
+        imagePresetsPanel = imagePresetsPanel[0];
+        imagePresetsPanel.removeAll();
+
+        var selectedImagePresetArray = panel.find("name", "./s7ImagePreset");
+        if (selectedImagePresetArray && selectedImagePresetArray.length > 0) {
+            selectedImagePreset = selectedImagePresetArray[0].getValue();
+        }
+
+        var presetSelectWidget = new CQ.form.Selection({
+            type: 'select',
+            name: 'imagePresetCombo',
+            fieldLabel: CQ.I18n.getMessage('Image Preset'),
+            fieldDescription: CQ.I18n.getMessage("Image Preset to use when rendering image. It cannot be set when viewer preset is set."),
+            defaultValue: selectedImagePreset,
+            listeners: {
+                selectionchanged : function(select, value, isChecked ) {
+                    if (selectedImagePresetArray && selectedImagePresetArray.length > 0) {
+                        selectedImagePresetArray[0].setValue(value);
+
+                        // disable size, image format and sharpness selectors
+                        CQ.scene7.dynamicImageHelper.updatePresetPrecedence(tabpanel, value);
+
+                        CQ.scene7.dynamicImageHelper.enableDisableJpegQuality(panel, "" == value);
+                        CQ.scene7.dynamicImageHelper.enableDisableUnsharpMask(panel, "" == value);
+                        //disable viewer preset when image preset is set
+                        CQ.scene7.dynamicImageHelper.enableDisableViewerPreset(panel, "" == value);
+                    }
+
+                }
+            },
+            options: [
+                { text: 'None', value: ''},
+            ]
+        });
+
+        CQ.scene7.dynamicImageHelper.initImagePresetsPanel(imagePresetsPanel, presetSelectWidget, selectedImagePreset, dynamicMediaMode);
+        imagePresetsPanel.add(presetSelectWidget);
+    }
+
+    if (viewerPresetsPanel && viewerPresetsPanel.length > 0) {
+        viewerPresetsPanel = viewerPresetsPanel[0];
+        if (!enableViewerPresets) {
+            viewerPresetsPanel.hide();
+        }
+        viewerPresetsPanel.removeAll();
+
+        var selectedViewerPresetArray = panel.find("name", "./s7ViewerPreset");
+        var breakpointField = CQ.scene7.dynamicImageHelper.getChildBy(panel, "name", "./breakpoints");
+        if (selectedViewerPresetArray && selectedViewerPresetArray.length > 0) {
+            selectedViewerPreset = selectedViewerPresetArray[0].getValue();
+            breakpointField.setDisabled( selectedViewerPresetArray[0].getValue() !== '');
+        }
+
+        var viewerPresetSelectWidget = new CQ.form.Selection({
+            type: 'select',
+            name: 'viewerPresetCombo',
+            fieldLabel: CQ.I18n.getMessage('Viewer Preset'),
+            fieldDescription: CQ.I18n.getMessage("Viewer Preset to use when rendering dynamic image. It cannot be set when image preset is set."),
+            defaultValue: selectedViewerPreset,
+            listeners: {
+                selectionchanged : function(select, value, isChecked ) {
+                    if (selectedViewerPresetArray && selectedViewerPresetArray.length > 0) {
+                        selectedViewerPresetArray[0].setValue(value);
+                        //disable image preset when viewer preset is set.
+                        CQ.scene7.dynamicImageHelper.enableDisableImagePreset(panel, "" == value);
+                    }
+                    breakpointField.setDisabled(value !== '');
+                    breakpointField.setValue('');
+                }
+            },
+            options: [
+                { text: 'None', value: ''},
+            ]
+        });
+
+        CQ.scene7.dynamicImageHelper.initViewerPresetsPanel( viewerPresetsPanel,
+            viewerPresetSelectWidget,
+            selectedViewerPreset,
+            assetType);
+        viewerPresetsPanel.add(viewerPresetSelectWidget);
+    }
+
+    //enable/disable viewer/image preset depending on state of the other.
+    CQ.scene7.dynamicImageHelper.enableDisableViewerPreset(panel, "" == selectedImagePreset);
+    CQ.scene7.dynamicImageHelper.enableDisableImagePreset(panel, "" == selectedViewerPreset);
+
+    // enable or disable the jpeg quality field based on the selected format
+    CQ.scene7.dynamicImageHelper.enableDisableJpegQuality(panel, "" == selectedImagePreset);
+
+    // update unsharp mask slider fields based on the selected sharpening option
+    CQ.scene7.dynamicImageHelper.enableDisableUnsharpMask(panel, "" == selectedImagePreset);
+
+    // update fields based on selected preset
+    CQ.scene7.dynamicImageHelper.updatePresetPrecedence(tabpanel, selectedImagePreset);
+
+    panel.doLayout();
+};
+
+/**
+ * Reset the tab panel to first tab so subsequent activate will be called when user
+ * clicks on dynamic media settings tab to refresh viewer preset
+ * @param dialog
+ */
+CQ.scene7.dynamicImageHelper.resetTab = function(dialog) {
+    var tabPanel = dialog.findByType('tabpanel');
+    if( tabPanel && tabPanel.length > 0 ) {
+        tabPanel[0].setActiveTab(0);
+    }
+};

@@ -1,0 +1,764 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+
+    // TODO CQ-47993: Namespace with Editor type
+    var USER_PREF_COOKIE_KEY = "cq-editor-sidepanel";
+
+    var CSS_EMPTY_CONTENT = "js-SidePanel-content--empty";
+    var CSS_TOGGLE_SIDEPANEL = "toggle-sidepanel";
+    var CSS_SIDEPANEL_CLOSED = "sidepanel-closed";
+    var CSS_SIDEPANEL_OPENED = "sidepanel-opened";
+    var CSS_SIDEPANEL_RESIZER = "sidepanel-resizer";
+    var CSS_SIDEPANEL_RESIZING = "sidepanel-resizing";
+    var CSS_SIDEPANEL_CONTENT = "sidepanel-content";
+    var CSS_SIDEPANEL_HEADERTITLE = "sidepanel-header-title";
+    var CSS_SIDEPANEL_ANCHOR_IN_TABS = ".sidepanel coral-tabview";
+    var EVENT_SIDEPANEL_TABSWITCH = "cq-sidepanel-tab-switched.sidepanel";
+    var EVENT_SIDEPANEL_TAB_CHANGE = "coral-tabview:change";
+    var EVENT_SIDEPANEL_RESIZE = "resize.sidepanel";
+    var EVENT_SIDEPANEL_TRANSITIONEND = "transitionend.sidepanel";
+    var EVENT_SIDEPANEL_CLICK = "click.sidepanel";
+
+    // Selectors
+    var SIDEPANEL_SELECTOR = "#SidePanel";
+    var DIALOG_SELECTOR = "coral-dialog.cq-Dialog";
+    // Classes
+    var DIALOG_OPENED_CLASS = "cq-dialog-is-open";
+    var DIALOG_BACKDROP_OPENED_CLASS = "is-open";
+    // Events
+    var SIDEPANEL_NAMESPACE = ".sidepanel";
+    var OVERLAY_BEFORE_OPEN =  "coral-overlay:beforeopen";
+    var DIALOG_BEFORE_CLOSE =  "dialog-beforeclose";
+
+
+    // Dialog backdrop over the content
+    var $backdrop = $();
+
+    /**
+     * Tab has been switched on the side panel
+     *
+     * @event Document#cq-sidepanel-tab-switched
+     */
+
+    /**
+     * The side panel is about to be toggled
+     *
+     * @event Document#cq-sidepanel-beforetoggle
+     */
+
+    /**
+     * The side panel has been toggled
+     *
+     * @event Document#cq-sidepanel-aftertoggle
+     */
+
+    /**
+     * The side panel has been resized
+     *
+     * @event Document#cq-sidepanel-resized
+     */
+
+    /**
+     * The SidePanel usually contains the {@link Granite.author.ui.assetFinder} and {@link Granite.author.ui.componentBrowser}, and is positioned on the left of the screen, as an aside of the main "Content Panel".
+     * It could have different variants/contents (js-sidePanel-empty, js-sidePanel-edit), and the current content is usually set by the current layer.
+     *
+     * Initialized on {@link Document#event:cq-editor-loaded}
+     *
+     * @namespace
+     * @alias Granite.author.ui.SidePanel
+     */
+    ns.ui.SidePanel = {
+        /**
+         * Corresponding jQuery element
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         * @type {jQuery}
+         */
+        $el: $(SIDEPANEL_SELECTOR),
+
+        /**
+         * Content panel to which the SidePanel is anchored
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         * @type {jQuery}
+         */
+        $anchor: $("#Content"),
+
+        /**
+         * CSS Classes corresponding to the different tabs of the SidePanel
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         * @type {Object}
+         */
+        TAB_CLASSES: {
+            ASSETS:         "sidepanel-tab-assets",
+            COMPONENTS:     "sidepanel-tab-components",
+            CONTENT:        "sidepanel-tab-content"
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @deprecated
+         * @ignore
+         */
+        id: "SidePanel",
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _resizer: null,
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _openOnRestore: false,
+
+        /**
+         * Coral TabView element
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         * @type {Coral.TabView}
+         * @private
+         * @ignore
+         */
+        _tabView: null,
+
+        /**
+         * Initialize the SidePanel: open it if needed and bind events
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         */
+        init: function () {
+            this._tabView = this.$el.find("coral-tabview").get(0);
+
+            if (this._getUserPrefCookie() === "open" && !this.isOpened()) {
+                this.open(false);
+            }
+
+            channel.off(EVENT_SIDEPANEL_TAB_CHANGE, CSS_SIDEPANEL_ANCHOR_IN_TABS).on(EVENT_SIDEPANEL_TAB_CHANGE, CSS_SIDEPANEL_ANCHOR_IN_TABS, this._handleTabNavClick.bind(this));
+            channel.off(EVENT_SIDEPANEL_TABSWITCH).on(EVENT_SIDEPANEL_TABSWITCH, this._handleTabSwitch.bind(this));
+            channel.off(EVENT_SIDEPANEL_CLICK, "." + CSS_TOGGLE_SIDEPANEL).on(EVENT_SIDEPANEL_CLICK, "." + CSS_TOGGLE_SIDEPANEL, this._handleToggleClick.bind(this));
+            $(window)
+                .off(EVENT_SIDEPANEL_RESIZE).on(EVENT_SIDEPANEL_RESIZE, $.debounce(500, true, this._handleWindowResizeBegin.bind(this)))
+                .off(EVENT_SIDEPANEL_RESIZE).on(EVENT_SIDEPANEL_RESIZE, $.debounce(500, false, this._handleWindowResizeEnd.bind(this)));
+
+            channel.off(OVERLAY_BEFORE_OPEN + SIDEPANEL_NAMESPACE).on(OVERLAY_BEFORE_OPEN + SIDEPANEL_NAMESPACE, DIALOG_SELECTOR, this._showContentBackdrop.bind(this));
+            channel.off(DIALOG_BEFORE_CLOSE + SIDEPANEL_NAMESPACE).on(DIALOG_BEFORE_CLOSE + SIDEPANEL_NAMESPACE, DIALOG_SELECTOR, this._hideContentBackdrop.bind(this));
+        },
+
+        /**
+         * Open the SidePanel
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         *
+         * @param {Boolean} keepRestorable <code>true</code> to keep allow to restore the SidePanel e.g. after a mode switch.
+         * */
+        open: function (keepRestorable) {
+            $('#sidepanel-toggle-button').attr("aria-expanded", "true");
+            if (this.$el.hasClass(CSS_SIDEPANEL_OPENED)) {
+                return;
+            }
+
+            // css position, width are set inline via JS
+            this._cleanInlineCss();
+            this._triggerToggle();
+
+            this.$el.removeClass(CSS_SIDEPANEL_CLOSED);
+            this.$el.addClass(CSS_SIDEPANEL_OPENED);
+
+            this._setUserPrefCookie("open");
+
+            // set the status to be restored e.g. after a mode switch
+            if (keepRestorable === false) {
+                this._openOnRestore = true;
+            }
+
+            if (ns.device.isDesktop() && (this.$el.find("." + CSS_SIDEPANEL_RESIZER).length === 0)) {
+                this._addResizer();
+            }
+
+            this._triggerTabSwitched();
+            this._triggerResized();
+        },
+
+        /**
+         * Close the SidePanel
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         *
+         * @param {Boolean} keepRestorable <code>true</code> to keep allow to restore the SidePanel e.g. after a mode switch.
+         */
+        close: function (keepRestorable) {
+            $('#sidepanel-toggle-button').attr("aria-expanded", "false");
+            if (this.$el.hasClass(CSS_SIDEPANEL_CLOSED)) {
+                return;
+            }
+
+            // css position, width are set inline via JS
+            this._cleanInlineCss();
+            this._triggerToggle();
+
+            this.$el.addClass(CSS_SIDEPANEL_CLOSED);
+            this.$el.removeClass(CSS_SIDEPANEL_OPENED);
+
+            this._setUserPrefCookie("closed");
+
+            // set the status to restore after mode switch
+            if (keepRestorable === false) {
+                this._openOnRestore = false;
+            }
+
+            this._triggerResized();
+        },
+
+        /**
+         * Open or close the SidePanel depending on the keepRestorable parameter previously set during the call of the open/close method
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         */
+        restore: function() {
+            if (this._openOnRestore === true) {
+                this.open(true);
+            } else {
+                this.close(true);
+            }
+        },
+
+        /**
+         * State whether the SidePanel is opened or not
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         *
+         * @returns {Boolean} <code>true</code> if the SidePanel is opened; <code>false</code> otherwise
+         */
+        isOpened: function () {
+            return this.$el.hasClass(CSS_SIDEPANEL_OPENED);
+        },
+
+        /**
+         * Get the current width of the SidePanel
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         *
+         * @returns {Number} The width of the SidePanel (0 if closed)
+         */
+        getWidth: function () {
+            return this.isOpened() ? this.$el.width() : 0;
+        },
+
+        /**
+         * Load and add new content to the SidePanel (nothing is done if the content is already present)
+         *
+         * See <code>/libs/wcm/core/content/editor/jcr:content/sidepanels/</code> for examples of content node structures of SidePanel's content
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         * @fires Document#foundation-contentloaded
+         *
+         * @param {Object} options The configuration object parameter
+         * @param {String} options.selector The CSS selector of the content node to find in the SidePanel DOM
+         * @param {String} options.path The JCR path of the content node to load from server
+         * @returns {Promise} The HTML of the content retrieved
+         */
+        loadContent: function (options) {
+            function success (data) {
+                var $html = $(data);
+                this.$el.find("." + CSS_SIDEPANEL_CONTENT).append($html);
+
+                // Initialize widgets
+                channel.trigger("foundation-contentloaded");
+            }
+
+            // Don't load again if already in cache (here, cache = the DOM)
+            var html = this.$el.find(options.selector).get(0);
+
+            if (html) {
+                // Content has been already loaded
+                return $.Deferred().resolveWith(options, html).promise();
+
+            } else {
+                // Load content from the server
+                return $.get(options.path).then(success.bind(this));
+            }
+        },
+
+        /**
+         * Switch between the different SidePanel contents / variants
+         * This function will only toggle the current SidePanel variant shown by another one that is already loaded (but hidden). See {@link Granite.author.ui.SidePanel#loadContent} if you want to load a custom variant.
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         *
+         * @param contentClassName {String} The CSS class of the content to show. By default the following two variants are available: js-sidePanel-edit (default one) and js-sidePanel-empty (when no SidePanel is needed).
+         */
+        showContent: function (contentClassName) {
+            this.$el.find("." + CSS_SIDEPANEL_CONTENT).children().each(function() {
+                var $child = $(this);
+                if ($child.is(CSS_TOGGLE_SIDEPANEL)) {
+                    return;
+                }
+                $child.toggle($child.hasClass(contentClassName));
+            });
+            this._triggerTabSwitched();
+
+
+            // TODO CQ-47993: Avoid globalBar dependency
+            ns.ui.globalBar.sidePanelTrigger.disabled = (contentClassName === CSS_EMPTY_CONTENT);
+        },
+
+        /**
+         * Show a "blank" SidePanel
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         */
+        showEmptyContent: function () {
+            this.showContent(CSS_EMPTY_CONTENT);
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @ignore
+         * @deprecated
+         */
+        showLayer: function (content) {
+            Granite.author.util.deprecated('Use Granite.author.ui.SidePanel.showLayer instead');
+            this.showContent(content);
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @ignore
+         * @deprecated
+         */
+        showEmptyLayer: function () {
+            Granite.author.util.deprecated('Use Granite.author.ui.SidePanel.showEmptyLayer instead');
+            this.showEmptyContent();
+        },
+
+
+        /**
+         * Toggle a tab from the SidePanel (enable or disable it)
+         * If the tab is already opened, it will also switch to the nearest available tab
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         *
+         * @param tabClass {String} The [CSS class]{@link Granite.author.ui.SidePanel.TAB_CLASSES} of the SidePanel tab to toggle
+         * @param enable {Boolean} Indicates if the tab should be enabled or disabled
+         */
+        toggleTab: function (tabClass, enable) {
+            var tab = this._getTab(tabClass);
+
+            if (enable) {
+                tab.removeAttribute("disabled");
+            } else {
+                tab.setAttribute("disabled", "");
+
+                // If there is no tab to select, then close the SidePanel itself
+                const tabItems = this._tabView.tabList.items.getAll();
+                if (!tabItems.filter(function(item) {
+                    return !(item.hasAttribute('disabled') || item.hasAttribute('hidden'));
+                }).length) {
+                    this.close();
+                }
+            }
+        },
+
+        /**
+         * Get the [tabClass]{@link Granite.author.ui.SidePanel.TAB_CLASSES} of the selected tab
+         */
+        getSelectedTabClass: function() {
+            return this._tabView.panelStack.selectedItem.querySelector(".sidepanel-tab").className.match(/sidepanel-tab-[\w]*/)[0];
+        },
+
+        /**
+         * Get the Coral.Tab corresponding to the passed [tabClass]{@link Granite.author.ui.SidePanel.TAB_CLASSES}
+         *
+         * @memberOf Granite.author.ui.SidePanel
+         *
+         * @param tabClass {String} The [CSS class]{@link Granite.author.ui.SidePanel.TAB_CLASSES} of the SidePanel tab to toggle
+         * @return {Coral.Tab} The corresponding Coral.Tab element
+         * @private
+         *
+         */
+        _getTab: function (tabClass) {
+            var sidePanelTab = this._tabView.querySelector("." + tabClass);
+
+            if (!sidePanelTab) {
+                return;
+            }
+
+            // The Coral.Tab is derived from the Coral.Panel
+            var tabPanel = sidePanelTab.closest("coral-panel");
+
+            if (!tabPanel) {
+                return;
+            }
+
+            return this._tabView.querySelector("#" + tabPanel.getAttribute("aria-labelledby"));
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _triggerTabSwitched: function (event) {
+            // get active tab from visible tab group
+            var $tab = this.$el.find("coral-panel:selected:visible .sidepanel-tab");
+
+            // information on mobile is wrong, the is-active class is set after switch, therefore use the aria controls
+            if (event) {
+                var $tabCtrl = $(event.target).find("coral-tab:selected");
+                $tab = $("#" + $tabCtrl.attr('aria-controls') + " .sidepanel-tab");
+            }
+
+            if ($tab.length) {
+                // get tab name (".sidepanel-tab-foo")
+                var tabName = $tab.attr("class").match(/sidepanel-tab-[\w]*/)[0];
+
+                channel.trigger($.Event("cq-sidepanel-tab-switched", {
+                    tab: $tab,
+                    tabName: tabName
+                }));
+            }
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _triggerToggle: function () {
+            channel.trigger("cq-sidepanel-beforetoggle");
+
+            if ("ontransitionend" in window) {
+                this.$el.off(EVENT_SIDEPANEL_TRANSITIONEND).on(EVENT_SIDEPANEL_TRANSITIONEND, function () {
+                    channel.trigger("cq-sidepanel-aftertoggle");
+                });
+            } else {
+                setTimeout(function () {
+                    channel.trigger("cq-sidepanel-aftertoggle");
+                }, 2000);
+            }
+         },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+         _triggerResized: function () {
+            channel.trigger("cq-sidepanel-resized");
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _handleWindowResizeBegin: function (event) {
+            this.$el.addClass(CSS_SIDEPANEL_RESIZING);
+            this._triggerResized();
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _handleWindowResizeEnd: function (event) {
+            this.$el.removeClass(CSS_SIDEPANEL_RESIZING);
+            this._triggerResized();
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _handleTabSwitch: function (event) {
+            var headerTitle = Granite.I18n.getVar(event.tab.data("headertitle")) || "";
+            this.$el.find("." + CSS_SIDEPANEL_HEADERTITLE).html(headerTitle);
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _handleToggleClick: function (event) {
+            if (this.$el.hasClass(CSS_SIDEPANEL_CLOSED)) {
+                this.open(false);
+            } else {
+                this.close(false);
+            }
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _handleTabNavClick: function (event) {
+            this._triggerTabSwitched(event);
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+         _getRelativeWidth: function (widthProperty) {
+            var width   = this.$el.css(widthProperty),
+                indexPx = width.indexOf("px");
+
+            if (indexPx !== -1) {
+
+                // All but Chrome, we got px values (remove "px")
+                width = width.substring(0, width.length-2);
+
+                // get relative value
+                width = width / $(window).width()*100;
+            } else {
+
+                // Chrome, we got % values
+                width = parseFloat(width);
+            }
+
+            return width;
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _cleanInlineCss: function () {
+            this.$el.removeAttr("style");
+            this.$anchor.removeAttr("style");
+            this.$el.find("." + CSS_SIDEPANEL_RESIZER).removeAttr("style");
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _handleResizeDragStart: function (event) {
+            event.preventDefault();
+
+            if (event.type === "mousedown") {
+                if ((event.which || event.button) !== 1) {
+                    return;
+                }
+                $("body")
+                    .on("mousemove.cq-sidepanel-drag",this._handleResizeDrag.bind(this))
+                    .one("mouseup.cq-sidepanel-drag", this._handleResizeDragEnd.bind(this));
+            }
+            else {
+                $("body")
+                    .on("touchmove.cq-sidepanel-drag pointermove.cq-sidepanel-drag MSPointerMove.cq-sidepanel-drag", this._handleResizeDrag.bind(this))
+                    .one("touchend.cq-sidepanel-drag pointerup.cq-sidepanel-drag MSPointerUp.cq-sidepanel-drag", this._handleResizeDragEnd.bind(this))
+                    .css("touch-action", "none");
+            }
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _handleResizeDrag: function (event) {
+            // scrolling for touch
+            event.preventDefault();
+
+            var inputPoint = event.originalEvent.touches ? event.originalEvent.touches[0] :
+                    event.originalEvent.changedTouches ? event.originalEvent.changedTouches[0] :
+                        event.originalEvent;
+            var offset =  inputPoint.pageX;
+
+            // values in %
+            var newWidth = offset/$(window).width()*100;
+            var minWidth = this._getRelativeWidth("minWidth");
+            var maxWidth = this._getRelativeWidth("maxWidth");
+
+            if (offset !== 0 &&
+                newWidth > minWidth &&
+                newWidth < maxWidth) {
+
+                this._resizer.css("left", offset);
+                this._resizer.addClass("is-dragging");
+            }
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _handleResizeDragEnd: function (event) {
+            if (event.type === "mouseup") {
+                $("body")
+                    .off("mousemove.cq-sidepanel-drag")
+                    .off("mouseup.cq-sidepanel-drag");
+            }
+            else {
+                $("body")
+                    .off("touchmove.cq-sidepanel-drag pointermove.cq-sidepanel-drag MSPointerMove.cq-sidepanel-drag")
+                    .off("touchend.cq-sidepanel-drag pointerup.cq-sidepanel-drag MSPointerUp.cq-sidepanel-drag")
+                    .css("touch-action", "");
+            }
+
+            // move anchored panel, and expand side panel
+            var offset = this._resizer.css("left");
+
+            if (offset !== "auto") {
+                this.$anchor.css("left", offset);
+                this.$el.css("width", offset);
+                this._resizer.removeClass("is-dragging");
+                this._resizer.removeAttr("style");
+
+                channel.trigger("cq-sidepanel-resized");
+            }
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _addResizer: function () {
+            this._resizer = $("<div/>")
+                .addClass(CSS_SIDEPANEL_RESIZER)
+                .on("touchstart.cq-sidepanel-drag pointerdown.cq-sidepanel-drag MSPointerDown.cq-sidepanel-drag", this._handleResizeDragStart.bind(this))
+                .on("mousedown.cq-sidepanel-drag", this._handleResizeDragStart.bind(this))
+                .appendTo(this.$el);
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        // open or closed
+        _setUserPrefCookie: function (value) {
+            $.cookie(USER_PREF_COOKIE_KEY, value, {
+                path: Granite.HTTP.externalize("/"),
+                expires: 7
+            });
+        },
+
+        /**
+         * @memberOf Granite.author.ui.SidePanel
+         * @private
+         * @ignore
+         */
+        _getUserPrefCookie: function () {
+            return $.cookie(USER_PREF_COOKIE_KEY);
+        },
+
+        /**
+         * Displays the dialog backdrop over the content
+         *
+         * @private
+         */
+        _showContentBackdrop: function () {
+            // CQ-4200804: move to DialogFrame
+            if ($backdrop.length === 0) {
+                // create backdrop
+                $backdrop = $('<div class="cq-dialog-backdrop"></div>').insertBefore(SIDEPANEL_SELECTOR);
+            }
+            // SidePanel requires z-index in order to overlay the backdrop
+            this.$el.addClass(DIALOG_OPENED_CLASS);
+            // backdrop has CSS transition to fade in
+            $backdrop.show();
+            $backdrop.addClass(DIALOG_BACKDROP_OPENED_CLASS);
+        },
+
+        /**
+         * Hides the dialog backdrop over the content
+         *
+         * @private
+         */
+        _hideContentBackdrop: function () {
+            // CQ-4200804: move to DialogFrame
+            var $sidePanel = this.$el;
+            $backdrop.removeClass(DIALOG_BACKDROP_OPENED_CLASS);
+            $backdrop.one("transitionend", function() {
+                $backdrop.hide();
+                $sidePanel.removeClass(DIALOG_OPENED_CLASS);
+            });
+        }
+    };
+
+    /**
+     * Reference for legacy API
+     *
+     * @deprecated
+     */
+    Object.defineProperty(ns,'SidePanel',{
+
+        get: function () {
+            Granite.author.util.deprecated('Use Granite.author.ui.SidePanel instead');
+            return ns.ui.SidePanel;
+        },
+        set: function (value) {
+            Granite.author.util.deprecated('Use Granite.author.ui.SidePanel instead');
+            ns.ui.SidePanel = value;
+        }
+    });
+
+    channel.one("cq-editor-loaded", function () {
+        ns.ui.SidePanel.init();
+    });
+
+    channel.ready(function() {
+        var $panel = $(SIDEPANEL_SELECTOR);
+        var url = $panel.data("contentUrl");
+        $.ajax({
+            url: url,
+            success: function(res) {
+                var $res = $(res);
+                // removing script tags from downloaded html which are already present on the page
+                var $documentScripts = $(document).find("script");
+                var presentSrcs = [];
+                $documentScripts.each(function(i,v){
+                    if(v.getAttribute("src") !== null) {
+                        presentSrcs.push(v.getAttribute("src"));
+                    }
+                });
+                var $scripts = $res.find("script");
+                $scripts.each(function(i,v) {
+                    var src = v.getAttribute("src");
+                    if(src !== null && presentSrcs.indexOf(src) !== -1) {
+                        $(v).remove();
+                    }
+                });
+                $panel.append($res);
+                // Initialize widgets
+                $panel.trigger("foundation-contentloaded");
+                channel.trigger($.Event("cq-sidepanel-loaded"));
+            }
+        });
+    });
+
+}(jQuery, Granite.author, jQuery(document), this));

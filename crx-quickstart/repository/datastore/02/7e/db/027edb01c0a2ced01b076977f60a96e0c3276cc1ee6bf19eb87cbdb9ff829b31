@@ -1,0 +1,736 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;
+(function ($, ns, channel, window, undefined) {
+
+    var TEXT_PROPERTY_NAME_DEFAULT = "text";
+    var TABLE_PROPERTY_NAME_DEFAULT = "tableData";
+
+    var ui = { };
+
+    var env = undefined, scrollViewTopBeforePaste, editorHeightBeforePaste, contentWrapperHeightBeforePaste,
+        fullScreenAdapter;
+
+    function saveEnvironment(dom) {
+        var $dom = $(dom);
+        var $cq = $dom.find("cq").remove();
+        env = {
+            $root: $dom,
+            $cq: $cq
+        };
+    }
+
+    function restoreEnvironment() {
+        if (env) {
+            env.$root.append(env.$cq);
+            env = undefined;
+        }
+    }
+
+    function finish(editable) {
+        ui[editable.path].remove();
+        delete ui[editable.path];
+        channel.off("editor-frame-mode-changed.ipe", onEditModeChange);
+        restoreEnvironment();
+    }
+
+    function onEditModeChange(event) {
+        var data = event.data;
+        var editable = data.editable;
+        var editor = data.editor;
+        editor.finishInlineEdit(editable, editor.rte.getContent(), true);
+    }
+
+    if(CUI && CUI.rte && CUI.rte.Selection) {
+        var sel = CUI.rte.Selection;
+    }
+
+    function getBookmark(rte) {
+        var context = rte.editorKernel.getEditContext();
+        return sel.createSelectionBookmark(context);
+    }
+
+    function selectBookmark(rte, bookmark) {
+        var context = rte.editorKernel.getEditContext();
+        sel.selectBookmark(context, bookmark);
+    }
+
+    function installFullScreenAdapter() {
+        // executed in CUI.RichText scope
+        var com = CUI.rte.Common;
+        fullScreenAdapter = new FullScreenAdapter(this);
+        setFullScreenAdapter.call(this);
+        if (com.ua.isWebKit) {
+            this.editorKernel.addPluginListener("paste", saveScrollStateBeforePaste, this, null, false, 900);
+            this.editorKernel.addPluginListener("commandexecuted", handleScrollOnPaste, this, null, false);
+        }
+    }
+
+    function setFullScreenAdapter() {
+        this.editorKernel.execCmd("setFullScreenAdapter", fullScreenAdapter);
+    }
+
+    function saveScrollStateBeforePaste(e) {
+        var com = CUI.rte.Common;
+        if (e.type == "paste" && com.ua.isWebKit) {
+            // save the current scrollTop of contentScrollView
+            scrollViewTopBeforePaste = $("#ContentScrollView").scrollTop();
+            contentWrapperHeightBeforePaste = $("#ContentWrapper").height();
+            // save the current height of editor, later we can subtract this from new height of editor
+            // to get height of pasted content. We can then add this pasted content's height to the above
+            // saved scroll Top of contentScrollView to get the new scroll top for contentScrollView
+            editorHeightBeforePaste = e.editContext.root.offsetHeight;
+        }
+    }
+
+    function handleScrollOnPaste(e) {
+        var com = CUI.rte.Common, newScrollTop, heightIncrease;
+        if (e.cmd == "paste" && com.ua.isWebKit) {
+            // calculate increase in editor height
+            heightIncrease = e.editContext.root.offsetHeight - editorHeightBeforePaste;
+            newScrollTop = scrollViewTopBeforePaste + heightIncrease;
+            // Actual paste might not have taken place yet. So set content wrapper's height so that
+            // setting scroll top of contentscrollview would be effective
+            $("#ContentWrapper").height(contentWrapperHeightBeforePaste + heightIncrease);
+            $("#ContentScrollView").scrollTop(newScrollTop);
+        }
+    }
+
+    function calcEditorHeight($toolbar) {
+        var vpHeight = window.innerHeight;
+        return vpHeight - $toolbar.outerHeight();
+    }
+
+    function handleConfig(config, type, componentType) {
+        var com = CUI.rte.Common;
+        if (type === "uiSettings") {
+            if (config.hasOwnProperty("fullscreen")) {
+                var fs = config.fullscreen;
+                if (fs.hasOwnProperty("toolbar")) {
+                    var fsTb = fs.toolbar;
+                    if (com.ua.isTouch) {
+                        var i = com.arrayIndex(fsTb, "fullscreen#finish");
+                        if (i >= 0) {
+                            fsTb[i] = "control#close";
+                        }
+                        fsTb.push("control#save");
+                    }
+                }
+            }
+            if (componentType && componentType == "table" && config.hasOwnProperty("tableEditOptions")) {
+                var tableSettings = config.tableEditOptions;
+                if (tableSettings.hasOwnProperty("toolbar")) {
+                    var tableTb = tableSettings.toolbar;
+                    var fullscreenFinishIndex = com.arrayIndex(tableTb, "fullscreen#finish");
+                    if (!com.ua.isTouch && fullscreenFinishIndex < 0) {
+                        tableTb.push("fullscreen#finish");
+                    }
+                }
+            }
+        }
+        return config;
+    }
+
+    function getPersistedPropertyName(componentType, editable, targetId) {
+        var ipeConfig = $.extend(true, {}, editable.config.ipeConfig);
+        // Use ipeConfig of the corresponding child editor in case of Hybrid Editor
+        ipeConfig = targetId ? (ipeConfig[targetId] || { }) : ipeConfig;
+        // Return textPropertyName config, if specified.
+        // Otherwise, return targetId in case of Hybrid Editor or default value for the current componentType, otherwise.
+        if (componentType && componentType === 'table') {
+            return ipeConfig.textPropertyName || targetId || TABLE_PROPERTY_NAME_DEFAULT;
+        } else {
+            return ipeConfig.textPropertyName || targetId || TEXT_PROPERTY_NAME_DEFAULT;
+        }
+    }
+
+    /**
+     * Adapter for the fullscreen mode
+     *
+     * @class
+     * @type {Window.Class}
+     */
+    var FullScreenAdapter = new Class({
+
+        baseRTE: undefined,
+
+        fullScreenRTE: undefined,
+
+        touchScrollLimiter: undefined,
+
+        extend: CUI.rte.commands.FullScreenAdapter,
+
+        $container: undefined,
+
+        $editor: undefined,
+
+        $header: undefined,
+
+        $toggleButton: $(""),
+
+        $fullScreenContent: undefined,
+
+        $richtextContainer: undefined,
+
+        $sourceEditor: undefined,
+
+        _handleEscape: function() {
+            this.finish();
+            return true;
+        },
+
+        construct: function(baseRTE) {
+            this.baseRTE = baseRTE;
+        },
+
+        start: function(adapterConfig) {
+            var com = CUI.rte.Common;
+            var isTouch = com.ua.isTouch;
+            var bkm = getBookmark(this.baseRTE);
+            this.$header = $("<div></div>");
+            this.$header.text(CUI.rte.Utils.i18n("dialog.fullscreen.text"));
+            this.$header.addClass("coral-RichText-fullscreen-header");
+            if (!isTouch) {
+                this.$toggleButton = $('<button type="button" title="Fullscreen" aria-label="Fullscreen" data-action="fullscreen#finish" tabindex="-1" class="coral-RichText-fullScreenExit disabled coral-Icon coral-Icon--fullScreenExit coral-RichText--modechanger"></button>');
+                var minimizeText = CUI.rte.Utils.i18n("dialog.fullscreen.minimize");
+                this.$header.append($("<span>" + minimizeText + "</span>"));
+                this.$header.find(">span").append(this.$toggleButton);
+            }
+            var self = this;
+            this.$toggleButton.on("click.rte-handler", function (e) {
+                var editorKernel = self.fullScreenRTE.editorKernel;
+                var dm = editorKernel.getDialogManager();
+                dm.hide();
+                var oppositeKernel = self.finish();
+                CUI.rte.Utils.defer(oppositeKernel.updateToolbar, 1, oppositeKernel);
+                editorKernel.enableFocusHandling();
+                e.stopPropagation();
+            });
+            this.$container = ns.editor.fullscreenController.start(this.$header, adapterConfig);
+            var $ui = $("<div/>");
+            $ui.addClass("coral-RichText-ui");
+            // $ui.css("height", "80px");
+            var $wrapper = $("<div/>");
+            $wrapper.addClass("coral-RichText-editorWrapper");
+            this.$editor = $("<div/>");
+            this.$editor.addClass("coral-RichText-editor");
+            this.$sourceEditor = $("<textarea/>");
+            this.$sourceEditor.addClass("coral-RichText-sourceEditor");
+            this.$sourceEditor.hide();
+            this.$fullScreenContent = $("<div/>");
+            this.$fullScreenContent.addClass('coral-RichText-fullscreen-content');
+            this.$container.append(this.$fullScreenContent);
+            this.$richtextContainer = $("<div/>");
+            this.$richtextContainer.addClass("coral-RichText-fullscreen-richtextContainer");
+            this.$fullScreenContent.append(this.$richtextContainer);
+            this.$richtextContainer.append($ui);
+            this.$richtextContainer.append($wrapper);
+            $wrapper.append(this.$editor);
+            $wrapper.append(this.$sourceEditor);
+            var self = this;
+            this.$sourceEditor.fipo("tap.rte-" + this.id, "click.rte-" + this.id,
+                function(e) {
+                    e.stopPropagation();
+                });
+            // need to prevent both mousedown and click events from bubbling up to
+            // avoid focus loss on desktop browsers
+            this.$container.fipo("touchstart.rteOOA", "mousedown.rteOOA click.rteOOA",
+                function(e) {
+                    var target = e.target;
+                    var $target = $(target);
+                    if ((target === self.$fullScreenContent[0]) || (target === self.$header[0]) || (target === self.$header.find(">span")[0])
+                        || (target === $wrapper[0]) || $target.hasClass("coral-RichText-toolbar") || ($target[0] === self.$container[0])) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                });
+            this.fullScreenRTE = new CUI.RichText({
+                "element": this.$editor,
+                "initialContent": this.baseRTE.getContent(),
+                "preventCaretInitialize": true,
+                "$ui": $ui,
+                "isFullScreen": true,
+                "autoConfig": true,
+                "fullScreenAdapter": this,
+                "componentType": this.baseRTE.getComponentType(),
+                "listeners": {
+                    "beforeEscape": CUI.rte.Utils.scope(this._handleEscape, this),
+                    // handler that ensure fullscreen mode gets hidden if RTE is left
+                    // in fullscreen mode (iOS only)
+                    "beforeFinish": function() {
+                        self._leaveFromFullScreenMode();
+                    },
+                    "beforeCancel": function() {
+                        self._leaveFromFullScreenMode(true);
+                    }
+                }
+            });
+            var undoConfig = this.baseRTE.getUndoConfig();
+            this.baseRTE.suspend();
+            this.fullScreenRTE.start(CUI.rte.Utils.copyObject(this.baseRTE.originalConfig));
+
+            //Changes are done for Issue :- CQ-38308
+
+            var ek = this.fullScreenRTE.editorKernel;
+            if(com.ua.isGecko || com.ua.isIE ) {
+                ek.initializeCaret(true);
+            }
+            this.fullScreenRTE.setUndoConfig(undoConfig);
+            if (isTouch) {
+                // ensure "main focus" is transferred from iframe to our window - otherwise
+                // keyboard input is ignored on iOS devices
+                window.focus();
+            }
+
+
+            this.fullScreenRTE.focus();
+            var context = ek.getEditContext();
+            // replace the dom objects in bookmark by their counterparts in the fullscreen editor
+            this._convertBookmark(bkm, this.baseRTE.editorKernel.getEditContext(), context);
+            selectBookmark(this.fullScreenRTE, bkm);
+            if (isTouch) {
+                this.touchScrollLimiter = new CUI.rte.ui.cui.TouchScrollLimiter();
+                this.touchScrollLimiter.attach(this.$container, $wrapper, this.$editor);
+            }
+            context.setState("CUI.touchScrollLimiter", this.touchScrollLimiter);
+            return ek;
+        },
+
+        /**
+         * Modifies the dom element references present in the bookmark created from old context
+         * to point to corresponding elements in new context.
+         *
+         * @memberOf FullScreenAdapter.prototype
+         *
+         * @param bkm the bookmark to convert
+         * @param fromContext the old edit context
+         * @param toContext the new edit context
+         * @private
+         */
+        _convertBookmark: function(bkm, fromContext, toContext) {
+            var indexPath;
+            var com = CUI.rte.Common;
+            if (bkm.insertObject) {
+                indexPath = com.createIndexPath(fromContext, bkm.insertObject);
+                bkm.insertObject = com.getElementByIndexPath(toContext.root, indexPath);
+            }
+            if (bkm.object) {
+                indexPath = com.createIndexPath(fromContext, bkm.object);
+                bkm.object = com.getElementByIndexPath(toContext.root, indexPath);
+            }
+            if (bkm.cells) {
+                var cellsCopy = [];
+                for (var c=0; c < bkm.cells.length; c++) {
+                    indexPath = com.createIndexPath(fromContext, bkm.cells[c]);
+                    cellsCopy.push(com.getElementByIndexPath(toContext.root, indexPath));
+                }
+                bkm.cells = cellsCopy;
+            }
+        },
+
+        /**
+         * Get content from source editor and push it into RTE.
+         *
+         * @memberOf FullScreenAdapter.prototype
+         *
+         * @private
+         */
+        pushValue: function(){
+            var v = this.$sourceEditor.val();
+            if (!this.sourceEditMode || this.togglingSourceEdit) {
+                this.fullScreenRTE.editorKernel.setUnprocessedHtml(v);
+            }
+        },
+
+        /**
+         * Get content from RTE and push it into source editor.
+         *
+         * @memberOf FullScreenAdapter.prototype
+         *
+         * @private
+         */
+        syncValue: function() {
+            if (!this.sourceEditMode || this.togglingSourceEdit) {
+                var html = this.fullScreenRTE.editorKernel.getProcessedHtml();
+                this.$sourceEditor.val(html);
+            }
+        },
+
+        toggleSourceEdit: function(sourceEditMode){
+            this.togglingSourceEdit = true;
+            if (sourceEditMode === undefined){
+                sourceEditMode = !this.sourceEditMode;
+            }
+            sourceEditMode = sourceEditMode === true;
+            var isChanged = sourceEditMode !== this.sourceEditMode;
+            this.sourceEditMode = sourceEditMode;
+            var ek = this.fullScreenRTE.editorKernel;
+            if (!isChanged) {
+                return;
+            }
+            if (this.sourceEditMode) {
+                ek.disableFocusHandling();
+                ek.notifyBlur();
+                ek.disableToolbar([ "sourceedit" ]);
+                this.syncValue();
+                this.$editor.hide();
+                this.$sourceEditor.show();
+                this.$sourceEditor.focus();
+                ek.firePluginEvent("sourceedit", {
+                    "enabled": true
+                }, false);
+            } else {
+                ek.enableFocusHandling();
+                if (this.initialized && !this.disabled){
+                    ek.enableToolbar();
+                }
+                this.$editor.show();
+                this.$sourceEditor.hide();
+                this.pushValue();
+                ek.focus();
+                ek.firePluginEvent("sourceedit", {
+                    "enabled": false
+                }, false);
+            }
+            this.togglingSourceEdit = false;
+        },
+
+        _dropFullScreenMode: function() {
+            if (this.touchScrollLimiter) {
+                this.touchScrollLimiter.detach();
+                this.touchScrollLimiter = undefined;
+            }
+            if (!CUI.rte.Common.ua.isTouch) {
+                $(window).off("resize.rteFSResize");
+            }
+            var $container = ns.editor.fullscreenController.getContainer();
+            $container.off(".rteOOA");
+            ns.editor.fullscreenController.finish();
+        },
+
+        /**
+         * Finishes editing from full screen mode (iOS only) - the current content of the
+         * full screen editor is transferred to the base RTE, which then is regularily gets
+         * "finished".
+         *
+         * @memberOf FullScreenAdapter.prototype
+         *
+         * @private
+         */
+        _leaveFromFullScreenMode: function(isCancelled) {
+            var content = this.fullScreenRTE.getContent();
+            var isTouch = CUI.rte.Common.ua.isTouch;
+            this.fullScreenRTE.suspend();
+            this.fullScreenRTE = undefined;
+            this._dropFullScreenMode();
+            if (!isCancelled) {
+                this.baseRTE.reactivate(content);
+            }
+            this.baseRTE.finish(isCancelled);
+            this.baseRTE = undefined;
+            if (isTouch) {
+                // ensure "main focus" is transferred from top window object back to the
+                // iframe - otherwise keyboard input is ignored on iOS devices
+                $("#ContentFrame")[0].contentWindow.focus();
+            }
+        },
+
+        finish: function() {
+            var bkm = getBookmark(this.fullScreenRTE);
+            var content = this.fullScreenRTE.getContent();
+            var undoConfig = this.fullScreenRTE.getUndoConfig();
+            this.$toggleButton.off("click.rte-handler");
+            this.fullScreenRTE.suspend();
+            this._dropFullScreenMode();
+            this.baseRTE.reactivate(content);
+            // replace the dom objects in bookmark by their counterparts in the inline editor
+            this._convertBookmark(bkm, this.fullScreenRTE.editorKernel.getEditContext(),
+                this.baseRTE.editorKernel.getEditContext());
+            this.fullScreenRTE = undefined;
+            this.baseRTE.setUndoConfig(undoConfig);
+            if (CUI.rte.Common.ua.isTouch) {
+                // ensure "main focus" is transferred from top window object back to the
+                // iframe - otherwise keyboard input is ignored on iOS devices
+                $("#ContentFrame")[0].contentWindow.focus();
+            }
+            this.baseRTE.focus();
+            selectBookmark(this.baseRTE, bkm);
+            return this.baseRTE.editorKernel;
+        },
+
+        isFullScreen: function() {
+            return ns.editor.fullscreenController.isActive();
+        }
+
+    });
+
+
+    /**
+     * @class Granite.author.editor.InlineTextEditor
+     * @param {string} componentType The type of the text component to edit ("text" or "table")
+     * @classdesc The InlineTextEditor is an in-place editor that allows to edit text.
+     */
+    ns.editor.InlineTextEditor = function(componentType) {
+        var self = this;
+        this.componentType = componentType;
+        // TODO: still here for compatibility reasons, but it's better
+        // to launch the editor via startImageEditor() directly
+        channel.on("inline-edit-start", function(e) {
+            var editable = e.editable;
+            self.startInlineEdit(editable);
+        });
+    };
+
+    /**
+     * Starts the text in-place editor on the given Editable
+     *
+     * @function Granite.author.editor.InlineTextEditor#setUp
+     *
+     * @param {Granite.author.Editable} editable The editable containing the text to edit
+     * @param {string} targetId The identifier of the target element that contains the text to be edited
+     *                          Used by Hybrid Editor to specify the child Editor to be edited.
+     */
+    ns.editor.InlineTextEditor.prototype.setUp = function (editable, targetId) {
+        this.startInlineEdit(editable, targetId);
+    };
+
+    /**
+     * Stops the text in-place editor on the given Editable
+     *
+     * @function Granite.author.editor.InlineTextEditor#tearDown
+     *
+     * @param {Granite.author.Editable} editable The editable containing the text to edit
+     * @param {string} targetId The identifier of the target element that contains the text to be edited
+     */
+    ns.editor.InlineTextEditor.prototype.tearDown = function (editable, targetId) {
+        this.finishInlineEdit(editable, targetId);
+    };
+
+    function onContentRead (self, data, editable, targetId) {
+        var property = getPersistedPropertyName(self.componentType, editable, targetId);
+        if (property.substring(0,2) === "./") {
+            property = property.substring(2);
+        }
+
+        var initialContent = "";
+        if (data && data[property] != null) {
+            initialContent = data[property] || "";
+        } else {
+            try {
+                var dataObj = JSON.parse(data);
+                initialContent = dataObj[property] || "";
+            } catch (err) {}
+        }
+
+        var $uiContainer = $("#InlineEditingUI");
+        var configCallBack = null;
+        ui[editable.path] = $("<div class='coral-RichText-ui coral--dark'></div>");
+        $uiContainer.show();
+        $uiContainer.append(ui[editable.path]);
+        var ipeConfig = $.extend(true, {}, editable.config.ipeConfig);
+        ipeConfig = targetId ? (ipeConfig[targetId] || { }) : ipeConfig;
+        var $editable = $(editable.dom);
+        // handle editElementQuery like in classic UI
+        var subElementQuery = ipeConfig["editElementQuery"];
+        //handle multiple text instances
+        if (targetId) {
+            subElementQuery =  subElementQuery ? subElementQuery: "div." + targetId;
+        } else if (!subElementQuery) {
+            //default value for the editable itself
+            subElementQuery = ".";
+        }
+        if (subElementQuery != ".") {
+            var $subEditable = $editable.find(subElementQuery);
+            if ($subEditable.length) {
+                $editable = $subEditable;
+            }
+        }
+        $editable.data("config", ipeConfig);
+        self.notifyInitialHistoryContent(editable.path, initialContent);
+        if (self.componentType && self.componentType == 'table') {
+            var defaults = {
+                "useColPercentage": false,
+                "rtePlugins": {
+                    "table": {
+                        "features": "*",
+                        "defaultValues": {
+                            "width": "100%"
+                        },
+                        "editMode": CUI.rte.plugins.TablePlugin.EDITMODE_TABLE
+                    }
+                }
+            };
+            configCallBack = function(config) {
+                return Granite.Util.applyDefaults({}, defaults, config);
+            };
+        }
+        if (CUI.rte.Common.ua.isTouch) {
+            self.rte = new ns.editor.TouchRTE({
+                "element": $editable,
+                "initialContent": initialContent,
+                "$ui": ui[editable.path],
+                "useMask": true,
+                "autoConfig": true,
+                "listeners": {
+                    "onStarted": installFullScreenAdapter,
+                    "onResumed": setFullScreenAdapter
+                }
+            });
+        } else {
+            self.rte = new CUI.RichText({
+                "element": $editable,
+                "initialContent": initialContent,
+                "$ui": ui[editable.path],
+                "autoConfig": true,
+                "componentType": self.componentType,
+                "listeners": {
+                    "onStarted": installFullScreenAdapter,
+                    "onResumed": setFullScreenAdapter
+                }
+            });
+        }
+        saveEnvironment(editable.dom);
+        CUI.rte.ConfigUtils.loadConfigAndStartEditing(self.rte, $editable, configCallBack);
+    }
+
+    /**
+     * Starts inline/inplace editing of the Editable.
+     */
+    ns.editor.InlineTextEditor.prototype.startInlineEdit = function(editable, targetId) {
+        var self = this;
+        var asyncRead = !CUI.rte.Common.ua.isTouch, xssConfig = {};
+        channel.trigger("cq-hide-overlays");
+        channel.trigger("inline-edit-before-start");
+        channel.on("editor-frame-mode-changed.ipe", {
+            "editor": this,
+            "editable": editable
+        }, onEditModeChange);
+        xssConfig["disableXSSFiltering"] = editable.config.ipeConfig.disableXSSFiltering;
+        editable.dom.on("editing-finished editing-cancelled", function (e, content) {
+            editable.dom.off("editing-finished editing-cancelled");
+            var isFinished = (e.type === "editing-finished");
+            if (isFinished) {
+                self.finishInlineEdit(editable, content, null, targetId);
+            } else {
+                self.cancelInlineEdit(editable);
+            }
+        });
+
+        ns.history.Manager.setBlocked(true);
+
+        ns.persistence.readParagraphContent(editable, asyncRead, xssConfig)
+            .then(function (data) {
+                onContentRead(self, data, editable, targetId);
+            })
+            .fail(function (data) {
+                ns.persistence.updateParagraph(editable, {"./sling:resourceType": editable.type})
+                    .then(function () {
+                        return ns.persistence.readParagraphContent(editable, asyncRead)
+                    })
+                    .then(function (data) {
+                        onContentRead(self, data, editable, targetId);
+                    });
+            });
+
+        if (CUI.rte.Common.ua.isTouch) {
+            self.rte.focus();
+        }
+    };
+
+    ns.editor.InlineTextEditor.prototype.finishInlineEdit =
+        function(editable, changedContent, preventModeChange, targetId) {
+            var self = this;
+            var persistedPropertyName = getPersistedPropertyName(this.componentType, editable, targetId);
+            finish(editable);
+            var updateObject = {};
+            updateObject[persistedPropertyName] = changedContent;
+            updateObject["textIsRich"] = "true";
+            ns.edit.EditableActions.UPDATE.execute(editable, updateObject)
+                .always(function (e) {
+                    ns.selection.select(editable);
+                    channel.trigger($.Event('inline-edit-finish', {
+                        editable: editable,
+                        changedContent: changedContent
+                    }));
+                    if (!preventModeChange) {
+                        channel.trigger("cq-show-overlays");
+                    }
+                    self.addHistoryStep(editable, changedContent); // Add the undo/redo history step
+                });
+
+            $("#InlineEditingUI").hide();
+            ns.history.Manager.setBlocked(false);
+        };
+
+    /**
+     * Notifies the history handling about the initial content.
+     * @param {String} path The path of the content
+     * @param {String} initialContent The initial content
+     */
+    ns.editor.InlineTextEditor.prototype.notifyInitialHistoryContent = function(path, initialContent) {
+        var historyEnabled = ns.history.Manager.isEnabled(),
+            self = this;
+
+        if (historyEnabled) {
+            self.historyPath = path;
+            self.historyInitialContent = initialContent;
+        }
+    };
+
+    /**
+     * Sets up the undo/redo history step for the text editing update.
+     * @param {Granite.author.Editable} editable The editable that is being edited
+     * @param {String} persistedContent The content that was persisted following inline editing
+     */
+    ns.editor.InlineTextEditor.prototype.addHistoryStep = function(editable, persistedContent) {
+        var self = this,
+            updateProperty = self.componentType && self.componentType == 'table' ? "tableData" : "text", // TODO - configurable property
+            originalData = {},
+            changedData = {};
+
+        if (editable) {
+            originalData[updateProperty] = self.historyInitialContent;
+            originalData['textIsRich'] = true;
+            changedData[updateProperty] = persistedContent;
+            changedData['textIsRich'] = true;
+
+            if (originalData[updateProperty] !== changedData[updateProperty]) {
+                ns.history.util.Utils.addUpdateParagraphStep(self.historyPath, editable.type, originalData, changedData);
+            }
+        }
+    };
+
+    ns.editor.InlineTextEditor.prototype.cancelInlineEdit = function(editable, preventModeChange) {
+        finish(editable);
+        channel.trigger($.Event('inline-edit-cancel', {
+            editable: editable
+        }));
+        if (!preventModeChange) {
+            channel.trigger("cq-show-overlays");
+        }
+    };
+
+    // register the editor to the editor registry
+    ns.editor.register('text', new ns.editor.InlineTextEditor('text'));
+    // register the editor for table to the editor registry
+    ns.editor.register('table', new ns.editor.InlineTextEditor('table'));
+
+    // register config handlers for RTE
+    var tk = CUI.rte.ui.ToolkitRegistry.get();
+    tk.addToolkitData(CUI.rte.ui.ToolkitDefs.CONFIG_ADAPTER, handleConfig);
+
+}(jQuery, Granite.author, jQuery(document), this));

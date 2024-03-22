@@ -1,0 +1,707 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE: All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any. The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+  "use strict";
+
+  ns.history.util.Utils = function() {
+
+    return {
+
+      /**
+       * <p>Checks undo is enabled, gets the history and creates a new undo step, adding it to the history.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @return {Granite.author.history.Step} The new history step
+       */
+      beginStep: function() {
+        var historyEnabled = ns.history.Manager.isEnabled(),
+            history, historyStep;
+
+        if (historyEnabled) {
+          history = ns.history.Manager.getHistory();
+          historyStep = new ns.history.Step(history.createStepConfig());
+          history.addStep(historyStep);
+        }
+
+        return historyStep;
+      },
+
+      /**
+       * <p>Finalizes a history step, reordering actions and marking it as committed.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Granite.author.history.Step} historyStep The step to finalize
+       * @return {Granite.author.history.Step} The new history step
+       */
+      finalizeStep: function (historyStep) {
+        var historyEnabled = ns.history.Manager.isEnabled();
+
+        if (historyEnabled && historyStep && historyStep.actions.length > 0) {
+          ns.history.util.Utils.sortDeleteParagraphActions(historyStep);
+          ns.history.util.Utils.sortMoveParagraphActions(historyStep);
+          ns.history.util.Utils.sortInsertParagraphActions(historyStep);
+          historyStep.commit(); // commit step when the action has completed
+        }
+
+        return historyStep;
+      },
+
+      /**
+       * <p>Helper for adding an update paragraph history step</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {String} path Editable path
+       * @param {String} type Editable type
+       * @param {Object} originalData The data before update
+       * @param {Object} changedData The data following update
+       */
+      addUpdateParagraphStep : function(path, type, originalData, changedData) {
+        var historyStep, historyAction;
+
+        if (ns.history.Manager.isEnabled() && path && type) {
+          historyStep = ns.history.util.Utils.beginStep();
+          historyAction = new ns.history.actions.UpdateParagraph(path, type, originalData, changedData);
+          historyStep.addAction(historyAction);
+          historyStep.commit();
+        }
+      },
+
+      /**
+       * <p>Creates a Sling-compatible parameter object from the specified JSON object.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Object} json The JSON object
+       * @param {String} [prefix] current prefix
+       * @param {Object} [parameters] A predefined parameters object
+       * @param {Boolean} [isRecursiveCall] True if the method is called recursively
+       * @return {Object} An object with HTTP parameters
+       */
+      jsonToSlingParameters: function(json, prefix, parameters, isRecursiveCall) {
+        // TODO - refactor
+        parameters = parameters || { };
+        prefix = prefix || "./";
+        if ($.isPlainObject(json)) {
+          for (var key in json) {
+            if (json.hasOwnProperty(key)) {
+              if (key == "jcr:primaryType") {
+                var typeHint = (ns.history.util.Utils.strEndsWith(prefix, "/")
+                  ? prefix.substring(0, prefix - 1) : prefix)
+                  + "@TypeHint";
+                parameters[typeHint] = json[key];
+              } else {
+                var newPrefix = prefix
+                  + (ns.history.util.Utils.strEndsWith(prefix, "/") ? "" : "/") + key;
+                ns.history.util.Utils.jsonToSlingParameters(json[key], newPrefix, parameters,
+                  true);
+              }
+            }
+          }
+        } else if (isRecursiveCall || !ns.history.util.Utils.strEndsWith(prefix, "sling:resourceType")) {
+          // sling:resourceType gets only filtered for "top-level" components, but is
+          // kept for sub components (aka sling:ResourceTypes in a recursed call)
+          parameters[prefix] = json;
+          ns.history.util.Utils.createTypeHint(parameters, prefix);
+        }
+        return parameters;
+      },
+
+      /**
+       * <p>Gets the current data of a paragraph from the server and prepares it for being used in a createParagraph context.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Granite.author.Editable|Object} editable The editable; can be a stub
+       * @param {Boolean} [basicDataOnly] True to retrieve basic data only (must be set to true if item is a stub)
+       * @return {$.Promise} A deferred object that will be resolved when the request is completed. The request might fail if the parent of the editable contains an important number of children, in such case, the deferred would be rejected with the data received from the server.
+       */
+      getCurrentData: function(editable, basicDataOnly) {
+        /*
+         AdobePatentID="2789US01"
+         */
+
+        var parentPath = editable.getParentPath(),
+          pathSepIndex = editable.path.lastIndexOf("/"),
+          itemName = (pathSepIndex >= 0) ? editable.path.substring(pathSepIndex + 1) : editable.path,
+          takeNext, insertPath = null, historyData,
+          blobs = null;
+
+        return ns.persistence.readParagraphContent({path: parentPath + ".infinity"}, undefined, {}, "html")
+            .then(function (data) {
+              var dataObj = $.parseJSON(data), data;
+
+              for (var key in dataObj) {
+                if (dataObj.hasOwnProperty(key)) {
+                  if (key === itemName) {
+                    takeNext = true;
+                  } else if (takeNext) {
+                    insertPath = parentPath + "/" + key;
+                    break;
+                  }
+                }
+              }
+
+              // This item's data
+              data = dataObj[itemName];
+
+              if (basicDataOnly !== true) {
+                // determine blobs
+                blobs = [];
+                ns.history.util.Utils.determineBlobs(data, blobs);
+
+                // filter data
+                var blobCnt = blobs.length;
+                for (var b = 0; b < blobCnt; b++) {
+                  var blob = blobs[b];
+                  var fieldNames = blob.field.split("/");
+                  var hrchCnt = fieldNames.length - 1;
+                  var fieldData = data;
+                  for (var h = 0; h < hrchCnt; h++) {
+                    fieldData = fieldData[fieldNames[h]];
+                  }
+                  delete fieldData[fieldNames[hrchCnt]];
+                }
+              }
+
+              // Filter out certain properties
+              ns.history.util.Utils.filterJSON(data);
+
+              return {
+                "data": data,
+                "insertBefore": insertPath,
+                "blobs": blobs
+              };
+            });
+      },
+
+      /**
+       * <p>Gets the path data of a paragraph neighbor, at a relative position.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Granite.author.Editable|Object} editable The editable. Can be a stub
+       * @param {String} relativePos The position of the neighbor relative to the original editable ("after"|"before")
+       * @return {Promise} A Promise object that will be resolved when the request is completed
+       */
+      getNeighborPath: function(editable, relativePos) {
+        var parentPath = editable.getParentPath(),
+            pathSepIndex = editable.path.lastIndexOf("/"),
+            itemName = (pathSepIndex >= 0) ? editable.path.substring(pathSepIndex + 1) : editable.path,
+            neighborPath;
+
+        return ns.persistence.readParagraphContent({path: parentPath + ".infinity"}, true, null, "html")
+            .then(function (data) {
+              var dataObj = $.parseJSON(data), data, takeNext = false;
+
+              if (relativePos == "after") {
+                for (var key in dataObj) {
+                  if (dataObj.hasOwnProperty(key)) {
+                    if (key == itemName) {
+                      break;
+                    } else {
+                      neighborPath = parentPath + "/" + key;
+                    }
+                  }
+                }
+              } else {
+                for (var key in dataObj) {
+                  if (dataObj.hasOwnProperty(key)) {
+                    if (key == itemName) {
+                      takeNext = true;
+                    } else if (takeNext) {
+                      neighborPath = parentPath + "/" + key;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (!neighborPath) {
+                neighborPath = parentPath + "/*";
+              }
+
+              data = {
+                "neighborPath": neighborPath
+              };
+
+              return data;
+            });
+      },
+
+      /**
+       * <p>Filters out properties that aren't required.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       * @private
+       *
+       * @param {Object} json The json object to filter
+       * @param {Boolean} createTypeHint Flag
+       * @param {String} name The property name to check (jcr:lastModified, chartType,
+       *        ...)
+       */
+      filterJSON: function(json, createTypeHint) {
+        if ($.isPlainObject(json)) {
+          for (var key in json) {
+            if (json.hasOwnProperty(key)) {
+              if (ns.history.util.Utils.isFiltered(key)) {
+                if ((key !== "jcr:primaryType") || !createTypeHint) {
+                  delete json[key];
+                }
+              } else if(key !== "cq:annotations") {
+                // do not clear annotations, it cannot be restored after clearing
+                var replacement = ns.history.util.Utils.filterJSON(json[key], createTypeHint);
+                if (replacement != null) {
+                  json[key] = replacement;
+                }
+              }
+            }
+          }
+        } else if ($.isArray(json)) {
+          var itemCnt = json.length;
+          for (var i = 0; i < itemCnt; i++) {
+            ns.history.util.Utils.filterJSON(json[i], createTypeHint);
+          }
+        }
+        return null;
+      },
+
+      /**
+       * <p>Checks if the specified property name has to be filtered out.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {String} name The property name to check (jcr:lastModified, chartType,...)
+       */
+      isFiltered: function(name) {
+        var lastSepPos = name.lastIndexOf("/");
+        if (lastSepPos >= 0) {
+          name = name.substring(lastSepPos + 1);
+        }
+        switch (name) {
+          case "jcr:primaryType":
+          case "jcr:lastModified":
+          case "jcr:lastModifiedBy":
+          case "jcr:created":
+          case "jcr:createdBy":
+          case ":jcr:data":
+          case "jcr:uuid":
+            return true;
+        }
+        return ns.history.util.Utils.strEndsWith(name, [ "@Delete", "@MoveFrom" ]);
+      },
+
+      /**
+       * Creates a suitable type hint for the specified data
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Object} data The data object, containing name/value pairs
+       * @param {String} name The name of the object
+       */
+      createTypeHint: function(data, name) {
+        var value = data[name],
+          typeHint = ns.history.util.Utils.getTypeForHint(value);
+        if (typeHint) {
+          data[name] = String(data[name]);
+          data[name + "@TypeHint"] = typeHint;
+        }
+      },
+
+      /**
+       * Creates a suitable type for the specified object.
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {any} value The value
+       * @return {String} The type
+       */
+      getTypeForHint: function(value) {
+        var typeHint = null;
+        if (typeof value === "number") {
+          if (parseInt(value) == parseFloat(value)) {
+            typeHint = "Long";
+          } else {
+            typeHint = "Double";
+          }
+        } else if ($.type(value) === "boolean") {
+          typeHint = "Boolean";
+        } else if(isNaN(value) && !isNaN(Date.parse(value))) {
+          typeHint = "Date"
+        }
+        else if (typeof value === "string") {
+          typeHint = "String";
+        }
+        return typeHint;
+      },
+
+      /* BLOBs / Binary Data
+       ---------------------*/
+
+      /**
+       * <p>Determines the BLOBs from the specified data structure and adds them to the
+       * specified list of BLOBs.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Object} data The data structure (as returned by server)
+       * @param {Array} blobs The list of BLOBs
+       * @param {String} [path] The currently processed path
+       * @param {String} [currentField] The path of the currently processed field
+       */
+      determineBlobs: function(data, blobs, path, currentField) {
+
+        /*
+         AdobePatentID="2789US01"
+         */
+
+        if (path == null) {
+          path = "";
+        }
+        if (data) {
+          var isComponent = false;
+          if (data["sling:resourceType"]) {
+            isComponent = true;
+          } else if (data["jcr:primaryType"] == "nt:resource") {
+            blobs.push(new ns.history.Blob({
+              "op": "update",
+              "path": currentField,
+              "field": currentField
+            }));
+          }
+          for (var key in data) {
+            if (data.hasOwnProperty(key)) {
+              var child = data[key];
+              if ($.isPlainObject(child)) {
+                if (isComponent) {
+                  currentField = path + key;
+                }
+                ns.history.util.Utils.determineBlobs(child, blobs,
+                  path + key + "/", currentField);
+              }
+            }
+          }
+        }
+      },
+
+      /**
+       * Creates an array with serializable blob data.
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Array} blobs The BLOBs
+       * @return {Array} The list of serialized blobs
+       */
+      serializeBlobs: function(blobs) {
+        var blobCnt, serializedBlobs = [];
+        if (blobs) {
+          blobCnt = blobs.length;
+          for (var b = 0; b < blobCnt; b++) {
+            serializedBlobs.push(blobs[b].serialize());
+          }
+        }
+        return serializedBlobs;
+      },
+
+      /**
+       * Creates a list of BLOB objects from their serialized form.
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Array} serializedBlobs The list of serialized BLOB data
+       * @return {Array} The BLOBs
+       */
+      createBlobsFromSerialized: function(serializedBlobs) {
+        var blobCnt, blobs = [];
+        if (serializedBlobs) {
+          blobCnt = serializedBlobs.length;
+          for (var b = 0; b < blobCnt; b++) {
+            blobs.push(new ns.history.Blob(serializedBlobs[b]));
+          }
+        }
+        return blobs;
+      },
+
+      /**
+       * <p>Saves a BLOB and returns a promise, with the result data.</p>
+       *
+       * <p>The result will contain a property "id" which contains the ID of the saved
+       * BLOB (if not deleted) and a flag "deleted" that determines if the BLOB has been
+       * removed and hence not actually been saved - which is a valid state.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {String} url The URL of the servlet
+       * @param {String} parPath The paragraph's path
+       * @param {String} subPath The sub path to the nt:resource
+       * @param {String} [originalBlobId] The ID of an original BLOB; if
+       *        provided, the BLOB is only saved if the jcr:lastModified property has
+       *        changed, otherwise the original BLOB gets removed instead
+       * @return {$.Promise}
+       */
+      saveBinary: function(url, parPath, subPath, originalBlobId) {
+
+        /*
+         AdobePatentID="2789US01"
+         */
+
+        var result = null,
+            params = {
+              "operation": "save",
+              "par": parPath,
+              "srcPath": subPath
+            };
+
+        if (originalBlobId) {
+          params['originalBlob'] = originalBlobId;
+        }
+
+        return $.ajax({
+          type: 'POST',
+          url: url,
+          data: params,
+          dataType: 'html'
+        })
+            .then(function (data) {
+              var id = $(data).find('#Path').text(), isUnchanged;
+
+              if ((id != null) && (id.length === 0)) {
+                id = null;
+              }
+              isUnchanged = (id === originalBlobId);
+              result = {
+                "id": (isUnchanged ? null : id),
+                "deleted": (id == null),
+                "unchanged": isUnchanged
+              };
+              return result;
+            });
+      },
+
+      /**
+       * Restores a BLOB.
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {String} url The URL of the servlet
+       * @param {String} undoDataPath The path to the undo data to be restored; null if
+       *        existing data should be removed
+       * @param {String} parPath The paragraph's path
+       * @param {String} subPath The sub path where the binary data gets restored
+       * @param {Boolean} isGlobal True if the restore is a global restore (deleting
+       *        BLOBs will be handled differently)
+       * @return {$.Promise}
+       */
+      restoreBinary: function(url, undoDataPath, parPath, subPath, isGlobal) {
+        var params = {
+              "operation": "restore",
+              "srcPath": (undoDataPath != null) ? undoDataPath : "",
+              "par": parPath,
+              "targetPath": subPath,
+              "global": (isGlobal === true) ? "true" : "false"
+            };
+
+        return $.ajax({
+          type: 'POST',
+          url: url,
+          data: params,
+          dataType: 'html'
+        });
+      },
+
+      /* STRING
+       ----------------*/
+
+      /**
+       * Check if the given string starts with (one of) the given partial string(s).
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {String} str String to check
+       * @param {String|Array} partialStr partial String(s)
+       * @return {Boolean} True, if str starts with partialStr, else false
+       */
+      strStartsWith: function(str, partialStr) {
+        if ($.isArray(partialStr)) {
+          var strCnt = partialStr.length;
+          for (var s = 0; s < strCnt; s++) {
+            if (ns.history.util.Utils.strStartsWith(str, partialStr[s])) {
+              return true;
+            }
+          }
+          return false;
+        }
+        var pLen = partialStr.length;
+        if (str.length >= pLen) {
+          return (str.substring(0, pLen) == partialStr);
+        }
+        return false;
+      },
+
+      /**
+       * Check if the given string ends with (one of) the given partial string(s).
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {String} str String to check
+       * @param {String|Array} partialStr partial String(s)
+       * @return {Boolean} True, if str ends with partialStr, else false
+       */
+      strEndsWith: function(str, partialStr) {
+        if ($.isArray(partialStr)) {
+          var strCnt = partialStr.length;
+          for (var s = 0; s < strCnt; s++) {
+            if (ns.history.util.Utils.strEndsWith(str, partialStr[s])) {
+              return true;
+            }
+          }
+          return false;
+        }
+        var sLen = str.length;
+        var pLen = partialStr.length;
+        if (sLen >= pLen) {
+          return (str.substring(sLen - pLen, sLen) == partialStr);
+        }
+        return false;
+      },
+
+      /**
+       * Determines the insert path for an editable.
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Granite.author.Editable} editable The editable for which we want to find an insert path
+       * @return {Boolean} True, if str ends with partialStr, else false
+       * @return {Promise} A Promise object that will be resolved when the request is completed
+       */
+      determineInsertPath: function (editable) {
+        var insertPath, resolveData = {};
+
+        return ns.history.util.Utils.getCurrentData(editable)
+            .then(function (data) {
+              insertPath = data.insertBefore;
+
+              if (!insertPath) {
+                // last component of a parsys
+                insertPath = editable.getParentPath() + "/*";
+              }
+
+              resolveData.insertPath = insertPath;
+              return resolveData;
+            });
+      },
+
+      /* PAR ACTIONS
+       ----------------*/
+
+      /**
+       * <p>Sorts the {@link Granite.author.history.actions.MoveParagraph}s of the specified
+       * undo step in a way that they can be undone.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Granite.author.history.Step} step The undo step
+       */
+      sortMoveParagraphActions: function(step) {
+        var actions = step.actions;
+        var reverse = false;
+        for (var a = actions.length - 1; a >= 0; a--) {
+          var actionToCheck = actions[a];
+          if (actionToCheck instanceof Granite.author.history.actions.MoveParagraph) {
+            reverse = true;
+            break;
+          }
+        }
+
+        if (reverse === true){
+          actions.reverse();
+        }
+      },
+
+      /**
+       * <p>Sorts the {@link Granite.author.history.actions.InsertParagraph}s of the specified
+       * undo step in a way that they can be undone.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Granite.author.history.Step} step The undo step
+       */
+      sortInsertParagraphActions: function(step) {
+        var actions = step.actions;
+        if (actions.some(action => action instanceof Granite.author.history.actions.InsertParagraph)) {
+          actions.reverse();
+
+        }
+      },
+
+      /**
+       * <p>Sorts the {@link Granite.author.history.actions.DeleteParagraph}s of the specified
+       * undo step in a way that they can be redone without causing errors for adjacent
+       * paragraphs that both get removed.</p>
+       *
+       * @memberOf Granite.author.history.util.Utils
+       *
+       * @param {Granite.author.history.Step} step The undo step
+       */
+      sortDeleteParagraphActions: function(step) {
+        var actions = step.actions;
+        var removes = [ ];
+        for (var a = actions.length - 1; a >= 0; a--) {
+          var actionToCheck = actions[a];
+          if (actionToCheck instanceof Granite.author.history.actions.DeleteParagraph) {
+            removes.push(actionToCheck);
+            actions.splice(a, 1);
+          }
+        }
+        var sortedRemoves = [ ];
+        // actions are safe if their insert path is referencing either a path that
+        // is not marked for removal or that will be removed later (hence undone
+        // before actionToCheck)
+        var hasSafePredecessor = function(actionToCheck) {
+          var predPath = actionToCheck.insertPath;
+          for (var r = 0; r < removes.length; r++) {
+            if (removes[r].path == predPath) {
+              return false;
+            }
+          }
+          return true;
+        };
+        while (removes.length > 0) {
+          var removeCnt = removes.length;
+          var changes = 0;
+          for (var r = removeCnt - 1; r >= 0; r--) {
+            var removalToCheck = removes[r];
+            if (hasSafePredecessor(removalToCheck)) {
+              sortedRemoves.push(removalToCheck);
+              removes.splice(r, 1);
+              changes++;
+            }
+          }
+          // prevent endless loop - should not happen
+          if (changes === 0) {
+            throw new Error("Could not sort Delete Paragraph Actions.");
+          }
+        }
+
+        step.actions = actions.concat(sortedRemoves);
+      }
+    };
+
+  }();
+
+}(jQuery, Granite.author, jQuery(document), this));

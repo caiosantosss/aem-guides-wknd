@@ -1,0 +1,408 @@
+<%--
+  ADOBE CONFIDENTIAL
+  Copyright 2020 Adobe Systems Incorporated
+  All Rights Reserved.
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%>
+<%@include file="/libs/granite/ui/global.jsp"%>
+
+<%@page import="com.adobe.granite.confmgr.Conf,
+                  com.adobe.granite.security.user.util.AuthorizableUtil,
+                  com.day.cq.commons.LabeledResource,
+                  com.day.cq.commons.date.RelativeTimeFormat,
+                  com.day.cq.commons.jcr.JcrConstants,
+                  com.day.cq.i18n.I18n,
+                  com.day.cq.wcm.api.NameConstants,
+                  com.day.cq.wcm.api.Template,
+                  com.day.cq.wcm.api.TemplatedResource,
+                  com.adobe.granite.toggle.api.ToggleRouter,
+                  org.apache.commons.lang.StringUtils,
+                  org.apache.jackrabbit.util.Text,
+                  org.apache.sling.api.SlingHttpServletRequest,
+                  org.apache.sling.api.resource.Resource,
+                  org.apache.sling.api.resource.ResourceResolver,
+                  org.apache.sling.api.scripting.SlingScriptHelper,
+                  org.apache.sling.api.resource.ValueMap" %>
+
+<%@page import="org.slf4j.Logger,
+                javax.jcr.RepositoryException,
+                javax.jcr.Session,
+                javax.jcr.security.AccessControlManager,
+                javax.jcr.security.Privilege,
+                java.text.SimpleDateFormat,
+                java.util.ArrayList,
+                java.util.Calendar,
+                java.util.List,
+                java.util.ResourceBundle" %>
+
+<%
+%><%
+%><%--###
+Model Base Initializer
+=========
+This JSP is initializing all the attaributes expected by ../modelBase.jsp, it is expected to evaluate entity properties
+& perform performance incentive tasks at this JSP, hence it should not be triggered more than once per resource.
+###--%><%!
+    public static class CFMBase {
+
+        public static final String NS_MODELS = "com.adobe.cq.cfm.models.";
+        public static final String SCAFFOLD = NS_MODELS + "scaffold";
+        public static final String ACTION_RELS = NS_MODELS + "actionRels";
+        public static final String NN_SCAFFOLDING = "scaffolding";
+        public static final String RT_MODEL_SCAFFOLD = "wcm/scaffolding/components/scaffolding";
+
+        public static final String MODEL_PROPERTIES_URL = "/mnt/overlay/dam/cfm/models/console/content/properties.html";
+        public static final String SCAFFOLD_EDIT_URL = "/mnt/overlay/dam/cfm/models/editor/content/editor.html";
+        public static final String NN_MODELS = "models";
+        public static final String NN_CONF_ROOT = "conf";
+
+        public boolean isModelEnabled;
+        public boolean isModelLocked;
+        public String alertVariant;
+        public String statusText;
+
+        private boolean isFolder;
+        private String title;
+        private String name;
+        private String actionRels;
+        private String thumbnailUrl;
+        private boolean isNew;
+        private AccessControlManager acm;
+        private boolean hasScaffold;
+        private Resource scaffold;
+        Template model;
+        private String modifiedDate;
+        private Calendar modifiedDateRaw;
+        private String description;
+        private String modifiedBy;
+
+        public void initialize(SlingHttpServletRequest request, ResourceResolver resourceResolver, Resource resource, Logger log, I18n i18n, SlingScriptHelper sling) {
+            acm = null;
+            try {
+                acm = resourceResolver.adaptTo(Session.class).getAccessControlManager();
+            } catch (
+                    RepositoryException e) {
+                log.warn("Unable to get access manager", e);
+            }
+
+            ResourceBundle resourceBundle = request.getResourceBundle(request.getLocale());
+            RelativeTimeFormat rtf = new RelativeTimeFormat("r", resourceBundle);
+            model = resource.adaptTo(Template.class);
+            scaffold = resource.getChild("jcr:content");
+            Resource scaffoldContent = null;
+            if (scaffold != null) {
+                scaffoldContent = scaffold.getChild("model");
+                if (scaffoldContent == null) {
+                    log.warn("Invalid Model found at " + scaffold.getPath());
+                    return;
+                }
+            }
+            if (scaffold != null && !scaffoldContent.isResourceType(RT_MODEL_SCAFFOLD)) {
+                scaffold = null;
+            }
+
+            hasScaffold = (scaffold != null);
+            request.setAttribute(SCAFFOLD, scaffold);
+            Resource modelContent = resource;
+            LabeledResource label = model;
+            if (resource.getChild(JcrConstants.JCR_CONTENT) != null) {
+                modelContent = resource.getChild(JcrConstants.JCR_CONTENT);
+                label = modelContent.adaptTo(LabeledResource.class);
+            }
+
+            isFolder = false;
+            isNew = isNew(model);
+            title = "";
+            name = resource.getName();
+
+             description = "";
+            modifiedDateRaw = null;
+             modifiedBy = null;
+            thumbnailUrl = null;
+            String navigationHref = null;
+            String folderPath = null;
+
+            ToggleRouter toggleRouter = sling.getService(ToggleRouter.class);
+
+            if (model == null) {
+                // resource is folder
+                isFolder = true;
+                if (StringUtils.endsWith(resource.getPath(), Conf.NN_SETTINGS)) {
+                    folderPath = resource.getPath().substring(0, resource.getPath().indexOf("/" + Conf.NN_SETTINGS));
+                } else {
+                    folderPath = resource.getPath();
+                }
+                Resource folderResource = resourceResolver.getResource(folderPath);
+                if (folderResource != null) {
+                    ValueMap vm = folderResource.getValueMap();
+                    title = vm.get("jcr:content/jcr:title", vm.get("jcr:title", folderResource.getName()));
+
+                    if (NN_MODELS.equals(folderResource.getName()) && NN_MODELS.equals(title)) {
+                        String[] path = folderPath.split("/");
+                        if ((path.length > 3) && (path[1].equals(NN_CONF_ROOT))) {
+                            title += " [" + path[2] + "]";
+                        }
+                    }
+
+                    modifiedDateRaw = vm.get(JcrConstants.JCR_LASTMODIFIED, Calendar.class);
+                    modifiedBy = AuthorizableUtil.getFormattedName(resourceResolver, vm.get(JcrConstants.JCR_LAST_MODIFIED_BY, String.class));
+                }
+            } else {
+                // resource is a model
+                title = label.getTitle() != null ? label.getTitle() : model.getName();
+                description = label.getDescription();
+                ValueMap modelProperties = modelContent.getValueMap();
+                modifiedDateRaw = modelProperties.get(NameConstants.PN_PAGE_LAST_MOD, Calendar.class);
+                modifiedBy = AuthorizableUtil.getFormattedName(resourceResolver, modelProperties.get(NameConstants.PN_PAGE_LAST_MOD_BY, String.class));
+                thumbnailUrl = getThumbnailUrl(model);
+                if (thumbnailUrl.startsWith("/")) {
+                    thumbnailUrl = request.getContextPath() + thumbnailUrl;
+                }
+                navigationHref = request.getContextPath() + MODEL_PROPERTIES_URL + Text.escapePath(model.getPath());
+                defineStatusData();
+                defineLockedData();
+            }
+
+            modifiedDate = formatDate(modifiedDateRaw, i18n.get("Never"), rtf);
+            if (modifiedBy == null) {
+                modifiedBy = "";
+            }
+
+            // Action rels
+            actionRels = StringUtils.join(getActionRels(resource, acm, !isFolder, hasScaffold), " ");
+            request.setAttribute(ACTION_RELS, actionRels);
+        }
+
+        public boolean isModified() {
+            return modifiedDateRaw != null;
+        }
+
+        public long getModifiedTimestamp() {
+            return isModified() ? modifiedDateRaw.getTimeInMillis() : 0L;
+        }
+
+        private boolean isNew(Template model) {
+            if (model == null) return false;
+            Resource contentRes = model.adaptTo(Resource.class).getChild(JcrConstants.JCR_CONTENT);
+            Calendar createdDateRaw = contentRes.getValueMap().get(JcrConstants.JCR_CREATED, Calendar.class);
+            Calendar modifiedDateRaw = contentRes.getValueMap().get(JcrConstants.JCR_LASTMODIFIED, Calendar.class);
+            Calendar twentyFourHoursAgo = Calendar.getInstance();
+            twentyFourHoursAgo.add(Calendar.DATE, -1);
+            if ((createdDateRaw == null) || (modifiedDateRaw != null && modifiedDateRaw.before(createdDateRaw))) {
+                createdDateRaw = modifiedDateRaw;
+            }
+            return createdDateRaw != null && twentyFourHoursAgo.before(createdDateRaw);
+        }
+
+        public static String formatDate(Calendar cal, String defaultValue, RelativeTimeFormat rtf) {
+            if (cal == null) {
+                return defaultValue;
+            }
+            try {
+                return rtf.format(cal.getTimeInMillis(), true);
+            } catch (IllegalArgumentException e) {
+                SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+                return sdf.format(cal.getTime());
+            }
+        }
+
+        private String getThumbnailUrl(Template model) {
+            String thumbnailUrl = "";
+            String ck = "";
+            String modelThumbnail = model.getThumbnailPath();
+            if (StringUtils.isNotEmpty(modelThumbnail)) {
+                thumbnailUrl = modelThumbnail;
+                Resource modelResource = model.adaptTo(Resource.class);
+                Resource thumbnailResource = modelResource.getResourceResolver().getResource(modelThumbnail);
+                if (thumbnailResource != null) {
+                    ValueMap metadata = thumbnailResource.getChild("jcr:content").getValueMap();
+                    if (metadata != null) {
+                        Calendar cal = metadata.get("jcr:lastModified", Calendar.class);
+                        if (cal != null) {
+                            ck = "" + (cal.getTimeInMillis() / 1000);
+                        }
+                    }
+                }
+                return Text.escapePath(thumbnailUrl) + "?ck=" + ck;
+            }
+
+            return thumbnailUrl;
+        }
+
+        public static String getModelType(ResourceResolver resolver, Resource modelResource) {
+            String templateTypeTitle = "";
+            if (modelResource != null) {
+                Resource modelContent = modelResource.getChild(JcrConstants.JCR_CONTENT);
+                if (modelContent != null) {
+                    ValueMap modelContentVM = modelContent.getValueMap();
+                    if (modelContentVM.containsKey(TemplatedResource.PN_TEMPLATETYPE)) {
+                        String templateTypePath = modelContentVM.get(TemplatedResource.PN_TEMPLATETYPE, String.class);
+                        Resource templateTypeResource = resolver.getResource(templateTypePath);
+                        if (templateTypeResource != null) {
+                            Template templateType = templateTypeResource.adaptTo(Template.class);
+                            if (templateType != null && StringUtils.isNotBlank(templateType.getTitle())) {
+                                templateTypeTitle = templateType.getTitle();
+                            }
+                        }
+                    }
+                }
+            }
+            return templateTypeTitle;
+        }
+
+        private List<String> getActionRels(Resource resource, AccessControlManager acm, boolean isModel, boolean hasScaffolding) {
+            List<String> actionRels = new ArrayList<String>();
+            if (hasPermission(acm, resource, Privilege.JCR_READ)) {
+                if (isModel) {
+                    actionRels.add("cq-cfm-models-properties-activator");
+                    actionRels.add("cq-cfm-models-copy-activator");
+                } else {
+                    // for nt:folder there are no properties to edit
+                    if (!resource.isResourceType("nt:folder")) {
+                        actionRels.add("cq-cfm-entities-folderproperties-activator");
+                    }
+                }
+
+                // Content Fragment Model Editor can be viewed in "read-only mode" if user has no write permissions.
+                if (isModel && hasScaffolding) {
+                    actionRels.add("cq-cfm-models-edit-activator");
+                }
+            }
+            if (hasPermission(acm, resource, Privilege.JCR_WRITE)) {
+                if (isModel) {
+                    if (isModelEnabled) {
+                        actionRels.add("cq-cfm-models-disable-activator");
+                    } else {
+                        actionRels.add("cq-cfm-models-enable-activator");
+                    }
+                    if (isModelLocked) {
+                        actionRels.add("cq-cfm-models-unlock-activator");
+                    } else {
+                        actionRels.add("cq-cfm-models-lock-activator");
+                    }
+                }
+            }
+            if (hasPermission(acm, resource, Privilege.JCR_REMOVE_NODE)) {
+                actionRels.add("cq-cfm-models-delete-activator");
+            }
+            if (hasPermission(acm, resource, "crx:replicate")) {
+                if (!isModel || isModelEnabled) {
+                    actionRels.add("cq-cfm-models-publish-activator");
+                }
+                actionRels.add("cq-cfm-models-unpublish-activator");
+            }
+            return actionRels;
+        }
+
+        private String findModelStatus() {
+            ValueMap properties = scaffold.getValueMap();
+            return properties.get("status", String.class);
+        }
+
+        private void defineStatusData() {
+            String status = findModelStatus();
+            if (status == null || "enabled".equals(status)) {
+                alertVariant = "success";
+                statusText = "Enabled";
+                isModelEnabled = true;
+            } else if ("draft".equals(status)) {
+                alertVariant = "warning";
+                statusText = "Draft";
+                isModelEnabled = false;
+            } else {
+                alertVariant = "error";
+                statusText = "Disabled";
+                isModelEnabled = false;
+            }
+        }
+
+        private void defineLockedData() {
+            ValueMap properties = scaffold.getValueMap();
+            Boolean locked = properties.get("isLocked", false);
+            isModelLocked = locked;
+        }
+
+        public static boolean hasPermission(AccessControlManager acm, String path, String privilege) {
+            if (acm != null) {
+                try {
+                    Privilege p = acm.privilegeFromName(privilege);
+                    return acm.hasPrivileges(path, new Privilege[]{p});
+                } catch (RepositoryException ignore) {
+                }
+            }
+            return false;
+        }
+
+        public static boolean hasPermission(AccessControlManager acm, Resource resource, String privilege) {
+            return hasPermission(acm, resource.getPath(), privilege);
+        }
+
+        public boolean isFolder() {
+            return this.isFolder;
+        }
+
+        public String getTitle() {
+            return this.title;
+        }
+
+        public String getName() {
+            return this.name;
+        }
+
+        public String getActionRels() {
+            return actionRels;
+        }
+
+        public boolean isThumbnailUrlEmpty() {
+            return thumbnailUrl.isEmpty();
+        }
+
+        public String getThumbnailUrl() {
+            return thumbnailUrl;
+        }
+
+        public boolean isNew() {
+            return isNew;
+        }
+
+        public boolean hasScaffold() {
+            return hasScaffold;
+        }
+
+        public AccessControlManager getAcm() {
+            return acm;
+        }
+
+        public Resource getScaffold() {
+            return scaffold;
+        }
+
+        public Template getModel() {
+            return model;
+        }
+
+        public String getModifiedDate() {
+            return modifiedDate;
+        }
+
+        public String getDescription() {
+            return description;
+        }
+
+        public String getModifiedBy() {
+            return modifiedBy;
+        }
+
+        public boolean isLocked() {
+            return isModelLocked;
+        }
+    }
+%>

@@ -1,0 +1,946 @@
+<%@page session="false"%><%--
+  Copyright 1997-2009 Day Management AG
+  Barfuesserplatz 6, 4001 Basel, Switzerland
+  All Rights Reserved.
+
+  This software is the confidential and proprietary information of
+  Day Management AG, ("Confidential Information"). You shall not
+  disclose such Confidential Information and shall use it only in
+  accordance with the terms of the license agreement you entered into
+  with Day.
+
+  ==============================================================================
+
+
+
+--%><%@page session="false" 
+            contentType="text/html"
+            pageEncoding="utf-8"
+            import="java.util.Iterator,
+                    org.apache.commons.lang3.StringEscapeUtils,
+                    org.apache.commons.lang.StringUtils,
+                    org.apache.sling.api.SlingHttpServletRequest,
+                    org.apache.sling.api.resource.Resource,
+                    com.day.text.Text,
+                    com.day.cq.commons.inherit.InheritanceValueMap,
+                    com.day.cq.commons.inherit.HierarchyNodeInheritanceValueMap,
+                    com.day.cq.wcm.api.Page"%><%
+%><%@taglib prefix="cq" uri="http://www.day.com/taglibs/cq/1.0" %><%
+%><cq:defineObjects/><%
+
+    String path = resource.getPath();
+    String resourceType = resource.getResourceType();
+    String dialogPath = (!resourceType.startsWith("/libs") ? "/libs/" : "") + resourceType + "/dialog";
+    String suffix = slingRequest.getRequestPathInfo().getSuffix();
+    String[] noArr = new String[0];
+    Resource parentResource = currentPage.getParent().getContentResource();
+    InheritanceValueMap parentPageProperties = new HierarchyNodeInheritanceValueMap(parentResource);
+
+%>
+<div id='CQ'> <!-- Create CQ div first, so tabs render on top -->
+    <div id="CqScTabs" style="float:left; width:55%;">
+    <div id="topPanel"></div>
+        <script type="text/javascript">
+            var rsidVarNames = {};
+            var provider = {
+                map: { },
+
+                onAvailable: function(key, callback, scope, options) {
+                    this.generateEntry(key);
+                    var entry = this.map[key];
+                    entry.obs.on('change', callback, scope, options);
+                    if (entry.value != null)
+                        entry.obs.fireEvent('change', entry.value, null);
+                },
+
+                unAvailable: function(key, callback, scope, options) {
+                    var entry = this.map[key];
+                    if (entry) {
+                        entry.obs.un('change', callback, scope, options);
+                    }
+                },
+
+                getValue: function(key) {
+                    var entry = this.map[key];
+                    return entry ? entry.value : null;
+                },
+
+                setValue: function(key, value) {
+                    this.generateEntry(key);
+                    var entry = this.map[key];
+                    var oldValue = entry.value;
+                    entry.value = value;
+                    entry.obs.fireEvent('change', value, oldValue);
+                },
+
+                generateEntry: function(key) {
+                    if (this.map[key]) {
+                        return true;
+                    } else {
+                        entry = {
+                            value: null,
+                            obs: new CQ.Ext.util.Observable()
+                        };
+                        entry.obs.addEvents({
+                            change: true
+                        });
+                        this.map[key] = entry;
+                        return false;
+                    }
+                }
+            };
+            
+            var variableMappingsStore = new CQ.Ext.data.JsonStore({
+                mode: "local",
+                fields: [{
+                    name: "scVar",
+                    type: "string"
+                }, {
+                    name: "componentName",
+                    type: "string"
+                }, {
+                    name: "componentIcon",
+                    type: "string"
+                }, {
+                    name: "componentFrameworkPath",
+                    type: "string"
+                }, {
+                    name: "cqVar",
+                    type: "string"
+                }]
+            });
+            var jsonStore = { };
+            // TODO use same function in cqmappings
+            var getShortScVar = function(scVar, arr) {
+                var title = '';
+                if (typeof arr != 'undefined' && typeof arr.length != 'undefined' && arr.length > 0) {
+                    title = arr[0].name;
+                    if (arr.length > 1)
+                        title += '...';
+                }
+                return title + " (" + scVar + ")";
+            };
+            variableMappingsStore.on('load', function(store, records, options) {
+                provider.onAvailable("scVariables", function(variables) {
+                    var mappingData = { };
+                    CQ.Ext.each(records, function(item) {
+                        var scVar = item.get('scVar');
+                        if (scVar) {
+                            if (!mappingData[scVar])
+                                mappingData[scVar] = [];
+                            mappingData[scVar].push(item);
+                        }
+                    });
+                    CQ.Ext.each(variables, function(variable) {
+                        var scVar = variable.name;
+                        var type = variable.type;
+                        var varData = {
+                            names: []
+                        };
+                        try {
+                            varData.names = CQ.Ext.util.JSON.decode(variable.title);
+                        } catch (e) {
+                            console.log(e);
+                        }
+                        var store = jsonStore[type];
+                        var shortScVar = getShortScVar(scVar, varData.names);
+                        if (store) {
+                            var baseRec = {
+                                scVar: scVar,
+                                title: shortScVar
+                            };
+                            var dataArray = mappingData[scVar];
+                            if (dataArray) {
+                                CQ.Ext.each(dataArray, function(data) {
+                                    var rec = { };
+                                    for (var idx in baseRec)
+                                        rec[idx] = baseRec[idx];
+                                    data.fields.each(function(recordField) {
+                                        var fieldName = recordField.name;
+                                        if (!(fieldName in rec))
+                                            rec[fieldName] = data.get(fieldName);
+                                    });
+                                    conflictManager.addVariable(scVar, rec.cqVar, rec.componentName, varData);
+                                    store.push(rec);
+                                });
+                            } else {
+                                conflictManager.addNewVariable(scVar, varData);
+                                store.push(baseRec);
+                            }
+                        }
+                        else {
+                            rsidVarNames[scVar] = varData.names;
+                        }
+                    });
+                }, this, { single: true });
+            });
+            
+            var contentPath = "<%= xssAPI.encodeForJSString(resource.getPath()) %>";
+            var path = "<%= xssAPI.encodeForJSString(currentPage.getPath()) %>";
+
+            // Set-up URLs
+            var scViewInfoUrl = '/libs/cq/analytics/scviewinfo.json';
+            scViewInfoUrl = CQ.HTTP.addParameter(scViewInfoUrl, "path", contentPath);
+            scViewInfoUrl = CQ.HTTP.externalize(scViewInfoUrl);
+    
+            var variablesUrl = '/libs/cq/analytics/sitecatalyst/variables.json';
+            variablesUrl = CQ.HTTP.addParameter(variablesUrl, "path", path);
+            variablesUrl = CQ.HTTP.addParameter(variablesUrl, "filter",
+                ["traffic", "conversion", "event", "merchandising"]);
+            variablesUrl = CQ.HTTP.externalize(variablesUrl);
+            
+            CQ.HTTP.get(variablesUrl,
+                function(options, success, response) {
+                    var variables;
+                    if (success) {
+                        try {
+                            var jsonObj = CQ.HTTP.eval(response);
+                            if (jsonObj)
+                                variables = jsonObj.variables;
+                        } catch (e) {
+                            CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                                CQ.I18n.getMessage("Unable to parse Analytics variables"));
+                        }
+                    } else {
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                            CQ.I18n.getMessage("Unable to load Analytics variables"));
+                    }
+                    provider.setValue("scVariables", variables || []);
+                   });
+
+            CQ.HTTP.get(scViewInfoUrl,
+                function(options, success, response) {
+                    var scViewInfo;
+                    if (success) {
+                        try {
+                            scViewInfo = CQ.HTTP.eval(response);
+                        } catch (e) {
+                            CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                                CQ.I18n.getMessage("Unable to parse Analytics variables"));
+                        }
+                    } else {
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                            CQ.I18n.getMessage("Unable to load Analytics variables"));
+                    }
+                    provider.setValue("scViewInfo", scViewInfo || { });
+                });
+
+        var augmentMappings = function(variableMappings, compFwPathMap) {
+            CQ.Ext.each(variableMappings, function(item) {
+                var entry = compFwPathMap[item.componentFrameworkPath];
+                item.componentName = entry.name;
+                item.componentIcon = entry.icon;
+            });
+            return variableMappings;
+        };
+        provider.onAvailable("scViewInfo", function(scViewInfo) {
+            var variableMappings = [];
+            var cqData = [];
+            var cqVars = scViewInfo.cqVars;
+            var compFwPathMap = scViewInfo.componentFrameworkPathMap;
+            variableMappings = augmentMappings(scViewInfo.variableMappings,
+                                               compFwPathMap);
+            var allTracked = { };
+            for (var component in cqVars) {
+                var tracked = cqVars[component];
+                CQ.Ext.each(tracked, function(item) {
+                    if (!allTracked[item])
+                        allTracked[item] = [];
+                    allTracked[item].push(component);
+                });
+            }
+            for (var id in allTracked) {
+                var pieces = id.split('.');
+                if (pieces.length <= 0 || !pieces[0])
+                    continue;
+                var store = pieces[0];
+                var title = pieces.slice(1).join('.');
+                var compFwPath = allTracked[id];
+                if (compFwPath == undefined || compFwPath[0] == undefined || compFwPathMap[compFwPath[0]] == undefined) {
+                    continue;
+                }
+                var entry = compFwPathMap[compFwPath[0]];
+                cqData.push({
+                    id: id,
+                    store: store,
+                    title: title,
+                    name: id,
+                    value: id,
+                    componentFrameworkPath: compFwPath,
+                    componentName: entry.name,
+                    componentIcon: entry.icon
+                });
+            }
+            variableMappingsStore.loadData(variableMappings);
+            provider.setValue('cqVars', cqData);
+        });
+        
+            var conflictManager = new CQ.analytics.ConflictManager({
+                provider: provider
+            });
+            var tabPanel;
+            CQ.Ext.onReady(function() {
+                tabPanel = new CQ.Ext.TabPanel( {
+                border:false,
+                activeItem: 0,
+                activeTab: 0,
+                renderTo: 'tabsHeader',
+                items: [
+                    {
+                        title: CQ.I18n.getMessage('AEM view'),
+                        cfTab: 'cfTab-SiteCatalystVars',
+                        view: '/cqview'
+                    },
+                    {
+                        title: CQ.I18n.getMessage('Analytics view'),
+                        cfTab: 'cfTab-ClientContextVars',
+                        view: '/scview'
+                    }
+                ]
+                });
+                
+                
+                var cfTabIds = {
+                    "cqview": ['cfTab-SiteCatalystVars'],
+                    "scview": ['cfTab-ClientContextVars']
+                };
+                
+                
+                var suffix = '<%= xssAPI.encodeForJSString(suffix) %>';
+                var currentTab = suffix;
+                if (currentTab == '' || currentTab === 'null') {
+                  currentTab = '/cqview';
+                }
+
+                var cf = CQ.WCM.getContentFinder();
+                var cfTabPanel = cf ? cf.findById(CQ.wcm.ContentFinder.TABPANEL_ID) : null;
+                if (cfTabPanel) {
+                    // hide all CF tabs
+                    for (var i=0; i < cfTabPanel.items.length; i++) {
+                        cfTabPanel.hideTabStripItem(cfTabPanel.items.items[i].id);
+                    }
+                    // show tabs for view
+                    var view = currentTab.replace(/^\//,'');
+                    var tabids = cfTabIds[view];
+                    for (var i=0; i<tabids.length; i++) {
+                        cfTabPanel.unhideTabStripItem(tabids[i]);
+                    }
+                    cfTabPanel.activate(cf.findById(tabids[0]));
+                    cfTabPanel.doLayout();
+                }
+                // activate on-page tab
+                for (var i=0; i < tabPanel.items.length; i++) {
+                    if (tabPanel.items.items[i].view == currentTab) {
+                        tabPanel.activate(tabPanel.items.items[i]);
+                    }
+                }
+                
+                
+                tabPanel.on('tabchange', function(tabPanel, tab){
+                    var path = window.location.href;
+                    path = path.substring(0, suffix == 'null'? (path.indexOf('?') > 0 ? path.indexOf('?') : path.length) : path.indexOf(suffix)) + tab.view;
+                    setTimeout("window.location.href = '" + path + "'", 500);
+                });
+            });
+        </script>
+        <div id="tabsHeader"></div>   
+        <div id="tabContent"> 
+        <% if ("/scview".equals(suffix)) { %>
+            <%@include file="scview.jsp"%>
+        <% } else { %>
+            <%@include file="cqview.jsp"%>
+        <% } %>
+        </div>
+    </div>
+    <div id='RightSide' style="float:left; width:300px; margin:0px 0px 0px 20px;">
+        <script type="text/javascript">            
+            CQ.Ext.onReady(function() {
+                // remove CF and Sidekick when navigating to welcome page
+                $CQ("a.home").on('click', function() { window.top.location=this.href; });
+
+                var store;
+                var refreshRequested = false;
+                var handleReport = function(reportSuites, callback) {
+                    if(reportSuites && reportSuites.report_suites != undefined) {
+                        callback(reportSuites.report_suites);
+                    }else if(reportSuites && (reportSuites.error == "not authenticated" || reportSuites.error == "Unable to validate authentication.")){ // in case of error (no endpoint found or authentication failed), ask the user to check the credential to try again.
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"), CQ.I18n.getMessage("We were not able to login to Analytics. \n\nPlease check your credentials and try again."));
+                    }else if(reportSuites && reportSuites.error == "not authorized"){ // in case of error (no endpoint found or authentication failed), ask the user to check the credential to try again.
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),CQ.I18n.getMessage("Web Service access is not enabled. \n\nPlease see an Analytics administrator to enable access."));
+                    }else if(reportSuites && reportSuites.error == "not online"){
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),CQ.I18n.getMessage("Connection to Analytics could not be established. \n\nPlease check your Internet connection."));
+                    }else {
+                        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),CQ.I18n.getMessage("Connection to Analytics could not be established. \n\nPlease see an Analytics administrator for more details."));
+                    }
+                };
+
+                var cf = CQ.WCM.getContentFinder();
+                if (cf) {
+                    var cfTab = cf.findById("cfTab-SiteCatalystVars");
+                }
+                if (cfTab && cfTab.dataView) {
+                    store = cfTab.dataView.store;
+                } else {
+                    store = new CQ.Ext.data.JsonStore({
+                        "id": "variablesstore",
+                        "autoDestroy":true,
+                        "autoLoad": true,
+                        "proxy": new CQ.Ext.data.HttpProxy({
+                            "url": CQ.shared.HTTP.externalize("/libs/cq/analytics/sitecatalyst/variables.json"),
+                            "method": "GET"
+                        }),
+                        "reader": new CQ.Ext.data.JsonReader({
+                            "root": "variables",
+                            "fields": [
+                                "uid", "no", "name", "title", "path", "type"
+                            ],
+                            "id": "uid"
+                        }),
+                        "baseParams": {
+                            "path": CQ.HTTP.getAnchor(CQ.WCM.getContentUrl())
+                        }
+                    });
+                }
+                store.on('load',function(store, records, options){
+                    if (refreshRequested) {
+                        window.location.reload();
+                    }
+                });
+
+                var reportUrl = CQ.HTTP.externalize("<%= xssAPI.encodeForJSString(path) %>");
+                var saveReportSuites = function() {
+                    var delta = {};
+                    delta["_charset_"] = "utf-8";
+                    var reportsuites = this.getSelectedReportSuites();
+                    var rsid = [];
+                    CQ.Ext.each(reportsuites,
+                        function(item, index, allItems) {
+                            var sepPos = item.lastIndexOf(";");
+                            if (sepPos >= 0) {
+                                rsid.push(item.substr(0, sepPos));
+                            } else {
+                                rsid.push(item);
+                            }
+                    });
+                    rsid = rsid.join(",");
+                    this.reportsuites.actual = reportsuites.join(",");
+                    this.suites.actual = rsid;
+                    provider.setValue("suites", this.suites);
+                    delta["public/reportsuites"] = reportsuites;
+                    delta["public/reportsuite"] = rsid;
+                    CQ.HTTP.post(
+                        reportUrl,
+                        function(options, success, response) {
+                            if (success) {
+                                store.baseParams.force = true;
+                                store.removeAll();
+                                store.reload();
+                                //refreshRequested = true;
+                                var values = reportSelector.suites.getValues();
+                                var trackers = {
+                                       trackingServer: serverField,
+                                    trackingServerSecure: serverSecureField
+                                }
+                                if (values && values.split(",").length == 1 && needTrackingServer(trackers, reportSelector.suites)) {
+                                    CQ.Ext.Msg.confirm(
+                                        CQ.I18n.getMessage("Load default server settings?"),
+                                        CQ.I18n.getMessage("Do you want to load the default server settings and overwrite current values in the Server section?"),
+                                        function (btn) {
+                                               if (btn == 'yes') {
+                                                   updateTrackingServer(values);
+                                               }
+                                           }
+                                    ).setIcon(CQ.Ext.Msg.QUESTION);
+                                }
+                            } else {
+                                CQ.Notification.notify(null, 'Could not save report suite');
+                            }
+                        },
+                        delta
+                    );
+                };
+                var InheritableValue = function(actual, inherited) {
+                    this.actual = actual || "";
+                    this.inherited = inherited || "";
+                    this.getValues = function() {
+                        return this.actual || this.inherited;
+                    };
+                };
+                var reportSelector = new CQ.analytics.ReportSuiteField({
+                    hideLabel: true,
+                    orderable: false,
+                    listeners: {
+                        removeditem: saveReportSuites,
+                        select: saveReportSuites
+                    },
+                    id: "cq-report-suites-selector",
+                    fieldConfig: {
+                        mode: "local",
+                        store: new CQ.Ext.data.ArrayStore({
+                            fields: ["rsid", "full"],
+                            data: []
+                        }),
+                        triggerAction: "All",
+                        xtype: 'reportsuitefielditem'
+                    },
+                    suites: new InheritableValue("<%= StringEscapeUtils.escapeEcmaScript(pageProperties.get("public/reportsuite", "")) %>",
+                        "<%= StringEscapeUtils.escapeEcmaScript(parentPageProperties.getInherited("public/reportsuite", "")) %>"),
+                    reportsuites: new InheritableValue("<%= StringEscapeUtils.escapeEcmaScript(StringUtils.join(pageProperties.get("public/reportsuites", noArr), ",")) %>",
+                        "<%= StringEscapeUtils.escapeEcmaScript(StringUtils.join(parentPageProperties.getInherited("public/reportsuites", noArr), ",")) %>"),
+
+                    getSelectedReportSuites: function() {
+                        var rsid = [];
+                        CQ.Ext.each(this.find('name', './analytics/cq:s_account'),
+                            function(item, index, allItems) {
+                                var value = item.getValue();
+                                if (value) {
+                                    rsid.push(value);
+                                }
+                            });
+                        return rsid;
+                    }
+                });
+                CQ.Ext.apply(reportSelector.suites, {
+                    isFirstInherited: function() {
+                        var actualList = this.actual.split(',');
+                        var inheritedList = this.inherited.split(',');
+                        return inheritedList[0] && (!actualList[0]
+                            || (inheritedList.indexOf(actualList[0]) >= 0));
+                    }
+                });
+                provider.setValue("suites", reportSelector.suites);
+
+                var generateCallback = function(key, message) {
+                    return function(field) {
+                        var delta = {};
+                        delta["_charset_"] = "utf-8";
+                        delta[key] = field.getValue();
+                        CQ.HTTP.post(reportUrl,
+                            function(options, success, response) {
+                                if (success) {
+                                    if (field.inheritable)
+                                        field.inheritable.actual = delta[key];
+                                } else {
+                                    CQ.Notification.notify(null, message);
+                                }
+                            }, delta
+                        );
+                    };
+                };
+                
+                var toggleFields = function(checked, fieldList) {
+                    var action = checked ? "enable" : "disable";
+                    CQ.Ext.each(fieldList, function(item) {
+                        item[action]();
+                    });
+                };
+                var linkDownloadField = new CQ.Ext.form.TextField({
+                    fieldName: "linkDownloadFileTypes",
+                    fieldLabel: CQ.I18n.getMessage("Download File Types"),
+                    fieldDescription: CQ.I18n.getMessage("list of file extensions"),
+                    value: "<%= StringEscapeUtils.escapeEcmaScript(
+                        pageProperties.getInherited("linkDownloadFileTypes",
+                            "exe,zip,wav,mp3,mov,mpg,avi,wmv,doc,pdf,xls")) %>"
+                });
+                var linkExternalField = new CQ.Ext.form.TextField({
+                    fieldName: "linkExternalFilters",
+                    fieldLabel: CQ.I18n.getMessage("External Filters"),
+                    fieldDescription: CQ.I18n.getMessage("example: 'site1.com,site2.com'"),
+                    value: "<%= StringEscapeUtils.escapeEcmaScript(
+                        pageProperties.getInherited("linkExternalFilters", "''")) %>"
+                });
+                var linkInternalField = new CQ.Ext.form.TextField({
+                    fieldName: "linkInternalFilters",
+                    fieldLabel: CQ.I18n.getMessage("Internal Filters"),
+                    fieldDescription: CQ.I18n.getMessage("example: 'javascript:,'+window.location.hostname"),
+                    value: "<%= StringEscapeUtils.escapeEcmaScript(
+                        pageProperties.getInherited("linkInternalFilters",
+                            "'javascript:,'+window.location.hostname")) %>"
+                });
+                var leadingCommaErrMsg = CQ.I18n.getMessage("A leading comma is not a valid construct");
+                var trailingCommaErrMsg = CQ.I18n.getMessage("A trailing comma is not a valid construct");
+                var twoCommasErrMsg = CQ.I18n.getMessage("Two consecutive commas are not a valid construct");
+                var linkTracking = new CQ.analytics.InstantSaveForm({
+                    title: CQ.I18n.getMessage("Link Tracking Configuration"),  
+                    nodeUrl: "<%= xssAPI.encodeForJSString(path) %>",
+                    items: [
+                        new CQ.Ext.form.Checkbox({
+                            fieldName: "trackDownloadLinks",
+                            fieldLabel: CQ.I18n.getMessage("Track Downloads"),
+                            fieldDescription: CQ.I18n.getMessage("enable tracking download links"),
+                            checked: <%= StringEscapeUtils.escapeEcmaScript(pageProperties.getInherited("trackDownloadLinks", "true")) %>,
+                            slaveFields: [ linkDownloadField ],
+                            listeners: {
+                                render: function(checkbox) {
+                                    toggleFields(checkbox.checked, checkbox.slaveFields);
+                                },
+
+                                check: function(checkbox, checked) {
+                                    toggleFields(checked, checkbox.slaveFields);
+                                }
+                            }
+                        }),
+                        linkDownloadField,
+                        new CQ.Ext.form.Checkbox({
+                            fieldName: "trackExternalLinks",
+                            fieldLabel: CQ.I18n.getMessage("Track External"),
+                            fieldDescription: CQ.I18n.getMessage("enable tracking external links"),
+                            checked: <%= StringEscapeUtils.escapeEcmaScript(pageProperties.getInherited("trackExternalLinks", "true")) %>,
+                            slaveFields: [ linkExternalField, linkInternalField ],
+                            listeners: {
+                                render: function(checkbox) {
+                                    toggleFields(checkbox.checked, checkbox.slaveFields);
+                                },
+
+                                check: function(checkbox, checked) {
+                                    toggleFields(checked, checkbox.slaveFields);
+                                }
+                            }
+                        }),
+                        linkExternalField,
+                        linkInternalField,
+                        new CQ.Ext.form.Checkbox({
+                            fieldName: "linkLeaveQueryString",
+                            fieldLabel: CQ.I18n.getMessage("Leave Query String"),
+                            fieldDescription: CQ.I18n.getMessage("include query string in reports"),
+                            checked: <%= StringEscapeUtils.escapeEcmaScript(pageProperties.getInherited("linkLeaveQueryString", "false")) %>
+                        }),
+                        new CQ.Ext.form.TextField({
+                            fieldName: "linkTrackEvents",
+                            fieldLabel: CQ.I18n.getMessage("Link track events"),
+                            fieldDescription: CQ.I18n.getMessage("example: scAdd,purchase,event14"),
+                            value: "<%= StringEscapeUtils.escapeEcmaScript(
+                                pageProperties.getInherited("linkTrackEvents", "None")) %>",
+                            sureTitleMsg: CQ.I18n.getMessage("Unknown event name(s)"),
+                            predefinedEvents: {
+                                purchase: true,
+                                scOpen: true,
+                                scView: true,
+                                scCheckout: true,
+                                scAdd: true,
+                                scRemove: true
+                            },
+                            validator: function(value) {
+                                if (value == "" || value == "None")
+                                    return true;
+                                var events = value.split(',');
+                                var isValid = true;
+                                var eventReg = new RegExp("^event[0-9]+$");
+                                var idx = CQ.Ext.each(events, function(item) {
+                                    if (!this.predefinedEvents[item] && !eventReg.test(item)) {
+                                        isValid = false;
+                                        return false;
+                                    }
+                                }, this);
+                                if (isValid) {
+                                    return true;
+                                } else {
+                                    var wrongValue = events[idx];
+                                    if (wrongValue != "") {
+                                        return CQ.I18n.getMessage("Some event names are not valid (e.g. {0})", [ wrongValue ]);
+                                    } else {
+                                        if (idx == 0) {
+                                            return leadingCommaErrMsg;
+                                        } else if (idx < events.length - 1) {
+                                            return twoCommasErrMsg;
+                                        } else {
+                                            return trailingCommaErrMsg;
+                                        }
+                                    }
+                                }
+                            }
+                        }),
+                        new CQ.Ext.form.TextField({
+                            fieldName: "linkTrackVars",
+                            fieldLabel: CQ.I18n.getMessage("Link track vars"),
+                            fieldDescription: CQ.I18n.getMessage("example: events,prop1,eVar49"),
+                            value: "<%= StringEscapeUtils.escapeEcmaScript(
+                                pageProperties.getInherited("linkTrackVars", "None")) %>",
+                            sureTitleMsg: CQ.I18n.getMessage("Unknown var name(s)"),
+                            validator: function(value) {
+                                if (value == "" || value == "None") {
+                                    return true;
+                                }
+                                var evars = value.split(',');
+                                var isValid = true;
+                                var eVarReg = new RegExp("^eVar[0-9]+$");
+                                var propReg = new RegExp("^prop[0-9]+$");
+                                var idx = CQ.Ext.each(evars, function(item) {
+                                    if (item != "events" && !eVarReg.test(item) &&
+                                            !propReg.test(item)) {
+                                        isValid = false;
+                                        return false;
+                                    }
+                                }, this);
+                                if (isValid) {
+                                    return true;
+                                } else {
+                                    var wrongValue = evars[idx];
+                                    if (wrongValue != "") {
+                                        return CQ.I18n.getMessage("Some var names are not valid (e.g. {0})", [ wrongValue ]);
+                                    } else {
+                                        if (idx == 0) {
+                                            return leadingCommaErrMsg;
+                                        } else if (idx < evars.length - 1) {
+                                            return twoCommasErrMsg;
+                                        } else {
+                                            return trailingCommaErrMsg;
+                                        }
+                                    }
+                                }
+                            }
+                        }),
+                        new CQ.Ext.form.Checkbox({
+                            fieldName: "public/cq:adhocLinkTracking",
+                            fieldLabel: CQ.I18n.getMessage("Ad-hoc Link Tracking"),
+                            fieldDescription: CQ.I18n.getMessage("display tracking parameters in the rich text ad-hoc link editor"),
+                            checked: <%= StringEscapeUtils.escapeEcmaScript(pageProperties.getInherited("public/cq:adhocLinkTracking", "false")) %>
+                        })
+                    ],
+                    loadFields: function() {}
+                });
+
+                var cqVariables = new CQ.analytics.InstantSaveVariableField({
+                    hideLabel: true,
+                    nodeUrl: "<%= xssAPI.encodeForJSString(path) %>",
+                    name: "public/cq:variables",
+                    value: "<%= StringEscapeUtils.escapeEcmaScript(pageProperties.getInherited("public/cq:variables",
+                        "[[\"charSet\", \"UTF-8\"], [\"cookieLifetime\", \"\"], [\"currencyCode\", \"USD\"], [\"trackInlineStats\", \"\"]]")) %>",
+                    fieldConfig: {
+                        xtype: 'instantvariablefielditem'
+                    }
+                });
+
+                var configCodeField = new CQ.Ext.form.TextArea({
+                    fieldLabel: CQ.I18n.getMessage("Enter any other free-form JavaScript tracking settings for Analytics here:"),
+                    height: 150,
+                    value: "<%= StringEscapeUtils.escapeEcmaScript(pageProperties.getInherited("public/cq:configCode", "")) %>",
+                    listeners: {
+                        change: generateCallback("public/cq:configCode",
+                                CQ.I18n.getMessage("Could not save config code"))
+                    }
+                });
+
+                var scodeSettings = new CQ.form.DialogFieldSet({
+                    title: CQ.I18n.getMessage("General Analytics settings"),
+                    collapsed: true,
+                    collapsible: true,
+                    labelAlign: 'top',
+                    items: [cqVariables, configCodeField]
+                });
+
+                var serverField = new CQ.Ext.form.TextField({
+                    fieldLabel: CQ.I18n.getMessage("Tracking Server"),
+                    fieldDescription: CQ.I18n.getMessage("Please use CName if possible"),
+                    inheritable: new InheritableValue(
+                        "<%= StringEscapeUtils.escapeEcmaScript(
+                            pageProperties.get("public/cq:trackingServer", "")) %>",
+                        "<%= StringEscapeUtils.escapeEcmaScript(
+                            parentPageProperties.getInherited("public/cq:trackingServer", "")) %>"),
+                    listeners: {
+                        change: generateCallback("public/cq:trackingServer",
+                                CQ.I18n.getMessage("Could not save tracking server"))
+                    }
+                });
+                var serverSecureField = new CQ.Ext.form.TextField({
+                    fieldLabel: CQ.I18n.getMessage("Secure Tracking Server"),
+                    fieldDescription: CQ.I18n.getMessage("Please use CName if possible"),
+                    inheritable: new InheritableValue(
+                        "<%= StringEscapeUtils.escapeEcmaScript(
+                            pageProperties.get("public/cq:trackingServerSecure", "")) %>",
+                        "<%= StringEscapeUtils.escapeEcmaScript(
+                            parentPageProperties.getInherited("public/cq:trackingServerSecure", "")) %>"),
+                    listeners: {
+                        change: generateCallback("public/cq:trackingServerSecure",
+                                CQ.I18n.getMessage("Could not save secure tracking server"))
+                    }
+                });
+                var namespaceField = new CQ.Ext.form.TextField({
+                    fieldLabel: CQ.I18n.getMessage("Visitor Namespace"),
+                    inheritable: new InheritableValue(
+                        "<%= StringEscapeUtils.escapeEcmaScript(
+                            pageProperties.get("public/cq:visitorNamespace", "")) %>",
+                        "<%= StringEscapeUtils.escapeEcmaScript(
+                            parentPageProperties.getInherited("public/cq:visitorNamespace", "")) %>"),
+                    listeners: {
+                        change: generateCallback("public/cq:visitorNamespace",
+                                CQ.I18n.getMessage("Could not save visitor namespace"))
+                    }
+                });
+
+                var servers = new CQ.form.DialogFieldSet({
+                    title: CQ.I18n.getMessage("Servers"),
+                    collapsed: true,
+                    collapsible: true,
+                    items: [serverField, serverSecureField, namespaceField]
+                });
+
+                var selectorPanel = new CQ.form.DialogFieldSet({
+                    title: CQ.I18n.getMessage("Report Suites"),
+                    collapsible: true,
+                    collapsed: false,
+                    labelAlign: 'top',
+                    items: [ reportSelector ]
+                });
+                var linksPanel = new CQ.form.DialogFieldSet({
+                    title: CQ.I18n.getMessage("Child frameworks"),
+                    collapsible: true,
+                    collapsed: false,
+                    labelAlign: 'left',
+                    labelWidth: 15,
+                    items: [<%
+                        Iterator<Page> children = currentPage.listChildren();
+                        while (children.hasNext()) {
+                            Page child = children.next();
+                            if (child == null) {
+                                break;
+                            }
+                            String title = child.getNavigationTitle();
+                            if (title == null || title.equals("")) {
+                                title = child.getTitle();
+                            }
+                            if (title == null || title.equals("")) {
+                                title = child.getName();
+                            }
+                            %>{  xtype: 'box',
+                                 fieldLabel: '&nbsp;&raquo;&nbsp;',
+                                 autoEl: {tag: 'a', href: '<%= xssAPI.encodeForJSString(Text.escape(child.getPath(), '%', true)) %>.html', html: '<%= xssAPI.encodeForJSString(title) %>',
+                                                        style:'color: #15428B; cursor: pointer; text-decoration: underline' }
+                            },<%
+                        }%>
+                    ]
+                });
+                
+                var rightPanel = new CQ.Ext.FormPanel({
+                    border: false,
+                    renderTo: "RightSide",
+                    bodyStyle: 'background:transparent',
+                    items: [
+                        linksPanel, selectorPanel, scodeSettings, servers
+                    ]
+                });
+
+                var topPanel = new CQ.Ext.FormPanel({
+                    border: false,
+                    renderTo: "topPanel",
+                    bodyStyle: 'background:transparent',
+                    items: [
+                        linkTracking
+                    ]
+                });
+
+                var path = "<%= xssAPI.encodeForJSString(path) %>";
+                var trail = path.lastIndexOf('/jcr:content');
+                if (trail >= 0) {
+                    path = path.substr(0, trail);
+                }
+                var serviceUrl = "/libs/cq/analytics/sitecatalyst/service.json";
+                serviceUrl = CQ.HTTP.externalize(serviceUrl);
+
+                var trackers = {
+                    trackingServer: serverField,
+                    trackingServerSecure: serverSecureField,
+                    visitorNamespace: namespaceField
+                };
+
+                var updateTrackingServer = function(rsid) {
+                    CQ.HTTP.post(serviceUrl,
+                        function(options, success, response) {
+                            if (success) {
+                                var trackingData = CQ.HTTP.eval(response);
+                                if (trackingData) { 
+                                    var delta = { };
+                                    delta["public/cq:trackingServer"] = trackingData.tracking_server;
+                                    delta["public/cq:trackingServerSecure"] = trackingData.tracking_server;
+                                    delta["public/cq:visitorNamespace"] = trackingData.namespace;
+                                    CQ.HTTP.post(reportUrl,
+                                        function(options, success, response) {
+                                            if (success) {
+                                                if (trackers.trackingServer.inheritable){
+                                                    trackers.trackingServer.inheritable.actual = delta["public/cq:trackingServer"];
+                                                    trackers.trackingServer.setValue(delta["public/cq:trackingServer"]);
+                                                }
+                                                if (trackers.trackingServerSecure.inheritable){
+                                                    trackers.trackingServerSecure.inheritable.actual = delta["public/cq:trackingServerSecure"];
+                                                    trackers.trackingServerSecure.setValue(delta["public/cq:trackingServerSecure"]);
+                                                }
+                                                if (trackers.visitorNamespace.inheritable){
+                                                    trackers.visitorNamespace.inheritable.actual = delta["public/cq:visitorNamespace"];
+                                                    trackers.visitorNamespace.setValue(delta["public/cq:visitorNamespace"]);
+                                                }        
+                                            } else {
+                                                CQ.Notification.notify(null, CQ.I18n.getMessage("Could not save tracking servers"));
+                                            }
+                                        }, delta
+                                    );
+                                     
+                                }
+                            } else {
+                                CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                                        CQ.I18n.getMessage("Could not retrieve tracking server"));
+                            }
+                        }, {
+                            "_charset_":"utf-8",
+                            "method": "Company.GetTrackingServer",
+                            "configPath": path,
+                            "rsid": rsid
+                        }, this, true
+                    );
+                };
+
+                var needTrackingServer = function(trackers, suites) {
+                    var needed = false;
+                    var firstReportSuiteInherited = suites.isFirstInherited();
+                    for (var idx in trackers) {
+                        var elem = trackers[idx];
+                        var actual = elem.inheritable.actual;
+                        if (!actual && firstReportSuiteInherited) {
+                            actual = elem.inheritable.inherited;
+                        }
+                        elem.serverSide = !actual;
+                        if (actual) {
+                            elem.setValue(actual);
+                        } else {
+                            needed = true;
+                        }
+                    }
+                    return needed;
+                };
+
+                var execute = function(suites, selector) {
+                    var data = [];
+                    CQ.Ext.each(suites, function(item, index, allItems) {
+                        data.push([item.rsid, item.rsid]);
+                    });
+                    var store = selector.fieldConfig.store;
+                    store.on('load', function(store, records, options) {
+                        var reportsuites = selector.reportsuites.getValues();
+                        if (reportsuites) {
+                            reportsuites = reportsuites.split(",");
+                            selector.setValue(reportsuites);
+                        }
+                    }, this, { single: true });
+                    store.loadData(data);
+                };
+                CQ.HTTP.post(serviceUrl,
+                    function(options, success, response) {
+                        if (success) {
+                            handleReport(CQ.HTTP.eval(response), this);
+                            var values = reportSelector.suites.getValues();
+                            if (values && needTrackingServer(trackers, reportSelector.suites)) {
+                                // CQ5-24506 we do not updateTrackingServer anymore here, but need the call to set values
+                               }
+                        } else {
+                            CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"),
+                                    CQ.I18n.getMessage("Could not retrieve report suites"));
+                        }
+                    }, {
+                        "_charset_":"utf-8",
+                        "method": "Company.GetReportSuites",
+                        "configPath": path
+                    }, execute.createDelegate(this, [reportSelector], true), true
+                );
+            });
+        </script>
+    </div>
+</div>

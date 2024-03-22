@@ -1,0 +1,418 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2022 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(document, XSS, Granite, $) {
+    "use strict";
+    var bCreateLaunchMode = true;
+
+    function _getLaunchItemFromPath(wizard, resourcePath) {
+        var retVal = null;
+        if(wizard.childResourceCFList && wizard.childResourceCFList.length>0) {
+            for(var index=0;index< wizard.childResourceCFList.length;index++) {
+                var currentItem = wizard.childResourceCFList[index];
+                if(currentItem.path===resourcePath) {
+                    retVal = currentItem;
+                    break;
+                }
+            }
+        }
+        return retVal;
+    }
+
+    function _removeResourcePath(wizard, resourcePath) {
+        if(wizard.childResourceCFList && wizard.childResourceCFList.length>0) {
+            for (var index=0; index < wizard.childResourceCFList.length; index++) {
+                var currentItem = wizard.childResourceCFList[index];
+                if(currentItem.path === resourcePath) {
+                    wizard.childResourceCFList.splice(index, 1);
+                    break;
+                }
+            }
+        }
+    }
+
+    function _appendResourceCF(wizard, resourcePath, bisDeep, bDisableDeep, bRefreshUI) {
+        var bAdded = false;
+        if(!wizard.childResourceCFList) {
+            wizard.childResourceCFList = [];
+        }
+        var newItem = {
+            path: resourcePath,
+            disableDeep: bDisableDeep
+        };
+        _validateResourceCF(newItem, bisDeep);
+        if(newItem.valid) {
+            bAdded = true;
+            wizard.childResourceCFList.push(newItem);
+            if(bRefreshUI) {
+                _refreshChildCFListUI(wizard);
+            }
+        }
+        return bAdded;
+    }
+
+    function _getLaunchTable(wizard) {
+        var table = wizard.find('table[is="coral-table"]');
+        return table[0];
+    }
+
+    function _getSelectedLaunchItems(wizard) {
+        var launchTable = _getLaunchTable(wizard);
+        return launchTable.selectedItems;
+    }
+
+    function _removeAllRowsFromTable(launchTable) {
+        var tableBody = $(launchTable).find('tbody');
+        tableBody.empty();
+    }
+
+
+
+    function _refreshChildCFListUI(wizard) {
+        var launchTable = _getLaunchTable(wizard);
+        _removeAllRowsFromTable(launchTable);
+
+        //first clear all path fields
+        var inputArray = wizard.find('input[name="srcPathList"]'),
+            index, item;
+        for(index=0;index<inputArray.length;index++) {
+            item = inputArray[index];
+            item.parentElement.removeChild(item);
+        }
+        inputArray = wizard.find('input[name="includeReferences"]');
+        for(index=0;index<inputArray.length;index++) {
+            item = inputArray[index];
+            item.parentElement.removeChild(item);
+        }
+
+        for(index=0; index< wizard.childResourceCFList.length; index++) {
+            var currentItem = wizard.childResourceCFList[index];
+            _appendCurrentLaunchCF(wizard, launchTable, currentItem);
+        }
+        wizard.find('.foundation-collection-item-includereferencecf coral-switch').on('change', function(evt) {
+            var currentInput = $(evt.currentTarget);
+            var $tr = currentInput.closest('tr');
+            var currentPath = $tr.data('path');
+            var launchItem = _getLaunchItemFromPath(wizard,currentPath);
+            launchItem.cache.includereferenceCF = currentInput[0].checked;
+            _updatelaunchincludeReferenceCFState(wizard, launchItem);
+        });
+        _updateButtonStates(wizard);
+    }
+
+    function _validateResourceCF(currentItem, bIsDeep) {
+        //first find if we have all information about this item
+        if(!currentItem.info) {
+            var url = Granite.HTTP.externalize(currentItem.path + "/jcr:content.json" , true);
+            // no further XSS encoding required here, as url is only used in a JavaScript
+            // context (still could make sense to validate/sanitize the URL, but that's not
+            // an XSS issue)
+            var data = Granite.HTTP.eval(url);
+            currentItem.info = data;
+        }
+        currentItem.valid = !!currentItem.info && !!currentItem.info["jcr:title"];
+        if(currentItem.valid) {
+            //process more data now
+            currentItem.cache = {};
+            currentItem.cache.title = XSS.getXSSValue(currentItem.info["jcr:title"]);
+            var replicatedDate = currentItem.info["cq:lastReplicated"];
+            var momentDate = new moment(replicatedDate);
+            var bValidReplicatedDate = replicatedDate!=null && momentDate!=null && momentDate.isValid();
+            var strLastReplicationAction = currentItem.info["cq:lastReplicationAction"];
+            var strPublished = (bValidReplicatedDate && "Deactivate" !== strLastReplicationAction) ? Granite.I18n.get("Published") : Granite.I18n.get("Not published");
+            var strModifiedBy = currentItem.info["cq:lastReplicatedBy"] || Granite.I18n.get("None");
+            var modifiedDate = currentItem.info["cq:lastModified"];
+            var strModifiedDate = "";
+            try {
+                var m = new moment(modifiedDate);
+                strModifiedDate = m.format('LL');
+            } catch(e) {
+                strModifiedDate = "";
+            }
+            currentItem.cache.published = strPublished;
+            currentItem.cache.modifiedby = strModifiedBy;
+            currentItem.cache.modifieddate = strModifiedDate;
+            currentItem.cache.includereferenceCF = bIsDeep;
+        }
+    }
+
+    function _appendCurrentLaunchCF(wizard, launchTable, currentItem) {
+        launchTable.multiple = true;
+        launchTable.selectable = true;
+        var tableRowText ='<tr is="coral-table-row" itemprop="item" class="foundation-collection-item"></tr>';
+        var tableContentText = '<td is="coral-table-cell" class="select"><coral-checkbox coral-table-rowselect></coral-checkbox></td>'+
+        '<td class="foundation-collection-item-title" is="coral-table-cell">'+currentItem.cache.title+'</td>'+
+        '<td class="foundation-collection-item-published" is="coral-table-cell">'+currentItem.cache.published+'</td>'+
+        '<td class="foundation-collection-item-modifiedby" is="coral-table-cell">'+currentItem.cache.modifiedby+'</td>'+
+        '<td class="foundation-collection-item-modifieddate" is="coral-table-cell">'+currentItem.cache.modifieddate+'</td>'+
+        '<td class="foundation-collection-item-includereferencecf" is="coral-table-cell"><a><coral-switch ' +
+            (currentItem.cache.includereferenceCF ? "checked" : "") + '></a></coral-switch></td>';
+        var $tableRow = $(tableRowText);
+        $tableRow.data('path',currentItem.path);
+        launchTable.items.add($tableRow[0]);
+        $tableRow[0].innerHTML = tableContentText;
+        if(currentItem.disableDeep) {
+            $tableRow.find('coral-switch')[0].disabled = true;
+        }
+        _appendHiddenField(wizard, 'srcPathList', currentItem.path, currentItem.path);
+        _appendHiddenField(wizard, 'includeReferences', currentItem.path, currentItem.cache.includereferenceCF);
+    }
+
+    function _updatelaunchincludeReferenceCFState(wizard, launchItem) {
+        var inputList = wizard.find('input[name="includeReferences"]');
+        if(inputList!=null && inputList.length>0) {
+            for(var index=0;index<inputList.length;index++) {
+                var currentInput = $(inputList[index]);
+                if(currentInput.data('path')===launchItem.path) {
+                    currentInput.attr('value', launchItem.cache.includereferenceCF);
+                }
+            }
+        }
+    }
+
+    function _appendHiddenField(wizard, name, pathInfo, value) {
+        var wizardForm = $(wizard[0]);
+        var $hiddenField = $("<input type='hidden'/>").attr("name", name);
+        wizardForm.append($hiddenField);
+        $hiddenField.data('path',pathInfo);
+        if (value !== undefined) {
+            $hiddenField.attr("value", value);
+        }
+    }
+
+    function _updateButtonStates(wizard) {
+        _updateDeleteButtonState(wizard);
+        _updateToggleButtonState(wizard);
+    }
+
+    function _updateToggleButtonState(wizard) {
+        var wizardAPI = wizard.adaptTo("foundation-wizard");
+        wizardAPI.toggleNext(wizard.childResourceCFList.length>0);
+        setTimeout(function() {
+            wizardAPI.toggleNext(wizard.childResourceCFList.length>0);
+        },0);
+    }
+
+    function _updateDeleteButtonState(wizard) {
+        var selectedLaunchItems = _getSelectedLaunchItems(wizard);
+        var deleteBtn = wizard.find(".foundation-collection-action-delete");
+        if(selectedLaunchItems!=null && selectedLaunchItems.length>0) {
+            deleteBtn.removeAttr('hidden');
+        } else {
+            deleteBtn.attr('hidden','hidden');
+        }
+    }
+
+    function _handleDeleteBtnClick(wizard) {
+        var selectedLaunchItems = _getSelectedLaunchItems(wizard);
+        if(selectedLaunchItems!=null && selectedLaunchItems.length>0) {
+            for(var index=0; index< selectedLaunchItems.length; index++) {
+                var currentItem = $(selectedLaunchItems[index]);
+                _removeResourcePath(wizard, currentItem.data('path'));
+            }
+            _refreshChildCFListUI(wizard);
+        }
+    }
+
+    function _parse_url_params() {
+        var searchString = location.search;
+        function _parse_values_internal(params, pairs) {
+            var pair = pairs[0];
+            var parts = pair.split('=');
+            var key = decodeURIComponent(parts[0]);
+            var value = decodeURIComponent(parts.slice(1).join('='));
+
+            // Handle multiple parameters of the same name
+            if (typeof params[key] === "undefined") {
+              params[key] = value;
+            } else {
+              params[key] = [].concat(params[key], value);
+            }
+            return pairs.length === 1 ? params : _parse_values_internal(params, pairs.slice(1));
+        }
+        return searchString.length === 0 ? {} : _parse_values_internal({}, searchString.substr(1).split('&'));
+    }
+
+    function _getFormElement() {
+        var form = $(".cq-dam-createlaunch-form");
+        if(form === null || form.length === 0) {
+            //this might be edit launch now
+            form = $('.cq-dam-editlaunch-form');
+            bCreateLaunchMode = false;
+        }
+        return form;
+    }
+
+    function _getWizardFromForm(form) {
+        var wizard;
+        if(bCreateLaunchMode) {
+            wizard = form.find(".cq-dam-createlaunch-wizard");
+        } else {
+            wizard = form.find(".cq-dam-editlaunch-wizard");
+        }
+        return wizard;
+    }
+
+    function _addcontentFragment(selections, ui, wizard) {
+        if (selections.length > 0) {
+            ui.wait();
+            var bAdded = false;
+            var bRootPath = false;
+            for(var index = 0; index < selections.length; index++) {
+                var selection = selections[index];
+                var strResourcePath = selection.value;
+                if(strResourcePath !== '/content') {
+                    bAdded = _checkAndAddItem(wizard, strResourcePath);
+                } else {
+                    bRootPath = true;
+                }
+            }
+            ui.clearWait();
+            _checkAlreadyAdded(bAdded, bRootPath, ui, wizard);
+        }
+    }
+
+    function _checkAndAddItem(wizard, strResourcePath) {
+        var bAdded = false;
+        var currentItem = _getLaunchItemFromPath(wizard, strResourcePath);
+        if(currentItem == null) {
+            if(_appendResourceCF(wizard, strResourcePath, true, false, false)) {
+                bAdded = true;
+            }
+        }
+        return bAdded;
+    }
+
+    function _checkAlreadyAdded(bAdded, bRootPath, ui, wizard) {
+        if(bAdded) {
+            _refreshChildCFListUI(wizard);
+        } else if(!bRootPath) {
+            ui.prompt(Granite.I18n.get("Error"),
+                Granite.I18n.get("Selected content fragments(s) already exist in the list."),
+                "error",
+                [{
+                    text: Granite.I18n.get("Ok"),
+                    id: "no"
+                }]
+            );
+        }
+    }
+
+    function _handleDelete(ui, wizard) {
+        ui.prompt(Granite.I18n.get("Remove"),
+            Granite.I18n.get("Do you really want to remove selected content fragments?"),
+            "error",
+             [{
+                text: Granite.I18n.get("Cancel"),
+                id: "no"
+              },
+              {
+                text: Granite.I18n.get("Remove"),
+                id: "yes",
+                warning: true
+              }],
+             function(btnId) {
+                if (btnId === "yes") {
+                    _handleDeleteBtnClick(wizard);
+                }
+             }
+        );
+    }
+
+    function _appendRows(pathArray, createNested, wizard) {
+        var index = 0;
+        if(pathArray.length === 0 && window._g_initial_edit_launch_list && window._g_initial_edit_launch_list.length) {
+            //check if we have edit array with us
+            for(;index<window._g_initial_edit_launch_list.length;index++) {
+                var obj = window._g_initial_edit_launch_list[index];
+                _appendResourceCF(wizard, obj.rootResource, obj.isDeep, true, false);
+            }
+            _refreshChildCFListUI(wizard);
+        }
+        else if(pathArray && pathArray.length>0) {
+            for(;index<pathArray.length;index++) {
+                var path = pathArray[index];
+                var deep = true;
+                if (path.lastIndexOf("-", 0) === 0) {
+                    path = path.substring(1);
+                    deep = false;
+                }
+                _appendResourceCF(wizard, path, deep, createNested, false);
+            }
+            _refreshChildCFListUI(wizard);
+        }
+    }
+
+    $(function() {
+        var form = _getFormElement();
+        var wizard = _getWizardFromForm(form);
+        var ui = $(window).adaptTo("foundation-ui");
+        var timeout = 1000;
+        
+        wizard.find(".foundation-collection-action-delete").click(function() {
+            _handleDelete(ui, wizard);
+        });
+        
+        wizard.on("foundation-wizard-stepchange", function() {
+            setTimeout(function() {
+                //we need to update the thumbnail UI as well
+                if(wizard.childResourceCFList && wizard.childResourceCFList.length>0) {
+                    var currentPath = wizard.childResourceCFList[0].path;
+                    var src = Granite.HTTP.externalize(currentPath + ".thumb.319.319.png");
+                    $(".foundation-layout-thumbnail-image img").attr("src", src);
+                }
+            }, 0, wizard);
+        });
+
+        $(window).adaptTo("foundation-registry").register("foundation.picker.control.action", {
+            name: "cq.dam.createlaunch.addcf",
+            handler: function(name, el, config, selections) {
+                _addcontentFragment(selections, ui, wizard);
+            }
+        });
+
+        // autoselect source
+        setTimeout(function() {
+            var pathArray = [];
+            var urlParams = _parse_url_params();
+            if (urlParams && urlParams['source'] && urlParams['source'].length>0) {
+                pathArray = urlParams['source'].split(',');
+            }
+            else if (window.location.hash) {
+                var path = window.location.hash.substring(1);
+                pathArray = path.split(',');
+            }
+            if(!wizard.childResourceCFList) {
+                wizard.childResourceCFList = [];
+            }
+            var createNested = urlParams['create_nested_launch'];
+            _appendRows(pathArray, createNested, wizard);
+            //if there are some child CFs added we should move to next CF
+            if(wizard.childResourceCFList.length > 0 && createNested) {
+                var wizardAPI = wizard.adaptTo("foundation-wizard");
+                wizardAPI.next();
+            }
+
+            setTimeout(function() {
+                _updateButtonStates(wizard);
+                wizard.find('table[is="coral-table"]').on("coral-table:change", function() {
+                    _updateButtonStates(wizard);
+                });
+                
+            },0);
+        },timeout);
+    });
+})(document, _g.XSS, Granite, Granite.$);

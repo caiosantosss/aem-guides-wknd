@@ -1,0 +1,671 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function ($, ns, channel, window, undefined) {
+    "use strict";
+
+    ns.MsmAuthoringHelper = ns.MsmAuthoringHelper || (function() {
+        var self = {};
+        
+        self.RolloutDialogUrl = "";
+        self.RolloutDialogMaxItems = -1;
+        
+        self.isInitialized = false;
+
+        self.toggleInheritance = function (editable, param, target) {
+            _showConfirmationModal(editable, target);
+        };
+
+        self.cancelInheritance = function (editable) {
+            _sendInheritanceToggleXHR(editable, null, true);
+        };
+
+        var _sendInheritanceToggleXHR = function(editable, target, cancelInheritance, callback) {
+            var params = {};
+            params[ MSM.MSMCommons.Constants.PARAM_STATUS + "/" + MSM.MSMCommons.Constants.PARAM_IS_CANCELLED ] = cancelInheritance;
+            // deepCancel = true if component is not container and false if component is container
+            params[ MSM.MSMCommons.Constants.PARAM_STATUS + "/" + MSM.MSMCommons.Constants.PARAM_IS_CANCELLED_FOR_CHILDREN ] = !editable.config.isContainer;
+
+            $.ajax({
+                type: "POST",
+                url: editable.path + ".msm.conf",
+                data: params
+            }).done(function( data, textStatus, jqXHR ) {
+                if (!_g.HTTP.isOkStatus(jqXHR.status)) {
+                    return;
+                }
+                ns.edit.actions.doRefresh(editable).then(function() {
+                    ns.overlayManager.recreate(editable);
+                });
+
+                if (callback) {
+                    callback.call(this);
+                }
+            });
+        };
+
+        var _initPageInfo = function(callback) {
+            if (ns.pageInfo.msm.sourcePath  && ns.pageInfo.msm.targetPath) {
+                // nothing to do, information is already available in pageInfo
+                return;
+            }
+
+            $.ajax({
+                type: "GET",
+                url: Granite.author.ContentFrame.getContentPath() + ".msm.conf"
+            }).done(function( data, textStatus, jqXHR ) {
+                if (!_g.HTTP.isOkStatus(jqXHR.status)) {
+                    return;
+                }
+
+                ns.pageInfo.msm[MSM.MSMCommons.Constants.PROP_SOURCE_PATH] = data[MSM.MSMCommons.Constants.PROP_SOURCE_PATH];
+                ns.pageInfo.msm[MSM.MSMCommons.Constants.PROP_TARGET_PATH] = data[MSM.MSMCommons.Constants.PROP_TARGET_PATH];
+
+                if (callback) {
+                    callback.call(this);
+                }
+            });
+        };
+
+        var _showConfirmationModal = function(editable, target) {
+            var cancelInheritance = !self.isInheritanceCancelled(editable);
+            var modalHeader = cancelInheritance ?
+                Granite.I18n.get("Cancel inheritance") :
+                Granite.I18n.get("Revert inheritance");
+            var modalMessage = cancelInheritance ?
+                Granite.I18n.get("Do you really want to cancel the inheritance?") :
+                Granite.I18n.get("Do you really want to revert the inheritance?");
+
+            var $message = $(document.createElement("div"));
+            $(document.createElement("p"))
+                .text(modalMessage)
+                .appendTo($message);
+
+            if (!cancelInheritance) { 
+                MSM.MSMCommons.buildSyncAfterRevertOption(false).appendTo($message);
+                MSM.MSMCommons.buildSyncCompAfterRevertOption(false).appendTo($message);
+             }
+
+
+            var modalConfirmationHandler = function() {
+                if (!cancelInheritance && (MSM.MSMCommons.checkDoSyncPageAfterRevert()||MSM.MSMCommons.checkDoSyncCompAfterRevert())) {
+                    var editablePath = editable.path;
+                    var res = editablePath.substring(editablePath.indexOf("/jcr:content"));
+                    var blueprintPath = ns.MsmAuthoringHelper.getBlueprintPath(editable);
+                    var livecopyPath = ns.MsmAuthoringHelper.getLiveCopyPath(editable);
+                    if (blueprintPath && livecopyPath) {
+                        var compPath=[];
+                        compPath.push(blueprintPath+res);
+                        _sendInheritanceToggleXHR(editable, target, cancelInheritance, function() {
+                            if(MSM.MSMCommons.checkDoSyncPageAfterRevert()){
+                             MSM.MSMCommons.syncPage(blueprintPath, livecopyPath, false);
+                            }
+                            else {
+                            MSM.MSMCommons.syncComp(blueprintPath, livecopyPath, JSON.stringify(compPath));
+                            }
+                        });
+                    } else {
+                        ns.ui.alert(Granite.I18n.get("Error"), Granite.I18n.get("An error occurred while" +
+                            " synchronizing the Live Copy."), "error");
+                    }
+                } else {
+                    _sendInheritanceToggleXHR(editable, target, cancelInheritance, function(){
+                        var parentEditable = ns.editables.getParent(editable);
+                        if (parentEditable) {
+                            ns.editableHelper.doRefresh(parentEditable);
+                        }
+                    });
+                }
+            };
+
+            var promptConfig = {
+                title:modalHeader,
+                message: $message.html(),
+                type:ns.ui.helpers.PROMPT_TYPES["NOTICE"],
+                actions:[{
+                    id:"OK",
+                    text:Granite.I18n.get("Yes"),
+                    primary:true
+                },{
+                    id:"CANCEL",
+                    text:Granite.I18n.get("No"),
+                    primary:false
+                }],
+                callback: function(actionId){
+                    if ("OK" === actionId) {
+                        modalConfirmationHandler()
+                    }
+                }
+            };
+
+            ns.ui.helpers.prompt(promptConfig);
+        };
+
+        /**
+         * Open the rollout dialog
+         * @param dialogSource source for dialog
+         */
+        self.openRolloutDialog = function(dialogSource) {
+            var dialog = new ns.ui.Dialog({
+                getConfig: function () {
+                    return {
+                        src: dialogSource,
+                        loadingMode: 'auto',
+                        isFloating: false
+                    }
+                },
+                onReady: function() {
+                    $("#rollout-page-previous-button,#rollout-page-next-button,#rollout-load-all-button").click("click", function(e) {
+                        e.preventDefault();
+
+                        var url = new URL(e.target.href);
+                        var dialogSource = ns.MsmAuthoringHelper.RolloutDialogUrl + Granite.HTTP.internalize(ns.page.path) + url.search;
+
+                        $(".msm-rollout-dialog").trigger("foundation-form-submitted", [true]);
+                        ns.MsmAuthoringHelper.openRolloutDialog(dialogSource);
+                    });
+                    MSM.Rollout.initDialog();
+                    $(".msm-rollout-dialog").off("dialog-beforeclose").on("dialog-beforeclose", function() {
+                        // hide dialog on success and failure
+                        // required because notifications are behind dialog
+                        $(".msm-rollout-dialog").hide();
+                    });
+                }
+            });
+
+            ns.DialogFrame.openDialog(dialog);
+        };
+
+        /**
+         * Returns if the live copy inheritance of the given editable is cancelled.
+         */
+        self.isInheritanceCancelled = function(editable) {
+            var msmConfig = editable.config[MSM.MSMCommons.Constants.PROP_LIVE_RELATIONSHIP];
+            return msmConfig[MSM.MSMCommons.Constants.PARAM_STATUS]
+                && msmConfig[MSM.MSMCommons.Constants.PARAM_STATUS][MSM.MSMCommons.Constants.PARAM_IS_CANCELLED];
+        };
+
+        /**
+         * Returns if the given editable is a live copy.
+         */
+        self.isLiveCopy = function(editable) {
+            var msmConfig = editable.config[MSM.MSMCommons.Constants.PROP_LIVE_RELATIONSHIP];
+            var isManuallyCreated = msmConfig
+                && msmConfig[MSM.MSMCommons.Constants.PARAM_STATUS]
+                && msmConfig[MSM.MSMCommons.Constants.PARAM_STATUS][MSM.MSMCommons.Constants.PROP_IS_MANUALLY_CREATED] == true;
+            // identify components that are used to insert new components in a parsys
+            var isNewComponent = editable.dom.hasClass('new');
+
+            return msmConfig && !isManuallyCreated && !isNewComponent;
+        };
+
+        /**
+         * Get blueprint page path
+         * @param editable
+         * @returns {*}
+         */
+        self.getBlueprintPath = function(editable) {
+            return ns.pageInfo.msm[MSM.MSMCommons.Constants.PROP_SOURCE_PATH];
+        };
+
+        /**
+         * Get livecopy page path
+         * @param editable
+         * @returns {*}
+         */
+        self.getLiveCopyPath = function(editable) {
+            return ns.pageInfo.msm[MSM.MSMCommons.Constants.PROP_TARGET_PATH];
+        };
+
+        var _renderInheritanceToggleCondition = function(editable, actionName) {
+            if (self.isLiveCopy(editable) && ns.pageInfoHelper.canModify()) {
+                var addMSMAction = self.isInheritanceCancelled(editable) ? "MSM_REENABLE_INHERITANCE" : "MSM_CANCEL_INHERITANCE";
+
+                // hook in a handler for the "beforedelete" and cancel the default delete functionality
+                var defaultBeforeDeleteFunc = editable.config.editConfig.listeners["beforedelete"];
+                editable.config.editConfig.listeners["beforedelete"] = function () {
+                    // only delete the paragraph from the backend, but don't remove the editable
+                    ns.persistence.deleteParagraph(editable).done(function () {
+                        editable.refresh(false).then(function() {
+                            ns.overlayManager.recreate(editable);
+                            if (ns.layerManager.getCurrentLayer() === "msm") {
+                                $(editable.overlay.dom[0]).addClass("is-bordered");
+                            }
+                        });
+                    });
+
+                    // restore old "beforedelete" handler
+                    editable.config.editConfig.listeners["beforedelete"] = defaultBeforeDeleteFunc;
+
+                    // cancel the normal delete operation
+                    return false;
+                };
+
+                return addMSMAction == actionName;
+            }
+
+            return false;
+        };
+
+        var _initializeBlueprintEditableToolbar = function(editable) {
+
+            // remove any rollout popovers
+            $(".rollout-popover").remove();
+
+            // update the options
+            _updateRolloutOptions(editable);
+
+            // update selection
+            var selection = [];
+            if (ns.selection.isGroupSelection) {
+                selection = ns.selection.selected;
+            } else {
+                selection = [editable];
+            }
+            MSM.MSMCommons.updateSelection(selection);
+        };
+
+        var _updateRolloutOptions = function(editable) {
+            // use the hidden rollout options to update editable's options popover
+            var $popoverContent = $(".hidden-rollout-options").clone();
+            $popoverContent.removeClass("hidden-rollout-options");
+            $popoverContent.addClass("rollout-popover");
+            $popoverContent.hide();
+            $popoverContent.insertAfter(editable.overlay.dom);
+        };
+
+        /**
+         * Decorates a toolbar's action condition with a method to allow
+         * checking custom logic when rendering the toolbar actions
+         */
+        var _decorateToolbarAction = function(actionConfig, newCondition) {
+            if (!actionConfig) {
+                return;
+            }
+
+            // save the existing action condition, if any
+            var existingCondition = actionConfig.condition;
+
+            // set up a new condition on the action config
+            actionConfig.condition = function(editable) {
+                var conditionResult = true;
+
+                if (existingCondition) {
+                    conditionResult = existingCondition.call(this, editable);
+                }
+
+                return conditionResult && newCondition.call(this, editable);
+            };
+
+            // some actions don't have a predefined condition, then, fake a dummy one
+            if (!existingCondition) {
+                existingCondition = function () {
+                    return true;
+                }
+            }
+
+            // save old config condition
+            actionConfig.decoratedCondition = existingCondition;
+        };
+
+        var _decorateLiveCopyActions = function() {
+            // only decorate actions on a LC page
+            if (!MSM.MSMCommons.isLiveCopyPage(ns)) {
+                return;
+            }
+
+            // copy, move and group are always visible, others only when inheritance is cancelled
+            var allowActionsAlways = ["COPY", "MOVE", "CUT", "INSERT", "PASTE", "GROUP", "MSM_CANCEL_INHERITANCE", "MSM_REENABLE_INHERITANCE", "MSM_ROLLOUT", "MSM_PARENT"];
+
+            // decorate the other actions condition to only render if inheritance is canceled
+            $.each(ns.EditorFrame.editableToolbar.config.actions, function(actionName, actionConfig) {
+                if($.inArray(actionName, allowActionsAlways) < 0) {
+
+                    // decorate action's condition to return true only if the inheritance is canceled
+                    _decorateToolbarAction(actionConfig, function(editable){
+                        var msmConfig = editable.config[MSM.MSMCommons.Constants.PROP_LIVE_RELATIONSHIP];
+
+                        return MSM.MSMCommons.isInheritanceCancelled(editable)
+                            || MSM.MSMCommons.isManuallyCreated(editable);
+                    });
+                }
+            });
+        };
+
+        /**
+         * Inspect all editable actions for the decorated condition and restore it
+         */
+        var _restoreEditableActions = function () {
+            if (ns.EditorFrame && ns.EditorFrame.editableToolbar) {
+              $.each(ns.EditorFrame.editableToolbar.config.actions, function(actionName, actionConfig) {
+                if (actionConfig.decoratedCondition) {
+                  actionConfig.condition = actionConfig.decoratedCondition;
+                  actionConfig.decoratedCondition = undefined;
+                }
+              });
+            }
+        };
+
+        /**
+         * Enables or disables an editable's drop target
+         */
+        var _updateDropTargetState = function(editable) {
+            if (MSM.MSMCommons.isInheritanceCancelled(editable)
+                    || MSM.MSMCommons.isManuallyCreated(editable)) {
+                if (editable.disabledDropTargets) {
+                    editable.dropTargets = editable.disabledDropTargets;
+                    editable.disabledDropTargets = undefined;
+
+                    // recreate the overlay for the editable
+                    ns.overlayManager.recreate(editable);
+                }
+            } else {
+                if (editable.dropTargets && editable.dropTargets.length > 0) {
+                    editable.disabledDropTargets = editable.dropTargets;
+
+                    // remove overlays if any
+                    MSM.MSMCommons.removeDropTargets(editable);
+                }
+            }
+        };
+
+        self.showRolloutPopover = function(editable, param, target) {
+            $(".rollout-popover").show();
+            var $popover = $(".rollout-popover").popover({
+                pointAt: (editable.overlay.dom),
+                pointFrom: "top",
+                alignFrom: "right"
+            }).data("popover");
+            $popover.toggleVisibility();
+        };
+
+        /**
+        *
+        * @type {Object} configuration for the MSM toolbar cancel and re-enable inheritance buttons
+        */
+        self.inheritanceToolbarButtons = {
+            "MSM_CANCEL_INHERITANCE": {
+                icon: MSM.MSMCommons.Constants.ICON_LOCKED,
+                text: Granite.I18n.getMessage("Cancel Inheritance"),
+                handler: self.toggleInheritance,
+                condition: function (editable) {
+                    return _renderInheritanceToggleCondition(editable, "MSM_CANCEL_INHERITANCE");
+                }
+            },
+            "MSM_REENABLE_INHERITANCE": {
+                icon: MSM.MSMCommons.Constants.ICON_UNLOCKED,
+                text: Granite.I18n.getMessage("Re-enable Inheritance"),
+                handler: self.toggleInheritance,
+                condition: function (editable) {
+                    return _renderInheritanceToggleCondition(editable, "MSM_REENABLE_INHERITANCE");
+                }
+            },
+            "MSM_ROLLOUT": {
+                icon: MSM.MSMCommons.Constants.ICON_ROLLOUT,
+                text: Granite.I18n.getMessage("Rollout"),
+                handler: self.showRolloutPopover,
+                condition: function (editable) {
+                    if (MSM.MSMCommons.isBlueprintPage(ns)
+                            && !editable.hasPlaceholder()) {
+                        _initializeBlueprintEditableToolbar(editable);
+                        return true;
+                    }
+                    return false;
+                }
+            },
+            "MSM_PARENT": {
+                // select the parent (parsys)
+                icon: 'selectContainer',
+                text: Granite.I18n.get('Parent'),
+                handler: function (editable, param, target) {
+                    target.addClass('is-active');
+
+                    ns.edit.actions.doSelectParent(editable, target, [ns.store.getParent(editable)]);
+                    // do not close toolbar
+                    return false;
+                },
+                condition: function (editable) {
+                    // only in MSM layer and when a parent is available
+                    return ns.layerManager.getCurrentLayer() === "msm" && !!ns.store.getParent(editable);
+                }
+            }
+        };
+
+        /**
+         * Hooks MSM touch UI authoring functionality
+         */
+        self.initialize = function() {
+            if (self.isInitialized) {
+                return;
+            }
+
+            var isLiveCopy = MSM.MSMCommons.isLiveCopyPage(ns);
+            if (!isLiveCopy && !MSM.MSMCommons.isBlueprintPage(ns)) {
+                return;
+            }
+
+            // set additional information about the page, e.g. source path and target path
+            _initPageInfo();
+
+            // get rollout options
+            $.ajax({
+              type: 'GET',
+              dataType: 'html',
+              url: MSM.MSMCommons.Constants.ENDPOINT_ROLLOUT_OPTIONS
+            }).done(function (data, textStatus, jqXHR) {
+              var $rolloutOptions = $("<div>");
+              $rolloutOptions.addClass("hidden-rollout-options");
+              $rolloutOptions.append(data);
+              $rolloutOptions.hide();
+              $rolloutOptions.appendTo($("body"));
+
+              var $dialogPath = $rolloutOptions.find("[data-dialogpath]");
+              if ($dialogPath.length > 0) {
+                ns.MsmAuthoringHelper.RolloutDialogUrl = Granite.HTTP.externalize($dialogPath.data("dialogpath"));
+
+                if ($dialogPath.data("max-items") > 0) {
+                  ns.MsmAuthoringHelper.RolloutDialogMaxItems = $dialogPath.data("max-items");
+                }
+              }
+            });
+
+            if (ns.EditorFrame && ns.EditorFrame.editableToolbar) {
+              // decorate LC editable actions
+              _decorateLiveCopyActions();
+
+              if (isLiveCopy) {
+                // disable drop targets for un-cancelled editables
+                $.each(ns.store, function(index, editable) {
+                  _updateDropTargetState(editable);
+
+                  var oldRefresh = editable.updateConfig;
+
+                  // overlay the update config
+                  editable.updateConfig = function(config) {
+                    // call previous
+                    oldRefresh.call(this, config);
+
+                    // make sure to call the update drop target state
+                    _updateDropTargetState(editable);
+                  }
+                })
+              }
+
+              // add msm actions to the toolbar
+              $.each(self.inheritanceToolbarButtons, function(name, msmActionConfig){
+                ns.EditorFrame.editableToolbar.registerAction(name, msmActionConfig);
+              });
+            }
+
+            self.isInitialized = true;
+        };
+
+        /**
+         * Un-initializes the MSM touch UI functionality
+         */
+        self.tearDown = function() {
+            if (!self.isInitialized) {
+                return;
+            }
+
+            // un-decorate the toolbar actions
+            _restoreEditableActions();
+
+            self.isInitialized = false;
+        };
+
+        return self;
+    }());
+
+    // handler for the options
+    $("#OverlayWrapper").on("click", ".msm-rollout-option", function(e) {
+        e.stopPropagation();
+        var el = $(this);
+        var self = $(this);
+        if (el.find("[data-dialogpath]").length > 0) {
+            el = el.find("[data-dialogpath]");
+            var dialogSource = Granite.HTTP.externalize(el.data("dialogpath")) + ns.page.path;
+            if (el.data("max-items") > 0) {
+                dialogSource += "?maxSize=" + el.data("max-items");
+            }
+
+            ns.MsmAuthoringHelper.openRolloutDialog(dialogSource);
+
+        } else if (el.find("[data-rollout-command-path]").length > 0) {
+            el = el.find("[data-rollout-command-path]");
+            var rolloutCommandPath = el.data("rollout-command-path");
+            var blueprint = ns.page.path;
+            if (rolloutCommandPath
+                && blueprint) {
+                var dialog = $("#aem-sites-rollout-schedule-dialog");
+                if (dialog.length) {
+                    dialog[0].show();
+                }
+                event.preventDefault();
+            }
+
+        }
+        $("#aem-sites-rollout-schedule-dialog").on("click", ".schedule-rollout-done", function(e) {
+            if (self.find("[data-rollout-command-path]").length > 0) {
+                self = self.find("[data-rollout-command-path]");
+                var rolloutCommandPath = self.data("rollout-command-path");
+                var blueprint = ns.page.path;
+                var status;
+                var time = null;
+                var target;
+
+                var scheduleOptionNow = $(".schedule-rollout-options-now", ".schedule-rollout-options");
+                var scheduleOptionLater = $(".schedule-rollout-options-later", ".schedule-rollout-options");
+                var scheduleOptionDatePicker = $(".schedule-rollout-datepicker", "#aem-sites-rollout-schedule-dialog");
+                if (scheduleOptionNow.length && scheduleOptionNow[0].checked) {
+                    status= scheduleOptionNow[0].value;
+                } else if (scheduleOptionLater.length && scheduleOptionLater[0].checked) {
+                    status = scheduleOptionLater[0].value;
+                    time = scheduleOptionDatePicker[0].value;
+                }
+                if (rolloutCommandPath
+                    && blueprint) {
+                    MSM.Rollout.doRollout(Granite.HTTP.externalize(rolloutCommandPath), blueprint,target,status,time);
+                }
+
+            }
+        });
+    });
+
+
+    // handler for the rollout page
+    channel.off("click.rollout-page").on("click.rollout-page", "#rolloutBtn", function(e){
+
+        // deselect all, close the toolbar and clear selection store in MSM commons
+        if (ns) {
+            if (ns.selection
+                    && ns.selection.deselectAll) {
+                ns.selection.deselectAll();
+            }
+
+            if (ns.EditorFrame
+                    && ns.EditorFrame.editableToolbar
+                    && ns.EditorFrame.editableToolbar.close) {
+                ns.EditorFrame.editableToolbar.close();
+            }
+        }
+        MSM.MSMCommons.updateSelection([]);
+
+        var dialogSource = ns.MsmAuthoringHelper.RolloutDialogUrl + Granite.HTTP.internalize(ns.page.path);
+        if (ns.MsmAuthoringHelper.RolloutDialogMaxItems > 0) {
+            dialogSource += "?maxSize=" + ns.MsmAuthoringHelper.RolloutDialogMaxItems;
+        }
+
+        ns.MsmAuthoringHelper.openRolloutDialog(dialogSource);
+
+        // required when opening dialog a second time after a submit failure (all other cases work without explicitly showing it)
+        $(".msm-rollout-dialog").show();
+    });
+    
+    // hook into the layer switcher to re-initialize when edit, preview or msm layers are activated
+    channel.on("cq-layer-activated", function(e) {
+        if (e.layer === "Edit"
+            || e.layer === "Preview"
+            || e.layer === "msm"
+            || e.layer === "Targeting") {
+            ns.MsmAuthoringHelper.tearDown();
+            ns.MsmAuthoringHelper.initialize();
+        }
+    });
+
+    // cancel the inheritance of the parent parsys on move
+    channel.on("cq-persistence-after-move", function(event, editable) {
+
+        if (!editable || !ns.MsmAuthoringHelper.isLiveCopy(editable)) {
+            // no livecopy
+            return;
+        } else if (ns.layerManager.getCurrentLayer() === "msm") {
+            // in msm layer the parent is selected after move; workaround
+            ns.EditorFrame.editableToolbar.close();
+        }
+
+        var parent = ns.store.getParent(editable);
+        if (ns.MsmAuthoringHelper.isLiveCopy(parent) && !ns.MsmAuthoringHelper.isInheritanceCancelled(parent)) {
+
+            var modalConfirmationHandler = function () {
+                ns.MsmAuthoringHelper.cancelInheritance(parent);
+            };
+
+            var promptConfig = {
+                title: Granite.I18n.get("Cancel inheritance"),
+                message: Granite.I18n.get("Do you want to cancel the inheritance of the paragraph system?"),
+                type: ns.ui.helpers.PROMPT_TYPES["NOTICE"],
+                actions: [{
+                    id: "OK",
+                    text: Granite.I18n.get("Yes"),
+                    primary: true
+                }, {
+                    id: "CANCEL",
+                    text: Granite.I18n.get("No"),
+                    primary: false
+                }],
+                callback: function (actionId) {
+                    if ("OK" === actionId) {
+                        ns.EditorFrame.editableToolbar.close();
+                        modalConfirmationHandler()
+                    }
+                }
+            };
+            ns.ui.helpers.prompt(promptConfig);
+        }
+    });
+
+}(jQuery, Granite.author, jQuery(document), this));

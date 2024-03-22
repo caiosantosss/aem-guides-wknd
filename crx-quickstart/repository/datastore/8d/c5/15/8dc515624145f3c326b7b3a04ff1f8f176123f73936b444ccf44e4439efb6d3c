@@ -1,0 +1,795 @@
+/*!************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * ___________________
+ *
+ *  Copyright 2015 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+
+/**
+ * ModifierEditor package
+ *
+ * This package contains classes that construct the ModifierEditor GUI.
+ */
+(function (s7sdk, s7ve, document, $) {
+    "use strict";
+
+    /**
+     * @class CUI_ModifierEditor
+     */
+    s7ve.ModifierEditor = function ModifierEditor(parameterManager, $container, symbolResolver) {
+
+        // Set s7sdk object to correct namespace
+        s7sdk = window.s7viewers.s7sdk;
+
+        var comp, i = 0,
+            imax, compModel;
+
+        this.factories = [];
+        this.componentModels = [];
+        this.factories.push(new s7ve.ModifierEditor.WidgetFactory(symbolResolver));
+        this.$section = $("<section></section>").addClass("s7ve-ModifierEditor").appendTo($container);
+
+        //store the list of components
+        this.components = parameterManager.getRegisteredComponents();
+
+        var componentSelectWidget = s7ve.UI.createComponentSelectWidget({
+            label: Granite.I18n.get("Component Behavior"),
+            name: "s7ve-ModifierEditor-componentSelect"
+        });
+        var componentSelect = componentSelectWidget.s7ve_select;
+
+        componentSelect.onChange(function (value) {
+            this.displayComponentTab(value);
+        }.bind(this));
+
+        this.$section.append(componentSelectWidget.$section);
+
+        // Create Tab Panel Here
+        this.s7ve_panelStack = s7ve.UI.createPanelStack();
+        s7ve.ModifierEditor.s7ve_panelStack = this.s7ve_panelStack;
+
+        this.$section.append(this.s7ve_panelStack.$element);
+
+        // Add symbols from supplemental modifier descriptor object in modifier model
+        symbolResolver.addDefaultSymbolTexts(s7sdk.model.SupplementalModifierDescriptors.symbols);
+        symbolResolver.addDefaultSymbolTexts(window.s7ve.SymbolText);
+
+        /**
+         * RESTRICTED COMPONENT NAMES, hard-coded for this release.
+         */
+        var restricted = {
+            'container': true,
+            'controlbar': false,
+            'mediaset': true,
+            'infopanelpopup': true
+        };
+
+        var componentsPresent = [],
+            componentNames = {};
+
+        /**
+         * CQ-78103: [AEM][Viewer Presets][Editor] MixedMedia: SetIndicator component is present on the behavior tab
+         */
+        s7ve.ModifierEditor.augmentRestrictedObject = function () {
+            // Temporary fix until we support more robust exception descriptor
+            var viewerType = s7ve.ViewerEditor.getPreviewElement().data() && s7ve.ViewerEditor.getPreviewElement().data().s7type;
+            if (viewerType == "IMAGESET" || viewerType == "MIXEDMEDIASET") {
+                restricted['setindicator'] = true;
+            }
+            if (viewerType == "INTERACTIVEIMAGE") {
+                restricted['imagemapeffect'] = true;
+            }
+        };
+        /**
+         * TEMPORARY WORKAROUND: to support viewer level modifiers for MixedMediaViewer and InteractiveVideo
+         */
+        s7ve.ModifierEditor.injectViewerLevelInterface = function () {
+
+            // We should not be reaching to grab viewer objects from this code, it should
+            // instead be provided in an agnostic fashion to this constructor
+            var previewDataObj = s7ve.ViewerEditor.getPreviewElement().data(),
+                viewerInstance = previewDataObj.s7viewer,
+                viewerType = previewDataObj.s7type;
+
+            if (viewerType == "CAROUSELSET" || viewerType == "MIXEDMEDIASET" || viewerType == "INTERACTIVEVIDEO" || viewerType == "IMAGESET") {
+
+                if (viewerInstance.s7ve_componentInterfaceInjected) {
+                    return viewerInstance;
+                }
+
+                // When any setModifier call is made on viewer we want to invoke check function to see if new components
+                // have been added to the viewer
+                viewerInstance.setModifier = window.s7ve.UI.conditionalProxy(viewerInstance.setModifier, function () {
+                    return true;
+                }).bind(viewerInstance);
+
+                // Treat OOTB viewer as any other component, give it functions to masquerade
+                viewerInstance.getParam = function (name, defaultValue) {
+                    return viewerInstance.s7params.get(name, defaultValue);
+                };
+                viewerInstance.getOwner = function () {
+                    return "";
+                };
+                viewerInstance.getId = viewerInstance.getClassName = function () {
+                    return {
+                        "MIXEDMEDIASET": "MixedMedia",
+                        "CAROUSELSET": "CarouselViewer",
+                        "INTERACTIVEVIDEO": "InteractiveVideo",
+						"IMAGESET": "ZoomViewer"
+                    }[viewerType];
+                };
+                viewerInstance.getModifiers = function () {
+					return this.constructor.prototype.modifiers;
+                };
+                viewerInstance.s7ve_componentInterfaceInjected = true;
+                return viewerInstance;
+            }
+        }.bind(this);
+
+        var viewerInstance = s7ve.ModifierEditor.injectViewerLevelInterface();
+        if (viewerInstance) {
+            this.components.push(viewerInstance);
+        }
+        // END OF TEMPORARY WORKAROUND
+
+        /**
+         * Wrapping component iteration in closure so we can check components and build widgets later
+         * if components appear resulting from runtime configuration
+         */
+        s7ve.ModifierEditor.checkComponents = function (subsequent) {
+
+            // Iterate through components, build models
+            for (i = 0, imax = this.components.length; i < imax; i++) {
+                comp = this.components[i];
+
+                // Skip iteration if component already exists in registered components list
+                // when running in subsequent process mode
+                if (subsequent && componentNames[comp.getClassName()]) {
+                    continue;
+                }
+
+                if (restricted[comp.getClassName().toLowerCase()]) {
+                    continue;
+                }
+                compModel = new s7sdk.model.ComponentModifierModel(this.factories, comp, symbolResolver);
+
+                var hasModifiers = false;
+                for (var j in compModel.models) {
+                    if (compModel.models.hasOwnProperty(j)) {
+                        hasModifiers = true;
+                        break;
+                    }
+                }
+                if (hasModifiers === false) {
+                    continue;
+                }
+
+                /**
+                 * TEMPORARY WORK-AROUND - to allow duplicate SDK components in the viewer to share the same setModifier
+                 * call so that their configuration preview may be shared (since the preset configuration will also be shared)
+                 */
+                if (componentNames[comp.getClassName()]) {
+                    // skip adding duplicate component to menu
+                    continue;
+                }
+                componentNames[comp.getClassName()] = comp;
+                // END OF TEMPORARY WORK-AROUND
+
+                componentsPresent.push(comp);
+                this.componentModels.push(compModel);
+
+                componentSelect.addOption({
+                    value: comp.getId(),
+                    display: this.getDisplayName(comp)
+                });
+            }
+
+            if (imax) {
+                componentSelect.setValue(componentsPresent[0].getId());
+                this.displayComponentTab(componentsPresent[0].getId());
+            }
+
+        }.bind(this);
+
+        /** Modifier Editor Control Overlay Event Listener **/
+        $(document).on("s7ve-ComponentSelectEvent", function (event) {
+            componentSelect.setValue(event.component.compId); //Modifier Editor Set Value takes component ID
+            this.s7ve_panelStack.showPanel(this.displayComponentTab(event.component.compId));
+        }.bind(this));
+
+        s7ve.ModifierEditor.augmentRestrictedObject();
+        s7ve.ModifierEditor.checkComponents();
+        this.validateComponentInstances();
+    };
+
+    /**
+     * Translate component class names to user display names
+     */
+    s7ve.ModifierEditor.prototype.getDisplayName = function (component) {
+        var className = component.getClassName();
+        return ({
+                "MixedMedia": "Viewer",
+                "InteractiveVideo": "Viewer",
+                "CarouselViewer": "Viewer",
+				"ZoomViewer": "Viewer"
+            }[className]) || className;
+    };
+    
+    /**
+     * Helper function to retrieve className from metadata
+     */
+    s7ve.ModifierEditor.prototype.getMetadataClassName = function (metadata) {
+    	var className = (metadata != undefined && metadata.className != undefined)? metadata.className : '';
+    	return className;
+    };
+
+    s7ve.ModifierEditor.prototype.displayComponentTab = function (componentId) {
+        this.s7ve_panelStack.showPanel("tab_" + componentId);
+    };
+
+    /**
+     * TEMPORARY WORK-AROUND - to allow duplicate SDK components in the viewer to share the same setModifier
+     * call so that their configuration preview may be shared (since the preset configuration will also be shared)
+     */
+    s7ve.ModifierEditor.aggregateSetModifier = function (primaryCmp, secondaryCmp) {
+        var originalSetModifier = primaryCmp.setModifier;
+
+        // Set new setModifier function that calls the existing setModifier function as 
+        // well as the one of the duplicate component, while still respecting context.		
+        primaryCmp.setModifier = function () {
+            var args = Array.prototype.slice.call(arguments);
+            originalSetModifier.apply(this, args);
+            secondaryCmp.setModifier.apply(secondaryCmp, args);
+        };
+    };
+
+    /**
+     * Update models to reference correct viewer component instances in the event of
+     * viewer reload
+     */
+    s7ve.ModifierEditor.prototype.validateComponentInstances = function () {
+        var cmpById = s7ve.ViewerEditor.getComponentsById(),
+            cmpByType = s7ve.ViewerEditor.getComponentsByType(),
+            viewerComp = s7ve.ModifierEditor.injectViewerLevelInterface();
+
+        this.componentModels.forEach(function (componentModel) {
+            var component = componentModel.component,
+                targetId = component.getId(),
+                validCmp = cmpById[targetId],
+                duplicates,
+                firstOf;
+
+            if (component instanceof s7sdk.ControlComponent && !validCmp) {
+                // We will no longer throw error since viewer may instantiate fewer components
+                // when reloading in mobile format
+                // throw new Error("Unable to validate component. Cannot find: " + targetId);
+            }
+            if (viewerComp && (targetId === viewerComp.getId())) {
+                // if we found an ID and have injected viewer component interface then select it
+                validCmp = viewerComp;
+            }
+
+            // If we have a component with the same name as a previously processed component, we will mutate the original
+            // component's setModifier call so that the subsequent components setModifier is called. We respect context.
+            duplicates = cmpByType[validCmp.getClassName()] || [];
+
+            firstOf = duplicates.shift();
+
+            if (duplicates.length) {
+                duplicates.forEach(function (dup) {
+                    s7ve.ModifierEditor.aggregateSetModifier(firstOf, dup);
+                });
+            }
+
+            componentModel.component = validCmp;
+        });
+    };
+
+    // TODO: in order to trigger reparsing of Coral UI controls that were added to the page
+    // after the page has been loaded, $(parent).trigger('cui-contentloaded'); has to be
+    // executed.  However, this also caused the change event on the NumberInput control to be
+    // triggered.  As a work-around, a flag to indicate that control widget change events shall
+    // be suppressed.
+    s7ve.ModifierEditor.initialize = false;
+
+}(window.s7sdk, window.s7ve, window.document, window.$));
+
+
+(function (s7sdk, s7ve, document) {
+
+    /**
+     * @class s7ve.ModifierEditor.WidgetFactory
+     */
+    s7ve.ModifierEditor.WidgetFactory = function (symbolResolver) {
+        "use strict";
+
+        // Set s7sdk object to correct namespace
+        s7sdk = window.s7viewers.s7sdk;
+
+        this.tabs = {};
+        this.dialog = null;
+        this.symbolResolver = symbolResolver;
+
+        return this;
+    };
+
+    s7ve.ModifierEditor.WidgetFactory.prototype = {
+        createWidget: function (modifierModel, property, modifierObj) {
+            "use strict";
+            if (!s7sdk.model) {
+                throw new Error("s7sdk not defined");
+            }
+
+            var component = modifierModel.componentModel.component,
+                componentName = component.getClassName(), //container, pageview, pagescrubber
+                componentID = component.getId(), // use this as prefix for ids "id_***"
+                $tab;
+            if (this.tabs.hasOwnProperty(componentID)) {
+                $tab = this.tabs[componentID];
+                // existing tab
+            } else {
+
+                //var panelContainer = $("#panelContainer");
+                var s7ve_accordion = s7ve.UI.createAccordion({
+                    variant: "quiet"
+                });
+
+                s7ve.ModifierEditor.accordions = s7ve.ModifierEditor.accordions || {};
+                s7ve.ModifierEditor.accordions["tab_" + componentID] = s7ve_accordion;
+
+                var panel = s7ve.ModifierEditor.s7ve_panelStack.addPanel("tab_" + componentID);
+
+                panel.append(s7ve.UI.createHeading(3).text(Granite.I18n.get("Modifiers")));
+                panel.append(s7ve_accordion.$wrapper);
+
+                // first createWidget for this component, one component has many modifiers
+
+                // save this tab
+                this.tabs[componentID] = panel;
+            }
+            // set first tab as active
+            // this.tabPanel.set('active', 0);
+            return new s7ve.ModifierEditor.ModifierWidget(modifierModel, property, modifierObj, this.symbolResolver);
+        }
+    };
+
+}(window.s7sdk, window.s7ve, window.document));
+
+(function (s7sdk, s7ve, document) {
+
+    /**
+     * @class s7ve.ModifierEditor.ModifierWidget
+     */
+    s7ve.ModifierEditor.ModifierWidget = function (modifierModel, property, modifierObj, symbolResolver) {
+        "use strict";
+
+        // Set s7sdk object to correct namespace
+        s7sdk = window.s7viewers.s7sdk;
+
+        var restricted = {
+            'stagesize': true,
+            'reset': true,
+            'swipe': true,
+            'tmblayout': true,
+            'textpos': true,
+            'resizable': true,
+            'pagemode': true,
+            'orientation': true,
+            'partialswatches': true,
+            'align': true,
+            'videoserverurl': true,
+            'contenturl': true,
+            'size': true,
+            'posterimage': true,
+            'caption': true,
+            'navigation': true,
+            'aemmode': true,
+            'showtime': true,
+            'showchaptertitle': true,
+            'showchaptertime': true,
+            'chaptertimepattern': true,
+            'showduration': true,
+            'enableorientation': true,
+            'labelkey': true,
+            'rgn': true,
+            'rgnn': true,
+            'singleclick': true,
+            'doubleclick': true,
+            // AOD Specific
+            'breakpoints': true,
+            'lockdirection': true,
+            'sensitivity': true,
+            'interactivedata': true,
+            'video': true,
+            'assettemplate': true,
+            'scpois' : true,
+            'scmode' : true,
+            'scdebug' : true
+        };
+
+        var component = modifierModel.componentModel.component,
+            componentName = component.getClassName(),
+            componentID = component.getId(),
+            modifierParams = modifierObj.values,
+            parent = this,
+            paramName, modName, $div;
+
+        /********************************************************************
+         * TEMPORARY WORKAROUND TO HARD-CODE SPECIAL EXCLUSIONS FROM EDITOR *
+         * There will be proper support in future release                   *
+         ********************************************************************/
+
+            // Fix for CQ-39234
+        var viewerType = s7ve.ViewerEditor.getPreviewElement().data() && s7ve.ViewerEditor.getPreviewElement().data().s7type;
+        if (viewerType == "MIXEDMEDIASET") {
+            try {
+                // Check for modifier with name 'imagereload' and selectively remove two parameters
+                if (modifierObj.name.toLowerCase() == "imagereload") {
+                    modifierObj.values.forEach(function (item, index, array) {
+                        if (item.param == "type" || item.param == "fullscreen") {
+                            item.noConfig = true;
+                        }
+                    });
+                }
+            } catch (error) {
+                // Catch incase unexpected error processing modifierObj. This is a fallback to
+                // ensure we continue processing remaining modifiers
+            }
+            // Mark these modifiers for exclusion by adding to restrict object
+            // IMPORTANT NOTE: These will be excluded by logic inside next if statement
+            restricted["overlay"] = true;
+            restricted["highlightmode"] = true;
+        }
+        if (viewerType == "INTERACTIVEIMAGE") {
+            restricted["zoomstep"] = true;
+            restricted["transition"] = true;
+            restricted["frametransition"] = true;
+            restricted["iconeffect"] = true;
+        }
+        if (viewerType == "THREED") {
+            restricted["locale"] = true;
+            restricted["modelurl"] = true;
+        }
+        // Check restricted object and ignore modifiers that are present
+        if (restricted[(modifierObj.name || "").toLowerCase()]) {
+            return;
+        }
+        if (modifierObj.name.toLowerCase() == "playback") {
+            modifierObj.values[modifierObj.values.length - 1].noConfig = true;
+
+            if (!Granite.Toggles.isEnabled("FT_ASSETS-4454") && modifierObj.values[0].param === "type") {
+                var playbackOptions = modifierObj.values[0].ranges;
+                playbackOptions = playbackOptions.filter(function (option) {
+                    var playbackType = option.toLowerCase();
+                    return playbackType !== "hls" && playbackType !== "dash";
+                });
+
+                modifierObj.values[0].ranges = playbackOptions;
+            }
+        }
+        if (modifierObj.name.toLowerCase() == "scrollstep" && window.s7ve.s7preview.data().s7type != "INTERACTIVEVIDEO") {
+            modifierObj.values[modifierObj.values.length - 1].noConfig = true;
+        }
+        if (modifierObj.name.toLowerCase() == "frametransition" && window.s7ve.s7preview.data().s7type == "MIXEDMEDIASET") {
+            return;
+        }
+        /* END WORKAROUND */
+
+        this.compClass = component.getClassName();
+        this.listeners = [];
+        this.property = property;
+
+        // one widget per property, no need to have an array
+        this.modifierObj = modifierObj.clone();
+
+        // store reference to single tip alert
+        this.alert = null;
+
+        // tab ID
+        var $tabID = 'tab_' + componentID;
+
+        // The following section handles modifiers with single (e.g. aspect) or
+        // multiple parameters (e.g. stagesize).  For single parameter, the modifier name
+        // will be used as the label.  For multiple parameters, the modifier name will be
+        // used as a legend, the parameter name will be used as the label.
+        // If the modifier or parameter name is not in the lookup table, the modifier or
+        // parameter name will be used.  Otherwise, the verbose display name from the
+        // dictionary will be used.
+        if (modifierObj.getSymbol()) {
+            modName = s7ve.SymbolTree.resolve(modifierObj.getSymbol());
+        }
+
+        modifierModel.tipsNotifier.addObserver(function (tip) {
+            if (!this.alert && tip.message) {
+                this.alert = s7ve.UI.createAlert({
+                    text: tip.message,
+                    variant: "warning"
+                });
+                $modifierDiv.append(this.alert.$element);
+            }
+
+            if (this.alert) {
+                if (tip.action == "clear") {
+                    this.alert.$element.fadeOut();
+                } else {
+                    this.alert.$element.fadeIn();
+                }
+            }
+        }.bind(this));
+
+        var s7ve_accordion = s7ve.ModifierEditor.accordions[$tabID];
+        var $modifierDiv = s7ve.UI.createWidgetSection({});
+        var baseId = "vme-" + modifierObj.qualifier + "-" + modifierObj.name;
+        var panelId = baseId + "-panel";
+        var accordion_item = s7ve_accordion.addPanel({
+            label: modName,
+            content: "",
+            id: panelId
+        });
+
+        $modifierDiv.appendTo(accordion_item.content);
+
+        var info = s7ve.ModifierEditor.ModifierInfo.modifiers;
+        /**
+         * Search help, add to popovers -- need to optimize this
+         */
+        for (var compHelpName in info) {
+            if (compHelpName.toLowerCase().indexOf(this.compClass.toLowerCase()) != -1) {
+                var helpObject = info[compHelpName];
+                var modInfo = helpObject[this.modifierObj.name.toLowerCase()];
+            }
+        }
+
+        if (modInfo) {
+            var alert = s7ve.UI.createAlert({
+                text: modInfo.description
+            });
+            s7ve_accordion.onChange(function (selected) {
+                if(selected === accordion_item) {
+                    alert.show();
+                }
+            });
+            $modifierDiv.append(alert.$element);
+        }
+
+        for (paramName in modifierParams) {
+            if (!modifierParams.hasOwnProperty(paramName) || modifierParams[paramName].noConfig) {
+                continue;
+            }
+
+            var paramValue = modifierParams[paramName];
+
+            // look up the verbose parameter name from dictionary
+            var paramSymbol = paramValue.getParamSymbol();
+            var label = paramSymbol ? s7ve.SymbolTree.resolve(paramSymbol) : paramValue.getParamName();
+            
+            var metadata = s7ve.ModifierEditor.getMetaData(modifierObj, modifierModel);
+            var widgetId = baseId + "-" + paramValue.param;
+
+            if (paramValue instanceof s7sdk.modifier.BooleanParam) {
+                s7ve.ModifierEditor.BooleanWidget(paramValue, parent, label, metadata, widgetId, [panelId]).appendTo($modifierDiv);
+            } else if (paramValue instanceof s7sdk.modifier.NumberParam) {
+                s7ve.ModifierEditor.NumberWidget(paramValue, parent, label, metadata, widgetId, [panelId]).appendTo($modifierDiv);
+            } else if (paramValue instanceof s7sdk.modifier.EnumParam) {
+                s7ve.ModifierEditor.EnumWidget(paramValue, parent, label, metadata, widgetId, [panelId]).appendTo($modifierDiv);
+            } else {
+                s7ve.ModifierEditor.StringWidget(paramValue, parent, label, metadata, widgetId, [panelId]).appendTo($modifierDiv);
+            }
+        }
+        return this;
+    };
+
+    s7ve.ModifierEditor.ModifierWidget.prototype = {
+        valueChanged: function (paramName, newValue) {
+            "use strict";
+            //modifierObj is the oldValue
+            var oldValue = this.modifierObj;
+            this.modifierObj = oldValue.clone();
+            //alert(paramName + ' ' + newValue);
+            this.modifierObj.setParam(paramName, newValue);
+            //set new param value to modifierObj
+            //alert(this.modifierObj);
+            this.notifyPropertyChanged(oldValue, this.modifierObj);
+        },
+        addPropertyListener: function (prop, listener) {
+            "use strict";
+            // only accept listeners for the property associated with the widget, ignore the rest
+            if (!listener || typeof listener !== "function" || prop !== this.property) {
+                return;
+            }
+            this.listeners.push(listener);
+        },
+        notifyPropertyChanged: function (oldValue, newValue) {
+            "use strict";
+            if ((oldValue && oldValue.equal(newValue)) || oldValue === newValue) {
+                return;
+            }
+
+            var i = 0,
+                imax = this.listeners.length;
+            for (i = 0; i < imax; i++) {
+                this.listeners[i](this.property, oldValue, newValue);
+            }
+
+            window.s7ve.ViewerEditor.setModifier({
+                // If component is MixedMedia level modifier then we ignore component class qualifier
+                name: ((this.compClass == "CarouselViewer" || this.compClass == "MixedMedia" || this.compClass == "ZoomViewer" || this.compClass == "InteractiveVideo") ? "" : this.compClass + ".") + this.modifierObj.name,
+                value: this.modifierObj.values.toString()
+            });
+        }
+    };
+
+    /**
+     * @class s7ve.ModifierEditor.BooleanWidget
+     */
+    s7ve.ModifierEditor.BooleanWidget = function (parmObj, parent, label, metadata,  id, labelledByIds) {
+        "use strict";
+        if (!parmObj instanceof s7sdk.modifier.BooleanParam) {
+            throw new Error();
+        }
+
+        var checked = parmObj.getValue();
+        var s7ve_boolSwitch = s7ve.UI.createBoolSwitch({
+            checked: checked,
+            labelText: label,
+            id: labelledByIds,
+            labelledByIds: labelledByIds
+        });
+
+        s7ve_boolSwitch.onChange(function (isChecked) {
+            parent.valueChanged(parmObj.getParamName(), isChecked);
+        });
+        
+        s7ve_boolSwitch.$wrapper.addClass(s7ve.ModifierEditor.prototype.getMetadataClassName(metadata));
+
+        return s7ve_boolSwitch.$wrapper;
+    };
+
+    /**
+     * @class s7ve.ModifierEditor.NumberWidget
+     */
+    s7ve.ModifierEditor.NumberWidget = function (parmObj, parent, label, metadata, id, labelledByIds) {
+        "use strict";
+        if (!parmObj instanceof s7sdk.modifier.NumberParam) {
+            throw new Error('parmObj is NOT an instanceof s7sdk.modifier.NumberParam');
+        }
+
+        var _min, _max, step;
+        // optional settings
+        if (parmObj.ranges) {
+            _min = parmObj.ranges.trim().split(":")[0];
+            if (!(/:$/.test(parmObj.ranges.trim()))) {
+                _max = parmObj.ranges.trim().split(":")[1];
+                step = (parseFloat(parmObj.ranges.trim().split(":")[1]) - parseFloat(parmObj.ranges.trim().split(":")[0])) / 10;
+                // } else {  // ranges ends with ":"
+                // TODO: how to handle step: "any" in coral UI?
+            }
+        }
+        if (parmObj.getParamSymbol() == "SPINVIEW_ZOOMSTEP_LIMIT" || parmObj.getParamSymbol() == "ZOOMVIEW_ZOOMSTEP_LIMIT") {
+            // workaround for CQ-35163
+            step = 0.1;
+            _min = 0.1;
+            _max = 100;
+        }
+        if (parmObj.getParamName() == "easing") {
+            // workaround for CQ-35166
+            step = 1
+        }
+        if (!step) {
+            if (Math.floor(parmObj.getValue()) - parmObj.getValue() != 0) {
+                step = 0.1;
+            } else if (_min) {
+                step = parseFloat(_min) - Math.floor(parseFloat(_min));
+            } else {
+                step = 1;
+            }
+        }
+
+        var s7ve_numberInput = s7ve.UI.createNumberInput({
+            labelText: label,
+            min: _min,
+            max: _max,
+            step: step,
+            value: parmObj.getValue(),
+            id: id,
+            labelledByIds: labelledByIds
+        });
+
+        s7ve_numberInput.onChange(function (value) {
+            parent.valueChanged(parmObj.getParamName(), value);
+        });
+        
+        s7ve_numberInput.$wrapper.addClass(s7ve.ModifierEditor.prototype.getMetadataClassName(metadata));
+
+        return s7ve_numberInput.$wrapper;
+    };
+    
+    
+    /**
+     * Scan modifier descriptors object for metadata 
+     */
+    s7ve.ModifierEditor.getMetaData = function (modifierObj, modifierModel) {
+        var componentName = modifierModel.componentModel.component.getClassName().toLowerCase(),
+            descriptor = s7ve.ModifierEditor.SupplementalModifierDescriptors[componentName] || {},
+            modifier = descriptor[modifierObj.name] || {},
+            metadata = modifier.metadata;
+        return metadata;   
+    }
+
+    /**
+     * @class s7ve.ModifierEditor.EnumWidget
+     */
+    s7ve.ModifierEditor.EnumWidget = function (parmObj, parent, label, metadata, id, labelledByIds) {
+        "use strict";
+        if (!parmObj instanceof s7sdk.modifier.EnumParam) {
+            throw new Error();
+        }
+
+        var s7ve_select = s7ve.UI.createSelect({
+            labelText: label,
+            id: id,
+            labelledByIds: labelledByIds
+        });
+        
+        s7ve_select.$wrapper.addClass(s7ve.ModifierEditor.prototype.getMetadataClassName(metadata));
+
+        var ranges = parmObj.getRanges(),
+            i = 0,
+            imax = ranges.length,
+            oldValue;
+
+        for (i = 0; i < imax; i++) {
+            var token = ranges.toString().split(',')[i];
+            s7ve_select.addOption({
+                value: token,
+                display: token,
+                selected: Boolean(token == parmObj.getValue())
+            });
+        }
+
+        s7ve_select.onChange(function (value) {
+            parent.valueChanged(parmObj.getParamName(), value);
+        });
+
+        return s7ve_select.$wrapper;
+    };
+
+    /**
+     * @class s7ve.ModifierEditor.StringWidget
+     */
+    s7ve.ModifierEditor.StringWidget = function (parmObj, parent, label, metadata, id, labelledByIds) {
+        "use strict";
+        if (!parmObj instanceof s7sdk.modifier.StringParam) {
+            throw new Error();
+            // text pending ...
+        }
+            
+        var oldValue = parmObj,
+            s7ve_textfield = s7ve.UI.createTextfield({
+                value: parmObj,
+                labelText: label,
+                id: id,
+                labelledByIds: labelledByIds
+            });
+
+        s7ve_textfield.onChange(function (value) {
+            parent.valueChanged(parmObj.getParamName(), value);
+        });
+        
+        s7ve_textfield.$wrapper.addClass(s7ve.ModifierEditor.prototype.getMetadataClassName(metadata));
+
+        return s7ve_textfield.$wrapper;
+    };
+
+}(window.s7sdk, window.s7ve, window.document));

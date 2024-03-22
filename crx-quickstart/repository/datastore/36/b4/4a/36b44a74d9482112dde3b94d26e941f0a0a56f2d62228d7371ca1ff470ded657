@@ -1,0 +1,745 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2012 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%>
+<%@include file="/libs/granite/ui/global.jsp"%>
+<%@page import="java.util.ArrayList,
+                java.util.Arrays,
+                java.util.Collections,
+                java.util.Comparator,
+                java.util.List,
+                java.util.Iterator,
+                java.util.Map,
+                java.util.Map.Entry,
+                java.util.HashMap,
+                javax.jcr.Session,
+                javax.jcr.Node,
+                javax.jcr.NodeIterator,
+                javax.jcr.PropertyType,
+                javax.jcr.Property,
+                javax.jcr.Value,
+                javax.jcr.Item,
+                javax.jcr.PathNotFoundException,
+                javax.jcr.RepositoryException,
+                org.apache.jackrabbit.JcrConstants,
+                org.apache.sling.api.resource.Resource,
+                org.apache.sling.api.SlingHttpServletRequest,
+                org.apache.sling.api.resource.ResourceWrapper,
+                org.apache.sling.api.resource.ResourceResolver,
+                org.apache.sling.api.resource.ValueMap,
+                org.apache.sling.api.wrappers.ValueMapDecorator,
+                org.apache.sling.tenant.Tenant,
+                org.apache.commons.collections.iterators.FilterIterator,
+                org.apache.commons.collections.Transformer,
+                org.apache.commons.collections.iterators.TransformIterator,
+                com.adobe.granite.ui.components.Config,
+                com.adobe.granite.ui.components.ExpressionHelper,
+                com.adobe.granite.ui.components.ds.AbstractDataSource,
+                com.adobe.granite.ui.components.ds.DataSource,
+                com.adobe.granite.ui.components.ds.ValueMapResource,
+                com.day.cq.dam.api.Asset,
+                com.day.cq.dam.api.DamConstants,
+                com.day.cq.dam.api.s7dam.constants.S7damConstants,
+                com.day.cq.dam.api.s7dam.utils.PreviewUtils,
+                com.day.cq.dam.commons.preset.S7Preset,
+                com.day.cq.dam.commons.preset.PresetType,
+                com.day.cq.dam.commons.util.DamUtil,
+                com.day.cq.dam.commons.util.UIHelper,
+                com.day.cq.dam.entitlement.api.EntitlementConstants,
+                com.day.cq.dam.scene7.api.constants.Scene7AssetType,
+                com.day.cq.dam.scene7.api.S7Config,
+                com.day.cq.dam.scene7.api.S7ConfigResolver,
+                org.apache.sling.featureflags.Features,
+                com.adobe.granite.toggle.api.ToggleRouter"%>
+<%@ page import="org.apache.sling.api.request.RequestParameterMap" %>
+<%@ page import="org.apache.sling.api.request.RequestParameter" %>
+<%@ page import="com.adobe.granite.confmgr.Conf" %>
+<%@ page import="org.slf4j.Logger" %>
+<%@ page import="org.slf4j.LoggerFactory" %>
+<%
+    /**
+     *   A datasource returning image presets. An optional <code>name</code> filter can
+     *   be specified which is matched against the name if exists.
+     *	ELs can be specified for limit and offset. All the other
+     *   properties will be added as request attributes with name-value pairs as in the
+     *   properties.
+     *
+     *   @datasource
+     *   @name AssetsDatasource
+     *   @location /libs/dam/gui/components/commons/datasources/assetsdatasource
+     *
+     *   @property {String} itemResourceType Using which every resource in this datasource is rendered with
+     *   @property {String} name which is used to filter the resources based on node name
+     *   @property {String} limit an EL that specifies number of resources to be fetched
+     *   @property {String} offset an EL that specifies the offset
+     *   @property {String} &lt;other&gt; will be added as request attribute
+
+     *   @example
+     *   + datasource
+     *      - jcr:primaryType = "nt:unstructured"
+     *      - itemResourceType="dam/gui/components/s7dam/viewerpreset/listitem"
+     *      - itemTemplate="dam/gui/coral/content/commons/sidepanels/viewerpresetitemview"
+     *      - sling:resourceType="dam/gui/components/s7dam/viewerpreset/viewerpresetsds"
+     *      - limit = "10"
+     *      - offset = "${empty requestPathInfo.selectors[1] ? &quot;10&quot; : requestPathInfo.selectors[1]}"
+
+     */
+
+    final int ROWS_DEFAULT = 10;
+    final int ROWS_NEXT_TIME_ONWARDS = 10;
+
+    final String NAME = "name";
+    final String LEVELLIMIT = "levelLimit";
+    final String ITEMRESOURCETYPE = "itemResourceType";
+    final String ITEMTEMPLATE = "itemTemplate";
+
+
+    String vttPath = "";
+    String DEFAULT_VTT_EXTENSION = ".svideo.vtt";
+
+    String assetId = "";
+    String companyId = "";
+
+    String contentPath = slingRequest.getRequestPathInfo().getSuffix();
+
+    log.debug("Starting {} for {}...", getClass().getName(), contentPath);
+
+    Resource assetResource = slingRequest.getResourceResolver().getResource(contentPath);
+    Node assetChildNode = null;
+    Boolean isinteractiveAsset = false;
+    String s7type = "";
+    Boolean isPanoramic = false;
+    final double DEFAULT_PANORAMIC_AR = 2.0;
+    double panoramicAR = DEFAULT_PANORAMIC_AR;
+    final double DEFAULT_VIDEO360_AR = 2.0;
+    double video360AR = DEFAULT_VIDEO360_AR;    
+    Boolean isVideo360 = false;	
+    boolean isVideoSmartCropEnabled = false;
+
+    RequestParameterMap params = slingRequest.getRequestParameterMap();
+    RequestParameter reqParam = params.getValue("remoteassettype");
+
+    ToggleRouter toggleRouter = sling.getService(ToggleRouter.class);
+    boolean isMultiDMEnabled = toggleRouter.isEnabled("FT_ASSETS-14407");
+    if (null != reqParam){
+        s7type = reqParam.getString();
+        s7type = s7type.replace("_","");
+    }
+
+    final Features featureManager = sling.getService(Features.class);
+    S7ConfigResolver s7configResolver = null;
+    S7Config s7config = null;
+// determine if the current run mode is DMS7 and retrieve the value of aspect ratio to quality an image asset as panoramic.
+    boolean enabledDynamicMediaScene7 = false;
+    if (featureManager.getFeature(EntitlementConstants.ASSETS_SCENE7_FEATURE_FLAG_PID)!=null &&
+            featureManager.isEnabled(EntitlementConstants.ASSETS_SCENE7_FEATURE_FLAG_PID)) {
+        enabledDynamicMediaScene7 = true;
+
+        // override qualifying aspect ratio if available from DMS7 configuration
+        if (null != assetResource) {
+            s7configResolver = sling.getService(S7ConfigResolver.class);
+            if(isMultiDMEnabled) {
+                s7config  = s7configResolver.getS7ConfigForResource(resourceResolver, assetResource);
+            } else {
+                s7config  = s7configResolver.getS7ConfigForAssetPath(resourceResolver, assetResource.getPath());
+            }
+            if (s7config != null && s7config.getPropertiesMap() != null) {
+                panoramicAR = s7config.getPropertiesMap().get("s7PanoramicAR", DEFAULT_PANORAMIC_AR);
+                video360AR = s7config.getPropertiesMap().get("s7Video360AR", DEFAULT_VIDEO360_AR);
+            }
+        }
+    }
+
+    if (null != assetResource){
+        assetChildNode = assetResource.adaptTo(Node.class);
+        Node metaNode = assetChildNode.getNode("jcr:content/metadata");
+        if(metaNode != null && metaNode.hasProperty("imageMap")){
+            //check to make sure that image map is not empty
+            if (!metaNode.getProperty("imageMap").getString().trim().isEmpty()){
+                isinteractiveAsset = true;
+            }
+        }
+
+        PreviewUtils previewUtils = sling.getService(PreviewUtils.class);
+        if(assetChildNode.hasProperty(S7damConstants.S7_ASSET_METADATA_NODE + "/" + S7damConstants.PN_S7_TYPE)) {
+            s7type = assetChildNode.getProperty(S7damConstants.S7_ASSET_METADATA_NODE + "/" + S7damConstants.PN_S7_TYPE).getString();
+        } else if (previewUtils.isImagePreviewSupported(assetResource.adaptTo(Asset.class))) {
+                s7type = Scene7AssetType.IMAGE.getValue();
+        }
+
+        if(assetChildNode.isNodeType("dam:Asset")) {
+            //Grab asset path for path-based ID
+            assetId += assetChildNode.getPath();
+        }
+
+        //determine if asset is panoramic, only applicable in DMS7 run mode
+        if (enabledDynamicMediaScene7 && metaNode != null) {
+            isPanoramic = isPanoramicAsset(metaNode, panoramicAR);
+            isVideo360 = isVideo360Asset(metaNode, video360AR);
+            isVideoSmartCropEnabled = isVideoSmartCropEnabled(assetResource, log);
+        }
+    }
+//only populate assetId for dam:Asset type; otherwise pass empty as placeholder
+//
+    String assetFileName = "";
+    if (!assetId.isEmpty()){
+        assetFileName = assetId.substring(assetId.lastIndexOf("/"));
+        String vttNodePath = "jcr:content/related/vtt/sling:members" + assetFileName + DEFAULT_VTT_EXTENSION;
+        boolean hadVTTNode = assetChildNode.hasNode(vttNodePath);
+//Get real VTT path from related node
+        if(hadVTTNode) {
+            Node vttNode = assetChildNode.getNode(vttNodePath);
+            if(vttNode.hasProperty("sling:resource")) {
+                vttPath = vttNode.getProperty("sling:resource").getString();
+                if(vttPath.indexOf("/") == 0) {
+                    //remove leading / to workaround /is/content/ bug
+                    vttPath = vttPath.substring(1);
+                }
+            }
+            isinteractiveAsset = true;
+        }
+    }
+
+//-------------------
+    String s7presetPath = "";
+    String tenants7presetPath = null;
+
+    Tenant tenant = resourceResolver.adaptTo(Tenant.class);
+    if (tenant != null && tenant.getId() == null) {
+        tenant = null;
+    }
+    boolean isTenantUser = (tenant != null);
+    String tenantName = (isTenantUser) ? tenant.getName() : "";
+
+    boolean enabledDynamicMedia = false;
+    if (featureManager.getFeature(EntitlementConstants.ASSETS_DYNAMICMEDIA_FEATURE_FLAG_PID)!=null &&
+            featureManager.isEnabled(EntitlementConstants.ASSETS_DYNAMICMEDIA_FEATURE_FLAG_PID)) {
+        enabledDynamicMedia = true;
+    }
+
+
+    //Resource tenantPresetsResource = null;
+    if (isTenantUser) {
+        // todo: move to lib or conf
+        tenants7presetPath = "/etc/dam/tenants/" + tenantName + "/presets/viewer";
+        //tenantPresetsResource = resourceResolver.getResource(tenants7presetPath);
+    }
+
+    Config dsCfg = new Config(resource.getChild(Config.DATASOURCE));
+    final String names = dsCfg.get(NAME, String.class);
+
+    String[] reqPresetNames = (names != null && names.length() > 0 ? names.trim().split(",") : null);
+    final ArrayList<String> reqPresetList = (reqPresetNames != null ? new ArrayList<String>(Arrays.asList(reqPresetNames)) : null);
+
+    ArrayList<Resource> resources = new ArrayList<Resource>();
+    Iterator<Resource> itx;
+    String presetsRoot = null;
+    if(isMultiDMEnabled) {
+        presetsRoot = s7config.get("viewerpresets");
+    }
+    if (presetsRoot == null) {
+        presetsRoot = "/conf/global/settings/dam/dm/presets/viewer";
+    }
+    String[] resourceLocations = { presetsRoot,
+            "/etc/dam/presets/viewer",
+            tenants7presetPath
+    };
+
+    ArrayList<String> presetNames = new ArrayList<>();
+    for (String path : resourceLocations) {
+        if (null == path) continue;
+
+        Resource r = resourceResolver.getResource(path);
+        if (null == r) {
+            continue;
+        }
+
+        itx = r.listChildren();
+        while (itx.hasNext()) {
+            Resource rs = itx.next();
+
+            if (presetNames.contains(rs.getName())) {
+                continue; // disallow duplicate viewer preset names
+            }
+
+            Node node = rs.adaptTo(Node.class);
+            if (null == node) {
+                continue;
+            }
+
+            try {
+                if (node.hasNode(Node.JCR_CONTENT)) {
+                    node = node.getNode(Node.JCR_CONTENT);
+                    // This forces all presets to have an iscustom property.
+                    // When OOTB presets are copied to /conf, they have iscustom set
+                    // to false, so if iscustom is not set, it implies that iscustom=true.
+                   	
+                	if(node.hasNode("userdata")) { // remove corrupted presets fromlist
+                		node = node.getNode("userdata");
+                		if(node.hasProperty("style")) {
+                			Property pstyle = node.getProperty("style");
+                			String style = pstyle.getString();
+                			style = "/" + style;
+                			Resource cssres = resourceResolver.resolve(style);
+                			String restype = cssres.getResourceType();
+                			if(cssres != null && !"sling:nonexisting".equals(restype)) {
+                                node.setProperty("iscustom", isCustom(node));
+                                resources.add(rs);
+
+                                presetNames.add(rs.getName());
+                			}
+                		}
+                	}
+                    
+                }
+            } catch (Exception e) {
+                log.error("error loading " + rs.getName(), e);
+            }
+        }
+    }
+
+
+    if("asc".equals(dsCfg.get("sort", String.class))) {
+    	Collections.sort(resources, new Comparator<Resource>(){
+    	    public int compare(Resource s1, Resource s2) {
+    	        return s1.getName().compareToIgnoreCase(s2.getName());
+    	    }
+    	});  
+    }
+
+    Iterator<Resource> it = resources.iterator();
+
+    int count = 0;
+    int rows = ROWS_DEFAULT;
+    int offset = 0;
+//get the count of the total no. of assets
+    ExpressionHelper ex = cmp.getExpressionHelper();
+    List<Resource> rv = new ArrayList<Resource>(ROWS_DEFAULT);
+    offset = ex.get(dsCfg.get("offset", String.class), Integer.class);
+
+//skip offset number of valid resources
+    for (int skip = offset; skip > 0 && it.hasNext();) {
+        Resource res =it.next();
+        Node node = res.adaptTo(Node.class);
+        if(containsRequestPresetNames(node, reqPresetList, s7type, isinteractiveAsset, vttPath, isPanoramic,
+                                                                                 isVideo360, isVideoSmartCropEnabled)) {
+            skip--;
+        }
+    }
+
+// count of rows to get
+    String dsCfg_limit = dsCfg.get("limit", String.class);
+    rows = ex.get(dsCfg_limit, Integer.class);
+    if (rows <=0) {
+        rows = Integer.MAX_VALUE;
+    }
+
+// populate the rv with resources
+    while (it.hasNext() && count < rows) {
+        Resource p = it.next();
+        Node node = p.adaptTo(Node.class);
+        if (containsRequestPresetNames(node, reqPresetList, s7type, isinteractiveAsset, vttPath, isPanoramic,
+                                                                                 isVideo360, isVideoSmartCropEnabled)) {
+
+            if (node.hasNode(Node.JCR_CONTENT)) {
+                node = node.getNode(Node.JCR_CONTENT);
+                if (!node.hasProperty("iscustom")) {
+                    node.setProperty("iscustom", true);
+                }
+            }
+
+
+            rv.add(p);
+            count++;
+        }
+    }
+
+    final String itemRT = dsCfg.get(ITEMRESOURCETYPE, String.class);
+
+    final ResourceResolver resolver = resourceResolver;
+    final String dsCfg_itemTemplate = dsCfg.get(ITEMTEMPLATE, String.class);
+
+    final List<Resource> lst = rv;
+    @SuppressWarnings("unchecked")
+    DataSource datasource = new AbstractDataSource() {
+        public Iterator<Resource> iterator() {
+            Iterator<Resource> it = lst.iterator();
+
+            return new TransformIterator(it, new Transformer() {
+                public Object transform(Object o) {
+                    ValueMap vm = new ValueMapDecorator(new HashMap<String, Object>());
+                    vm.put(ITEMTEMPLATE, dsCfg_itemTemplate);
+                    ValueMapResource vmr = new ValueMapResource(resolver, ((Resource) o).getPath(), "nt:unstructured", vm);
+                    Resource r = ((Resource) vmr);
+                    return new ResourceWrapper(r) {
+                        public String getResourceType() {
+                            return itemRT;
+                        }
+                    };
+                }
+            });
+        }
+    };
+    String dsName = DataSource.class.getName();
+    request.setAttribute(dsName, datasource);
+
+    if (log.isDebugEnabled()) {
+        String s = "Dump of DataSource " + dsName + ": {";
+        Iterator<Resource> iter = datasource.iterator();
+        while (iter.hasNext()) {
+            Resource res = iter.next();
+            s += System.lineSeparator() + "  " + res.toString();
+        }
+        s += "}";
+        log.debug(s);
+    }
+
+%>
+<%!
+
+    // @return  true if ViewerPreset of given viewerType (Category) is able to show asset of type == s7type,
+    //      considering pre-determined asset flags.
+    private boolean filterByType(String viewerType, String s7type, boolean isinteractiveAsset, String vtt,
+                                             boolean isPanoramic, boolean isVideo360, boolean isVideoSmartCropEnabled) {
+
+        final String VPRESET_TYPE_VIDEOSMARTCROP = "SMART_CROP_VIDEO";
+        // TODO: unify to com.day.cq.dam.s7dam.common.presets.S7damViewerPresetsService.Category.SMART_CROP_VIDEO.name();
+
+        if (isVideoSmartCropEnabled) {
+            if (viewerType.equals(VPRESET_TYPE_VIDEOSMARTCROP)) {
+                return true;
+            } // for other viewer types, fallback to standard matching rules
+        }
+
+        String modifiedType = viewerType.replace("_", "");
+
+        //Asset type
+        boolean isMatched = false;
+
+        if(s7type != null) {
+            s7type = s7type.toUpperCase();
+        }
+        if(s7type.equals("THREED")){
+            s7type = "DIMENSIONAL";
+        }
+        //convert mixedmediaset type to mixedmedia
+        if(s7type.equals("MIXEDMEDIASET")){
+            s7type = "MIXEDMEDIA";
+        } else if(s7type.equals("VIDEOAVS")) {// convert videoavs type into video
+            s7type = "VIDEO";
+        } 
+		if(s7type.equals("VIDEO") && isVideo360) {
+			s7type = "VIDEO360";
+		}
+
+        isMatched = s7type.equals(modifiedType);
+
+        if(s7type.equals("IMAGE")) {//If the asset is a single image, then it can use zoom or flyout preset
+            isMatched = modifiedType.equals("ZOOM") || modifiedType.equals("FLYOUTZOOM") || modifiedType.equals("VERTICALZOOM");
+            //for interactive image
+            if(modifiedType.indexOf("INTERACTIVEIMAGE") == 0 && isinteractiveAsset){
+                isMatched = true;
+            }
+            // if the asset is panoramic, then it can use the panoramic preset
+            if (modifiedType.indexOf("PANORAMICIMAGE") == 0 && isPanoramic) {
+                isMatched = true;
+            }
+        } else if (!isMatched && s7type.equals("IMAGESET")) {
+            //If not matched yet and type is image set, try to match flyout (image set can use flyout viewer)
+            isMatched = modifiedType.equals("FLYOUTZOOM") || modifiedType.equals("VERTICALZOOM");
+        }
+        else if (!isMatched && s7type.equals("VIDEO")) {
+            //VTT must not be emptied to display interactive video preset
+            isMatched = modifiedType.equals("INTERACTIVEVIDEO") && vtt.length() != 0;
+        }
+        else if (!isMatched && s7type.equals("VIDEO360")) {
+            isMatched = modifiedType.equals("VIDEO360") || modifiedType.equals("VIDEO");
+        }		
+        return isMatched;
+    }
+
+
+    private boolean containsRequestPresetNames(Node node,
+                                               ArrayList<String> filterList,
+                                               String s7type,
+                                               boolean isinteractiveAsset,
+                                               String vttPath,
+                                               boolean isPanoramic,
+											   boolean isVideo360,
+											   boolean isVideoSmartCropEnabled)
+            throws RepositoryException {
+
+        String name = node.getName();
+        if(name.equals("rep:policy")){
+            return false;
+        }
+
+        String viewerType = "";
+        Node contentNode = node.getNode(Node.JCR_CONTENT);
+
+        // ignore inactive presets
+        String isActive = contentNode.getProperty("isactive").getString();
+        if (isActive == null || !isActive.equals("true")) {
+            return false;
+        }
+
+        if(contentNode != null && contentNode.hasProperty("category")){
+            viewerType = contentNode.getProperty("category").getString();
+        } else {
+            return false;
+        }
+
+        boolean filter_Type = filterByType(viewerType, s7type, isinteractiveAsset, vttPath, isPanoramic,
+                                                                                   isVideo360, isVideoSmartCropEnabled);
+        if(!filter_Type){
+            return false;
+        }
+        boolean contains = false;
+        if (filterList != null) {
+            String nodeName = node.getName();
+            if(nodeName != null) {
+                for (int i = 0; i < filterList.size(); i++) {
+                    if (filterList.get(i).equals(nodeName)) {
+                        contains = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            contains = true;
+        }
+
+        return contains;
+    }
+
+
+    Object getValue(Value val) throws RepositoryException {
+        switch (val.getType()) {
+            case PropertyType.BINARY: return val.getBinary().getSize();
+            case PropertyType.BOOLEAN: return val.getBoolean();
+            case PropertyType.DECIMAL: return val.getDecimal().floatValue();
+            case PropertyType.DOUBLE: return val.getDouble();
+            case PropertyType.LONG: return val.getLong();
+            default: return val.getString();
+        }
+    }
+
+        // properties for image width and height
+        String TIFF_IMAGELENGTH = "tiff:ImageLength",
+                TIFF_IMAGEWIDTH = "tiff:ImageWidth";
+
+    /**
+     Determine if image is panoramic based on its aspect ratio.
+     Default qualifying aspect ratio is 2.  This value shall be configurable from a JCR property.
+     Returns true if image dimensions are available, valid and aspect ratio equals the qualifying aspect ratio
+     @param metaNode The metadata node of the asset
+     @param panoramicAR aspect ratio to qualify an image asset as panoramic
+     */
+    private boolean isPanoramicAsset(Node metaNode, double panoramicAR) {
+
+        if (metaNode == null) {
+            return false;
+        }
+
+        // obtain image dimensions from meta data
+        // in some cases the string will return as "", so null checking the string value doesnt work.
+        // to avoid that, convert to long immediately
+        long assetTiffWidth = 0,
+                assetTiffHeight = 0;
+
+        try {
+            // check for keywords
+            if (metaNode.hasProperty(com.day.cq.dam.api.DamConstants.DC_SUBJECT)) {
+                Property subjectProp = metaNode.getProperty(com.day.cq.dam.api.DamConstants.DC_SUBJECT);
+                if (subjectProp != null) {
+
+                    Value[] values; // array of keywords
+                    if (subjectProp.isMultiple()) {
+                        values = subjectProp.getValues();
+
+                    } else {
+                        values = new Value[] { subjectProp.getValue() };
+                    }
+
+                    // search for keywords "equirectangular" or ["spherical" and ("panorama" or "panoramic")]
+                    String keyword;
+                    boolean hasSpherical = false, hasPanorama = false;
+                    for (int idx = 0; idx < values.length; idx ++)
+                    {
+                        if (values[idx] == null || values[idx].getString() == null) {
+                            continue;
+                        }
+                        keyword = values[idx].getString().toLowerCase();
+
+                        if (keyword.contains("equirectangular")) {
+                            return true;
+                        }
+
+                        if(keyword.contains("spherical")) {
+                            hasSpherical = true;
+                        }
+
+                        if (keyword.contains("panorama") || keyword.contains("panoramic")) {
+                            hasPanorama = true;
+                        }
+
+                        if (hasSpherical && hasPanorama) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            if (metaNode.hasProperty(TIFF_IMAGEWIDTH)){
+                assetTiffWidth = metaNode.getProperty(TIFF_IMAGEWIDTH).getLong();
+            }
+            if (metaNode.hasProperty(TIFF_IMAGELENGTH)){
+                assetTiffHeight = metaNode.getProperty(TIFF_IMAGELENGTH).getLong();
+            }
+
+            double assetAR = ((double)assetTiffWidth / assetTiffHeight);
+            // compare up to 2 digit accuracy
+            assetAR = (double) Math.round(assetAR * 100) / 100;
+            if (assetAR == panoramicAR) {
+                return true;
+            }
+        } catch (RepositoryException e) {
+
+        }
+
+        return false;
+    }
+
+
+    /**
+     * jcr:content property iscustom=false implies OOTB viewer preset.
+     * if it is not there it implies iscustom=true.
+     *
+     * @param node Node to test
+     * @return custom status
+     */
+    private boolean isCustom(Node node) {
+        boolean isCustom = true;
+        try {
+            if (node.hasNode(Node.JCR_CONTENT)) {
+                node = node.getNode(Node.JCR_CONTENT);
+                if (node != null) {
+                    Property customProperty = node.getProperty("iscustom");
+                    if (customProperty != null) {
+                        return customProperty.getBoolean();
+                    }
+                }
+            }
+        } catch (RepositoryException e) {
+            // Its ok - default to true
+        }
+        return isCustom;
+    }
+	
+    // properties for image width and height
+        String VIDEO_WIDTH = "dam:scene7Width",
+               VIDEO_HEIGHT = "dam:scene7Height";
+    /**
+     Determine if video is video 360 based on its aspect ratio.
+     Default qualifying aspect ratio is 2.  This value shall be configurable from a JCR property.
+     Returns true if video dimensions are available, valid and aspect ratio equals the qualifying aspect ratio
+     @param metaNode The metadata node of the asset
+     @param videoAR aspect ratio to qualify an video asset as video 360
+     */
+    private boolean isVideo360Asset(Node metaNode, double videoAR) {
+        if (metaNode == null) {
+            return false;
+        }
+        long videoWidth = 0,
+                videoHeight = 0;
+
+        try {
+            if (metaNode.hasProperty(VIDEO_WIDTH)){
+                videoWidth = metaNode.getProperty(VIDEO_WIDTH).getLong();
+            }
+            if (metaNode.hasProperty(VIDEO_HEIGHT)){
+                videoHeight = metaNode.getProperty(VIDEO_HEIGHT).getLong();
+            }
+
+            double assetAR = ((double)videoWidth / videoHeight);
+            // compare up to 2 digit accuracy
+            assetAR = (double) Math.round(assetAR * 100) / 100;
+            if (assetAR == videoAR) {
+                return true;
+            }
+        } catch (RepositoryException e) {
+
+        }
+
+        return false;
+    }
+
+    /**
+     * @param   resource        the Resource to analyze
+     * @return                  true if resource points to SmartCrop-Enabled Video Asset
+     *                          false otherwise or in case of unexpected JCR problems (RepositoryException)
+     */
+    private boolean isVideoSmartCropEnabled(Resource resource, Logger log) {
+
+        if (resource == null) {
+            return false;
+        }
+
+        try {
+
+            // 1) Asset type must be of VideoAVS type
+            Node node = resource.adaptTo(Node.class);
+            String s7Type = null;
+            try {
+                s7Type = node.getProperty(JcrConstants.JCR_CONTENT + "/" + S7damConstants.PN_S7_TYPE).getString();
+            } catch (PathNotFoundException e) {
+                // ignore resource having no S7 Type
+            }
+            log.debug("Asset's s7type = " + s7Type);
+            if (!S7damConstants.S7_VIDEO_AVS.equals(s7Type)) {
+                return false;
+            }
+
+            // 2) Covering Video Profile must have "smartcrop" subnode
+            Asset asset = resource.adaptTo(Asset.class);
+            Session session = resource.getResourceResolver().adaptTo(Session.class);
+            if (asset == null || session == null) {
+                log.debug("Cannot adapt Resource to Asset, or no Session!");
+                return false;
+            }
+
+            // TODO: migrate to new getApplicableProfile(Resource, ...) after settling time
+    	    Node profileNode = DamUtil.getApplicableProfile(asset, DamConstants.VIDEO_PROFILE, session);
+            if (profileNode != null) {
+                boolean profileIsSmartCropEnabled =
+                           (profileNode.hasNode(JcrConstants.JCR_CONTENT + "/" + "smartcrop"));  // TODO: unify constant
+                log.debug("Found Video Profile {} [SmartCropEnabled={}]",
+                                                      profileNode.getPath(), String.valueOf(profileIsSmartCropEnabled));
+                if (profileIsSmartCropEnabled) {
+                    return true;
+                }
+            } else {
+                log.debug("Video Profile not found for asset {}!", asset.getPath());
+            }
+
+        } catch (RepositoryException e) {
+            log.error("SmartCrop considered as not enabled for video because of: ", e);
+        }
+
+        return false;
+    }
+
+%>
+

@@ -1,0 +1,841 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * Workflow editor
+ */
+CQ.Workflow.Editor = function() {
+    // actions
+    this.saveAction = new CQ.Ext.Action({
+        text: CQ.I18n.getMessage('Save'),
+        scope:this,
+        handler: function() {
+            this.fireEvent('saveModel');
+        },
+        tooltip: {
+            title:CQ.I18n.getMessage('Save model'),
+            text:('Saves the current model'), 
+            autoHide:true
+        }
+    });
+    this.saveAction.setDisabled(true);
+    
+    // toolbar fields
+    var myThis = this;
+    this.titleField = new CQ.form.InlineTextField({
+        cls:'cq-wf-title',
+        listeners: {
+            render: function(comp) {
+                new CQ.Ext.ToolTip({
+                    target: comp.getEl(),
+                    title: CQ.I18n.getMessage('Model Title'),
+                    html: CQ.I18n.getMessage('Click to edit title of the model'),
+                    trackMouse:true
+                });
+            },
+            change: function(comp) {
+                myThis.setDirty(true);
+            }
+        }
+    });
+    this.versionField = new CQ.form.InlineTextField({
+        editable:false,
+        cls:'cq-wf-version',
+        listeners: {
+            render: function(comp) {
+                new CQ.Ext.ToolTip({
+                    target: comp.getEl(),
+                    title: CQ.I18n.getMessage('Model Version'),
+                    html: CQ.I18n.getMessage('Current version of the model'),
+                    trackMouse:true
+                });
+            },
+            change: function(comp) {
+                myThis.setDirty(true);
+            }
+        }
+    });
+    this.descriptionField = new CQ.form.InlineTextField({
+        cls:'cq-wf-description',
+        listeners: {
+            render: function(comp) {
+                new CQ.Ext.ToolTip({
+                    target: comp.getEl(),
+                    title: CQ.I18n.getMessage('Model Description'),
+                    html: CQ.I18n.getMessage('Click to edit description of the model'),
+                    trackMouse:true
+                });
+            },
+            change: function(comp) {
+                myThis.setDirty(true);
+            }
+        }
+    });
+    this.tagsField = new CQ.form.InlineTextField({
+        cls:'cq-wf-tags',
+        listeners: {
+            render: function(comp) {
+                new CQ.Ext.ToolTip({
+                    target: comp.getEl(),
+                    title: CQ.I18n.getMessage('Tags'),
+                    html: CQ.I18n.getMessage('Click to edit tags of the model. The tags are comma separated'),
+                    trackMouse:true
+                });
+            },
+            change: function(comp) {
+                myThis.setDirty(true);
+            }
+        }
+    });
+    CQ.Workflow.Editor.superclass.constructor.call(this, arguments[0]);
+}
+
+CQ.Ext.extend(CQ.Workflow.Editor, CQ.Ext.Panel, {
+    cls:'cq-wf-editor',
+    autoScroll:true,
+    defaultType: 'cq.workflow.editor.column.wrapper',
+    bodyStyle:{
+        padding:"10px"
+    },
+    
+    /**
+     * Insert new step or split
+     * @public
+     */
+    insert: function(target, atts) {
+        if (atts.nodeType) {
+            return this.insertNode(target, atts.nodeType);
+        } else if (atts.splitType) {
+            return this.insertSplit(target, atts.splitType);
+        }
+        return false;
+    },
+    
+    /**
+     * Insert new step
+     * @private
+     */
+    insertNode: function(target, type, data, noHighlight) {
+        var transition = new CQ.Workflow.Transition.Vertical({ editor:this });
+        transition.setData({ metaData:{} });
+        
+        var node = new CQ.Workflow.Node({ editor:this });
+        if (data) {
+            node.setData(data);
+        } else {
+            node.setData(CQ.Workflow.ModelUtil.getNewNodeData(this, type));
+        }
+        var column = target.ownerCt;
+        var tIndex = column.getIndex(target);
+        var pIndex = tIndex;
+        var pCount = 2;
+        var appendItem;
+        if ((target instanceof CQ.Workflow.Split)
+            && (target.previous instanceof CQ.Workflow.Join)) {
+            // add between 2 splits (dropped on split)
+            
+            // wire items
+            node.previous = target.previous;
+            node.next = target;
+            target.previous.next = node;
+            target.previous = node;
+            
+            appendItem = target;
+            
+            // insert node and check layout
+            column.insert(tIndex, node);
+            pCount = 1;
+            
+            CQ.Workflow.EditorUtil.addPlaceholder(
+                this.getWrapper(), column, pIndex, pCount);
+        } else if ((target instanceof CQ.Workflow.Join) 
+            && (target.next instanceof CQ.Workflow.Split)) {
+            // add between 2 splits (dropped in join)
+            
+            // wire items
+            node.previous = target;
+            node.next = target.next;
+            target.next.previous = node;
+            target.next = node;
+
+            appendItem = target.next;
+
+            // insert node and check layout
+            column.insert(tIndex + 1, node);
+            pCount = 1;
+            pIndex = tIndex + 1;
+            
+            CQ.Workflow.EditorUtil.addPlaceholder(
+                this.getWrapper(), column, pIndex, pCount);
+        } else if (target instanceof CQ.Workflow.Split) {
+            // add before split
+            transition.previous = target.previous;
+            transition.next = node;
+            node.previous = transition;
+            node.next = target;
+            target.previous.next = transition;
+            target.previous = node;
+            
+            appendItem = target;
+
+            column.insert(tIndex, node);
+            column.insert(tIndex, transition);
+            
+            CQ.Workflow.EditorUtil.addPlaceholder(
+                this.getWrapper(), column, pIndex, pCount);
+        } else if ((target instanceof CQ.Workflow.Transition.TL) 
+            || (target instanceof CQ.Workflow.Transition.TR)) {
+            // preppend item to the branch of a split
+            node.previous = target;
+            node.next = transition;
+            transition.previous = node;
+            transition.next = target.next;
+            target.next.previous = transition;
+            target.next = node;
+            
+            node.split = target.previous;
+            transition.split = target.previous;
+            
+            appendItem = transition;
+            
+            column.insert(tIndex + 1, transition);
+            column.insert(tIndex + 1, node);
+            
+            CQ.Workflow.EditorUtil.checkSplitLayout(target.previous, this);
+        } else if ((target instanceof CQ.Workflow.Transition.BL) 
+            || (target instanceof CQ.Workflow.Transition.BR)) {
+            // append item to the branch of a split
+            transition.previous = target.previous;
+            transition.next = node;
+            node.previous = transition;
+            node.next = target;
+            target.previous.next = transition;
+            target.previous = node;
+            
+            node.split = target.next.split;
+            transition.split = target.next.split;
+            
+            appendItem = target;
+            
+            column.insert(tIndex, node);
+            column.insert(tIndex, transition);
+            
+            CQ.Workflow.EditorUtil.checkSplitLayout(target.next.split, this);
+        } else {
+            // normal insert (no split/join stuff)
+            transition.next = target.next;
+            transition.previous = node;
+            node.previous = target;
+            node.next = transition;
+            target.next.previous = transition;
+            target.next = node;
+            
+            appendItem = transition;
+            
+            column.insert(tIndex + 1, node);
+            column.insert(tIndex + 2, transition);
+            
+            if (target.split && (!(target instanceof CQ.Workflow.Join))) {
+                node.split = target.split;
+                transition.split = target.split;
+                CQ.Workflow.EditorUtil.checkSplitLayout(target.split, this);
+            } else {
+                pIndex = tIndex + 1;
+                CQ.Workflow.EditorUtil.addPlaceholder(
+                    this.getWrapper(), column, pIndex, pCount);
+            }
+        }
+        this.doLayout();
+        this.showProperties({ source:node });
+        this.setDirty(true);
+        
+        // highlight nodes
+        if (!noHighlight) {
+            CQ.Ext.fly(node.getEl()).frame('#8db2e3', 1);
+        }
+        return appendItem;
+    },
+    
+    /**
+     * Insert new split
+     * @private
+     */
+    insertSplit: function(target, type, noHighlight) {
+        var wrapper = this.getWrapper();
+        
+        // remove target transition
+        var column = target.ownerCt;
+        var tIndex = column.getIndex(target);
+        
+        // insert split
+        var split, join;
+        if (type == CQ.Workflow.Split.AND) {
+            split = new CQ.Workflow.Split.And({ editor:this });
+            join = new CQ.Workflow.Join.And({ editor:this });
+        } else if (type == CQ.Workflow.Split.OR) {
+            split = new CQ.Workflow.Split.Or({ editor:this });
+            join = new CQ.Workflow.Join.Or({ editor:this });
+        }
+        split.join = join;
+        join.split = split;
+        
+        join.setData(CQ.Workflow.ModelUtil.getNewJoinData(this, type));
+        split.setData(CQ.Workflow.ModelUtil.getNewSplitData(this, type, 
+            CQ.Workflow.ModelUtil.generateNextID(join.nodeData.id)));
+        
+        var result = { split:split, join:join };
+        
+        var bIndex = tIndex;
+        var preventPlaceholderDelete = false;
+        if (target instanceof CQ.Workflow.Split) {
+            // insert before an existing split
+            join.next = target;
+            split.previous = target.previous;
+            target.previous.next = split;
+            target.previous = join;
+            
+            column.insert(tIndex, join);
+            column.insert(tIndex, new CQ.Workflow.Split.Placeholder());
+            column.insert(tIndex, split);
+            
+            preventPlaceholderDelete = true;
+        } else if (target instanceof CQ.Workflow.Join) {
+            // insert split after exising join
+            split.previous = target;
+            join.next = target.next;
+            target.next.previous = join;
+            target.next = split;
+            
+            column.insert(tIndex + 1, join);
+            column.insert(tIndex + 1, new CQ.Workflow.Split.Placeholder());
+            column.insert(tIndex + 1, split);
+            
+            bIndex = tIndex + 1;
+            preventPlaceholderDelete = true;
+        } else {
+            // insert split between to nodes
+            join.next = target.next;
+            target.next.previous = join;
+            split.previous = target.previous;
+            target.previous.next = split;
+            
+            column.remove(target);
+            column.insert(tIndex, join);
+            column.insert(tIndex, new CQ.Workflow.Split.Placeholder());
+            column.insert(tIndex, split);
+        }
+        
+        // check if a column is available, if not we need new columns
+        var cIndex = wrapper.getIndex(column);
+        var lColumn, rColumn;
+        if (cIndex > 0) {
+            lColumn = wrapper.getComponent(cIndex - 1);
+            var branch = CQ.Workflow.EditorUtil.createBranchItems(split, join, CQ.Workflow.Split.BRANCH_LEFT, 
+                lColumn, bIndex, preventPlaceholderDelete, split.nodeData.id, this);
+            result.left = branch.node;
+            
+            rColumn = wrapper.getComponent(cIndex + 1);
+            branch = CQ.Workflow.EditorUtil.createBranchItems(split, join, CQ.Workflow.Split.BRANCH_RIGHT, 
+                rColumn, bIndex, preventPlaceholderDelete, branch.node.nodeData.id, this);
+            result.right = branch.node;
+        } else {
+            lColumn = new CQ.Workflow.Editor.Column();
+            wrapper.insert(cIndex, lColumn);
+            
+            CQ.Workflow.EditorUtil.addColumnPlaceholder(lColumn, tIndex);
+            var branch = CQ.Workflow.EditorUtil.createBranchItems(split, join, CQ.Workflow.Split.BRANCH_LEFT, 
+                lColumn, null, null, split.nodeData.id, this);
+            result.left = branch.node;
+            CQ.Workflow.EditorUtil.addColumnPlaceholder(lColumn, (column.items.getCount() - tIndex - 3));
+            
+            rColumn = new CQ.Workflow.Editor.Column();
+            wrapper.add(rColumn);
+            
+            CQ.Workflow.EditorUtil.addColumnPlaceholder(rColumn, tIndex);
+            branch = CQ.Workflow.EditorUtil.createBranchItems(split, join, CQ.Workflow.Split.BRANCH_RIGHT, rColumn, 
+                null, null, branch.node.nodeData.id, this);
+            result.right = branch.node;
+            CQ.Workflow.EditorUtil.addColumnPlaceholder(rColumn, (column.items.getCount() - tIndex - 3));
+        }
+        this.doLayout();
+        this.doLayout(); // need to layout again to render columns correctly
+        this.setDirty(true);
+        
+        // highlight nodes
+        if (!noHighlight) {
+            CQ.Ext.fly(result.left.getEl()).frame('#8db2e3', 1);
+            CQ.Ext.fly(result.right.getEl()).frame('#8db2e3', 1);
+        }
+        return result;
+    },
+    
+    /**
+     * Remove split or step
+     * @public
+     */
+    removeItem: function(item) {
+        var appendItem;
+        if (item instanceof CQ.Workflow.Node) {
+            // remove node from the model
+            var column = item.ownerCt;
+            var tIndex = column.getIndex(item);
+                        
+            // wire surrounding nodes
+            if (item.previous instanceof CQ.Workflow.Join) {
+                column.remove(item, true);
+                
+                if (item.next instanceof CQ.Workflow.Split) {
+                    // in this case the step is between 2 splits
+                    item.next.previous = item.previous;
+                    item.previous.next = item.next;
+                } else {
+                    item.next.next.previous = item.previous;
+                    item.previous.next = item.next.next;
+                    column.remove(column.getComponent(tIndex), true);
+                }
+                CQ.Workflow.EditorUtil.removePlaceholder(this.getWrapper(), column, tIndex);
+            } else if (item.split) {
+                if (((item.previous instanceof CQ.Workflow.Transition.TL) 
+                        && (item.next instanceof CQ.Workflow.Transition.BL))
+                    || ((item.previous instanceof CQ.Workflow.Transition.TR) 
+                        && (item.next instanceof CQ.Workflow.Transition.BR))) {
+                    // last step in branch!! -> remove split and copy items
+                    
+                    // check which branch needs to be copied
+                    var copyItem;
+                    var copyData = new Array();
+                    if (item.previous instanceof CQ.Workflow.Transition.TL) {
+                        // need to copy right branch
+                        copyItem = item.previous.previous.right.next;
+                    } else {
+                        // need to copy left branch
+                        copyItem = item.previous.previous.left.next;
+                    }
+                    // copy node data
+                    while ((!(copyItem instanceof CQ.Workflow.Transition.BL))
+                        && (!(copyItem instanceof CQ.Workflow.Transition.BR))) {
+                        if (copyItem instanceof CQ.Workflow.Node) {
+                            copyData.push(copyItem.nodeData);
+                        }
+                        copyItem = copyItem.next;
+                    }
+                    // remove split
+                    var appendItem = this.remove(item.previous.previous);                   
+                    
+                    // add new nodes (as serial list of nodes)
+                    for (var i=0; i<copyData.length; i++) {
+                        appendItem = this.insertNode(appendItem, copyData[i].type, copyData[i]);
+                    }
+                } else if ((item.previous instanceof CQ.Workflow.Transition.TL) 
+                    || (item.previous instanceof CQ.Workflow.Transition.TR)) {
+                    // first step in branch and not the only step in this branch
+                    item.previous.next = item.next.next;
+                    item.next.next.previous = item.previous;
+                    
+                    column.remove(item, true);
+                    column.remove(column.getComponent(tIndex), true);
+                    CQ.Workflow.EditorUtil.checkSplitLayout(item.split, this);
+                } else if ((item.previous instanceof CQ.Workflow.Transition.BL) 
+                    || (item.previous instanceof CQ.Workflow.Transition.BR)) {
+                    // last step in branch and not the only step in this branch
+                    item.next.previous = item.previous.previous;
+                    item.previous.previous.next = iem.next;
+                    
+                    column.remove(item, true);
+                    column.remove(column.getComponent(tIndex - 1), true);
+                    CQ.Workflow.EditorUtil.checkSplitLayout(item.split, this);
+                } else {
+                    // step in branch that has a step before and after
+                    item.next.previous = item.previous.previous;
+                    item.previous.previous.next = item.next;
+                    
+                    column.remove(item, true);
+                    column.remove(column.getComponent(tIndex - 1), true);
+                    CQ.Workflow.EditorUtil.checkSplitLayout(item.split, this);
+                }
+            } else {
+                item.next.previous = item.previous.previous;
+                item.previous.previous.next = item.next;
+                
+                column.remove(item, true);
+                column.remove(column.getComponent(tIndex - 1), true);
+                CQ.Workflow.EditorUtil.removePlaceholder(this.getWrapper(), column, tIndex - 1);
+            }
+        } else if (item instanceof CQ.Workflow.Split) {
+            // remove a split from the model
+            var wrapper = this.getWrapper();
+            
+            var column = item.ownerCt;
+            var colIndex = wrapper.getIndex(column);
+            
+            var leftCol = wrapper.getComponent(colIndex - 1);
+            var rightCol = wrapper.getComponent(colIndex + 1);
+            
+            var splitIndex = column.getIndex(item);
+            var joinIndex = column.getIndex(item.join);
+            
+            var rows = joinIndex - splitIndex;
+            for (var i=0; i<=rows; i++) {
+                column.remove(splitIndex);
+                leftCol.remove(splitIndex);
+                rightCol.remove(splitIndex);
+            }
+            if ((item.previous instanceof CQ.Workflow.NodeBase)
+                && (item.join.next  instanceof CQ.Workflow.NodeBase)) {
+                // split is between two nodes/steps -> add new transition
+                var transition = new CQ.Workflow.Transition.Vertical({ editor:this });
+                transition.setData({ metaData:{} });
+                appendItem = transition;
+                
+                item.previous.next = transition;
+                item.join.next.previous = transition;
+                transition.previous = item.previous;
+                transition.next = item.join.next;
+                
+                column.insert(splitIndex, transition);  
+                CQ.Workflow.EditorUtil.addPlaceholder(
+                    this.getWrapper(), column, splitIndex, 1);
+            } else {
+                // create append item to be used if a split is transformed into serial steps
+                if (item.previous instanceof CQ.Workflow.NodeBase) {
+                    appendItem = item.next;
+                } else {
+                    appendItem = item.previous;
+                }
+                item.previous.next = item.join.next;
+                item.join.next.previous = item.previous;
+            }
+            // remove left/right columns if no longer needed
+            var removeCols = true;
+            for (var i=0; i<leftCol.items.getCount(); i++) {
+                if (!(leftCol.items.get(i) instanceof CQ.Workflow.Split.Placeholder)) {
+                    removeCols = false;
+                }
+            }
+            if (removeCols) {
+                wrapper.remove(leftCol, true);
+                wrapper.remove(rightCol, true);
+            }
+        }
+        this.doLayout();
+        this.setDirty(true);
+        return appendItem;
+    },
+    
+    /**
+     * Remove all items
+     * @public
+     */
+    clear: function() {
+        var wrapper = this.getWrapper();
+        for (var i=0; i<wrapper.items.getCount(); i++) {
+            wrapper.remove(wrapper.items.get(i), true);
+        }
+        this.doLayout();
+    },
+    
+    /**
+     * Sets a new version for the current loaded model.
+     */ 
+    setModelVersion: function(version) {
+        this.versionField.setValue(version);
+    },
+    
+    /**
+     * Load a new model
+     * @public
+     */
+    loadModel: function(model) {
+        this.clear();
+
+        // load model description
+        this.modelId = model.id;
+        this.titleField.setValue(model.title);
+        this.versionField.setValue(model.version);
+        this.descriptionField.setValue(model.description);
+        this.tagsField.setValue((model.metaData && model.metaData.tags) ? model.metaData.tags : "");
+        
+        // load model
+        var wrapper = this.getWrapper();
+        var column = wrapper.add(new CQ.Workflow.Editor.Column());
+        
+        CQ.Workflow.ModelUtil.convertToLocalNodeTypes(model.nodes);
+        var startData = CQ.Workflow.ModelUtil.getStartNode(model.nodes);
+        var endData = CQ.Workflow.ModelUtil.getEndNode(model.nodes);
+        
+        // create initial start & end node + an initial transition for inserting items
+        var start = new CQ.Workflow.Node.Start();
+        start.setData(startData);
+        var transition = new CQ.Workflow.Transition.Vertical({ 
+            editor:this, 
+            nodeData: { metaData: {} } 
+        });
+        var end = new CQ.Workflow.Node.End();
+        end.setData(endData);
+        
+        transition.previous = start;
+        transition.next = end;
+        start.next = transition;
+        end.previous = transition;
+        
+        column.add(start);
+        column.add(transition);
+        column.add(end);
+                
+        var node = start;
+        var target = transition;
+        var outs = CQ.Workflow.ModelUtil.getOuts(node.nodeData, model.transitions);
+        while (outs.length > 0) {
+            var ends = CQ.Workflow.ModelUtil.getTransitionEnds(outs[0], model.nodes);
+            
+            if (ends[0].type == CQ.Workflow.Node.END) {
+                // nothing to add here (END was already added)
+                outs = CQ.Workflow.ModelUtil.getOuts(ends[0], model.transitions);
+            } else if ((ends[0].type == CQ.Workflow.Split.AND) 
+                || (ends[0].type == CQ.Workflow.Split.OR)) { 
+
+                // load split
+                var splitItems = this.insertSplit(target, ends[0].type, true);
+                
+                // hide delete button (only when loading model)
+                splitItems.split.items.get(0).hide();
+                
+                // set split + join node data
+                splitItems.split.setData(ends[0]);
+                var joinData = CQ.Workflow.ModelUtil.getJoin(splitItems.split.getData(), model.transitions, model.nodes);
+                splitItems.join.setData(joinData);
+                
+                // load branches
+                var splitOuts = CQ.Workflow.ModelUtil.getOuts(splitItems.split.nodeData, model.transitions);
+                for (var i=0; i<splitOuts.length; i++) {
+                    if (splitOuts[i].metaData.branch == CQ.Workflow.Split.BRANCH_LEFT) {
+                        // set OR split transition data
+                        if (splitItems.split instanceof CQ.Workflow.Split.Or) {
+                            var tl = splitItems.split.left;
+                            tl.setData(splitOuts[i]);
+                        }
+                        
+                        // load left branch
+                        ends = CQ.Workflow.ModelUtil.getTransitionEnds(splitOuts[i], model.nodes);
+                        
+                        splitItems.left.setData(ends[0]);
+                        target = splitItems.left.next;
+                        
+                        var inBranchOuts = CQ.Workflow.ModelUtil.getOuts(ends[0], model.transitions);
+                        ends = CQ.Workflow.ModelUtil.getTransitionEnds(inBranchOuts[0], model.nodes);
+                        while ((ends[0].type != CQ.Workflow.Join.AND)
+                            && (ends[0].type != CQ.Workflow.Join.OR)) {
+                            this.insertNode(target, ends[0].type, ends[0], true);
+                            inBranchOuts = CQ.Workflow.ModelUtil.getOuts(ends[0], model.transitions);
+                            ends = CQ.Workflow.ModelUtil.getTransitionEnds(inBranchOuts[0], model.nodes);
+                        }
+                    } else if (splitOuts[i].metaData.branch == CQ.Workflow.Split.BRANCH_RIGHT) {
+                        // set OR split transition data
+                        if (splitItems.split instanceof CQ.Workflow.Split.Or) {
+                            var tl = splitItems.split.right;
+                            tl.setData(splitOuts[i]);
+                        }
+                        
+                        // load right branch
+                        ends = CQ.Workflow.ModelUtil.getTransitionEnds(splitOuts[i], model.nodes);
+                        
+                        splitItems.right.setData(ends[0]);
+                        target = splitItems.right.next;
+                        
+                        var inBranchOuts = CQ.Workflow.ModelUtil.getOuts(ends[0], model.transitions);
+                        ends = CQ.Workflow.ModelUtil.getTransitionEnds(inBranchOuts[0], model.nodes);
+                        while ((ends[0].type != CQ.Workflow.Join.AND)
+                            && (ends[0].type != CQ.Workflow.Join.OR)) {
+                            this.insertNode(target, ends[0].type, ends[0], true);
+                            inBranchOuts = CQ.Workflow.ModelUtil.getOuts(ends[0], model.transitions);
+                            ends = CQ.Workflow.ModelUtil.getTransitionEnds(inBranchOuts[0], model.nodes);
+                        }
+                    }
+                }
+                target = splitItems.join;
+                outs = CQ.Workflow.ModelUtil.getOuts(splitItems.join.nodeData, model.transitions);
+            } else {
+                // load node
+                target = this.insertNode(target, ends[0].type, ends[0], true);
+                outs = CQ.Workflow.ModelUtil.getOuts(ends[0], model.transitions);
+            }
+        }
+        this.doLayout();
+        this.setDirty(false);
+    },
+    
+    /**
+     * Get data (as JSON) of the current model
+     * @public
+     */
+    getModel: function() {
+        var model = new Object();
+        model.metaData = new Object();
+        model.nodes = new Array();
+        model.transitions = new Array();
+        
+        // get model description
+        model.id = this.modelId;
+        model.title = this.titleField.getValue();
+        model.version = this.versionField.getValue();
+        model.description = this.descriptionField.getValue();
+        model.metaData.tags = this.tagsField.getValue();
+        
+        // parse model and copy data to exported model object
+        var wrapper = this.getWrapper();
+        for (var i=0; i<wrapper.items.getCount(); i++) {
+            var column = wrapper.items.get(i);
+            
+            for (var j=0; j<column.items.getCount(); j++) {
+                
+                var item = column.items.get(j);
+                if (item instanceof CQ.Workflow.NodeBase) {
+                    model.nodes.push(CQ.Workflow.ModelUtil.copyObject(item.getData()));
+                } else if (item instanceof CQ.Workflow.TransitionBase) {
+                    if (item instanceof CQ.Workflow.Transition.Placeholder) {
+                        // these are just placeholders (no need to add them)
+                        continue;
+                    }
+                    model.transitions.push(CQ.Workflow.ModelUtil.copyObject(item.getData()));
+                } else if (item instanceof CQ.Workflow.Split) {
+                    model.nodes.push(CQ.Workflow.ModelUtil.copyObject(item.getData()));
+                    
+                    // create missing incoming split transition (not displayed in editor for better look&feel)
+                    var transition = new Object();
+                    transition.from = item.previous.nodeData.id;
+                    transition.to = item.nodeData.id;
+                    model.transitions.push(transition);
+                } else if (item instanceof CQ.Workflow.Join) {
+                    model.nodes.push(CQ.Workflow.ModelUtil.copyObject(item.getData()));
+                    
+                    // create missing outgoing join transition (not displayed in editor for better look&feel)
+                    // this is only needed if next item is not a split, in case item.next is a split the extra 
+                    // transition will be added by the split
+                    if (!(item.next instanceof CQ.Workflow.Split)) {
+                        var transition = new Object();
+                        transition.from = item.nodeData.id;
+                        transition.to = item.next.nodeData.id;
+                        model.transitions.push(transition);
+                    }
+                }
+            }
+        }
+        CQ.Workflow.ModelUtil.convertToRemoteNodeTypes(model.nodes);
+        return model;
+    },
+    
+    /**
+     * Returns the wrapper
+     * @private
+     */
+    getWrapper: function() {
+        return this.getComponent(0);
+    },
+    
+    /**
+     * Finds a node/step by ID
+     * @private
+     */
+    getNode: function(id) {
+        var wrapper = this.getWrapper();
+        
+        for (var i=0; i<wrapper.items.getCount(); i++) {
+            var column = wrapper.items.get(i);
+        
+            for (var j=0; j<column.items.getCount(); j++) {
+                var item = column.items.get(j);
+        
+                if ((item instanceof CQ.Workflow.Node) 
+                    && (item.nodeData.id == id)) {
+                    return item;
+                }
+            }
+        }
+    },
+    
+    /**
+     * Finds nodes by node type
+     * @private
+     */
+    getNodesByType: function(type) {
+        var wrapper = this.getWrapper();
+        
+        var nodes = new Array();
+        for (var i=0; i<wrapper.items.getCount(); i++) {
+            var column = wrapper.items.get(i);
+            
+            for (var j=0; j<column.items.getCount(); j++) {
+                var item = column.items.get(j);
+                
+                if ((item instanceof CQ.Workflow.Node)
+                    &&(item.getData().type == type)) {
+                    nodes.push(item);
+                }
+            }
+        }
+        return nodes;
+    },
+    
+    listeners: {
+        render: function(comp) {
+            var tbar = comp.getTopToolbar();
+            tbar.add(comp.saveAction);
+            tbar.add('->');
+            tbar.addField(comp.titleField);
+            tbar.add(' ');tbar.add("-");tbar.add(' ');
+            tbar.addField(comp.versionField);
+            tbar.add(' ');tbar.add("-");tbar.add(' ');
+            tbar.addField(comp.descriptionField);
+            tbar.add(' ');tbar.add("-");tbar.add(' ');
+            tbar.addField(comp.tagsField);
+        }
+    },
+    
+    initComponent: function() {
+        this.addEvents({ 
+            showProperties:true,
+            saveModel:true,
+            modelChanged:true 
+        });
+        CQ.Workflow.Editor.superclass.initComponent.call(this);
+    },
+    
+    showProperties: function(atts) {
+        this.fireEvent('showProperties', atts);
+    },
+    
+    setDirty: function(dirty) {
+        if (dirty) {
+            this.saveAction.setDisabled(false);
+            this.fireEvent('modelChanged');
+        } else {
+            this.saveAction.setDisabled(true);
+        }
+    },
+    
+    isDirty: function() {
+        return !this.saveAction.isDisabled();
+    }
+});
+CQ.Ext.override(CQ.Workflow.Editor, {
+    /**
+     * Ensure correct wrapper width according to number of columns
+     */
+    doLayout : CQ.Ext.Panel.prototype.doLayout.createSequence(function() {
+        var width = CQ.Workflow.Editor.COLUMN_WIDTH * this.getWrapper().items.getCount();
+        this.getWrapper().getEl().setWidth(width);
+    })
+});
+CQ.Ext.reg('cq.workflow.editor', CQ.Workflow.Editor);
+
+CQ.Workflow.Editor.DD_GROUP = 'cq.workflow.editor';
+CQ.Workflow.Editor.COLUMN_WIDTH = 200;

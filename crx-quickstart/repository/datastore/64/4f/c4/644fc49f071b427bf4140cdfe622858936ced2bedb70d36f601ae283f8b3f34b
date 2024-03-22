@@ -1,0 +1,914 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * This class represents a report as a whole.
+ * @class CQ.reports.Report
+ * @constructor
+ * Creates a new Report.
+ */
+CQ.reports.Report = CQ.Ext.extend(CQ.Ext.emptyFn, {
+
+    /**
+     * The report's title
+     */
+    title: null,
+
+    /**
+     * List of columns
+     * @type CQ.reports.Column[]
+     * @private
+     */
+    columns: null,
+
+    /**
+     * The Ext FormPanel to be used for the query builder.
+     * @type CQ.Ext.form.FormPanel
+     * @private
+     */
+    formPanel: null,
+
+    /**
+     * The view used to display the report
+     * @type CQ.reports.View
+     * @private
+     */
+    view: null,
+
+    /**
+     * List of available charts
+     * @type CQ.reports.ChartDefinition[]
+     * @private
+     */
+    charts: null,
+
+    /**
+     * List of active charts
+     * @type CQ.reports.ChartDefinition[]
+     * @private
+     */
+    activeCharts: null,
+
+    /**
+     * Flag that determines if the report is currently in edit mode
+     * @type Boolean
+     * @publicProp
+     */
+    isEditMode: false,
+
+    /**
+     * Path to the report's page
+     * @type String
+     * @private
+     */
+    pagePath: null,
+
+    /**
+     * Path to this instance of a report
+     * @type String
+     * @private
+     */
+    reportPath: null,
+
+    /**
+     * Path to the report's component node
+     * @type String
+     * @private
+     */
+    componentPath: null,
+
+    /**
+     * Processing mode of the report
+     * @type String
+     * @private
+     */
+    processingMode: null,
+
+    /**
+     * The type of rendering requested
+     * @type Object
+     * @private
+     */
+    renderType: null,
+
+    /**
+     * The selector to be used for requesting report data
+     * @type String
+     * @private
+     */
+    reportSelector: null,
+
+    /**
+     * The selector to be used for requesting chart data
+     * @type String
+     * @private
+     */
+    chartDataSelector: null,
+
+    /**
+     * The selector to be used for requesting "over time" snapshot data
+     * @type String
+     * @private
+     */
+    snapshotSelector: null,
+
+    /**
+     * Helper for synchronizing multiple requests
+     * @private
+     */
+    requestSyncer: null,
+
+    /**
+     * Raw result data, as received by server
+     * @private
+     */
+    data: null,
+
+    /**
+     * Data type definition, as received by server
+     */
+    typeDefs: null,
+
+    /**
+     * Current snapshot mode
+     */
+    snapshotMode: null,
+
+    /**
+     * Flag that determines if the report has been finished at least once
+     */
+    finished: false,
+
+    /**
+     * Path to the dialog that is used for finishing a report, presenting fields for
+     * title and description
+     */
+    finishTitleDescr: null,
+
+    /**
+     * Path to the dialog that is used for finishing a report, presenting fields for
+     * title, description and snapshot mode
+     */
+    finishTitleDescrSnap: null,
+
+    /**
+     * Path to the dialog that is used for finishing a report when snapshooting is
+     * activated and no finished version of the report is available
+     */
+    snapshotFinishDialog: null,
+
+
+    constructor: function() {
+        this.title = CQ.I18n.getMessage("Report");
+        this.columns = [ ];
+        this.reportSelector = "data";
+        this.chartDataSelector = "chart";
+        this.snapshotSelector = "snapshots";
+        this.finishSelector = "finish";
+    },
+
+    /**
+     * Sets the title of the report.
+     * @param {String} title The report's title
+     */
+    setTitle: function(title) {
+        this.title = title;
+    },
+
+    /**
+     * Sets the paths for this report.
+     * @param {String} reportPath The report's path
+     * @param {String} componentPath Path to the corresponding report component
+     * @param {String} pagePath The page the report is used by
+     */
+    setPaths: function(reportPath, componentPath, pagePath) {
+        this.reportPath = reportPath;
+        this.componentPath = componentPath;
+        this.pagePath = pagePath;
+    },
+
+    /**
+     * Sets the processing mode of the report.
+     * @param {String} processingMode The processing mode of the report (client, server,
+     *        server-interactive)
+     */
+    setProcessingMode: function(processingMode) {
+        this.processingMode = processingMode;
+    },
+
+    /**
+     * Sets the render type of the report.
+     * @param {Object} renderType The render type
+     */
+    setRenderType: function(renderType) {
+        this.renderType = renderType;
+    },
+
+    /**
+     * Checks if a report has to be rendered as a single view.
+     * @return {Boolean} True if the report has to be rendered as a single view
+     */
+    isSingleViewRendering: function() {
+        return (this.renderType != null);
+    },
+
+    /**
+     * Checks if the report is processed on the server and the report uses interactive
+     * mode (update/server-roundtrip after each change of settings).
+     */
+    isServerInteractiveProcessing: function() {
+        return (this.processingMode == CQ.reports.Report.PMODE_SERVER_INTERACTIVE);
+    },
+
+    /**
+     * Sets the selector to be used for requesting report data
+     * @param {String} selector The selector to be used for requesting report data
+     */
+    setReportSelector: function(selector) {
+        this.reportSelector = selector;
+    },
+
+    /**
+     * Sets the selector to be used for requesting chart data
+     * @param {String} selector The selector to be used for requesting chart data
+     */
+    setChartSelector: function(selector) {
+        this.chartSelector = selector;
+    },
+
+    /**
+     * Returns the URL to be used for generating chart data from the server.
+     * @return {String} The URL
+     */
+    getChartDataUrl: function() {
+        return this.reportPath + "." + this.chartDataSelector + CQ.HTTP.EXTENSION_JSON;
+    },
+
+    /**
+     * Returns the path to the report component.
+     * @return {String} Path to the report component
+     */
+    getComponentPath: function() {
+        return this.componentPath;
+    },
+
+    /**
+     * Returns the path of the page the report is used by.
+     * @return {String} The report's page path
+     */
+    getPagePath: function() {
+        return this.pagePath;
+    },
+
+    /**
+     * Sets the selector to be used for requesting snapshot data
+     * @param {String} selector The selector to be used for requesting snapshot data
+     */
+    setSnapshotSelector: function(selector) {
+        this.snapshotSelector = selector;
+    },
+
+    /**
+     * Returns the URL to be used for generating series data from the server.
+     * @return {String} The URL
+     */
+    getSnapshotDataUrl: function() {
+        return this.reportPath + "." + this.snapshotSelector + CQ.HTTP.EXTENSION_JSON;
+    },
+
+    /**
+     * Sets some date format requirements for clientside usage.
+     * @param {Number} firstDayOfWeek The first day of a week (1-based)
+     */
+    setDateFormat: function(firstDayOfWeek) {
+        this.firstDayOfWeek = firstDayOfWeek;
+    },
+
+    /**
+     * Gets the first day of a week to be used calendars, etc.
+     * @return {Number} The first day of a week (1-based)
+     */
+    getFirstDayOfWeek: function() {
+        return this.firstDayOfWeek;
+    },
+
+    /**
+     * Sets the selector to be used for finishing a report.
+     * @param {String} selector The selector to be used for finishing a report
+     */
+    setFinishSelector: function(selector) {
+        this.finishSelector = selector;
+    },
+
+    /**
+     * Sets both variants of the dialog to be used for finishing a report.
+     *
+     * @param {String} finishTitleDescr Path to the dialog with title, description
+     * @param {String} finishTitleDescrWarn Path to the dialog with title, description,
+     *        warning
+     * @param {String} finishTitleDescrSnap Path to the dialog with title, description,
+     *        snapshot mode
+     * @param {String} finishTitleDescrSnapWarn Path to the dialog with title, description,
+     *        snapshot mode, warning
+     */
+    setFinishDialogs: function(finishTitleDescr, finishTitleDescrWarn, finishTitleDescrSnap,
+            finishTitleDescrSnapWarn) {
+        this.finishTitleDescr = finishTitleDescr;
+        this.finishTitleDescrWarn = finishTitleDescrWarn;
+        this.finishTitleDescrSnap = finishTitleDescrSnap;
+        this.finishTitleDescrSnapWarn = finishTitleDescrSnapWarn;
+    },
+
+    getFinishDialog: function() {
+        var dialog;
+        if (this.isSnapshotActive()) {
+            dialog = (this.isFinished() ? this.finishTitleDescrWarn
+                    : this.finishTitleDescr);
+        } else {
+            dialog = (this.isFinished() ? this.finishTitleDescrSnapWarn
+                    : this.finishTitleDescrSnap);
+        }
+        return dialog;
+    },
+
+    /**
+     * <p>Sets if the report is currently displayed in "edit mode" from the serverside.</p>
+     *
+     * <p>Note that this method does additional processing (permissions) to determine the
+     * actual edit mode (as returned by {@link #isEditMode}).</p>
+     *
+     * @param {Boolean} isEditMode True if the report is currently in "edit mode"
+     */
+    setWCMEditMode: function(isEditMode) {
+        try {
+            var page = CQ.WCM.getPage(CQ.WCM.getPagePath());
+            this.isEditMode = isEditMode && page && page.hasPermission("update")
+                    && page.hasPermission("modify") && (this.renderType == null);
+        } catch (e) {
+            // unable to retrieve page information: we're obviously not in edit mode
+            this.isEditMode = false;
+        }
+    },
+
+    /**
+     * Sets the current snapshot mode.
+     * @param {String} snapshotMode The snapshot mode
+     */
+    setSnapshotMode: function(snapshotMode) {
+        this.snapshotMode = snapshotMode;
+    },
+
+    /**
+     * Checks if snapshots are currently active for the report.
+     * @return {Boolean} True if snapshots are active
+     */
+    isSnapshotActive: function() {
+        return (this.snapshotMode != null)
+                && (this.snapshotMode != CQ.reports.Report.SMODE_NONE);
+    },
+
+    /**
+     * Sets if the report has been finished at least once.
+     * @param {Boolean} isFinished True if the report has been finished at least once
+     */
+    setFinished: function(isFinished) {
+        this.finished = isFinished;
+    },
+
+    /**
+     * Determines if the report has been finished at least once.
+     * @return {Boolean} True if the report has at least been finished once
+     */
+    isFinished: function() {
+        return this.finished;
+    },
+
+    /**
+     * Gets the current snapshot mode.
+     * @return {Number} The current snapshot mode (as defined by constants
+     *         {@link CQ.reports.Report.SMODE_NONE}, {@link CQ.reports.Report.SMODE_HOURLY},
+     *         {@link CQ.reports.Report.SMODE_DAILY})
+     */
+    getSnapshotMode: function() {
+        if (this.snapshotMode == null) {
+            return CQ.reports.Report.SMODE_NONE;
+        }
+        return this.snapshotMode;
+    },
+
+    /**
+     * Adds a column to the report.
+     * @param {CQ.reports.Column} column The column to add
+     */
+    addColumn: function(column) {
+        column.report = this;
+        this.columns.push(column);
+    },
+
+    /**
+     * Inserts a column into the report.
+     * @param {CQ.reports.Column} column The column to insert
+     * @param {Number} colIndex The index for inserting the column
+     */
+    insertColumn: function(column, colIndex) {
+        column.report = this;
+        this.columns.splice(colIndex, 0, column);
+    },
+
+    /**
+     * Moves an existig column.
+     * @param {Number} colIndexToMove Index of column to move
+     * @param {Number} newIndex New index of column to move
+     */
+    moveColumn: function(colIndexToMove, newIndex) {
+        var colToMove = this.columns[colIndexToMove];
+        this.columns.splice(colIndexToMove, 1);
+        this.columns.splice(newIndex, 0, colToMove);
+    },
+
+    /**
+     * Loads the view configuration.
+     * @private
+     */
+    loadViewConfig: function() {
+        this.requestSyncer.registerRequest();
+        CQ.Ext.Ajax.request({
+                "method": "GET",
+                "url": CQ.HTTP.externalize(this.componentPath + "/view.infinity.json"),
+                "success": function(response) {
+                    var result = null;
+                    if (response && (response.status == 200)) {
+                        try {
+                            result = CQ.Util.formatData(CQ.Ext.util.JSON.decode(
+                                    response.responseText));
+                        } catch (e) {
+                            // Status may be erroneously reported as 200, when actually
+                            // another status has been generated; so we'll have to catch
+                            // exceptions that originate from parsing "presumed JSON" that
+                            // actually contains a Sling message
+                        }
+                    }
+                    this.onViewConfigLoaded(result);
+                },
+                "failure": function() {
+                    this.onViewConfigLoaded(null);
+                },
+                "scope": this
+            });
+    },
+
+    /**
+     * @private
+     */
+    onViewConfigLoaded: function(result) {
+        // todo set subviews to use
+        if (!this.renderType) {
+            this.view = new CQ.reports.views.TopLevelView({
+                    "subViewConfig": result
+                });
+        } else {
+            var singleView;
+            switch (this.renderType.type) {
+                case "tabular":
+                    singleView = new CQ.reports.views.GridView();
+                    break;
+                case "chart":
+                    singleView = new CQ.reports.views.SingleChartView({
+                            "chartId": this.renderType.chart
+                        });
+                    break;
+            }
+            if (singleView) {
+                this.view = new CQ.reports.views.TopLevelView({
+                        "ensureMinimumSize": false,
+                        "regularReportView": new CQ.reports.views.SingleView({
+                                "view": singleView
+                            }),
+                        "rightMargin": 0,
+                        "bottomMargin": 0,
+                        "width": this.renderType.width,
+                        "height": this.renderType.height
+                    });
+            }
+        }
+        this.requestSyncer.finishWithSuccess();
+    },
+
+    /**
+     * Loads the charting configuration.
+     * @private
+     */
+    loadChartingConfig: function() {
+        this.requestSyncer.registerRequest();
+        CQ.Ext.Ajax.request({
+                "method": "GET",
+                "url": CQ.HTTP.externalize(this.componentPath + "/charting.infinity.json"),
+                "success": function(response) {
+                        var result = null;
+                        if (response && (response.status == 200)) {
+                            try {
+                                result = CQ.Util.formatData(CQ.Ext.util.JSON.decode(
+                                        response.responseText));
+                            } catch (e) {
+                                // catch exceptions that originate from parsing a non-JSON Sling
+                                // response
+                            }
+                        }
+                        this.onChartingConfigLoaded(result);
+                    },
+                "failure": function() {
+                        this.onChartingConfigLoaded(null);
+                    },
+                "scope": this
+            });
+    },
+
+    /**
+     * @private
+     */
+    onChartingConfigLoaded: function(result) {
+        this.charts = [ ];
+        this.activeCharts = [ ];
+        if (result) {
+            if (result.definitions) {
+                var chartCnt = result.definitions.length;
+                for (var c = 0; c < chartCnt; c++) {
+                    var chartConfig = result.definitions[c];
+                    if (chartConfig.id === undefined) {
+                        chartConfig.id = "id-" + c;
+                    }
+                    if (this.renderType && (this.renderType.chartLayout != null)) {
+                        chartConfig.preferredLayout = this.renderType.chartLayout;
+                    }
+                    this.charts.push(new CQ.reports.ChartDefinition(chartConfig));
+                }
+            }
+            if (result.settings) {
+                if (result.settings.active) {
+                    var activeCharts = result.settings.active;
+                    var settingsCnt = activeCharts.length;
+                    for (var s = 0; s < settingsCnt; s++) {
+                        var chartDef = activeCharts[s];
+                        if (chartDef.id !== undefined) {
+                            var chart = this.getChartById(chartDef.id);
+                            if (chart) {
+                                this.activeCharts.push(chart);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // todo load instance settings
+        this.requestSyncer.finishWithSuccess();
+    },
+
+    /**
+     * Gets a chart definition by the specified ID.
+     * @param {String} id The chart ID
+     * @return {CQ.reports.ChartDefinition} The chart definition; null, if no chart
+     *         definition is available for the specified chart ID
+     * @private
+     */
+    getChartById: function(id) {
+        var chartCnt = this.charts.length;
+        for (var c = 0; c < chartCnt; c++) {
+            if (this.charts[c].id == id) {
+                return this.charts[c];
+            }
+        }
+        return null;
+    },
+
+    /**
+     * Determines if the report currently has active charts.
+     * @return {Boolean} True if the report currently has active charts
+     */
+    hasActiveCharts: function() {
+        return (this.activeCharts.length > 0);
+    },
+
+    /**
+     * <p>Loads the column defs.</p>
+     * <p>Should be used after all columns have been added.</p>
+     * @private
+     */
+    loadColumnDefs: function() {
+        var colCnt = this.columns.length;
+        for (var c = 0; c < colCnt; c++) {
+            this.columns[c].loadDef(this.requestSyncer);
+        }
+    },
+
+    /**
+     * Renders the report by the current view (if available).
+     * @private
+     */
+    render: function() {
+        this.destEl = CQ.Ext.get(this.destEl);
+        var toolbar = CQ.reports.utils.EditUtils.createToolbar(this);
+        if (toolbar) {
+            var tbPanel = new CQ.Ext.Panel({
+                    "items": [ toolbar ],
+                    "header": false,
+                    "footer": false,
+                    "cls": "cq-reports-gridview",
+                    "style": "padding: 1px 1px 12px 1px;"
+                });
+            tbPanel.render(this.destEl);
+        }
+        if (this.view) {
+            this.view.render(this.destEl, this);
+        }
+    },
+
+    /**
+     * Forces the view to reload data and adjust visually.
+     * @private
+     */
+    reload: function(isForced) {
+        if (this.view) {
+            this.view.reload(isForced);
+        }
+    },
+
+    /**
+     * Returns the path to be used for retrieving data.
+     * @return {String} The path to be used for retrieving data
+     */
+    getDataRequestPath: function() {
+        return CQ.HTTP.externalize(this.reportPath + "." + this.reportSelector
+                        + CQ.HTTP.EXTENSION_JSON);
+    },
+
+    /**
+     * <p>Initializes the report by loading column definitions, initial data and rendering
+     * the view.</p>
+     * <p>All available columns must have been added beforehand.</p>
+     * <p>Initialization is executed asynchroneously, so the method will return before
+     * the data is loaded and the report is actually displayed.</p>
+     * @param {CQ.Ext.Element|String} destEl The DOM element the report view has to be
+     *        rendered to
+     */
+    init: function(destEl) {
+        if (this.isSingleViewRendering()) {
+            // workaround: hide "parbase" div, which takes some place, but is not required
+            // in this context
+            var divs = document.getElementsByTagName("div");
+            var divCnt = divs.length;
+            for (var d = 0; d < divCnt; d++) {
+                var attribName = (CQ.Ext.isIE6 || CQ.Ext.isIE7 ? "className" : "class");
+                var classAttrib = divs[d].getAttribute(attribName);
+                if (classAttrib && (classAttrib.indexOf("parbase") >= 0)
+                        && (classAttrib.indexOf("reportbase") >= 0)) {
+                    divs[d].style.display = "none";
+                    break;
+                }
+            }
+        }
+        this.destEl = destEl;
+        this.requestSyncer = new CQ.reports.utils.RequestSync({
+                "onLoadFn": function() {
+                        this.render();
+                        this.reload();
+                    }.createDelegate(this),
+                "onErrorFn": function() {
+                         CQ.Notification.notify(null,
+                                 CQ.I18n.getMessage("Could not load report from server."));
+                    }.createDelegate(this)
+            });
+        this.requestSyncer.block();
+        this.colLoadCounter = 0;
+        this.loadViewConfig();
+        this.loadChartingConfig();
+        this.loadColumnDefs();
+        this.requestSyncer.unblock();
+    },
+
+    /**
+     * Finishes the report by creating a version where snapshots are taken from.
+     * @param {String} title The label for the report version (optional)
+     * @param {String} description The description for the report version (optional)
+     * @param {String} snapshotMode The snapshot mode for the finished report (optional)
+     */
+    finish: function(title, description, snapshotMode) {
+        var url = CQ.HTTP.externalize(this.reportPath + "." + this.finishSelector
+                + CQ.HTTP.EXTENSION_JSON);
+        var params = null;
+        if (title || description || snapshotMode) {
+            params = { };
+            if (title) {
+                params["title"] = title;
+            }
+            if (description) {
+                params["description"] = description;
+            }
+            if (snapshotMode) {
+                params["snapshots"] = snapshotMode;
+            }
+            params["_charset_"] = "utf-8";
+        }
+        CQ.Ext.Ajax.request({
+                "method": "POST",
+                "url": url,
+                "params": params,
+                "success": function(response) {
+                        var isSuccess = false;
+                        var result = null;
+                        if (response && (response.status == 200)) {
+                            try {
+                                result = CQ.Util.formatData(CQ.Ext.util.JSON.decode(
+                                        response.responseText));
+                                isSuccess = (result.success === true);
+                                if (isSuccess) {
+                                    this.finished = true;
+                                    if (snapshotMode) {
+                                        this.snapshotMode = snapshotMode;
+                                    }
+                                }
+                            } catch (e) {
+                                // Status may be erroneously reported as 200, when actually
+                                // another status has been generated; so we'll have to catch
+                                // exceptions that originate from parsing "presumed JSON"
+                                // that actually contains a Sling message
+                            }
+                        }
+                        if (isSuccess) {
+                            CQ.reports.utils.EditUtils.toggleSnapshotSwitch(true);
+                            CQ.Util.reload();
+                            /*
+                            CQ.Notification.notify(null,
+                                    CQ.I18n.getMessage("Report finished successfully."));
+                            if (this.view) {
+                                this.view.notifyFinished();
+                            }
+                            */
+                        } else {
+                            CQ.Notification.notify(null,
+                                    CQ.I18n.getMessage("Could not finish report."));
+                        }
+                    },
+                "failure": function() {
+                        CQ.Notification.notify(null,
+                                CQ.I18n.getMessage("Could not finish report."));
+                    },
+                "scope": this
+            });
+    },
+
+    /**
+     * Adjusts the state of the report to the specified sorting and calls the notification
+     * methods on the view if necessary.
+     * @param {String} col Column's data ID
+     * @param {String} dir Sorting direction
+     */
+    adjustSorting: function(col, dir) {
+        var sortedIndex = (col ? this.getColumnIndexForDataId(col) : -1);
+        if (sortedIndex >= 0) {
+            var colDef = this.columns[sortedIndex];
+            if (!colDef.isSorted() || (colDef.getSortingDirection() != dir)) {
+                this.fireSortingChanged(sortedIndex, dir);
+            }
+        }
+        var colCnt = this.columns.length;
+        for (var c = 0; c < colCnt; c++) {
+            if (c == sortedIndex) {
+                this.columns[c].setSorting(true, dir);
+            } else {
+                this.columns[c].setSorting(false);
+            }
+        }
+    },
+
+    /**
+     * Retrieves the column for the specified data ID (aka the column's label).
+     * @param {String} dataId The data ID to determine the column for
+     * @return {Number} The corresponding column index; -1 if no column is available
+     *         for the specified data ID
+     */
+    getColumnIndexForDataId: function(dataId) {
+        var colCnt = this.columns.length;
+        for (var c = 0; c < colCnt; c++) {
+            var col = this.columns[c];
+            if (col.getDataId() == dataId) {
+                return c;
+            }
+        }
+        return -1;
+    },
+
+    /**
+     * Retrieves the column index of the specified column.
+     * @param {CQ.reports.Column} col The column
+     * @return {Number} The column's index; -1 if the column is not available for the report
+     */
+    getColumnIndex: function(col) {
+        var colCnt = this.columns.length;
+        for (var c = 0; c < colCnt; c++) {
+            if (col == this.columns[c]) {
+                return c;
+            }
+        }
+        return -1;
+    },
+
+    /**
+     * Creates a list of columns currently used for grouping.
+     * @private
+     */
+    createGroupedColumns: function() {
+        var groupedCols = [ ];
+        var colCnt = this.columns.length;
+        for (var c = 0; c < colCnt; c++) {
+            var col = this.columns[c];
+            if (col.isGrouped()) {
+                groupedCols.push({
+                        "index": c,
+                        "data": col
+                    });
+            }
+        }
+        return groupedCols;
+    },
+
+    /**
+     * Creates a list of currently sorted columns.
+     * @private
+     */
+    createSortedColumns: function() {
+        var sortedCols = [ ];
+        var colCnt = this.columns.length;
+        for (var c = 0; c < colCnt; c++) {
+            var col = this.columns[c];
+            if (col.isSorted()) {
+                sortedCols.push({
+                        "index": c,
+                        "data": col
+                    });
+            }
+        }
+        return sortedCols;
+    },
+
+    fireStructureChanged: function() {
+        if (this.view) {
+            this.view.notifyStructureChanged();
+        }
+    },
+
+    fireSortingChanged: function(colIndex, dir) {
+        if (this.view) {
+            this.view.notifySortingChanged(colIndex, dir);
+        }
+    }
+
+});
+
+CQ.reports.Report.theInstance = new CQ.reports.Report();
+
+/**
+ * Processing mode: Report data is processed on the serverside. Each change in grouping,
+ * aggregation, filtering, etc. requires a server roundtrip. The report may be created
+ * interactively - that means that it is always updated on each change, requiring a
+ * server roundtrip.
+ */
+CQ.reports.Report.PMODE_SERVER_INTERACTIVE = "server-interactive";
+
+/**
+ * Processing mode: Report data is processed on the serverside. Each change in grouping,
+ * aggregation, filtering, etc. requires a server roundtrip. The report is not updated
+ * interactively.
+ */
+CQ.reports.Report.PMODE_SERVER = "server";
+
+/**
+ * Snapshot mode: No snapshots
+ */
+CQ.reports.Report.SMODE_NONE = "never";
+
+/**
+ * Snapshot mode: Hourly snapshots
+ */
+CQ.reports.Report.SMODE_HOURLY = "hourly";
+
+/**
+ * Snapshot mode: Daily snapshots
+ */
+CQ.reports.Report.SMODE_DAILY = "daily";
+
+/**
+ * Stub for empty results
+ * @private
+ */
+CQ.reports.Report.EMPTY_RESULT = {
+        "hits": [ ]
+    };

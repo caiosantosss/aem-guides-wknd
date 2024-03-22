@@ -1,0 +1,1318 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproducxtion of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+(function(document, $) {
+    "use strict";
+    var registry = $(window).adaptTo("foundation-registry");
+    registry.register("foundation.validation.validator", {
+            selector: "[data-validation='imgpreset.numinp']",
+            validate: function(el_) {
+            	var el = $(el_);
+            	if(el.find('input').val() == ""){
+            		if(el.hasClass("empty")){
+            			el.removeClass("empty");
+                		el.closest(".thirdwidth-field").addClass("thirdfield-emptytooltip");
+            			return "Please fill out this field.";
+            		}
+            		return "";
+            	} else {
+            		el.closest(".thirdwidth-field").removeClass("thirdfield-emptytooltip");
+            	}
+            	if(el.find('input').get(0).validity.valid) {
+            		el.find('input').removeClass('error');
+            	} else {
+            		if(el.find('input').get(0).validity.stepMismatch && el.attr('id') != "threshold") {
+                		el.find('input').removeClass('error');
+            		} else {
+                		el.find('input').addClass('error');	 
+            		}
+            	}
+            	if(el.attr('id') == "threshold"){
+            		if(el.find('input').get(0).validity.stepMismatch){
+            			el.closest(".thirdwidth-field").addClass("thirdfield-widetooltip");
+            			return "Value must be an integer with a minimum value of 0 and a maximum value of 255";
+            		} else {
+	            		el.closest(".thirdwidth-field").removeClass("thirdfield-widetooltip");
+	            		$(el.parent()).find("coral-tooltip").on("coral-overlay:close", function(e) {
+	                        doPreview();
+	                    });
+	                }
+            	}
+		    }
+        });
+    
+})(document, Granite.$);
+
+var resourcePath;
+var cloudConfigRoot;//support lazy migration upon edit for BC
+
+//used as uuid for presets that are being edited
+var oldName;
+
+//CREATE|UPDATE
+var mode;
+
+//CREATE|UPDATE
+var previewIsBlocked = false;
+
+var compDependences = {
+	"wid": {"isdisabled": false, "selectors":["#wid"]},
+	"hei": {"isdisabled": false, "selectors":["#hei"]},
+	"printres": {"isdisabled": false, "selectors":["#printres"]},
+	"fmt": {"isdisabled": false, "selectors":["#fmt button",
+	                                      "#gifClrQtzwrapper_type button",
+	                                      "#gifClrQtzwrapper_dither button",
+	                                      "input[name='gifClrQtzwrapper_clrList']",
+	                                      "#gifClrQtzwrapper_clrNm",
+	                                      "#fmt_compression button",
+	                                      "#colorspace button"]},
+	"quantize": {"isdisabled": false, "selectors":["#gifClrQtzwrapper_type button",
+	                                         "#gifClrQtzwrapper_dither button",
+	                                         "input[name='gifClrQtzwrapper_clrList']",
+	                                         "#gifClrQtzwrapper_clrNm"]},
+	"op_sharpen": {"isdisabled": false, "selectors":["#op_sharpen"]},
+	"resmode": {"isdisabled": false, "selectors":["#resmode button"]},
+	"op_usm": {"isdisabled": false, "selectors":["#op_usm button", "#amount", "#radius", "#threshold", "#usm_apply  button"]},
+    "colorprofile" : {"isdisabled": false, "selectors" : ["#colorprofile"]},
+    "renderintent" : {"isdisabled": false, "selectors" : ["#renderintent"]},
+    "blackpoint" : {"isdisabled": false, "selectors" : ["#blackpoint"]},
+    "dithering" : {"isdisabled": false, "selectors" : ["#dithering"]},
+	"embedprofile" : {"isdisabled" : false, "selectors" : ["#embedprofile"]}
+};
+
+//CONSTANTS
+var CONST_FMT_COMPRESSION_LZW_OPTION = "LZW";
+var CONST_FMT_COMPRESSION_JPEG_OPTION = "JPEG";
+var CONST_FMT_COMPRESSION_ZIP_OPTION = "ZIP";
+var CONST_FMT_COMPRESSION_NONE_OPTION = "NONE";
+
+var CONST_MAX_LENGTH_FOR_NAME = 100;
+
+var CONST_GIFCOLORQUANTIZETYPE_ADAPTIVE_OPTION = "Adaptive";
+var CONST_GIFCOLORQUANTIZETYPE_WEB_OPTION = "Web";
+var CONST_GIFCOLORQUANTIZETYPE_MACINTOSH_OPTION = "Macintosh";
+
+var CONST_GIFCOLORDITHER_DIFFUSE_OPTION = "Diffuse";
+ 
+var CONST_RENDERINTENT_ABSOLUTE = "Absolute Colorimetric";
+var CONST_RENDERINTENT_PERCEPTUAL = "Perceptual";
+var CONST_RENDERINTENT_RELATIVE = "Relative Colorimetric";
+var CONST_RENDERINTENT_SATURATION = "Saturation";
+var CONST_RENDERINTENT_COLOR_PROFILE_INTENT = "Color Profile Intent";
+
+$(document).on('foundation-contentloaded', function(){	
+	function initWhenReady(){
+		$("#amount").find('input').addClass("skip-default-validation");
+		$("#radius").find('input').addClass("skip-default-validation");
+
+	    // change validation for coral-numberinput 
+		var registry = $(window).adaptTo("foundation-registry");
+	    var rg = registry.get("foundation.validation.validator");
+    	for(var i=0; i< rg.length; i++){
+	    	var cur=rg[i];
+	    	if(cur.selector == "coral-numberinput") {
+	    		cur.validate = function(el_) {
+	            	var el = el_;
+			        if (el.max !== null && el.valueAsNumber > el.max) {
+			            return Granite.I18n.get("Please enter a value that is no more than {0}.", [ el.max ], "{0}=max number");
+			        }
+			
+			        if (el.min !== null && el.valueAsNumber < el.min) {
+			            return Granite.I18n.get("Please enter a value that is no less than {0}.", [ el.min ], "{0}=min number");
+			        }
+	    		}
+	    	}
+	    }
+
+		for(var prop in compDependences){
+			var curcomp = compDependences[prop];
+			for(var i=0; i < curcomp.selectors.length; i++){
+				var selector = curcomp.selectors[i];
+				if(prop == "op_usm" && selector != curcomp.selectors[0]){
+					if(curcomp.isdisabled){
+						$(selector).attr("disabled", "disabled");
+					} else {
+						if ($('#op_usm').val() == "2") {
+							$(selector).removeAttr("disabled");
+						}
+					}
+				} else {
+					if(curcomp.isdisabled){
+						$(selector).attr("disabled", "disabled");
+					} else {
+						$(selector).removeAttr("disabled");
+					}
+				}
+			}
+		}
+    
+		initializeEditorMode();
+
+               // mapping label for form mode
+               $(".width-label label").prop("id","width-label");
+               $(".height-label label").prop("id","height-label");
+               $(".format-label label").prop("id","format-label");
+               $(".compression-label label").prop("id","compression-label");
+               $(".type-label label").prop("id","type-label");
+               $(".nocolors-label label").prop("id","nocolor-label");
+               $(".dither-label label").prop("id","dither-label");
+               $(".colorlist-label label").prop("for","colorlist");
+               $(".colorspace-label label").prop("id","colorspace-label");
+               $(".colorprofile-label label").prop("id","colorprofile-label");
+               $(".renderintent-label label").prop("id","renderintent-label");
+               $(".blapnt-label label").prop("id","blkpnt-label");
+               $(".dithering-label label").prop("id","dithering-label");
+               $(".stype-label label").prop("id","stype-label");
+               $(".apply-label label").prop("id","apply-label");
+               $(".amount-label label").prop("id","amount-label");
+               $(".radius-label label").prop("id","radius-label");
+               $(".threshold-label label").prop("id","threshold-label");
+               $(".resample-label label").prop("id","resample-label");
+               $(".printresol-label label").prop("id","prntreso-label");
+               $(".name-label label").prop("for","imgPresetName");
+               $("#wid").prop("labelledBy","width-label");
+               $("#hei").prop("labelledBy","height-label");
+               $("#fmt button").attr("aria-labelledby","format-label");
+               $("#gifClrQtzwrapper_type button").attr("aria-labelledby","type-label");
+               $("#fmt_compression button").attr("aria-labelledby"," compression-label");
+               $("#gifClrQtzwrapper_clrNm").prop("labelledBy","nocolor-label");
+               $("#gifClrQtzwrapper_dither button").attr("aria-labelledby","dither-label");
+               $( "input[name=gifClrQtzwrapper_clrList]").attr("id","colorlist");
+               $("#colorspace button").attr("aria-labelledby","colorspace-label");
+               $("#colorprofile button").attr("aria-labelledby","colorprofile-label");
+               $("#renderintent button").attr("aria-labelledby","renderintent-label");
+               $("#blackpoint button").attr("aria-labelledby","blkpnt-label");
+               $("#dithering button").attr("aria-labelledby","dithering-label");
+               $("#op_usm button").attr("aria-labelledby","stype-label");
+               $("#usm_apply button").attr("aria-labelledby","apply-label");
+               $("#amount").prop("labelledBy","amount-label");
+               $("#radius").prop("labelledBy","radius-label");
+               $("#threshold").prop("labelledBy","threshold-label");
+               $("#resmode button").attr("aria-labelledby","resample-label");
+               $("#printres").prop("labelledBy","prntreso-label");
+               $(".modifierlabel label").prop("for","extramodifiers");
+               $(".quality-label label").prop("id","quality-label");
+               $("#qlt_slider")[0].labelledBy = "quality-label";
+               $("#qlt_input").attr("aria-labelledby","quality-label");
+        
+		if(mode == "CREATE") {
+			$('#profile-label').html(Granite.I18n.get('New Preset'));
+		} else {
+			$('#profile-label').html(Granite.I18n.get('Edit Preset'));
+		}
+
+		var renderintentOverrides = {};
+		renderintentOverrides[CONST_RENDERINTENT_RELATIVE] = "relative";
+		renderintentOverrides[CONST_RENDERINTENT_ABSOLUTE] = "absolute";
+		renderintentOverrides[CONST_RENDERINTENT_COLOR_PROFILE_INTENT] = "";
+		var fmtOverrides = {};
+		fmtOverrides[Granite.I18n.get("GIF with alpha")] = "gif-alpha";
+		fmtOverrides[Granite.I18n.get("PNG with alpha")] = "png-alpha";
+		fmtOverrides[Granite.I18n.get("TIFF with alpha")] = "tif-alpha";
+		fmtOverrides[Granite.I18n.get("Progressive JPEG")] = "pjpeg";
+		fmtOverrides[Granite.I18n.get("TIFF")] = "tif";
+		if (Granite.Toggles.isEnabled("ft-CQ-4324827")) {
+			rebuildSelectControl("#fmt", 
+								["JPEG","EPS","GIF","GIF with alpha","PDF","PNG","PNG with alpha","TIFF","TIFF with alpha","Progressive JPEG"], 
+								null,
+								fmtOverrides);
+			rebuildSelectControl("#renderintent", 
+								[CONST_RENDERINTENT_RELATIVE, CONST_RENDERINTENT_ABSOLUTE, CONST_RENDERINTENT_PERCEPTUAL, CONST_RENDERINTENT_SATURATION, CONST_RENDERINTENT_COLOR_PROFILE_INTENT], 
+								null,
+								renderintentOverrides);
+		} else {
+			rebuildSelectControl("#fmt", 
+								["JPEG","EPS","GIF","GIF with alpha","PDF","PNG","PNG with alpha","TIFF","TIFF with alpha"], 
+								null,
+								fmtOverrides);
+			rebuildSelectControl("#renderintent", 
+								[CONST_RENDERINTENT_RELATIVE, CONST_RENDERINTENT_ABSOLUTE, CONST_RENDERINTENT_PERCEPTUAL, CONST_RENDERINTENT_SATURATION], 
+								null,
+								renderintentOverrides);
+		}	
+
+		//setup char entry restrictions for imagePreset name
+		$("#imgPresetName").off('keypress');
+		$("#imgPresetName").on('keypress', alphaNumericFilterKeypress)
+	
+		//setup char entry restrictions for fields that are numeric
+		$("#wid").off('keypress');
+		$("#wid").on('keypress', noZeroForFirstCharFilterKeypress)
+		$("#hei").off('keypress');
+		$("#hei").on('keypress', noZeroForFirstCharFilterKeypress)
+		
+		$("#gifClrQtzwrapper_clrNm").off('keypress');
+		$("#gifClrQtzwrapper_clrNm").on('keypress', noZeroForFirstCharFilterKeypress);
+    
+		$("input[name='gifClrQtzwrapper_clrList']").on('keyup', function(evt) {
+			// check for multiple hex values
+			var clr = $(evt.currentTarget).val();
+			var arr = clr.split(',');
+			var error = false;
+			var i = 0;
+			var len = arr.length;
+				
+			if(len > 1) {           
+				for(i=0;i<len;i++) {
+				   if(!validHexidecimal(arr[i])) {
+						error = true;
+						break;
+					}
+				}
+			} else {
+				error = !validHexidecimal(clr);
+			}
+				
+			if(error && clr !== '') {
+				//show error
+				$(evt.currentTarget).addClass("error");
+                $("#gifClrQtzwrapper_clrListErrorTooltip").attr("open", "true");
+				$("#gifClrQtzwrapper_clrListErrorTooltip").css('display', 'inherit');
+				$("#save-button").attr("disabled", "disabled");
+			} else {
+				//hide error
+				$(evt.currentTarget).removeClass("error");
+				$("#gifClrQtzwrapper_clrListErrorTooltip").css('display', 'none');
+			}
+			enableSave();
+		});
+	
+		$("#printres").off('keypress');
+		$("#printres").on('keypress', noZeroForFirstCharFilterKeypress);
+		
+		$("#printres").off('keyup change');
+		$("#printres").on('keyup change', function(evt) {
+			var val = $("#printres").val();
+			
+			if(val.substring(0, 1) === "0" && val.length > 0) {
+				//show error
+				$("#printres").addClass("error");
+				$("#printresErrorTooltip").attr("open", "true");
+				$("#printresErrorTooltip").css("display", "inherit");
+				$("#save-button").attr("disabled", "disabled");
+			} else {
+				//hide error
+				$("#printres").removeClass("error");
+				$("#printresErrorTooltip").css("display", "none");
+				enableSave();
+			}
+		});
+		
+		//handle unsharpen mask fields
+		$("#amount").off('keyup change');
+		$('#amount').on('keyup change', validateUnsharpenFieldChange);
+		$("#radius").off('keyup change');
+		$('#radius').on('keyup change', validateUnsharpenFieldChange);
+		$("#threshold").off('keyup change');
+		$('#threshold').on('keyup change', validateUnsharpenFieldChange);    
+		
+		function forceValidate(el){
+			if(el.val() == "") {
+				el.addClass('empty');
+		        var api = el.adaptTo("foundation-validation");
+		        if (api) {
+		            api.checkValidity();
+		            api.updateUI();
+		        }
+			}
+		}
+
+		$("#gifClrQtzwrapper_clrNm").focusout(function(){
+			forceValidate($(this));
+		});
+		$("#amount").focusout(function(){
+			forceValidate($(this));
+		});
+		$("#radius").focusout(function(){
+			forceValidate($(this));
+		});
+		$("#threshold").focusout(function(){
+			forceValidate($(this));
+		});
+	    
+		//initially hide the gif options, compression and pjpeg options 
+		$("#fmt_compression_wrapper").css("display", "none");
+		$("#fmt_progressivejpegscan_wrapper").css("display", "none");
+		$('#gifClrQtzwrapper').hide();
+	
+		previewIsBlocked = true;
+	
+		setUnsharpMaskFields();
+		
+		//add or remove CMYK option for colorspace
+		addRemoveColorSpaceOpt(cmykSupportedFormat($('#fmt').val()));
+		//Get list of Color Profiles
+		generateColorProfileOptions(cmykSupportedFormat($('#fmt').val()));
+
+		if(!CONST_USE_ICC_OBJ) {
+			$('#colorprofile').prop('disabled', true);
+			disableICCModifiers(true);
+
+		}
+			
+		previewIsBlocked = false;
+	
+		$(".error-msg").css("display", "none");
+		
+		$('.infoTip').hide();
+		
+		$(document).on('click', '.icon-info-circle', function() {
+			var id = this.id + '-detail';
+			if(id != "btn-imgextramodifiers-info-detail") {
+				$('#btn-imgextramodifiers-info-detail').hide();
+			}
+			var $el 	= $('#' + id);
+			var visible = $el.css('display') !== 'none';
+			
+			if($('.infoTip[id='+id+']').data('isfocused') == 'true'){
+				$('.infoTip').data('isfocused', 'false');
+				return;
+			}
+			//close all
+			$('.infoTip[id!='+id+']').hide();
+			
+			if(visible) {
+				$el.hide();
+			} else {
+				$el.show();
+			}
+		});
+	
+		$('.icon-info-circle').mouseout(function(event) {
+	
+			var x = event.clientX;
+			var y = event.clientY;
+	
+			var elementOnMouseOver = document.elementFromPoint(x, y);
+			var elementClass=$(elementOnMouseOver).attr('class');
+			
+			var notout;
+			if(elementClass){
+				notout = (elementClass.indexOf("helpinfoico") == -1 && elementClass.indexOf("icon-info-circle") == -1);
+			} else {
+				notout = true;
+			}
+			if(notout){
+				var id = this.id + '-detail';
+				$('.infoTip[id='+id+']').data('isfocused', 'false');
+			}
+		});
+	
+		$("#close-imgextramodifiers-info-detail").off('click');
+		$("#close-imgextramodifiers-info-detail").on('click', function(e){
+			setTimeout(function (){
+				$('.infoTip').hide();
+			}, 0); 
+		});
+		
+		$("#link-imgextramodifiers-info-detail").off('click');
+		$("#link-imgextramodifiers-info-detail").on('click', function(e){
+			setTimeout(function (){
+				$('.infoTip').hide();
+			}, 0); 
+		});
+	
+		$('.icon-info-circle').focusin(function (){
+			var id = this.id + '-detail';
+			$('.infoTip[id='+id+']').show();
+			$('.infoTip[id='+id+']').data('isfocused', 'true');
+		});
+		
+		$('.icon-info-circle').focusout(function (event){
+			if(event.target.id == "btn-imgextramodifiers-info"){
+				setTimeout(function (){
+					$('#btn-imgextramodifiers-info-detail').hide();
+				}, 1000); 
+			} else { 
+				$('.infoTip').hide();
+			}
+		});
+		
+		$('#fmt').off('change selected');
+		$('#fmt').on('change selected', function(e) {
+			var formatVal = $('#fmt').val();
+			
+			$("#fmt_compression_wrapper").css("display", "none");
+			$("#fmt_progressivejpegscan_wrapper").css("display", "none");
+			
+			//reset value to blank if it is invalid and the format changed.
+			if($("input[name='gifClrQtzwrapper_clrList']").val().length > 0 && !validHexidecimal($("input[name='gifClrQtzwrapper_clrList']").val())) {
+				$("input[name='gifClrQtzwrapper_clrList']").val('');
+				$("input[name='gifClrQtzwrapper_clrList']").trigger('change');
+			}
+			
+			var fmtCompressionOverrides = {};
+			fmtCompressionOverrides[CONST_FMT_COMPRESSION_NONE_OPTION] = Granite.I18n.get("none");
+	
+			var gifClrQtzwrapper_typeOverrides = {};
+			gifClrQtzwrapper_typeOverrides[CONST_GIFCOLORQUANTIZETYPE_MACINTOSH_OPTION] = "mac";
+	
+			var showCompression = false;
+			var showClrQtz = false;
+			
+			//handle compression field
+			if (formatVal == "pdf") {
+				rebuildSelectControl("#fmt_compression", 
+									[CONST_FMT_COMPRESSION_NONE_OPTION, CONST_FMT_COMPRESSION_ZIP_OPTION, CONST_FMT_COMPRESSION_JPEG_OPTION], 
+									fmtCompressionOverrides,
+									null);
+	
+				showCompression = true;
+			} else if (formatVal == "tif") {
+				rebuildSelectControl("#fmt_compression", 
+									[CONST_FMT_COMPRESSION_NONE_OPTION, CONST_FMT_COMPRESSION_LZW_OPTION, CONST_FMT_COMPRESSION_JPEG_OPTION, CONST_FMT_COMPRESSION_ZIP_OPTION], 
+									fmtCompressionOverrides,
+									null);
+	
+				showCompression = true;
+			} else if (formatVal == "tif-alpha") {
+				rebuildSelectControl("#fmt_compression", 
+									[CONST_FMT_COMPRESSION_NONE_OPTION, CONST_FMT_COMPRESSION_LZW_OPTION, CONST_FMT_COMPRESSION_ZIP_OPTION], 
+									fmtCompressionOverrides,
+									null);
+	
+				showCompression = true;
+			} else if (formatVal == "gif") {
+				rebuildSelectControl("#gifClrQtzwrapper_type", 
+									[CONST_GIFCOLORQUANTIZETYPE_ADAPTIVE_OPTION, CONST_GIFCOLORQUANTIZETYPE_WEB_OPTION, CONST_GIFCOLORQUANTIZETYPE_MACINTOSH_OPTION], 
+									null,
+									gifClrQtzwrapper_typeOverrides);
+	
+				showClrQtz = true;
+			} else if (formatVal == "gif-alpha") {
+				rebuildSelectControl("#gifClrQtzwrapper_type", 
+									[CONST_GIFCOLORQUANTIZETYPE_ADAPTIVE_OPTION, CONST_GIFCOLORQUANTIZETYPE_WEB_OPTION], 
+									null,
+									gifClrQtzwrapper_typeOverrides);
+	
+				$("#gifClrQtzwrapper_type").val(CONST_GIFCOLORQUANTIZETYPE_ADAPTIVE_OPTION.toLowerCase());
+			}
+	
+			if (showCompression) {
+				$("#fmt_compression_wrapper").css("display", "inline-block");
+	
+				setSelectElementValueAndTriggerSelected("#fmt_compression", CONST_FMT_COMPRESSION_NONE_OPTION.toLowerCase());
+			}
+	
+			if (showClrQtz) {
+				setSelectElementValueAndTriggerSelected("#gifClrQtzwrapper_type", CONST_GIFCOLORQUANTIZETYPE_ADAPTIVE_OPTION.toLowerCase());
+				setSelectElementValueAndTriggerSelected("#gifClrQtzwrapper_dither", CONST_GIFCOLORDITHER_DIFFUSE_OPTION.toLowerCase());
+			}
+	
+			//handle quality field
+			if (formatVal === "jpeg" || formatVal === "pjpeg") {
+				$('#qltwrapper').show();
+			} else {
+				$('#qltwrapper').hide();
+			}
+	
+			if (formatVal === "pjpeg" && DMS7_MODE && DMS7_MODE.toLowerCase() == "true" && Granite.Toggles.isEnabled("ft-CQ-4324827")) {
+				$("#fmt_progressivejpegscan_wrapper").show();
+			}else{
+				$("#fmt_progressivejpegscan_wrapper").hide();
+			}
+
+			// Gif color quantization field
+			if (formatVal === 'gif' || formatVal === 'gif-alpha') {
+				$('#gifClrQtzwrapper').show();
+			} else {
+				$('#gifClrQtzwrapper').hide();
+			}
+	
+			//add or remove CMYK option for colorspace
+			addRemoveColorSpaceOpt(cmykSupportedFormat($('#fmt').val()));
+			generateColorProfileOptions(cmykSupportedFormat($('#fmt').val()));
+            
+            if(formatVal === "png") {
+                setSelectElementValueAndTriggerSelected("#colorprofile", CONST_RGB_DEFAULT);
+            }
+		});
+		
+		$('#imgPresetName').off('paste');
+		$('#imgPresetName').on('paste', function(event) {
+			event.preventDefault();
+			var clipboardData = event.clipboardData || event.originalEvent.clipboardData || window.clipboardData;
+		    var pastedData = clipboardData.getData('text');
+		    var name = $.trim(pastedData);
+		    $("#imgPresetName").val(name.replace(/[\/:[\\\]*|"';?@&=+$,*<>{}%# ]/g, ""));
+		});
+		//check unique name
+		$('#imgPresetName').off('keyup');
+		$('#imgPresetName').on('keyup', function() {
+			var existingPresetJson = JSON.parse(CONST_EXISTING_PRESETS);
+			if (existingPresetJson[$("#imgPresetName").val().toLowerCase()]) {
+				$("#nameErrorTooltip").css("display", "none");
+				$("#imgPresetName").addClass("error");
+				$("#sameNameErrorTooltip").attr("open", "true");
+				$("#sameNameErrorTooltip").css("display", "inherit");
+				$("#save-button").attr("disabled", "disabled");
+				$("#preseteditor-validator-msg-name").addClass("error-duplicate");
+				return;
+			} else {
+				$("#imgPresetName").removeClass("error");
+				$("#sameNameErrorTooltip").css("display", "none");
+			}
+	
+			if ($("#imgPresetName").val().length < 1) {
+				$("#imgPresetName").addClass("error");
+				$("#nameErrorTooltip").attr("open", "true");
+				$("#nameErrorTooltip").css("display", "inherit");
+				$("#save-button").attr("disabled", "disabled");
+				$("#preseteditor-validator-msg-name").removeClass("error-duplicate");
+			} else {
+				$("#imgPresetName").removeClass("error");
+				$("#nameErrorTooltip").css("display", "none");
+			}
+			enableSave();
+		});
+		//check name for space CQ-4194065
+		$('#imgPresetName').off('change');
+		$('#imgPresetName').on('change', function() {
+			
+			var nm = $('#imgPresetName').val();
+			if(nm.indexOf(' ') != -1) {
+				nm = nm.replace(/ /g, '');
+				$('#imgPresetName').val(nm);
+			}
+		});
+		//check range for width
+		$('#wid').off('keyup change');
+		$('#wid').on('keyup change', function() {
+			//blank values are fine
+			if ($('#wid').val() != "" && !validRange($('#wid').val(), 0, CONST_MAX_WID)) {
+				$("#wid").addClass("error");
+				$("#save-button").attr("disabled", "disabled");
+			} else {
+				$("#wid").removeClass("error");
+				doPreview_();
+			}
+		});
+	
+		//check range for hei
+		$('#hei').off('keyup change');
+		$('#hei').on('keyup change', function() {
+			//blank values are fine
+			if ($('#hei').val() != "" && !validRange($('#hei').val(), 0, CONST_MAX_HEI)) {
+				$("#hei").addClass("error");
+				$("#save-button").attr("disabled", "disabled");
+			} else {
+				$("#hei").removeClass("error");
+				doPreview_();
+			}
+		});
+		//check range for numbers of color
+		$('#gifClrQtzwrapper_clrNm').off('keyup change');
+		$('#gifClrQtzwrapper_clrNm').on('keyup change', function() {
+			if ($('#gifClrQtzwrapper_clrNm').val() != "" && !validRange($('#gifClrQtzwrapper_clrNm').val(), 2, 256)) {
+				$("#save-button").attr("disabled", "disabled");
+				$("#gifClrQtzwrapper_clrNm").addClass("error");
+				$("#numOfColorsErrorTooltip").attr("open", "true");
+				$("#numOfColorsErrorTooltip").css("display", "inherit");
+			} else {
+				$("#gifClrQtzwrapper_clrNm").removeClass("error");
+				$("#numOfColorsErrorTooltip").css("display", "none");
+				doPreview_();
+			}
+		});
+	
+		$("#extramodifiers").off('change keyup');
+		$("#extramodifiers").on('change keyup', function() {
+			$("#serverErrorTooltip").css('display', 'none');
+			parseExtramodifiers();
+			doPreview_();
+		});
+	
+		$("#op_sharpen").off('change');
+		$("#op_sharpen").on('change', function() {
+			var selectVal = ($("#op_sharpen").prop("checked") == true) ? "1" : "0";
+	
+			setSelectElementValueAndTriggerSelected("#op_usm", selectVal);
+		});
+	
+		$('#op_usm').off('change selected');
+		$('#op_usm').on('change selected', function() {
+			var checkedVal = ($("#op_usm").val() == "1") ? true : false;
+			$("#op_sharpen").prop('checked', checkedVal);
+	
+			setUnsharpMaskFields();
+		});
+	
+		//global listener
+	
+		$('input').off('change');
+		$('input').on('change', function() {
+			doPreview_();
+		});
+	
+		$('.selectcontrol').on('selected', function(e) {
+			doPreview_();
+		}); 
+		
+		$('#fmt_compression,#gifClrQtzwrapper_type,#gifClrQtzwrapper_dither,#colorspace,#resmode,#usm_apply').off('change');
+		$('#fmt_compression,#gifClrQtzwrapper_type,#gifClrQtzwrapper_dither,#colorspace,#resmode,#usm_apply').on('change', function() {
+			 doPreview_();
+		}); 
+	
+		$('#colorspace').on('change', function () {
+			var isDisabled = ($("#colorprofile").val() == "None" || !CONST_USE_ICC_OBJ);
+			$("#colorprofile").prop("disabled", !CONST_USE_ICC_OBJ);
+            disableICCModifiers(isDisabled);
+			if($("#colorspace").val() == "rgb") {
+				setSelectElementValueAndTriggerSelected("#colorprofile", CONST_RGB_DEFAULT);
+			} else if($("#colorspace").val() == "cmyk") {
+				setSelectElementValueAndTriggerSelected("#colorprofile", CONST_CMYK_DEFAULT);
+			} else {
+				$("#colorprofile").prop("disabled", true);//grayscale has no color profile
+                disableICCModifiers(true);
+			}
+		});
+	
+		$('#colorprofile').on('change', function () {
+            disableICCModifiers(false);
+			if(ICC_PROFILE_MAP[$("#colorprofile").val()] == "RGB") {
+				setSelectElementValueAndTriggerSelected("#colorspace", "rgb");
+			} else if(ICC_PROFILE_MAP[$("#colorprofile").val()] == "CMYK") {
+				setSelectElementValueAndTriggerSelected("#colorspace", "cmyk");
+			} else if($("#colorprofile").val() == "None") {
+                disableICCModifiers(true);
+			}
+		});
+
+		$("#embedprofile").on('change', function() {
+			doPreview_();
+		});
+    
+    $("#qlt_slider").on("change", function (event) {
+            var value = $(event.target).val();
+            $("#qlt_input").val(value);
+			enableSave();
+    });
+    
+    $("#qlt_input").on("keyup", function (event) {
+        var value = ($(event.target).val() && Number($(event.target).val())) || NaN;
+        if (!isNaN(value)) {
+            $("#qlt_slider").val(parseInt(value));
+        }
+		enableSave();
+    });  
+
+	
+    }
+
+//-------------------------------------------------
+
+	var isReadyToUse = false;
+	function tryInit(){
+		var selectComp = $("#usm_apply").get(0);
+	   
+	    Coral.commons.ready(selectComp, function() {
+	    	isReadyToUse = true;
+	    });
+	    if(!isReadyToUse) {
+	    	setTimeout(tryInit, 20);
+	    	return;
+	    }
+	    initWhenReady();
+//        $("#preseteditor").find(".hide").removeClass("hide");
+	}
+
+	tryInit();
+});
+
+function disableICCModifiers(bool) {
+    $('#renderintent').prop('disabled', bool);
+    $('#blackpoint').prop('disabled', bool);
+    $('#dithering').prop('disabled', bool);
+    $('#embedprofile').prop('disabled', bool);
+}
+
+function parseExtramodifiers(){
+	
+	var parseStr = getModifiers();
+    var prefixArr = ["=is{", "}", "=is(", ")", "=ir{", "}", "=ir(", ")"];
+    var prefix;
+    var matchStr;
+    var idx1 = -1;
+    var idx2 = -1;
+    for (var cnt = 0; cnt < prefixArr.length; cnt += 2) {
+        idx1 = 0;
+        prefix = prefixArr[cnt];
+        matchStr = prefixArr[cnt + 1];
+        while ((idx1 = parseStr.indexOf(prefix, idx1)) != -1) {
+            idx2 = parseStr.indexOf(matchStr, idx1);
+            if (idx2 != -1) {
+                parseStr = parseStr.substring(0, idx1) + prefix + escape(parseStr.substring(idx1 + prefix.length(), idx2)) + parseStr.substring(idx2);
+            }
+            idx1++;
+        }
+    }
+	var modpar = parseStr.split('&');
+	var mods = {};
+	for(var i=0;i<modpar.length; i++){
+		var cur = modpar[i];
+		if(cur.indexOf('=') != -1){
+			var curmod = cur.split('=');
+			mods[curmod[0]] = curmod[1];
+		}
+	}
+	
+	for(var prop in compDependences){
+		var curcomp = compDependences[prop];
+		if(mods[prop]){
+			if(curcomp.isdisabled) {
+				continue;
+			}
+			curcomp.isdisabled = true;
+		} else {
+			if(!curcomp.isdisabled) {
+				continue;
+			}
+			curcomp.isdisabled = false;
+		}
+		for(var i=0; i < curcomp.selectors.length; i++){
+			var selector = curcomp.selectors[i];
+			if(prop == "op_usm" && selector != curcomp.selectors[0]){
+				if(curcomp.isdisabled){
+					$(selector).attr("disabled", "disabled");
+				} else {
+					if ($('#op_usm').val() == "2") {
+						$(selector).removeAttr("disabled");
+					}
+				}
+			} else {
+				if(curcomp.isdisabled){
+					$(selector).attr("disabled", "disabled");
+				} else {
+					$(selector).removeAttr("disabled");
+				}
+			}
+		}
+	}
+}
+
+function doPreview_(){
+	if(previewIsBlocked){
+		return;
+	}
+    doPreview();
+}
+
+/**
+ * valueLabelOverrides is a key/value hash. the key is one of the constants in the script header, the override
+ * is generally a value the back end is expecting
+ */
+function rebuildSelectControl(selectId, optionList, optionLabelOverrides, optionValueOverrides) {
+    var selectComp = $(selectId).get(0);
+    var oldSelected = selectComp.selectedItem;
+    if(selectComp.selectedItem){
+    	selectComp.selectedItem.selected = false;	
+    }
+    
+    selectComp.items.clear();
+    var oldexists = false;
+    var defaultselect;
+    if (optionList != undefined && optionList.length > 0) {
+    	for (var i = 0; i < optionList.length; i++) {
+        	var item = {content: { innerHTML: optionList[i]}};
+        	item.value = optionValueOverrides && (optionValueOverrides[optionList[i]] || optionValueOverrides[optionList[i]] == "") ? optionValueOverrides[optionList[i]] : optionList[i].toLowerCase();
+        	if(i == 0) {
+        		defaultselect = item.value;
+        	}
+        	selectComp.items.add(item);
+        	if(oldSelected && item.value == oldSelected.value){
+        		oldexists = true;
+        	}
+    	}
+		selectComp.value = oldexists ? oldSelected.value : defaultselect;
+    }
+}
+
+function getExistingSelectOptionLabels(selectId) {
+    var optList = [];
+    $(selectId).find('option').each(function() {
+        optList.push($(this).text());
+    });
+
+    return optList;
+}
+
+function getExistingPresetNames(targetUrl) {
+    return $.ajax({
+        dataType: "json",
+        url: targetUrl
+    }).pipe(function (response) {
+        return response;
+    });
+}
+
+function setUnsharpMaskFields() {
+	function forceValidate(el){
+        var api = el.adaptTo("foundation-validation");
+        if (api) {
+            api.checkValidity();
+            api.updateUI();
+        }
+	}
+
+	if ($('#op_usm').val() == "2") {
+        $("#usm_apply").find('button').prop("disabled", false);
+        $("#amount").prop("disabled", false);
+        $("#radius").prop("disabled", false);
+        $("#threshold").prop("disabled", false);
+    } else {        
+        $("#usm_apply").find('button').prop("disabled", true);
+
+        $("#amount").val(1);
+        $("#radius").val(1);
+        $("#threshold").val(6);
+        $("#amount").removeClass("error");
+        $("#radius").removeClass("error");
+        $("#threshold").removeClass("error");
+        forceValidate($("#amount"));
+        forceValidate($("#radius"));
+        forceValidate($("#threshold"));
+        $("#amount").prop("disabled", true);
+        $("#radius").prop("disabled", true);
+        $("#threshold").prop("disabled", true);
+    }
+    Coral.commons.nextFrame(function() {
+    	doPreview_();
+    });
+}
+
+function setModeCreateImagePreset(cloudConfigPath) {
+	
+	$('#imgPresetName').removeAttr("disabled");
+
+	resourcePath = cloudConfigPath;
+    mode = "CREATE";
+
+    $("#gifClrQtzwrapper_clrNm").val("256");
+    $("#printres").val("72");
+    $("#wid").val("500");
+    $("#hei").val("500");
+    $("#qlt_slider").val("75");
+    $("#extramodifiers").val("");
+
+	if(ICC_SETTINGS_OBJ) {
+		$('#renderintent').val(ICC_SETTINGS_OBJ['renderintent']);
+		$('#blackpoint').val(ICC_SETTINGS_OBJ['blackpoint'] ? "1" : "0");
+		$('#dithering').val(ICC_SETTINGS_OBJ['dithering'] ? "1" : "0");
+
+		switch (ICC_SETTINGS_OBJ['resmode']) {
+			case "bilinear":
+				$('#resmode').val("bilin");
+				break;
+			case "bicubic":
+				$('#resmode').val("bicub");
+				break;
+			case "sharp2":
+				$('#resmode').val("sharp2");
+				break;
+			default:
+				$('#resmode').val("bisharp");
+		}
+	}
+
+    setTimeout(function() {
+        $('#imgPresetName').focus();
+        setDefaultColorSpaces();
+    }, 100);
+    $('#imgPresetName').focusout(function (event){
+    	$('#imgPresetName').trigger("keyup");
+    });
+    $("#preseteditor").find(".hide").removeClass("hide");
+    doPreview_();
+}
+
+function setModeEditImagePreset(cloudConfigPath, presetInfoUrl, presetName, configRoot) {
+
+	$('#imgPresetName').attr("disabled","true");
+
+    resourcePath = cloudConfigPath;
+    cloudConfigRoot = configRoot;
+    mode = "UPDATE";
+
+    $.ajax({
+      url: presetInfoUrl,
+      cache: false
+    }).done(function(data) {
+        previewIsBlocked = true;
+        for (var i = 0; i < data.length; i++) {
+            if (data[i]["id"] == presetName) {
+                populateFieldsWithEditedData(data[i]);
+                break;
+            }
+        }
+ 		previewIsBlocked = false;
+ 		doPreview_();
+    });
+
+    $("#save-button").removeAttr("disabled");
+}
+
+function cmykSupportedFormat(fmt) {
+    var formats = 'jpeg,pjpeg,pdf,eps,ptif,ptif-alpha,tif,tif-alpha';
+    
+    return (formats.search(fmt) >= 0);
+}
+
+function addRemoveColorSpaceOpt(add) {
+	var prevValue = "rgb";
+    if ($('#colorspace').val() && $('#colorspace').val() != "" && $('#colorspace').val() != null) {
+        //if cmyk isnt supported, it cannot be a value in the first place
+        prevValue = $('#colorspace').val().trim();
+    }
+
+    var colorspaceOverrides = {};
+    colorspaceOverrides[Granite.I18n.get('Grayscale')] = "gray";
+
+    var optionList = [Granite.I18n.get('RGB'), Granite.I18n.get('Grayscale')];
+
+    if(add) { //Add cmyk as a value if it is supported
+        optionList.push(Granite.I18n.get('CMYK'));
+    } else {
+        prevValue = prevValue == 'cmyk' ? 'rgb' : prevValue;
+    }
+
+    rebuildSelectControl("#colorspace", optionList, null, colorspaceOverrides);
+    setSelectElementValueAndTriggerSelected("#colorspace", prevValue);
+}
+
+function generateColorProfileOptions(add) {
+	var optionList = [];
+    var overrides = {};
+	for(var key in ICC_PROFILE_MAP) {
+		if(ICC_PROFILE_MAP.hasOwnProperty(key)) {
+			if(add) {
+                optionList.push(key);
+                overrides[key] = key;
+            } else {
+                if(ICC_PROFILE_MAP[key] != 'CMYK') {
+                    optionList.push(key);
+                    overrides[key] = key;
+                }
+            }
+		}
+	}
+
+    optionList.sort(); //just easier for users to read through... should have a filter though.
+	rebuildSelectControl("#colorprofile", optionList, null, overrides);
+    setDefaultColorSpaces();
+
+}
+
+function setDefaultColorSpaces() {
+    var currentColorSpace = $('#colorspace').val();
+    if(currentColorSpace == "rgb") {
+        setSelectElementValueAndTriggerSelected("#colorprofile", CONST_RGB_DEFAULT);
+    } else if( currentColorSpace == "cmyk") {
+        setSelectElementValueAndTriggerSelected("#colorprofile", CONST_CMYK_DEFAULT);
+    } else {
+        setSelectElementValueAndTriggerSelected("#colorprofile", ""); //we have nothing for gray...sorta
+    }
+}
+
+function populateFieldsWithEditedData(dataObj) {
+	// firefox long initialization of dropdown 
+	var dataObj_ = dataObj;
+	Coral.commons.nextFrame(function() {
+		populateFieldsWithEditedData_(dataObj_);
+		$("#preseteditor").find(".hide").removeClass("hide");
+	});
+}
+
+function populateFieldsWithEditedData_(dataObj) {
+	function checkId(idstr) {
+		var res = /^(?:#([\w-]+))$/.exec(idstr); 
+	    return res != null ? /^(?:#([\w-]+))$/.exec(idstr)[1] : null;
+	}	
+    $("#gifClrQtzwrapper_clrNm").val("256");
+    $("#qlt_slider").val("75");
+
+    $("#radius").val(1);
+    $("#amount").val(1);
+    $("#threshold").val(6);
+    
+    $("#printres").val("72");
+    $("#extramodifiers").val("");
+
+    var key;
+    var value;
+    var element;
+    var settings = dataObj["jcr:content"];
+    
+    $("#wid").val(settings["wid"] == undefined ? "" : settings["wid"]);
+    $("#hei").val(settings["hei"] == undefined ? "" : settings["hei"]);
+
+    //used as UUID
+    oldName = dataObj["id"];
+
+    $("#imgPresetName").val(dataObj["id"]);
+
+    //split apart format value
+    if (settings["fmt"] != undefined) {
+        var fmtColorspaceValues = settings["fmt"].split(",");
+        settings["fmt"] = fmtColorspaceValues[0];
+        settings["colorspace"] = fmtColorspaceValues[1];
+        settings["fmt_compression"] = fmtColorspaceValues[2];
+    }
+
+    if (settings["pscan"] != undefined) {
+    	$("#fmt_progressivejpegscan").val(settings["pscan"]);
+    }
+	
+    //split apart quality value
+    if (settings["qlt"] != undefined) {
+        var qltValues = settings["qlt"].split(",");
+        settings["qlt_slider"] = qltValues[0];
+        settings["qlt_input"] = qltValues[0];
+        settings["chrominance_downsampling"] = qltValues[1];
+    }
+
+    //split apart unsharp mask values
+    if (settings["op_usm"] != undefined) {
+        var amRadThresh = settings["op_usm"].split(",");
+        if (settings["op_usm"] != undefined) {
+            settings["amount"] = amRadThresh[0];
+            settings["radius"] = typeof amRadThresh[1] == 'undefined' ? "0" : amRadThresh[1];
+            settings["threshold"] = typeof amRadThresh[2] == 'undefined' ? "0" : amRadThresh[2];
+            settings["usm_apply"] = typeof amRadThresh[3] == 'undefined' ? "0" : amRadThresh[3];
+            settings["op_usm"] = "2";
+        }
+    } else if (settings["op_sharpen"] == "1") {
+        settings["op_usm"] = "1";
+    } else {
+        settings["op_usm"] = "0";
+    }
+
+    //split apart gif color quantization values
+    if (settings["quantize"] != undefined) {
+        var clrQtz = settings["quantize"].split(",");
+        settings["gifClrQtzwrapper_type"] = clrQtz[0];
+        settings["gifClrQtzwrapper_dither"] = clrQtz[1];
+        settings["gifClrQtzwrapper_clrNm"] = clrQtz[2];
+        var idx =  settings["quantize"].indexOf(clrQtz[2]) + clrQtz[2].length + 1;
+        settings["gifClrQtzwrapper_clrList"] = settings["quantize"].substring(idx, settings["quantize"].length); // The rest settings is for color list
+    }
+
+    if(settings["icc"] != undefined) {
+        var iccObj = settings["icc"].split(",");
+        settings["colorprofile"] = iccObj[0];
+        settings["renderintent"] = iccObj[1];
+        settings["blackpoint"] = iccObj[2] ? iccObj[2] : "0";
+        settings["dithering"] = iccObj[3] ? iccObj[3] : "0";
+    }
+
+	if(settings["iccembed"] != undefined) {
+		settings["embedprofile"] = settings["iccembed"];
+	}
+    
+    for(key in settings){
+        //skip over default jcr fields
+        switch (key) {
+            case "jcr:primaryType":
+            case "jcr:mixinTypes":
+            case "cq:lastReplicationAction":
+            case "cq:lastReplicatedBy":
+			case "chrominanceCorrected":
+            case "cq:lastReplicated":
+            case "uri":
+                    continue;
+                    break;
+            case "dam:extramodifiers":
+                    value = settings[key];
+                    element = "#extramodifiers";
+                    break;
+			case "gifClrQtzwrapper_clrList":
+					value = settings[key];
+					element = "input[name='gifClrQtzwrapper_clrList']";
+            default:
+                    value = settings[key];
+                    element = "#" + key;
+        }
+        if(element.indexOf("$") != -1) {
+            continue;
+        }
+        if(!checkId(element)){
+        	continue;
+        }
+        
+        if(key != "dam:extramodifiers" && value != null && typeof(value) != 'undefined' && value.indexOf("$") == 0) {
+            continue;
+        }
+        if ($(element) != undefined && $(element) != null) {
+            if ($(element).is("#qlt_slider")) {
+                $(element).val(parseInt(value));
+            } else if ($(element).is("input[type=text]")) {
+                $(element).val(value);
+            } else if ($(element).is(".cboxcontrol")) {
+				// chrominance value = 1 means it is disabled.
+				if($(element).attr('id') == "chrominance_downsampling"){
+					$(element).prop('checked', (value != "1"));
+				}else {
+					$(element).prop('checked', (value == "1"));
+				}
+            } else if ($(element).is(".selectcontrol")) {
+                setSelectElementValueAndTriggerSelected(element, value);
+            } else if($(element).is("input[is='coral-textfield']")) {
+                $(element).val(value);
+            } else if($(element).is('.coral-Form-field')) {
+                $(element).val(value);
+            }
+        }
+    }
+
+    parseExtramodifiers();
+
+    setTimeout(function() {
+        $('#imgPresetName').focus();
+        doPreview_();
+    }, 100);
+}
+function setSelectElementValueAndTriggerSelected(selectId, value) {
+	var selectComp = $(selectId).get(0);
+	selectComp.value = value;
+    $(selectComp).trigger("selected");
+}
+
+function getModifiers() {
+    return $("#extramodifiers").val();
+}
+
+/**
+ * keypress handlers.
+ */
+function alphaNumericFilterKeypress(evt) {
+    if ((evt.charCode && isRestricted(evt.charCode)) || $("#imgPresetName").val().length > CONST_MAX_LENGTH_FOR_NAME) {
+        evt.preventDefault();
+    }
+}
+function isRestricted(code) {
+    //invalid char list for JCR: ", ', *, /, :, [, \, ], |
+    //additional        for IPS: ; ? @ & = + $ , < > { } % #
+	// CQ-4194065 ' '
+    var restrictedCharCodes = [32, 34, 39, 42, 47, 58, 91, 92, 93, 124, 59, 63, 64, 38, 61, 43, 36, 44, 60, 62, 123, 125, 37, 35];
+    
+    if ($.inArray(code, restrictedCharCodes) > -1) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+// in case that the invalid chars not get caught with the key press event
+function validateImgPresetName() {
+    var name = $.trim($("#imgPresetName").val());
+    $("#imgPresetName").val(name.replace(/[\/:[\\\]*|"';?@&=+$,*<>{}%#]/g, "-"));
+    return $("#imgPresetName").val();
+}
+
+function noZeroForFirstCharFilterKeypress(evt) {
+    evt = evt || window.event;
+    
+    
+    // block period for ie11  
+    if(evt.keyCode == 46 && evt.key == '.') { 
+    	return false; 
+    }
+    //allow backspace and arrows
+    if(/^(8|37|39|127|46)$/i.test(evt.keyCode)) { 
+    	return; 
+    }
+    
+    var charCode = evt.keyCode || evt.which;
+    var charStr = String.fromCharCode(charCode);
+    var selectionStart = evt.currentTarget.selectionStart
+
+    /*
+     * "" is allowed - it removes the value from the jcr. values of zero are 
+     * generally not allowed and should be handled separately
+     */
+    if (!evt.shiftKey) {
+        if (evt.currentTarget.value.length == 0 || selectionStart == 0) {
+            //0 for first char is not allowed. also if the user has part of the field selected and the zeroth char is
+            //selected we dont allow zero to be entered
+            return /[1-9]/i.test(charStr);
+        } else {
+            //0 after first char is allowed
+            return /[0-9]/i.test(charStr);
+        }
+    } else {
+    	return false;
+    }
+}
+
+validRange = function(val,min,max) {
+    if(val.length<1) {
+        return false;
+    }
+    if( isNaN(val) || val<min || val>max ) {
+        return false;
+    }
+
+    return true;
+}
+
+function validHexidecimal(val) {
+    return /^[0-9A-Fa-f]{6}\b/.test(val);
+}
+
+function getRangeMap() {
+    var rangeMap = new Object();
+    rangeMap["amount"] = 5;
+    rangeMap["radius"] = 250;
+    rangeMap["threshold"] = 255;
+    return rangeMap;
+}
+
+function validateUnsharpenFieldChange(evt) {
+    var rangeMap = getRangeMap();
+    
+    var key = evt.currentTarget.id;
+    var max = rangeMap[key]
+    var val = $(evt.currentTarget).val();
+    var ok = validRange(val,0,max);
+    if(key == "threshold" && $("#threshold input[is='coral-textfield'][invalid]").length != 0) {
+    	ok = false;
+    }
+    if(!ok) {
+        $('#'+key).addClass("error");
+        $('#'+key+'ErrorTooltip').attr("open", "true");
+        $('#'+key+'ErrorTooltip').css("display", "inherit");
+    } else {
+        $('#'+key).removeClass("error");
+        $('#'+key+'ErrorTooltip').css("display", "none");
+    }
+    
+    //reset flag and validate other related fields
+    ok = true;
+    
+    //make sure all other field values are within the valid ranges before enabling save button
+    for(obj in rangeMap){
+        ok = validRange($('#'+obj).val(),0,rangeMap[obj]);
+        if(!ok) {
+        	enableSave();
+            return;
+        }
+    }
+    
+    Coral.commons.nextFrame(function() {
+    	doPreview_();
+    });
+
+}

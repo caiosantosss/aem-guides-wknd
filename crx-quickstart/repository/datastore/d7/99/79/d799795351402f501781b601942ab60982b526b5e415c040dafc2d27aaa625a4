@@ -1,0 +1,573 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2013 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+/**
+ * globals
+ * -------
+ *
+ * {@see ContextHub.Store.Core}
+ * {@see ContextHub.Store.Core.defaultConfig}
+ * {@see ContextHub.Store.Core.prototype.init}
+ * {@see ContextHub.Store.Core.prototype.clean}
+ * {@see ContextHub.Store.Core.prototype.reset}
+ * {@see ContextHub.Store.Core.prototype.setItem}
+ * {@see ContextHub.Store.Core.prototype.getItem}
+ * {@see ContextHub.Store.Core.prototype.removeItem}
+ * {@see ContextHub.Store.Core.prototype.getKeys}
+ * {@see ContextHub.Store.Core.prototype.getTree}
+ * {@see ContextHub.Store.Core.prototype.addAllItems}
+ * {@see ContextHub.Store.Core.prototype.addReference}
+ * {@see ContextHub.Store.Core.prototype.removeReference}
+ * {@see ContextHub.Store.Core.prototype.getReferences}
+ * {@see ContextHub.Store.Core.prototype.resolveReference}
+ * {@see ContextHub.Store.Core.prototype.pauseEventing}
+ * {@see ContextHub.Store.Core.prototype.resumeEventing}
+ * {@see ContextHub.Store.Core.prototype.isEventingPaused}
+ * {@see ContextHub.Store.Core.prototype.announceReadiness}
+ * {@see ContextHub.Store.Core.prototype.onUpdate}
+ */
+
+ContextHub.console.log(ContextHub.Shared.timestamp(), '[loading] contexthub.generic-stores - ContextHub.Store.Core.js');
+
+(function($, window) {
+    'use strict';
+
+    window.ContextHub.Store = window.ContextHub.Store || {};
+
+    /**
+     * In-memory persistence implementation.
+     *
+     * @private
+     * @constant
+     * @type {PersistenceMode}
+     */
+    var inMemoryPersistence =
+        new ContextHub.Utils.Persistence.prototype.PersistenceMode(
+            /* persistence name */
+            'memory',
+
+            /**
+             * Persistence implementation.
+             *
+             * @param {Object} config
+             * @returns {PersistencePublicAPI}
+             */
+            function implementation(config) {
+                /* applying settings */
+                var container = config.container;
+                var storage = config.storage;
+
+                /* returns everything stored in specific storage container */
+                var getTree = function() {
+                    var tree = (($.type(storage) === 'object') ? storage : {})[container];
+                    return ($.type(tree) === 'object') ? tree : {};
+                };
+
+                /* saves entire tree in specific storage container */
+                var saveTree = function(tree) {
+                    storage = ($.type(storage) === 'object') ? storage : {};
+                    storage[container] = tree;
+                };
+
+                /* returns public interface */
+                var prototype = ContextHub.Utils.Persistence.prototype.PersistenceMode.prototype;
+
+                return {
+                    setItem: prototype.setItem.bind(this, saveTree, getTree),
+                    getItem: prototype.getItem.bind(this, getTree),
+                    removeItem: prototype.removeItem.bind(this, saveTree, getTree),
+                    getKeys: function() {
+                        return ContextHub.Utils.JSON.tree.getKeys(getTree());
+                    },
+                    getTree: getTree
+                };
+            }
+        );
+
+    /**
+     * Constructs a ContextHub.Store.Core store.
+     *
+     * @constructor
+     */
+    ContextHub.Store.Core = function() {};
+
+    /**
+     * Initialize this store.
+     *
+     * @param {String} name - store name
+     * @param {Object} config - configuration
+     */
+    ContextHub.Store.Core.prototype.init = function(name, config) {
+        this.config = $.extend(true, {}, ContextHub.Store.Core.defaultConfig, config);
+        this.name = name;
+        this.eventChannel = ContextHub.Constants.EVENT_STORE_UPDATED + ':' + this.name;
+        this.storeDataKey = '/store/' + this.name;
+        this.data = {};
+        this.references = {};
+
+        /* if persistence wasn't set, use in-memory persistence */
+        if (!this.config.persistence) {
+            this.config.persistence = new ContextHub.Utils.Persistence({
+                container: 'data',
+                mode: inMemoryPersistence,
+                storage: this.data
+            });
+        }
+
+        /* if eventing wasn't set, use dummy one */
+        if (!this.config.eventing) {
+            var nothing = function() {};
+
+            this.config.eventing = {
+                trigger: nothing,
+                isPaused: nothing,
+                pause: nothing,
+                resume: nothing
+            };
+        }
+
+        /* return public interface */
+        this.persistence = this.config.persistence;
+        this.eventing = this.config.eventing;
+
+        /* set initial values (existing keys will not be overwritten) */
+        var wasPaused = this.isEventingPaused();
+        this.pauseEventing();
+
+        $.each(this.config.initialValues || {}, function(key, value) {
+            if (!this.getItem(key)) {
+                this.setItem(key, value);
+            }
+        }.bind(this));
+
+        if (!wasPaused) {
+            this.resumeEventing();
+        }
+    };
+
+    /**
+     * Default configuration of ContextHub.Store.Core
+     *
+     * @namespace ContextHub.Store.Core.defaultConfig
+     */
+    ContextHub.Store.Core.defaultConfig = {
+        eventDeferring: 16 * 2,
+        eventing: ContextHub.eventing,
+        persistence: ContextHub.persistence
+    };
+
+    /**
+     * Cleans store's persistence.
+     *
+     * @this ContextHub.Store.Core
+     */
+    ContextHub.Store.Core.prototype.clean = function() {
+        this.removeItem('/');
+    };
+
+    /**
+     * Resets store's persistence. If keepRemainingData is true, all key/value pairs which are not
+     * initial data will not get removed from the persistence.
+     *
+     * @this ContextHub.Store.Core
+     * @param {Boolean} [keepRemainingData] - if true, store won't be cleared before reapplying initial data
+     */
+    ContextHub.Store.Core.prototype.reset = function(keepRemainingData) {
+        var wasPaused = this.isEventingPaused();
+        this.pauseEventing();
+
+        if (!keepRemainingData) {
+            this.clean();
+        }
+
+        this.addAllItems(this.config.initialValues || {});
+
+        if (!wasPaused) {
+            this.resumeEventing();
+        }
+    };
+
+    /**
+     * Stores key/value pair in the persistence. Event 'data' is triggered if current value is different than old value
+     * of specified key. Additionally optional parameter options can override default eventing configuration.
+     * Triggered event contains following information: store name, key, old value, new value, action type ("set").
+     * To skip event triggering, options.silent have to be set to true.
+     *
+     * @this ContextHub.Store.Core
+     * @param {String} key - key name
+     * @param {Object} value - value
+     * @param {Object} [options] - options
+     * @return {Boolean} - true if item was stored, false if old value is the same
+     */
+    ContextHub.Store.Core.prototype.setItem = function(key, value, options) {
+        /* checks if key is just a reference to another key */
+        var resolvedKey = this.resolveReference(key);
+
+        /* value setting logic */
+        var old = this.getItem(resolvedKey);
+        var persistenceNeedsUpdate = true;
+        var type = typeof value;
+
+        /* determine if old value is different than new value */
+        if (typeof old === type) {
+            var isPrimitive = (type === 'string' || type === 'number' || type === 'boolean');
+
+            if (isPrimitive) {
+                persistenceNeedsUpdate = (old !== value);
+            } else {
+                var a = ContextHub.Utils.JSON.stringify(old);
+                var b = ContextHub.Utils.JSON.stringify(value);
+
+                persistenceNeedsUpdate = (a.length !== b.length) || (a !== b);
+            }
+        }
+
+        /* update persistence if needed */
+        if (persistenceNeedsUpdate) {
+            var wasPersisted = this.persistence.setItem(this.storeDataKey + '/' + resolvedKey, value);
+
+            if (wasPersisted && !(options || {}).silent) {
+                this.eventing.trigger(this.eventChannel, {
+                    key: resolvedKey,
+                    value: value,
+                    old: old,
+                    action: 'set'
+                }, $.extend(true, {
+                    defer: this.config.eventDeferring,
+                    _: {
+                        store: this.name,
+                        muteWhenNoData: true
+                    }
+                }, options));
+            }
+        }
+
+        return persistenceNeedsUpdate;
+    };
+
+    /**
+     * Returns value of a specified key.
+     *
+     * @this ContextHub.Store.Core
+     * @param {String} key - key name
+     * @return {Object|null} - value
+     */
+    ContextHub.Store.Core.prototype.getItem = function(key) {
+        /* checks if key is just a reference to another key */
+        var resolvedKey = this.resolveReference(key);
+
+        /* returns value */
+        return this.persistence.getItem(this.storeDataKey + '/' + resolvedKey);
+    };
+
+    /**
+     * Removes specified key and it's value from the persistence. If key was found a 'data' event is triggered.
+     * Triggered event contains following information: store name, key, old value, new value (null), action type ("remove").
+     * To skip event triggering, options.silent have to be set to true.
+     *
+     * @this ContextHub.Store.Core
+     * @param {String} key - key name
+     * @param {Object} [options] - options
+     * @return {Boolean} true - if item was removed
+     */
+    ContextHub.Store.Core.prototype.removeItem = function(key, options) {
+        /* checks if key is just a reference to another key */
+        var resolvedKey = this.resolveReference(key);
+
+        /* value removing logic */
+        var status = false;
+        var old = this.getItem(resolvedKey);
+
+        /* if key was found, remove it */
+        if (old !== null) {
+            status = true;
+            var wasPersisted = this.persistence.removeItem(this.storeDataKey + '/' + resolvedKey);
+
+            if (wasPersisted && !(options || {}).silent) {
+                this.eventing.trigger(this.eventChannel, {
+                    key: resolvedKey,
+                    value: null,
+                    old: old,
+                    store: this.name,
+                    action: 'remove'
+                }, $.extend(true, {
+                    defer: this.config.eventDeferring,
+                    _: {
+                        store: this.name,
+                        muteWhenNoData: true
+                    }
+                }, options));
+            }
+        }
+
+        return status;
+    };
+
+    /**
+     * Returns array of keys of store's persistence. When includeInternals is false, element '_' will be skipped.
+     *
+     * @this ContextHub.Store.Core
+     * @param {Boolean} [includeInternals] - if true, '_' item will be also returned (used by JSONP stores)
+     * @return {Array} - store's keys
+     */
+    ContextHub.Store.Core.prototype.getKeys = function(includeInternals) {
+        var tree = this.persistence.getTree();
+        tree = ContextHub.Utils.JSON.tree.getItem(tree, this.storeDataKey) || {};
+
+        if (!includeInternals) {
+            delete tree._;
+        }
+
+        return ContextHub.Utils.JSON.tree.getKeys(tree);
+    };
+
+    /**
+     * Returns store's persistence tree. When includeInternals is false, element '_' will be skipped.
+     *
+     * @this ContextHub.Store.Core
+     * @param {Boolean} [includeInternals] - if true, '_' item will be also returned (used by JSONP stores)
+     * @return {Object|{}} - store's data
+     */
+    ContextHub.Store.Core.prototype.getTree = function(includeInternals) {
+        var tree = this.persistence.getItem(this.storeDataKey) || {};
+
+        if (!includeInternals) {
+            delete tree._;
+        }
+
+        return tree;
+    };
+
+    /**
+     * Merges passed tree with store's persistence.
+     *
+     * @this ContextHub.Store.Core
+     * @param {Object} tree - json data object
+     * @param {Object} [options] - options
+     * @return {Boolean} - true if value was stored, false if old value is the same
+     */
+    ContextHub.Store.Core.prototype.addAllItems = function(tree, options) {
+        var type = $.type(tree);
+        var self = this;
+        var persistenceModified = false;
+
+        /* accept only object or array */
+        if (type === 'object' || type === 'array') {
+            $.each(tree, function(key, value) {
+                var status = self.setItem(key, value, options);
+                persistenceModified = persistenceModified || status;
+            });
+        }
+
+        return persistenceModified;
+    };
+
+    /**
+     * Creates a reference to another key ("foo" -> "bar").
+     *
+     * @this ContextHub.Store.Core
+     * @param {String} key - key name
+     * @param {String} anotherKey - another key name
+     * @return {Boolean} true - if reference was added
+     */
+    ContextHub.Store.Core.prototype.addReference = function(key, anotherKey) {
+        var keyChunks = ContextHub.Utils.JSON.tree.sanitizeKey(key);
+        var anotherKeyChunks = ContextHub.Utils.JSON.tree.sanitizeKey(anotherKey);
+        var status = false;
+
+        /* add reference if both keys are valid */
+        if (keyChunks && anotherKeyChunks) {
+            var referenceSourceKey = '/' + keyChunks.join('/');
+            var referenceDestinationKey = '/' + anotherKeyChunks.join('/');
+
+            if (referenceSourceKey !== referenceDestinationKey) {
+                status = true;
+                this.references[referenceSourceKey] = referenceDestinationKey;
+            }
+        }
+
+        return status;
+    };
+
+    /**
+     * Removes a reference.
+     *
+     * @this ContextHub.Store.Core
+     * @param {String} key - key name
+     * @return {Boolean} true - if reference was removed
+     */
+    ContextHub.Store.Core.prototype.removeReference = function(key) {
+        var keyChunks = ContextHub.Utils.JSON.tree.sanitizeKey(key);
+        var status = false;
+
+        if (keyChunks) {
+            status = true;
+            var referenceSourceKey = '/' + keyChunks.join('/');
+            delete this.references[referenceSourceKey];
+        }
+
+        return status;
+    };
+
+    /**
+     * Returns all references.
+     *
+     * @this ContextHub.Store.Core
+     * @return {Object} - list of references
+     */
+    ContextHub.Store.Core.prototype.getReferences = function() {
+        return this.references;
+    };
+
+    /**
+     * Tries to resolve a reference in n-iterations (5 by default).
+     *
+     * @this ContextHub.Store.Core
+     * @param {String} key - key name
+     * @param {Number} [retry] -  number of retries
+     * @return {String|null} - reference destination key name
+     */
+    ContextHub.Store.Core.prototype.resolveReference = function(key, retry) {
+        /* sanitize the key */
+        var keyChunks = ContextHub.Utils.JSON.tree.sanitizeKey(key);
+        var traverse = '/' + keyChunks.join('/');
+
+        /* search for reference */
+        if (!$.isEmptyObject(this.references) && key) {
+            var remainingRetries = retry || 5;
+            var anotherKey = traverse;
+
+            while ((remainingRetries > 0) && anotherKey) {
+                remainingRetries--;
+
+                /* find best matching reference */
+                var chunks = ContextHub.Utils.JSON.tree.sanitizeKey(traverse);
+                var bestMatch = '';
+                var rest = chunks.slice(0);
+
+                for (var idx = 0; idx < chunks.length && !this.references[bestMatch]; idx++) {
+                    bestMatch += '/' + chunks[idx];
+                    rest.shift();
+                }
+
+                /* get the best match */
+                anotherKey = this.references[bestMatch];
+
+                if (anotherKey) {
+                    /* add leftover and sanitize the key */
+                    anotherKey = anotherKey + '/' + rest.join('/');
+                    anotherKey = '/' + ContextHub.Utils.JSON.tree.sanitizeKey(anotherKey).join('/');
+                }
+
+                traverse = anotherKey || traverse;
+            }
+        }
+
+        return traverse;
+    };
+
+    /**
+     * Pauses eventing for this store.
+     *
+     * @this ContextHub.Store.Core
+     */
+    ContextHub.Store.Core.prototype.pauseEventing = function() {
+        if (this.eventing) {
+            this.eventing.pause(this.eventChannel);
+        }
+    };
+
+    /**
+     * Resumes eventing for this store.
+     *
+     * @this ContextHub.Store.Core
+     */
+    ContextHub.Store.Core.prototype.resumeEventing = function() {
+        if (this.eventing) {
+            this.eventing.resume(this.eventChannel);
+        }
+    };
+
+    /**
+     * Checks if eventing is paused for this store.
+     *
+     * @this ContextHub.Store.Core
+     * @return {Boolean} status - true if eventing is paused
+     */
+    ContextHub.Store.Core.prototype.isEventingPaused = function() {
+        return this.eventing && this.eventing.isPaused(this.eventChannel);
+    };
+
+    /**
+     * Triggers 'ready' event for this store.
+     *
+     * @this ContextHub.Store.Core
+     */
+    ContextHub.Store.Core.prototype.announceReadiness = function() {
+        var name = this.name;
+        var overlay = null;
+
+        /* add time stamp */
+        ContextHub.console.timeStamp('"' + name + '" ready');
+
+        /* we need to add overlay, but only for stores inheriting from JSONPStore */
+        if (this instanceof ContextHub.Store.JSONPStore) {
+            var storeKeys = this.getKeys();
+
+            overlay = { keys: { all: { hash: {}, list: storeKeys } } };
+
+            $.each(storeKeys, function(idx, key) {
+                overlay.keys.all.hash[key] = true;
+            });
+        }
+
+        /* trigger event */
+        this.eventing.trigger(ContextHub.Constants.EVENT_STORE_READY + ':' + name, {}, {
+            defer: 0,
+            _: {
+                action: 'ready',
+                store: name,
+                wasReadyAt: new Date().getTime(),
+                duration: this.duration || 0,
+                overlay: overlay
+            }
+        });
+    };
+
+    /**
+     * Binds/unbinds update handler to a store. If a handler is not provided, a given selector will be used to unbind
+     * previously attached handler, for example:
+     *
+     * var store = ContextHub.getStore('profile');
+     * store.onUpdate('my-handler', function() { ... });   // binds handler
+     * store.onUpdate('my-handler');                       // unbinds handler
+     *
+     * @param {String} selector - unique name
+     * @param {Function} [handler] - update handler
+     */
+    ContextHub.Store.Core.prototype.onUpdate = function(selector, handler) {
+        var bindHandler = typeof handler === 'function';
+        var eventName = this.eventChannel;
+
+        if (bindHandler) {
+            ContextHub.eventing.on(eventName, handler.bind(this), selector);
+        } else {
+            ContextHub.eventing.off(eventName, selector);
+        }
+    };
+
+}(ContextHubJQ, window));

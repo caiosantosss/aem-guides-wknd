@@ -1,0 +1,507 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2015 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;
+(function($, channel, window) {
+
+    window.TargetingUI = window.TargetingUI || {};
+
+    /**
+     * Multi site (MSM) support for the Targeting ui
+     */
+    window.TargetingUI.MultiSiteTargeting = (function() {
+        var self = {};
+
+        self.INHERITANCE_SELECT_TEMPLATE = '<div class="inheritance-select-container" hidden>'
+            + '<coral-select id="InheritanceSelect">'
+            + '<coral-select-item value="broken-inheritance"><coral-icon icon="multipleExclude"></coral-icon>' + Granite.I18n.get("Suspended Live Copy") + '</coral-select-item>'
+            + '<coral-select-item value="valid-inheritance"><coral-icon icon="multipleCheck"></coral-icon>' + Granite.I18n.get("In Sync with Blueprint") + ' <span class="valid-plus">+</span></coral-select-item>'
+            + '<coral-select-item value="break">' + Granite.I18n.get("Suspend Live Copy") + '</coral-select-item>'
+            + '<coral-select-item value="restore">' + Granite.I18n.get("Resume Live Copy") + '</coral-select-item>'
+            + '<coral-select-item value="remove">' + Granite.I18n.get("Detach Live Copy") + '</coral-select-item>'
+            + '</coral-select>'
+            + '</div>';
+
+        /**
+         * Only set in Target editor mode
+         * @type {Object}
+         */
+        self.contentManagerUI = undefined;
+
+        /**
+         * Only set in Personalization console
+         * @type {Object}
+         */
+        self.activityProperties = undefined;
+
+        var _inheritanceActionHandler = function (operation, successCallback) {
+            // restore previous selector value
+            self.inheritanceSelector.val(self.inheritanceSelectValue);
+
+            var actionProps = INHERITANCE_ACTION_PROPERTIES[operation];
+            if (!actionProps) {
+                return;
+            }
+
+            var foundationUI = $(window).adaptTo("foundation-ui");
+            var promptTitle = actionProps.promptConfig.title;
+            var promptMsg = actionProps.promptConfig.message;
+
+            var confirmButtonId = actionProps.promptConfig.confirmation.buttonId;
+            var confirmButtonText = actionProps.promptConfig.confirmation.buttonText;
+
+
+            foundationUI.prompt(promptTitle, promptMsg, undefined, [{
+                id: "cancel",
+                text: Granite.I18n.get("Cancel")
+            },{
+                id: confirmButtonId,
+                text: confirmButtonText,
+                primary: true
+            }
+            ], function (btnId) {
+                if (btnId === confirmButtonId) {
+                    _sendToggleInheritanceXhr(operation, _inheritanceToggleSuccessHandler(operation, successCallback));
+                }
+            });
+        };
+
+        var _inheritanceToggleSuccessHandler = function (operation, successCallback) {
+            return function () {
+                if (self.activityProperties) {
+                    // this part runs inside the wizard frame
+                    PersonalizationHelper.postMessage("targeting-editor-cmd", {
+                        "cmd": "wizard-inheritance-update",
+                        "payload": operation
+                    });
+
+                    // if the inheritance has been restored -> refresh the wizard to get the updated content
+                    if (operation == "restore") {
+                        PersonalizationHelper.refreshWizard();
+                    }
+                } else {
+                    // this part runs in the targeted content editor
+                    self.contentManagerUI.MessageListener.postMessage("personalization-wizard-cmd", {
+                        "cmd": "wizard:inheritance-update",
+                        "payload": operation
+                    });
+                }
+
+                if (successCallback) {
+                    successCallback.call();
+                }
+            }
+        };
+
+        var INHERITANCE_ACTION_PROPERTIES = {
+            "break": {
+                "successMessage": Granite.I18n.get("Successfully suspended the live copy inheritance!"),
+                "failMessage": Granite.I18n.get("An error occured while suspending the inheritance."),
+                "promptConfig": {
+                    "title": Granite.I18n.get("Suspend Live Copy Inheritance?"),
+                    "message": Granite.I18n.get("The inheritance will have to be suspended to be able to edit the activity."),
+                    "confirmation": {
+                        "buttonId" : "break",
+                        "buttonText": Granite.I18n.get("Suspend")
+                    }
+                },
+                "postData": {
+                    "msm:status/msm:isCancelled": true,
+                    "msm:status/msm:isCancelledForChildren": true
+                }
+            },
+            "restore": {
+                "successMessage": Granite.I18n.get("Successfully resumed the live copy inheritance!"),
+                "failMessage": Granite.I18n.get("An error occured while restoring the inheritance."),
+                "promptConfig": {
+                    "title": Granite.I18n.get("Resume Live Copy Inheritance?"),
+                    "message": Granite.I18n.get("Resuming the inheritance will permanently discard your modifications to the current activity."),
+                    "confirmation": {
+                        "buttonId" : "restore",
+                        "buttonText": Granite.I18n.get("Resume")
+                    }
+                },
+                "postData": {
+                    "msm:status/msm:isCancelled": false,
+                    "msm:status/msm:isCancelledForChildren": false
+                }
+            },
+            "remove": {
+                "successMessage": Granite.I18n.get("Successfully detached live copy from its blueprint!"),
+                "failMessage": Granite.I18n.get("An error occured while detaching the live copy."),
+                "promptConfig": {
+                    "title": Granite.I18n.get("Detach Live Copy?"),
+                    "message": Granite.I18n.get("This action will permanently detach the current activity from its blueprint."),
+                    "confirmation": {
+                        "buttonId" : "remove",
+                        "buttonText": Granite.I18n.get("Detach")
+                    }
+                },
+                "postData": {
+                    "removeLCMarkers": true
+                }
+            }
+        };
+
+        var _sendToggleInheritanceXhr = function(operation, successCallback) {
+            var xhrProps = INHERITANCE_ACTION_PROPERTIES[operation];
+            var postData = xhrProps.postData;
+
+            var postUrl = self.getActivityPath() + "/jcr:content.msm.conf";
+            if (operation == "remove") {
+                postUrl = self.getActivityPath() + ".msm.conf";
+            } else if (operation == "restore") {
+                postUrl = self.getActivityPath() + "/jcr:content.msmrestore.conf";
+            }
+
+            $.ajax({
+                type: "post",
+                url: postUrl,
+                contentType: "application/x-www-form-urlencoded",
+                data: postData
+            }).done(function (html) {
+                _showOperationResult(xhrProps.successMessage, false);
+
+                if (self.getActivityProperties()) {
+                    self.getActivityProperties().inheritanceCancelled = postData["msm:status/msm:isCancelled"] == true;
+                    self.getActivityProperties().isLiveCopy = postData["removeLCMarkers"] != true;
+                }
+
+                self.setupInheritanceHooks();
+
+                if (successCallback) {
+                    successCallback.call();
+                }
+            }).fail(function (xhr, error, errorThrown) {
+                _showOperationResult(xhrProps.failMessage, true, errorThrown);
+            });
+        };
+
+        var _setupInheritanceSelect = function() {
+            var activityProperties = self.getActivityProperties();
+
+            var inheritanceSelectContainer = $(".inheritance-select-container");
+            if (activityProperties && activityProperties.isLiveCopy) {
+                inheritanceSelectContainer.prop("hidden", false);
+            } else {
+                inheritanceSelectContainer.prop("hidden", true);
+            }
+
+            inheritanceSelectContainer.removeClass("broken-inheritance");
+            inheritanceSelectContainer.removeClass("valid-inheritance");
+
+            self.inheritanceSelector.find("[value='broken-inheritance']").prop("hidden", true);
+            self.inheritanceSelector.find("[value='valid-inheritance']").prop("hidden", true);
+
+            if (activityProperties && activityProperties.inheritanceCancelled) {
+                self.inheritanceSelector.val("broken-inheritance");
+
+                self.inheritanceSelector.find("[value='break']").prop("hidden", true);
+                self.inheritanceSelector.find("[value='restore']").prop("hidden", false);
+
+                inheritanceSelectContainer.addClass("broken-inheritance");
+            } else {
+                self.inheritanceSelector.val("valid-inheritance");
+
+                self.inheritanceSelector.find("[value='break']").prop("hidden", false);
+                self.inheritanceSelector.find("[value='restore']").prop("hidden", true);
+
+                inheritanceSelectContainer.addClass("valid-inheritance");
+            }
+
+            self.inheritanceSelectValue = self.inheritanceSelector.val();
+        };
+
+        var _isLocalContent = function (domElement) {
+            return $(domElement).closest(".msm-is-local").length > 0;
+        };
+
+        self.showDiagramLocalOfferMarkers = function(jqDiagramContainer, isAb) {
+            var activityProps = self.getActivityProperties();
+            if (activityProps
+                && activityProps.isLiveCopy
+                && !activityProps.inheritanceCancelled) {
+                var hasLocalExperiences = false;
+                $(".msm-target-local-marker").remove();
+                var experienceRows = jqDiagramContainer.find(".diagram-row");
+                var diagramWidget = jqDiagramContainer.data("diagram");
+
+                var experienceArray = diagramWidget.getData().experiences;
+
+                $.each(experienceRows, function (index, experienceRow) {
+                    var currentExperience = experienceArray[index];
+
+                    if (currentExperience.msmIsLocal) {
+                        var typeStyle = isAb ? "ab" : "xt";
+
+                        var localExpIcon = $("<div class='msm-target-local-marker " + typeStyle + " '><coral-icon icon='multipleAdd' size='S'></coral-icon></div>");
+
+                        $(experienceRow).find(".container-relative .diagram-cell:first").prepend(localExpIcon);
+                        $(experienceRow).addClass("msm-is-local");
+                        hasLocalExperiences = true;
+                    }
+                });
+
+                if (hasLocalExperiences) {
+                    self.inheritanceSelector.find(".valid-plus").show();
+                }
+            }
+        };
+
+        self.showExperiencesListLocalOfferMarkers = function() {
+            var activityProps = self.getActivityProperties();
+            // add UI markers for locally created content
+            if (activityProps
+                && activityProps.isLiveCopy
+                && !activityProps.inheritanceCancelled) {
+                if (self.contentManagerUI) {
+                    // this part runs in the target content editor -> place markers on the experiences rail items
+                    $(".msm-target-local-marker").remove();
+                    var hasLocalExperiences = false;
+
+                    var experienceElements = $(".rail-row.experience-row");
+                    $.each(experienceElements, function(index, experienceElement) {
+                        var experienceObj = self.contentManagerUI.contentManager.experiences[index];
+
+                        if (experienceObj && experienceObj["msmIsLocal"] == true) {
+                            var localExpIcon = $("<div class='msm-target-local-marker'><coral-icon icon='multipleAdd' size='S'></coral-icon></div>");
+                            $(experienceElement).append(localExpIcon);
+                            $(experienceElement).addClass("msm-is-local");
+                            hasLocalExperiences = true;
+                        }
+                    });
+
+                    if (hasLocalExperiences) {
+                        self.inheritanceSelector.find(".valid-plus").show();
+                    }
+                }
+            }
+        };
+
+        self.setupInheritanceHooks = function() {
+
+            // setup inheritance toggle selector
+            _setupInheritanceSelect();
+
+            // disable all actions unless inheritance is broken
+            if (self.isValidInheritance()) {
+                $(".rail-row.experience-row button[icon='triangleDown']").off("click.disable-editing")
+                    .on("click.disable-editing", function(e) {
+                        if (_isLocalContent(e.target)) {
+                            // allow change of locally created content
+                            return true;
+                        }
+
+                        self.ensureInheritanceBroken(function () {
+                            $(".rail-row.experience-row button[icon='triangleDown']").off("click.disable-editing");
+                        });
+                        return false;
+                    });
+
+                // audience-options-button,experience-options-button,visitor-percentage
+                $(".create-activity-wizard .foundation-layout-wizard2-contents").find(".audience-options-button,.experience-options-button").off("click.disable-editing")
+                    .on("click.disable-editing", function(e) {
+                        if (_isLocalContent(e.target)) {
+                            // allow change of locally created content
+                            return true;
+                        }
+
+                        self.ensureInheritanceBroken(function () {
+                            $(".create-activity-wizard .foundation-layout-wizard2-contents").find(".audience-options-button,.experience-options-button").off("click.disable-editing");
+                        });
+                        return false;
+                    });
+
+                $(".create-activity-wizard .foundation-layout-wizard2-contents").find("input[type='text'],button[icon='calendar'],.visitor-percentage,textarea,coral-select,.goals-container").off("focusin.disable-editing")
+                    .on("focusin.disable-editing", function(e) {
+                        if (_isLocalContent(e.target)) {
+                            // allow change of locally created content
+                            return true;
+                        }
+
+                        $(e.target).blur();
+                        self.ensureInheritanceBroken(function () {
+                            $(".create-activity-wizard .foundation-layout-wizard2-contents").find("input[type='text'],button[icon='calendar'],.visitor-percentage,textarea,coral-select,.goals-container").off("focusin.disable-editing");
+                            $(".create-activity-wizard coral-slider").prop("disabled", false);
+                        });
+                    });
+            }
+
+            $(".create-activity-wizard coral-slider").prop("disabled", self.isValidInheritance());
+        };
+
+        var _showOperationResult = function(text, isError, cause) {
+            var foundationUI = $(window).adaptTo("foundation-ui");
+            var message = isError == false ? text : Granite.I18n.get(text + ". Reason: {0}", [cause]);
+            var type = isError == false ? "success" : "error"
+
+            foundationUI.notify(type, message, type);
+        };
+
+        /**
+         * Gets the current activity path, taking into account that this might be called
+         * in the target editor or personalization standalone wizard
+         * @returns {*} path of the activity or {undefined} if no activity path is available
+         */
+        self.getActivityPath = function() {
+            if (self.contentManagerUI) {
+                return self.contentManagerUI.contentManager.currentActivity;
+            } else if (self.activityProperties) {
+                return self.activityProperties.path;
+            }
+
+            return undefined;
+        };
+
+        /**
+         * Gets the current activity properties, taking into account that this might be called
+         * in the target editor or personalization standalone wizard
+         * @returns {*} activity properties object or {undefined} if no activity is available
+         */
+        self.getActivityProperties = function() {
+            if (self.contentManagerUI) {
+                return self.contentManagerUI.contentManager.currentActivityProperties;
+            } else if (self.activityProperties) {
+                return self.activityProperties;
+            }
+
+            return undefined;
+        };
+
+        /**
+         * Checks if the selected experience is local or not. If no experience
+         * is selected the method returns {false}.
+         * 
+         * @return {true} if the selected experience is local, {false}
+         *         otherwise.
+         * @private
+         */
+        self._isSelectedExperienceLocal = function() {
+            var selectedExperience = $(".rail-row.experience-row.active");
+            return self._isExperienceLocal(selectedExperience);
+        };
+
+        /**
+         * Checks if the provided experience is local or not. If no experience
+         * is provided the method returns {false}.
+         * 
+         * @return {true} if the provided experience is local, {false}
+         *         otherwise.
+         * @private
+         */
+        self._isExperienceLocal = function(experience) {
+            if (experience.length > 0) {
+                return experience.hasClass("msm-is-local");
+            }
+            return false;
+        };
+
+        self.isValidInheritance = function() {
+            var activityProps = self.getActivityProperties();
+
+            return activityProps 
+                && activityProps.isLiveCopy
+                && !activityProps.inheritanceCancelled;
+        };
+
+        self.isExperienceEditable = function(experience) {
+            var isLocalExperience = experience ? self._isExperienceLocal(experience) : self._isSelectedExperienceLocal();
+
+            var isExpLocked = self.isValidInheritance() && !isLocalExperience;
+
+            return !isExpLocked;
+        };
+
+        self.ensureInheritanceBroken = function (callback, experience) {
+            if (!self.isExperienceEditable(experience)) {
+                _inheritanceActionHandler("break", callback);
+            } else {
+                if (callback) {
+                    callback.call();
+                }
+            }
+        };
+
+        self.loadActivityInheritanceStatus = function() {
+            $.get(Granite.HTTP.externalize(self.getActivityPath() + "/jcr:content.msm.conf"), {"advancedStatus" : true})
+                .done(function(data){
+                    var isLiveCopy = false;
+                    var inheritanceCancelled = false;
+                    var inheritancePlus = false;
+                    var isLiveCopyManuallyCreated = false;
+
+                    if (data["msm:status"]) {
+                        isLiveCopy = true;
+                        inheritanceCancelled = data["msm:status"]["msm:isCancelled"] == true;
+                        isLiveCopyManuallyCreated = data["msm:status"]["msm:isTargetManuallyCreated"] == true;
+                    }
+
+                    // this is a manually created page inside a LC -> no LC inheritance
+                    if (isLiveCopyManuallyCreated) {
+                        isLiveCopy = false;
+                        inheritanceCancelled = false;
+                    }
+
+                    var activityPropertiesObj = self.getActivityProperties();
+
+                    if (activityPropertiesObj) {
+                        activityPropertiesObj.isLiveCopy = isLiveCopy;
+                        activityPropertiesObj.inheritanceCancelled = inheritanceCancelled;
+                        activityPropertiesObj.inheritancePlus = inheritancePlus;
+                    }
+
+                    channel.trigger("activity-inheritance-status-updated");
+                })
+                .fail(function(){
+
+                });
+        };
+
+        self.initialize = function(initObj) {
+            if (initObj.contentManagerUI) {
+                self.contentManagerUI = initObj.contentManagerUI;
+            } else if (initObj.activityPath) {
+                self.activityProperties = {
+                    path: initObj.activityPath
+                };
+            }
+
+            if ($("#InheritanceSelect").length == 0) {
+                // inheritance selector needs adding
+                var wizardHeading = $(".foundation-layout-wizard2-title.coral-Heading");
+                var existingHeading = wizardHeading.html();
+                wizardHeading.html("<div class='selected-activity standalone'>" + existingHeading + "</div>" + self.INHERITANCE_SELECT_TEMPLATE);
+            }
+
+            self.inheritanceSelector = $("#InheritanceSelect");
+
+            self.inheritanceSelector.on("change", function(event) {
+                var inheritanceSelectValue = self.inheritanceSelector.val();
+
+                setTimeout(function() {
+                    _inheritanceActionHandler(inheritanceSelectValue);
+                }, 15);
+            });
+
+            channel.off("activity-inheritance-status-updated")
+                .on("activity-inheritance-status-updated", function (e) {
+                    self.setupInheritanceHooks();
+                });
+        };
+
+        return self;
+    })();
+}(jQuery, jQuery(document), this));

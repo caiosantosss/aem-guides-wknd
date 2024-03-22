@@ -1,0 +1,718 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * The <code>CQ.mcm.cal.RecurrenceRuleField</code> form widget allows to
+ * display and set a calendar event recurence rule.
+ * 
+ * @class CQ.mcm.cal.RecurrenceRuleField
+ * @extends CQ.form.CompositeField
+ */
+CQ.mcm.cal.RecurrenceRuleField = CQ.Ext.extend(CQ.form.CompositeField, {
+
+    constructor: function(config) {
+        CQ.Util.applyDefaults(config, {
+            "rule": {},
+            "prefix": ".",
+            "textStyle": "font-size: 11px; font-family: Tahoma; font-style: normal; font-weight: normal;",
+            "inDateFormat": null, // use standard javascript Date constructor/parser
+            // Note: ExtJS date format parser can only parse D (eg. Mon) and co
+            //       in the current locale! Thus using it for the ECMA date format is not good
+            //"inDateFormat": "D M d Y H:i:s \\G\\M\\TO",
+            "outDateFormat": "Y-m-d\\TH:i:s.000O", // when posting form
+            "displayDateFormat": CQ.Ext.form.DateField.prototype.format, // when displaying human readable form of rule
+            "readOnly": false,
+            
+            // inherited config
+            "border": false,
+            "maskDisabled": false,
+            "layout": "table",
+            "layoutConfig": {
+                "columns": 1
+            }
+        });
+
+        // needed in getRuleDefaults() and updatePlainTextDescription()
+        this.inDateFormat = config.inDateFormat;
+        this.displayDateFormat = config.displayDateFormat;
+        
+        this.applyRuleDefaults(config.rule);
+        
+        if (config.readOnly) {
+            config.html = this.getPlainTextDescription(config.rule);
+            
+            CQ.mcm.cal.RecurrenceRuleField.superclass.constructor.call(this, config);
+            return;
+        }
+        
+        var ruleWidget = this;
+        
+        this.rulePath = config.prefix + "/recurrence/rule/";
+        this.oldRule = config.rule;
+        
+        // ------------------------------------------------< frequency selector >
+        
+        // this is the central combo widget that enables/disables recurrence
+        this.frequencyField = new CQ.Ext.form.ComboBox({
+            "width": 120,
+            "hideLabel": true,
+            "bodyStyle": "margin-top:10px;",
+            
+            // if the value is "" (no repeat), we change the name to end with
+            // @Delete so that the property will be removed instead of written
+            "hiddenName": this.getFrequencyName(config.rule.frequency),
+            "forceSelection": true,
+            "editable": false,
+            "triggerAction": "all",
+            "store": [
+                ["", CQ.I18n.getMessage("Does not repeat")],
+                ["daily", CQ.I18n.getMessage("Daily")],
+                ["weekly", CQ.I18n.getMessage("Weekly")],
+                ["monthly", CQ.I18n.getMessage("Monthly")],
+                ["yearly", CQ.I18n.getMessage("Yearly")]
+            ],
+            "value": config.rule.frequency || "",
+            "listeners": {
+                "beforeselect" : function(combo, record, index) {
+                    // if recurrence is enabled for the first time, ensure default end type
+                    if (combo.getValue() === "") {
+                        ruleWidget.setDefaultEndType();
+                    }
+                    return true;
+                },
+                "select" : function(combo, record, index) {
+                    ruleWidget.updateRule();
+                }
+            }
+        });
+        
+        // displays the human readable version of the rule (eg. "Weekly until 1/4/09")
+        this.plainTextPanel = new CQ.Ext.Panel({
+            "width": 250,
+            "border": true,
+            "bodyStyle": "margin-top:10px; padding:10px; border: 1px solid #777; background-color: #e1e1e1;",
+            "html": this.getPlainTextDescription(config.rule)
+        });
+        
+        // ------------------------------------------------< hidden fields for Sling Post >
+        
+        this.hiddenRuleDelete = new CQ.Ext.form.Hidden({
+            "xtype": "hidden",
+            "name": config.prefix + "/recurrence@Delete",
+            "value": "",
+            "disabled": (config.rule.frequency !== "")
+        });
+        
+        this.hiddenRecurrenceType = new CQ.Ext.form.Hidden({
+            "xtype": "hidden",
+            "name": config.prefix + "/recurrence/jcr:primaryType",
+            "value": "cq:CalendarRecurrence",
+            "defaultValue": "cq:CalendarRecurrence"
+        });
+        
+        this.hiddenRecurrenceRuleType = new CQ.Ext.form.Hidden({
+            "xtype": "hidden",
+            "name": this.rulePath + "jcr:primaryType",
+            "value": "cq:CalendarRecurrenceRule",
+            "defaultValue": "cq:CalendarRecurrenceRule"
+        });
+        
+        this.hiddenUntilDelete = new CQ.Ext.form.Hidden({
+            "xtype": "hidden",
+            "name": this.rulePath + "until@Delete",
+            "value": ""
+        });
+        
+        this.hiddenCountDelete = new CQ.Ext.form.Hidden({
+            "xtype": "hidden",
+            "name": this.rulePath + "count@Delete",
+            "value": ""
+        });
+        
+        // ------------------------------------------------< interval part >
+        
+        this.intervalField = new CQ.Ext.form.NumberField({
+            "width": 30,
+            "name": this.rulePath + "interval",
+            "allowBlank": false,
+            "allowNegative": false,
+            "allowDecimals": false,
+            "minValue": 1,
+            "value": config.rule.interval || 1,
+            "listeners": {
+                "change" : function(field, newVal, oldVal) {
+                    ruleWidget.updateRule();
+                }
+            }
+        });
+        
+        this.intervalUnitLabel = new CQ.Ext.Panel({
+            "html": this.getIntervalUnit(config.rule.frequency || ""),
+            "border": false,                
+            "bodyStyle": "padding:5px;"
+        });
+        
+        // TODO: detailed weekly (bug 23558), monthly (23559) and yearly (23560) config
+        /*
+          {
+                // Use the default, automatic layout to distribute the controls evenly
+                // across a single row
+                xtype: 'checkboxgroup',
+                fieldLabel: 'Auto Layout',
+                items: [
+                    {boxLabel: 'Item 1', name: 'cb-auto-1'},
+                    {boxLabel: 'Item 2', name: 'cb-auto-2', checked: true},
+                    {boxLabel: 'Item 3', name: 'cb-auto-3'},
+                    {boxLabel: 'Item 4', name: 'cb-auto-4'},
+                    {boxLabel: 'Item 5', name: 'cb-auto-5'}
+                ]
+            } 
+         */
+        
+        // ------------------------------------------------< recurrence range (end) >
+        
+        var endType = this.getEndType(config.rule);
+        
+        // Text metrics:
+        // we have to manually calculate the width of certain labels because
+        // the layout requires fixed pixel widths to work properly and the
+        // text is localized, ie. it could be longer than the english original
+
+        // text metrics hack (needs an existing element with correct css)       
+        var hiddenLabel = new CQ.Ext.form.Label({ 
+           text: "placeholder", 
+           renderTo: document.body, 
+           style: config.textStyle,
+           hidden: true
+        });
+        var tm = CQ.Ext.util.TextMetrics.createInstance(hiddenLabel.el);
+        
+        // UNTIL
+        
+        // these texts are in the same column, the longest one wins
+        var radioColWidth = 30 /* radio dot + padding */ + Math.max(
+            tm.getWidth(CQ.I18n.getMessage("By&nbsp;")),
+            tm.getWidth(CQ.I18n.getMessage("After")),
+            tm.getWidth(CQ.I18n.getMessage("Never"))
+        );
+        
+        this.untilRadio = new CQ.Ext.form.Radio({
+            "boxLabel": CQ.I18n.getMessage("By&nbsp;"),
+            "cellStyle": "width: " + radioColWidth + "px; height: 30px;",
+            "name": ":ignored_radios_end",
+            "inputValue": "until",
+            "checked": (endType === "until" ? true : false),
+            "listeners": {
+                "check": function(){
+                    ruleWidget.updateRule();
+                }
+            }
+        });
+        
+        this.untilField = new CQ.form.DateTime({
+            "dateWidth": 100,
+            "hideTime": true,
+            "name": this.rulePath + "until",
+            "disabled": (endType !== "until"),
+            "allowBlank": false,
+            "hiddenFormat": config.outDateFormat,
+            "listeners": {
+                "change" : function(field, newVal, oldVal) {
+                    ruleWidget.untilFieldSetByUser = true;
+                    ruleWidget.updateRule();
+                }
+            }
+        });
+        this.untilField.setValue(config.rule.until || this.getDefaultUntil(config.rule.frequency));
+        
+        // COUNT
+        
+        this.countRadio = new CQ.Ext.form.Radio({
+            "boxLabel": CQ.I18n.getMessage("After"),
+            "cellStyle": "width: " + (20 + tm.getWidth(CQ.I18n.getMessage("After"))) + "px; height: 30px;",
+            "name": ":ignored_radios_end",
+            "inputValue": "count",
+            "checked": (endType === "count" ? true : false),
+            "listeners": {
+                "check": function(){
+                    ruleWidget.updateRule();
+                }
+            }
+        });
+        
+        this.countField = new CQ.Ext.form.NumberField({
+            "width": 30,
+            "name": this.rulePath + "count",
+            "allowBlank": false,
+            "allowNegative": false,
+            "allowDecimals": false,
+            "minValue": 1,
+            "value": config.rule.count || 10,
+            "disabled": (endType !== "count"),
+            "listeners": {
+                "change" : function(field, newVal, oldVal) {
+                    ruleWidget.updateRule();
+                }
+            }
+        });
+        
+        this.countLabel = new CQ.Ext.form.Label({
+            "text": CQ.I18n.getMessage("occurences"),
+            "disabled": (endType !== "count"),
+            "style": "padding-left: 5px;"
+        });
+        
+         // NEVER
+        
+        this.neverRadio = new CQ.Ext.form.Radio({
+            "boxLabel": CQ.I18n.getMessage("Never"),
+            "colspan": 2,
+            "cellStyle": "width: " + (20 + tm.getWidth(CQ.I18n.getMessage("Never"))) + "px; height: 30px;",
+            "name": ":ignored_radios_end",
+            "inputValue": "never",
+            "checked": (endType === "never" ? true : false),
+            "listeners": {
+                "check": function(){
+                    ruleWidget.updateRule();
+                }
+            }
+        });
+        
+        // ------------------------------------------------< big panel when repeat is on >
+        
+        this.repeatPanel = new CQ.Ext.Panel({
+            "border": false,
+            "bodyStyle": "margin-left:20px;",
+            "height": 180,
+            "hideMode": "visibility",
+            
+            "layout": "table",
+            "layoutConfig": {
+                "columns": 1
+            },
+            "items": [
+                {
+                    "xtype": "hidden",
+                    "name": this.rulePath + "interval@TypeHint",
+                    "value": "Long"
+                },
+                {
+                    "xtype": "hidden",
+                    "name": this.rulePath + "count@TypeHint",
+                    "value": "Long"
+                },
+                this.hiddenUntilDelete,
+                this.hiddenCountDelete,
+                this.plainTextPanel,
+                {
+                    "height": 25,
+                    "border": false,
+                    "bodyStyle": "margin-top:10px;",
+                    
+                    "layout": "column",
+                    "items": [
+                        {
+                            "html": CQ.I18n.getMessage("Every:"),
+                            "border": false,                
+                            "bodyStyle": "padding: 5px 5px 5px 0px;"
+                        },
+                        {
+                            "border": false,
+                            "items": [
+                                this.intervalField
+                            ]
+                        },
+                        this.intervalUnitLabel
+                    ]
+                },
+                {
+                    "border": false,
+                    "region": "center",
+                    "defaults": {
+                        "border": false
+                    },
+                    
+                    "width": 300,
+                    "layout": "table",
+                    "layoutConfig": {
+                        "columns": 3
+                    },
+                    "items": [
+                        // row 1 (and the full first column)
+                        {
+                            "html": CQ.I18n.getMessage("Ends:"),
+                            "rowspan": 3,
+                            "bodyStyle": "padding: 8px 5px 5px 0px;",
+                            "cellStyle": "width: " + (15 + tm.getWidth(CQ.I18n.getMessage("Ends:"))) + "px; vertical-align: top;"
+                        },
+                        
+                        // row 1, col 2 & 3
+                        this.untilRadio,
+                        this.untilField,
+                        
+                        // row 2
+                        this.countRadio,
+                        {
+                            "layout": "column",
+                            "items": [
+                                {
+                                   "border": false,
+                                    "items": [
+                                        this.countField
+                                    ]
+                                },
+                                {
+                                    "border": false,
+                                    "bodyStyle": "padding-top: 5px",
+                                    "items": [
+                                        this.countLabel
+                                    ]
+                                }
+                            ]
+                        },
+                        
+                        // row 3
+                        this.neverRadio
+                    ]
+                },
+                this.hiddenRecurrenceType,
+                this.hiddenRecurrenceRuleType,
+                this.hiddenRuleDelete // at the end, so it is applied last
+            ]
+        });
+        
+        config.items = [
+            this.frequencyField,
+            this.repeatPanel
+        ];
+        
+        this.enableRepeat(config.rule.frequency && config.rule.frequency !== "");
+        
+        CQ.mcm.cal.RecurrenceRuleField.superclass.constructor.call(this, config);
+    },
+
+    initComponent: function() {
+        CQ.mcm.cal.RecurrenceRuleField.superclass.initComponent.call(this);
+
+        this.addEvents(
+            /**
+             * @event change
+             * Fires if the field value has changed.
+             * @param {CQ.mcm.cal.RecurrenceRuleField} this
+             * @param {Object} newRule The new rule object
+             * @param {Object} oldRule The original rule object
+             */
+            'change'
+        );
+    },
+    
+    disable: function() {
+        if(this.rendered) {
+            this.onDisable();
+            this.frequencyField.disable();
+            this.hiddenRuleDelete.disable();
+            this.hiddenRecurrenceType.disable();
+            this.hiddenRecurrenceRuleType.disable();
+            this.hiddenUntilDelete.disable();
+            this.hiddenCountDelete.disable();
+            this.intervalField.disable();
+            this.untilRadio.disable();
+            this.untilField.disable();
+            this.countRadio.disable();
+            this.countField.disable();
+            this.neverRadio.disable();
+        }
+        this.disabled = true;
+        this.fireEvent("disable", this);
+        return this;
+    },
+    
+    enable: function() {
+        if(this.rendered){
+            this.onEnable();
+            this.frequencyField.enable();
+            this.hiddenRuleDelete.enable();
+            this.hiddenRecurrenceType.enable();
+            this.hiddenRecurrenceRuleType.enable();
+            this.hiddenUntilDelete.enable();
+            this.hiddenCountDelete.enable();
+            this.intervalField.enable();
+            this.untilRadio.enable();
+            this.untilField.enable();
+            this.countRadio.enable();
+            this.countField.enable();
+            this.neverRadio.enable();
+        }
+        this.disabled = false;
+        this.fireEvent("enable", this);
+        return this;
+    },
+    
+    setDisplayDateFormat: function(format) {
+        this.displayDateFormat = format;
+        if (this.untilField) {
+            this.untilField.df.format = format;
+            // re-set value to force update of rendered component
+            this.untilField.setValue(this.untilField.getDateValue());
+        }
+        this.updatePlainTextDescription();
+    },
+
+    /**
+     * Returns the current recurrence rule defined by the field's values
+     * as (json) object in the same structure as returned from Sling.
+     * @public
+     */
+    getRule: function() {
+        if (this.readOnly) {
+            return this.rule;
+        }
+        var o = {
+            frequency: this.frequencyField.getValue()
+        };
+        var interval = this.intervalField.getValue();
+        if (interval) {
+            o.interval = interval;
+        }
+        var endType = this.untilRadio.getGroupValue();
+        if (endType === "until") {
+            o.until = this.untilField.getValue();
+        } else if (endType === "count") {
+            o.count = this.countField.getValue();
+        }
+        return o;
+    },
+    
+    /**
+     * @private
+     */
+    applyRuleDefaults: function(rule) {
+        CQ.Util.applyDefaults(rule, {
+            frequency: "",
+            interval: 1
+        });
+        // make sure config.rule.until is a date object
+        if (rule.until && typeof rule.until === "string") {
+            if (this.inDateFormat) {
+                rule.until = Date.parseDate(rule.until, this.inDateFormat);
+            } else {
+                rule.until = new Date(rule.until);
+            }
+        }
+        return rule;
+    },
+    
+    /**
+     * @private
+     */
+    getEndType: function(rule) {
+        if (rule.until) {
+            return "until";
+        } else if (rule.count) {
+            return "count";
+        } else {
+            return "never";
+        }
+    },
+    
+    /**
+     * Updates all widgets and input fields according to the current
+     * recurrence rule defined by the field's values.
+     * @private
+     */
+    updateRule: function() {
+        var frequency = this.frequencyField.getValue();
+        this.frequencyField.hiddenField.name = this.getFrequencyName(frequency);
+        this.enableRepeat(frequency !== "");
+        
+        this.updateIntervalUnitLabel(frequency);
+        this.updateEndTypeDisabledStatus(frequency !== "");
+        
+        // set default only if the until field is disabled, ie. it is not set by the user
+        if (!this.untilFieldSetByUser) {
+            this.untilField.setValue(this.getDefaultUntil(frequency));
+        }
+        this.updatePlainTextDescription();
+        
+        if (frequency === "") {
+            this.untilFieldSetByUser = false;
+        }
+
+        var newRule = this.getRule();
+        this.fireEvent('change', this, newRule, this.oldRule);
+        this.oldRule = newRule;
+    },
+
+    /**
+     * @private
+     */
+    getFrequencyName: function(frequency) {
+        if (frequency) {
+            return this.rulePath + "frequency";
+        } else {
+            return this.rulePath + "frequency@Delete";
+        }
+    },
+    
+    /**
+     * @private
+     */
+    enableRepeat: function(repeating) {
+        // hide/show entire repeat panel
+        if (repeating) {
+            this.repeatPanel.show();
+            this.repeatPanel.setHeight(180);
+        } else {
+            this.repeatPanel.hide();
+            this.repeatPanel.setHeight(0);
+        }
+        
+        // interval
+        this.intervalField.setDisabled(!repeating);
+
+        // hidden fields for type
+        this.hiddenRuleDelete.setDisabled(repeating);
+        this.hiddenRecurrenceType.setDisabled(!repeating);
+        this.hiddenRecurrenceRuleType.setDisabled(!repeating);
+    },
+    
+    /**
+     * @private
+     */
+    updateIntervalUnitLabel: function(frequency) {
+        var unit = this.getIntervalUnit(frequency);
+        this.intervalUnitLabel.body.update(unit);
+    },
+    
+    /**
+     * @private
+     */
+    getIntervalUnit: function(freq) {
+        var unit;
+        if (freq === "") {
+            unit = "";
+        } else if (freq === "daily") {
+            unit = CQ.I18n.getMessage("day(s)");
+        } else if (freq === "weekly") {
+            unit = CQ.I18n.getMessage("week(s)");
+        } else if (freq === "monthly") {
+            unit = CQ.I18n.getMessage("month(s)");
+        } else if (freq === "yearly") {
+            unit = CQ.I18n.getMessage("year(s)");
+        }
+        return unit;
+    },
+    
+    /**
+     * @private
+     */
+    setDefaultEndType: function() {
+        this.untilRadio.setValue(true);
+        this.countRadio.setValue(false);
+        this.neverRadio.setValue(false);
+    },
+    
+    /**
+     * @private
+     */
+    updateEndTypeDisabledStatus: function(repeating) {
+        var endType = this.untilRadio.getGroupValue();
+        this.untilField.setDisabled(!repeating || endType !== "until");
+        this.countField.setDisabled(!repeating || endType !== "count");
+        this.countLabel.setDisabled(!repeating || endType !== "count");
+    },
+    
+    /**
+     * @private
+     */
+    getDefaultUntil: function(frequency) {
+        // defaults, depending on frequency
+        if (frequency === "daily") {
+            // 1 month
+            return new Date().add(Date.MONTH, 1);
+        } else if (frequency === "weekly") {
+            // 1 year
+            return new Date().add(Date.YEAR, 1);
+        } else if (frequency === "monthly") {
+            // 1 year
+            return new Date().add(Date.YEAR, 1);
+        } else if (frequency === "yearly") {
+            // 10 years
+            return new Date().add(Date.YEAR, 10);
+        } else {
+            // 1 month fallback
+            return new Date().add(Date.MONTH, 1);
+        }
+    },
+    
+    /**
+     * @private
+     */
+    updatePlainTextDescription: function() {
+        var text = this.getPlainTextDescription(this.getRule());
+        if (this.readOnly) {
+            this.body.update(text);
+        } else {
+            this.plainTextPanel.body.update(text);
+        }
+    },
+    
+    /**
+     * Returns the human readable plain text description of the given rule
+     * (which can be retrieved by {@link #getRule}()) as it is displayed
+     * in the widget when recurrence is enabled.
+     * @public
+     */
+    getPlainTextDescription: function(rule) {
+        this.applyRuleDefaults(rule);
+        
+        var text;
+        if (rule.frequency === "") {
+            text = CQ.I18n.getMessage("Event does not repeat");
+        } else if (rule.frequency === "daily") {
+            if (rule.interval == 1) {
+                text = CQ.I18n.getMessage("Daily");
+            } else {
+                text = CQ.I18n.getMessage("Every {0} days", [rule.interval]);
+            }
+        } else if (rule.frequency === "weekly") {
+            if (rule.interval == 1) {
+                text = CQ.I18n.getMessage("Weekly");
+            } else {
+                text = CQ.I18n.getMessage("Every {0} weeks", [rule.interval]);
+            }
+        } else if (rule.frequency === "monthly") {
+            if (rule.interval == 1) {
+                text = CQ.I18n.getMessage("Monthly");
+            } else {
+                text = CQ.I18n.getMessage("Every {0} months", [rule.interval]);
+            }
+        } else if (rule.frequency === "yearly") {
+            if (rule.interval == 1) {
+                text = CQ.I18n.getMessage("Yearly");
+            } else {
+                text = CQ.I18n.getMessage("Every {0} years", [rule.interval]);
+            }
+        }
+        if (rule.until) {
+            var untilStr = rule.until.format(this.displayDateFormat);
+            text = text + CQ.I18n.getMessage(" until {0}", [untilStr], "argument is a date, eg. 'until 06/20/09'");
+        } else if (rule.count) {
+            text = text + CQ.I18n.getMessage(", {0} times", [rule.count], "argument is a number, eg. ', 10 times'");
+        }
+        return text;
+    }
+
+});
+
+
+CQ.Ext.reg("recurrencerule", CQ.mcm.cal.RecurrenceRuleField);

@@ -1,0 +1,554 @@
+/*
+ * Copyright 1997-2011 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.form.ImageCrop.CropRect
+ * @extends CQ.form.SmartImage.Shape
+ * @private
+ * <p>The ImageCrop.CropRect provides the UI part of the cropping rectangle.</p>
+ * <p>Currently, all ratio-related calculations are done based upon the current width of
+ * the cropping rectancle. This is fine for ratios &gt;= 1, but may not provide the
+ * expected user experience for ratios &lt; 1. In future releases, ratios &lt; 1 should
+ * be calculated based on the current height.</p>
+ * @constructor
+ * Creates a new ImageCrop.CropRect
+ * @param {Object} config configuration of the area
+ * @param {Number} x horizontal offset of the cropping rect
+ * @param {Number} y vertical offset of the cropping rect
+ * @param {Number} width with of the cropping rect
+ * @param {Number} height height of the cropping rect
+ */
+CQ.form.ImageCrop.CropRect = CQ.Ext.extend(CQ.form.SmartImage.Shape, {
+
+    /**
+     * @cfg {String} rectColor The color of the rect
+     */
+    rectColor: null,
+
+    /**
+     * @cfg {String} invalidPartsBackground
+     * The background color of excluded parts of the image; may be null if no background
+     * color has to be used for excluded parts - todo format?
+     */
+    invalidPartsBackground: null,
+
+    /**
+     * @cfg {Number} handleDistance
+     * Distance between handles and the cropping rectangle
+     */
+    handleDistance: 0,
+
+    /**
+     * @cfg {Number} handleSize
+     * The size of handles
+     */
+    handleLength: 0,
+
+    /**
+     * @cfg {Number} handleThickness
+     * "Thickness" of handles
+     */
+    handleThickness: 0,
+
+    /**
+     * @cfg {Number} cropMinWidth
+     * Minimum width of the cropping rectangle
+     */
+    cropMinWidth: 0,
+
+    /**
+     * @cfg {Number} cropMinHeight
+     * Minimum height of the cropping rectangle
+     */
+    cropMinHeight: 0,
+
+    /**
+     * Current aspect ration - todo properties?
+     * @property ratio
+     * @type Object
+     */
+    ratio: null,
+
+    /**
+     * Current horizontal position of the cropping rect
+     * @private
+     * @type Number
+     */
+    x: 0,
+
+    /**
+     * Current vertical position of the cropping rect
+     * @private
+     * @type Number
+     */
+    y: 0,
+
+    /**
+     * Current width of the cropping rect
+     * @private
+     * @type Number
+     */
+    width: 0,
+
+    /**
+     * Current height of the cropping rect
+     * @private
+     * @type Number
+     */
+    height: 0,
+
+    /**
+     * Flag that determines if the sections should be drawn (usually during dragging the
+     * rectangle)
+     * @private
+     * @type Boolean
+     */
+    drawSections: false,
+
+    /**
+     * Fixed coordinates - this is the point opposite to the point that is actually
+     * dragged on resizing operations. It is required to correctly apply size and
+     * coordinate restraints.
+     * @private
+     * @type Object
+     */
+    fixedCoordinates: null,
+
+
+    // Lifecycle ---------------------------------------------------------------------------
+
+    constructor: function(config, x, y, width, height) {
+        var defaults = {
+            "rectColor": CQ.themes.ImageCrop.CROP_RECT_COLOR,
+            "invalidPartsBackground": CQ.themes.ImageCrop.BACKGROUND_INVALIDPARTS,
+            "handleDistance": CQ.themes.ImageCrop.HANDLE_DISTANCE,
+            "handleLength": CQ.themes.ImageCrop.HANDLE_LENGTH,
+            "handleThickness": CQ.themes.ImageCrop.HANDLE_THICKNESS,
+            "handleRollover": CQ.themes.ImageCrop.HANDLE_ROLLOVER
+        };
+        CQ.Util.applyDefaults(config, defaults);
+        CQ.Ext.apply(this, config);
+        CQ.form.ImageCrop.CropRect.superclass.constructor.call(this, config);
+        this.x = x;
+        this.y = y;
+        this.width = width;
+        this.height = height;
+        this.drawSections = false;
+    },
+
+
+    // Interface implementation ------------------------------------------------------------
+
+    /**
+     * Checks if the specified coordinates are a "mouseover" for the cropping rectangle.
+     * @param {Object} coords coordinates
+     * @param {Number} tolerance tolerance distance
+     * @return {Boolean} True if the shape is "touched" by the mouse
+     */
+    isTouched: function(coords, tolerance) {
+        var handleId = this.calculateHandleId(coords);
+        if (handleId != null) {
+            return true;
+        }
+        coords = coords.unzoomedUnclipped;
+        return (coords.x >= this.x) && (coords.x < (this.x + this.width))
+            && (coords.y >= this.y) && (coords.y < (this.y + this.height));
+    },
+
+    /**
+     * Checks if the specified coordinates are part of the visual handle defined by its
+     * corner coordinates.
+     * @param {Object} coords (mouse) coordinates to check
+     * @param {Number} handleX horizontal coordinate of the handle's corner
+     * @param {Number} handleY vertical coordinate of the handle's corner
+     * @return {Boolean} True if the mouse coordinates are part of the handle
+     */
+    isPartOfHandle: function(coords, handleX, handleY) {
+        var distance = this.calculateDistance(coords, { "x": handleX, "y": handleY });
+        return distance < Math.ceil(this.handleLength / (coords.absoluteZoom + 1));
+    },
+
+    /**
+     * Calculates the ID of the visual handle that is suitable for the specified
+     * coordinates.
+     * @param {Object} coords (mouse) coordinates to check
+     * @return {String} ID of the suitable handle ("topleft", "topright", "bottomleft",
+     *         "bottomright"); null if the mouse coordinates are not suitable for a handle
+     */
+    calculateHandleId: function(coords) {
+        coords = coords.unzoomedUnclipped;
+        var handleId = null;
+        if (this.isPartOfHandle(coords, this.x, this.y)) {
+            return "topleft";
+        }
+        if (this.isPartOfHandle(coords, this.x + this.width, this.y)) {
+            return "topright";
+        }
+        if (this.isPartOfHandle(coords, this.x, this.y + this.height)) {
+            return "bottomleft";
+        }
+        if (this.isPartOfHandle(coords, this.x + this.width, this.y + this.height)) {
+            return "bottomright";
+        }
+        return handleId;
+    },
+
+    /**
+     * Checks if the specified coordinates are directly draggable.
+     * @param {Object} coords The coordinates to check; properties: x, y
+     * @param {Number} tolerance The tolerance distance
+     * @return {Boolean} True if the specified coordinates are directly draggable
+     */
+    isDirectlyDraggable: function(coords, tolerance) {
+        return this.isTouched(coords);
+    },
+
+    /**
+     * Moves the cropping rectangle or a suitable edge of it by the specified offsets.
+     * @param {Number} xOffs The horizontal offset
+     * @param {Number} yOffs The vertical offset
+     * @param {Object} coords The actual coordinates
+     * @return {Boolean} True if a redraw of the shape is required
+     */
+    moveShapeBy: function(xOffs, yOffs, coords) {
+        var imageSize = coords.unzoomed.imageSize;
+        if (this.pointToMove == null) {
+            this.x = this.draggingReference.x + xOffs;
+            this.y = this.draggingReference.y + yOffs;
+            this.correctCoordinates(imageSize);
+        } else {
+            var newX = this.draggingReference.x + xOffs;
+            if (newX < 0) {
+                newX = 0;
+            }
+            if (newX >= imageSize.width) {
+                newX = imageSize.width - 1;
+            }
+            var newY = this.draggingReference.y + yOffs;
+            if (newY < 0) {
+                newY = 0;
+            }
+            if (newY >= imageSize.height) {
+                newY = imageSize.height - 1;
+            }
+            var xDelta, yDelta;
+            if (this.pointToMove == "topleft") {
+                xDelta = this.x - newX;
+                this.x = newX;
+                this.width += xDelta;
+                yDelta = this.y - newY;
+                this.y = newY;
+                this.height += yDelta;
+            } else if (this.pointToMove == "topright") {
+                this.width = newX - this.x + 1;
+                yDelta = this.y - newY;
+                this.y = newY;
+                this.height += yDelta;
+            } else if (this.pointToMove == "bottomleft") {
+                xDelta = this.x - newX;
+                this.x = newX;
+                this.width += xDelta;
+                this.height = newY - this.y + 1;
+            } else if (this.pointToMove == "bottomright") {
+                this.width = newX - this.x + 1;
+                this.height = newY - this.y + 1;
+            }
+            if (this.width < this.cropMinWidth) {
+                this.width = this.cropMinWidth;
+                this.correctXCoord();
+            }
+            if (this.height < this.cropMinHeight) {
+                this.height = this.cropMinHeight;
+                this.correctYCoord();
+            }
+            if (this.ratio != null) {
+                this.height = Math.round(this.width / this.ratio);
+                this.correctYCoord();
+                var hasXChanged = false;
+                if (this.x < 0) {
+                    this.width += this.x;
+                    this.x = 0;
+                    hasXChanged = true;
+                }
+                if (hasXChanged) {
+                    this.height = Math.round(this.width / this.ratio);
+                    this.correctXCoord();
+                    this.correctYCoord();
+                }
+                var hasYChanged = false;
+                if (this.y < 0) {
+                    this.height += this.y;
+                    this.y = 0;
+                    hasYChanged = true;
+                }
+                if ((this.y + this.height) > imageSize.height) {
+                    this.height = imageSize.height - this.y;
+                    hasYChanged = true;
+                }
+                if (hasYChanged) {
+                    this.width = Math.round(this.height * this.ratio);
+                    this.correctXCoord();
+                    this.correctYCoord();
+                }
+            }
+        }
+        return true;
+    },
+
+    /**
+     * <p>Corrects the x coordinate of the cropping rectangle if the width has been adjusted
+     * programatically.</p>
+     * <p>The x coordinate needs to be adjusted if the fixed point of the resize operation
+     * is on the right side of the rectangle.</p>
+     */
+    correctXCoord: function() {
+        if (this.fixedCoordinates.widthMult < 0) {
+            this.x = this.fixedCoordinates.x - this.width;
+        }
+    },
+
+    /**
+     * <p>Corrects the y coordinate of the cropping rectangle if the height has been
+     * adjusted programatically.</p>
+     * <p>The y coordinate needs to be adjusted if the fixed point of the resize operation
+     * represents the bottom of the crop rectangle.</p>
+     */
+    correctYCoord: function() {
+        if (this.fixedCoordinates.heightMult < 0) {
+            this.y = this.fixedCoordinates.y - this.height;
+        }
+    },
+
+    /**
+     * Corrects the cropping rectangle's coordinates to ensure that it doesn't exceed the
+     * specified image size.
+     * @param {Object} imageSize The image size to check; properties: width, height
+     */
+    correctCoordinates: function(imageSize) {
+        if (this.x < 0) {
+            this.x = 0;
+        }
+        if (this.y < 0) {
+            this.y = 0;
+        }
+        var xEnd = this.x + this.width;
+        var yEnd = this.y + this.height;
+        if (xEnd > imageSize.width) {
+            this.x = imageSize.width - this.width;
+            if (this.x < 0) {
+                this.width += this.x;
+                this.x = 0;
+            }
+        }
+        if (yEnd > imageSize.height) {
+            this.y = imageSize.height - this.height;
+            if (this.y < 0) {
+                this.height += this.y;
+                this.y = 0;
+            }
+        }
+    },
+
+    /**
+     * Handles the rollover of the cropping rectangle.
+     * @param {Object} coords The mouse coordinates
+     * @return {Boolean} True to trigger a redraw
+     */
+    onRollOver: function(coords) {
+        this.handleId = this.calculateHandleId(coords);
+        return true;
+    },
+
+    /**
+     * Handles the rollout of the cropping rectangle.
+     * @param {Object} coords The mouse coordinates
+     * @return {Boolean} True to trigger a redraw
+     */
+    onRollOut: function(coords) {
+        this.handleId = null;
+        return true;
+    },
+
+    /**
+     * Handles mouse moves inside the cropping rectangle
+     * @param {Object} coords The mouse coordinates
+     * @return {Boolean} True if a redraw is required
+     */
+    onRolledOver: function(coords) {
+        var oldHandleId = this.handleId;
+        this.handleId = this.calculateHandleId(coords);
+        return (this.handleId != oldHandleId);
+    },
+
+    /**
+     * This method is called when dragging starts.
+     * @param {Object} coords The coordinates where dragging starts
+     * @param {Number} tolerance The tolerance distance
+     * @return {Boolean} True to trigger a redraw
+     */
+    onDragStart: function(coords, tolerance) {
+        this.pointToMove = this.calculateHandleId(coords);
+        if ((this.pointToMove == "topleft") || (this.pointToMove == null)) {
+            this.draggingReference = {
+                "x": this.x,
+                "y": this.y
+            };
+            if (this.pointToMove != null) {
+                this.fixedCoordinates = {
+                    "x": this.x + this.width - 1,
+                    "y": this.y + this.height - 1,
+                    "widthMult": -1,
+                    "heightMult": -1
+                };
+            }
+        } else if (this.pointToMove == "topright") {
+            this.draggingReference = {
+                "x": this.x + this.width - 1,
+                "y": this.y
+            };
+            this.fixedCoordinates = {
+                "x": this.x,
+                "y": this.y + this.height - 1,
+                "widthMult": 1,
+                "heightMult": -1
+            };
+        } else if (this.pointToMove == "bottomleft") {
+            this.draggingReference = {
+                "x": this.x,
+                "y": this.y + this.height - 1
+            };
+            this.fixedCoordinates = {
+                "x": this.x + this.width - 1,
+                "y": this.y,
+                "widthMult": -1,
+                "heightMult": 1
+            };
+        } else if (this.pointToMove == "bottomright") {
+            this.draggingReference = {
+                "x": this.x + this.width - 1,
+                "y": this.y + this.height - 1
+            };
+            this.fixedCoordinates = {
+                "x": this.x,
+                "y": this.y,
+                "widthMult": 1,
+                "heightMult": 1
+            };
+        }
+        this.drawSections = true;
+        return true;
+    },
+
+    /**
+     * This method is called when dragging ends.
+     * @param {Object} coords The coordinates where dragging ends
+     * @param {Number} tolerance The tolerance distance
+     * @return {Boolean} True to trigger a redraw
+     */
+    onDragEnd: function(coords, tolerance) {
+        this.drawSections = false;
+        return true;
+    },
+
+    /**
+     * Redraws the cropping rectangle on the specified canvas context.
+     * @param {CanvasRenderingContext2D} ctx The canvas context to be used for drawing
+     * @param {Number} zoom The real zoom factor (1.0 means that the original size should be
+     *        used)
+     * @param {Object} offsets The offsets to be used for drawing; properties: srcX, srcY,
+     *        destX, destY, imageSize, zoomedSize (see
+     *        {@link CQ.form.SmartImage.Shape#draw})
+     */
+    draw: function(ctx, zoom, offsets) {
+        var coords = this.calculateDisplayCoords(zoom, offsets, this.x, this.y);
+        var size = this.calculateDisplaySize(zoom, this.width, this.height);
+        var x2 = coords.x + size.width;
+        var y2 = coords.y + size.height;
+        // draw area to be cut (invalid parts of the image; darkened)
+        ctx.save();
+        if (this.invalidPartsBackground) {
+            ctx.fillStyle = this.invalidPartsBackground;
+            var imageSize = offsets.imageSize;
+            var imageStartCoords = this.calculateDisplayCoords(zoom, offsets, 0, 0);
+            var imageEndCoords = this.calculateDisplayCoords(
+                zoom, offsets, imageSize.width, imageSize.height);
+            var xS = imageStartCoords.x;
+            var yS = imageStartCoords.y;
+            var xE = imageEndCoords.x;
+            var yE = imageEndCoords.y;
+            if (coords.x > 0) {
+                ctx.fillRect(xS, yS, coords.x - xS, yE - yS);
+            }
+            if (coords.y > 0) {
+                ctx.fillRect(coords.x, yS, size.width, coords.y - yS);
+            }
+            var yTemp = coords.y + size.height;
+            if (yTemp < yE) {
+                ctx.fillRect(coords.x, yTemp, size.width, yE - yTemp);
+            }
+            var xTemp = coords.x + size.width;
+            if (xTemp < xE) {
+                ctx.fillRect(xTemp, yS, xE - xTemp, yE - yS);
+            }
+        }
+        ctx.restore();
+        // draw cropping rect
+        ctx.strokeStyle = this.rectColor;
+        if (this.drawSections) {
+            ctx.beginPath();
+            var sY = (size.height / 3);
+            ctx.moveTo(coords.x, coords.y + sY);
+            ctx.lineTo(x2, coords.y + sY);
+            ctx.moveTo(coords.x, coords.y + 2 * sY);
+            ctx.lineTo(x2, coords.y + 2 * sY);
+            var sX = (size.width / 3);
+            ctx.moveTo(coords.x + sX, coords.y);
+            ctx.lineTo(coords.x + sX, y2);
+            ctx.moveTo(coords.x + 2 * sX, coords.y);
+            ctx.lineTo(coords.x + 2 * sX, y2);
+            ctx.stroke();
+        }
+        ctx.lineWidth = 1;
+        ctx.strokeRect(coords.x, coords.y, size.width, size.height);
+        ctx.lineWidth = this.handleThickness;
+        var sizeOffs = this.handleLength - this.handleDistance;
+        ctx.beginPath();
+        ctx.strokeStyle =
+            (this.handleId == "topleft" ? this.handleRollover : this.rectColor);
+        ctx.moveTo(coords.x - this.handleDistance, coords.y + sizeOffs);
+        ctx.lineTo(coords.x - this.handleDistance, coords.y - this.handleDistance);
+        ctx.lineTo(coords.x + sizeOffs, coords.y - this.handleDistance);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.strokeStyle =
+            (this.handleId == "topright" ? this.handleRollover : this.rectColor);
+        ctx.moveTo(x2 + this.handleDistance, coords.y + sizeOffs);
+        ctx.lineTo(x2 + this.handleDistance, coords.y - this.handleDistance);
+        ctx.lineTo(x2 - sizeOffs, coords.y - this.handleDistance);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.strokeStyle =
+            (this.handleId == "bottomleft" ? this.handleRollover : this.rectColor);
+        ctx.moveTo(coords.x - this.handleDistance, y2 - sizeOffs);
+        ctx.lineTo(coords.x - this.handleDistance, y2 + this.handleDistance);
+        ctx.lineTo(coords.x + sizeOffs, y2 + this.handleDistance);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.strokeStyle =
+            (this.handleId == "bottomright" ? this.handleRollover : this.rectColor);
+        ctx.moveTo(x2 + this.handleDistance, y2 - sizeOffs);
+        ctx.lineTo(x2 + this.handleDistance, y2 + this.handleDistance);
+        ctx.lineTo(x2 - sizeOffs, y2 + this.handleDistance);
+        ctx.stroke();
+    }
+
+});

@@ -1,0 +1,708 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2012 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+
+
+(function(document, $) {
+    "use strict";
+
+    var firstLoaddone = false;
+
+    var postServletUrl = Granite.HTTP.externalize('/libs/settings/dam/dm/presets/viewers.viewerpresets.json');
+    var replicationUrlSuffix = '.dmpublish.json';
+    var index = window.location.pathname.lastIndexOf("/viewerpresets.html") + "/viewerpresets.html".length;
+    var suffix = window.location.pathname.substring(index);
+    var editorUrl;
+    if(Granite.Toggles.isEnabled("FT_ASSETS-14407") == true){
+        editorUrl = Granite.HTTP.externalize("/mnt/overlay/dam/gui/content/s7dam/viewerpresets/viewerpreseteditor.html" + suffix);
+    } else {
+        editorUrl = Granite.HTTP.externalize("/mnt/overlay/dam/gui/content/s7dam/viewerpresets/viewerpreseteditor.html");
+    }
+
+    var presetList = [];
+    var usedNames = [];
+    var upbtnModal;
+    var delModal;
+    var successModal;
+    var errorModal;
+    var validateFn;
+
+
+    $(window).adaptTo("foundation-registry").register("foundation.validation.validator", {
+        selector: "[data-validation='viewerpreset.txtinp']",
+        validate: function(el) {
+            return validateFn != null ? validateFn() : "";
+        }
+    });
+
+
+    $(window).adaptTo("foundation-registry").register("foundation.collection.action.action", {
+        name: "foundation.link.viewerpresets",
+        handler: function(name, el, config, collection, selections) {
+            var params = {id: collection.dataset.foundationCollectionId,
+                item: selections.map(function(item) {
+                    return jQuery.parseJSON(item.dataset.config).id;
+                })
+            };
+            var url = Granite.URITemplate.expand(config.data.href, params);
+            if(config.data.itemRequired){
+                if(params.item.length != 0) {
+                    url += "&ts=" + new Date().getTime().toString() + "&_charset_=utf-8";
+                } else {
+                    return;
+                }
+            }
+            url = Granite.HTTP.externalize(url);
+            if(DynamicMedia.Util.isUnSafeUrl(url)) {
+                return;
+            }
+            if (config.data.target) {
+                window.open(url, config.data.target);
+            } else {
+                window.location = url;
+            }
+        }
+    });
+
+    // --- delete presets
+    $(document).on('coral-overlay:beforeopen', function(e) {
+        if(!e.target.getAttribute('id')) {
+            return;
+        }
+        var list = $(".rowSelectBoxes[checked]");
+        var deleteString = "";
+        var isDelete = e.target.getAttribute('id').indexOf('delete') != -1;
+        list.each(function(){
+            var presetStyle = $(this).data('config')["jcr:content"]["style"];
+            var isCustom = $(this).data('config')["jcr:content"]["iscustom"];
+            //prevent deletion of ootb preset
+            if (isCustom || !isDelete) {
+                deleteString += $(this).data('config')["id"] + "<BR>";
+            }
+        });
+        $(".msgscontent").html(deleteString);
+    });
+
+    $(document).on("click", ".aem-delete-presets", function(e) {
+        var list = $(".rowSelectBoxes[checked]");
+        var deleteString = "";
+        list.each(function(){
+            var presetStyle = $(this).data('config')["jcr:content"]["style"];
+            var isCustom = $(this).data('config')["jcr:content"]["iscustom"];
+            //prevent deletion of ootb preset
+            if (isCustom) {
+                deleteString += "&name=" + $(this).data('config')["uri"];
+            }
+        });
+
+        //check if there are anything to be deleted
+        if (deleteString.length > 0) {
+            var serializedData = ":operation=delete&_charset_=utf-8" + deleteString;
+            $.post(postServletUrl, serializedData, function() {document.location.reload(true);});
+        } else {
+            document.location.reload(true);
+        }
+    });
+
+    $(document).on("click", ".aem-unpublish-presets", function(e) {
+        unpublishPreset(e);
+    });
+    
+    $(document).one("foundation-contentloaded", function(e) {
+        // force load all pages
+        $('#presetsListTbl').on("foundation-collection-newpage", function(e) {
+            Coral.commons.nextFrame(function() {
+                if($('#presetsListTbl').data("foundation-layout-table.internal.paginator")) {
+                    $('#presetsListTbl').data("foundation-layout-table.internal.paginator")._loadNextPage();
+                }
+            });
+        });
+    });
+
+    function showHideDeletePresetButton(){
+	    var checked = $.map($(".rowSelectBoxes"), function(val) {
+            return $(val).is && $(val).is('coral-checkbox') && val.checked ? $(val) : null;
+        });
+        var n = checked ? checked.length : 0;
+        if (n < 1) {
+            return false;
+        } else if (n == 1) {
+            var preset = checked[0].closest(".foundation-collection-item").data('config');
+            if(isPresetCustom(preset)) {
+                return true;
+            } else {
+                return false;
+            }
+        } else {
+            var isDel = false;
+            for(var cur=0; cur < checked.length; cur++){
+                var preset = checked[cur].closest(".foundation-collection-item").data('config');
+                if(isPresetCustom(preset)) {
+                    isDel = true;
+                    break;
+                }
+            }
+            if(isDel) {
+                return true;
+            } else {
+                return false;
+            }
+        }
+	}
+
+	$(document).on('foundation-selections-change', function(e){
+        if(!CONFIG_IS_ADMIN_USER) {
+            return;
+        }
+
+        Coral.commons.nextFrame(function() {
+           if(showHideDeletePresetButton()) {
+		$("#deletePresetButton").show();
+	    } else {
+		$("#deletePresetButton").hide();
+	    }    	
+        });
+	});
+
+    $(document).on("foundation-contentloaded", function(e) {
+
+   	// temporary fix for wrong position of sort indicator 
+    	$('#presetsListTbl thead').removeAttr('sticky');
+    	$('#presetsListTbl').css('overflow', 'auto');
+        $(".foundation-layout-panel-content").css({'height': 'auto','overflow':'visible'});
+    	// prevent default scroll behavior
+    	$('#presetsListTbl').on("scroll.foundation-util-paginator", function(){
+        	$('#presetsListTbl').off("scroll.foundation-util-paginator");
+    	});
+    	
+        if(e.target.id && e.target.id.indexOf('modal') != -1){
+            return;
+        }
+        if(e.target.id == "globalnav-overlay" || e.target.id == "globalnav-home-content"){
+            return;
+        }
+
+        if(!delModal && $("#deletePresetButton").length != 0){
+            delModal = $("#deletePresetButton").data().foundationToggleableControlSrc;
+            resolveToggleable(delModal);
+            $("#deletePresetButton").off('click');
+            $("#deletePresetButton").on('click', function(e){
+                resolveToggleable(delModal).then(function(toggleable) {
+                    var api = toggleable.adaptTo("foundation-toggleable");
+                    if(api){
+                        api.show($(this));
+                    }
+                });
+            });
+        }
+        if(!upbtnModal && $("#presetUnpublishButton").length != 0){
+            upbtnModal = $("#presetUnpublishButton").data().foundationToggleableControlSrc;
+            resolveToggleable(upbtnModal);
+            $("#presetUnpublishButton").off('click');
+            $("#presetUnpublishButton").on('click', function(e){
+                resolveToggleable(upbtnModal).then(function(toggleable) {
+                    var api = toggleable.adaptTo("foundation-toggleable");
+                    if(api){
+                        api.show($(this));
+                    }
+                });
+            });
+        }
+
+        $('.cq-damadmin-admin-rendition-publish-activator').off('click');
+        $('.cq-damadmin-admin-rendition-publish-activator').on('click', function(e){
+            publishPreset(e);
+        });
+
+        //hide all buttons except adding
+        $("#deletePresetButton").hide();
+        $("#presetPublishButton").hide();
+        $("#presetUnpublishButton").hide();
+        $("#editPresetButton").hide();
+        $("#downloadAssetButton").hide();
+        $("#previewButton").hide();
+
+        /**
+         * Show modal dialog to gather new preset information
+         */
+        $("#addViewerPreset").off("click");
+        $("#addViewerPreset").on("click", function (event) {
+            event.preventDefault();
+            $("#createviewerpreset")[0].show();
+        });
+
+        $("#create-viewer-preset-submit").click("submit", submitNewPreset);
+
+        /**
+         * Custom validation for new preset name field so that we notify user
+         * when existing preset names have been entered into the field.
+         */
+
+        validateFn = function() {
+
+            var submit = $("#createviewerpreset button[type=submit]"),
+                input = $("#newViewerPresetName");
+
+            var potentialName = input.val().trim().toLowerCase(),
+                nameExists = false;
+
+            if(usedNames && usedNames.length) {
+                nameExists = usedNames.reduce(function(value, item) {
+                    var retVal;
+                    // if object has unrecognized properties we catch exception and treat as false
+                    try {
+                        retVal = value || (item.id.trim().toLowerCase() == potentialName);
+                    }
+                    catch(error) {
+                        retVal = false;
+                    }
+                    return retVal;
+                }, false);
+            }
+
+            // Set custom validation attributes
+            if(nameExists || potentialName.length == 0 || potentialName === "analytics") {
+                submit.attr("disabled", true);
+
+                if(nameExists) {
+                    input.attr("invalid");
+                    return Granite.I18n.get("Preset name already exists!");
+                } else if (potentialName === "analytics") {
+                    input.attr("invalid");
+                    return Granite.I18n.get("Preset name is a reserved system name!");
+                }
+            }
+            else {
+                submit.attr("disabled", null);
+                input.removeAttr("invalid");
+                return "";
+            }
+        };
+
+        function waitReady() {
+            var tstcontrol = $('#presetsListTbl th[is="coral-table-headercell"]').get(1);
+            if(!tstcontrol || !tstcontrol.trigger || waitSortControlIsReady()) {
+                setTimeout(waitReady, 20);
+                return;
+            }
+            
+            if(!CONFIG_IS_ADMIN_USER) {
+            	$('.foundation-collection-selectall').hide();
+                $('.rowSelectBoxes').attr('disabled','disabled');
+                $('#presetsListTbl coral-switch').attr('disabled','disabled');
+                
+                $('#presetsListTbl').find('tr').off("coral-table-row:_beforeselectedchanged");
+                $('#presetsListTbl').find('tr').on("coral-table-row:_beforeselectedchanged", function (e) {
+                   	return false;
+                });
+            }
+            
+            $('#presetsListTbl col[data-foundation-layout-table-column-name="titleCol"]').off('coral-table-column:_beforecolumnsort');
+            $('#presetsListTbl col[data-foundation-layout-table-column-name="titleCol"]').on('coral-table-column:_beforecolumnsort', function(e){
+            	if($(e.currentTarget).data('foundationLayoutTableColumnName') == "titleCol") {// skip DEFAULT marker for 'Preset Title' column
+            		if(e.originalEvent.detail.newSortableDirection == Coral.Table.Column.sortableDirection.DEFAULT) {
+            			e.originalEvent.detail.newSortableDirection = Coral.Table.Column.sortableDirection.ASCENDING;
+            		}
+            	}
+            });
+            		
+            $("#presetsListTbl").off('coral-table:beforecolumnsort');
+            $("#presetsListTbl").on('coral-table:beforecolumnsort', function(e) {
+                if($(e.originalEvent.detail.column).data('foundationLayoutTableColumnName') == "stateCol") {
+                    var sortctrls = $("#presetsListTbl .statectnr");
+                    for(var i=0; i < sortctrls.length; i++) {
+                        var chk = $(sortctrls[i]).find('coral-switch').get(0).checked;
+                        $(sortctrls[i]).get(0).value = chk.toString();
+                    }
+                } else if($(e.originalEvent.detail.column).data('foundationLayoutTableColumnName') == "titleCol") {
+                	if(e.detail.direction == Coral.Table.Column.sortableDirection.DEFAULT) {// skip DEFAULT sort for 'Preset Title' column
+                		e.detail.direction = Coral.Table.Column.sortableDirection.ASCENDING;
+                	}
+                }
+            });
+
+            var rows = $("#presetsListTbl .foundation-collection-item");
+            rows.each(function(idx) {
+                var row = $(this);
+                row.addClass('each-list-rendition');
+                row.removeAttr('coral-table-rowselect');
+                row.find('coral-checkbox').attr('coral-table-rowselect', '');
+                var config = row.data("config");
+                var content = config["jcr:content"];
+                if (typeof(content) == "string") {
+                    content = jQuery.parseJSON(content);
+                    content.iscustom = content.iscustom == "true";
+                    content.isactive = content.isactive == "true";
+                    content.uri = config.uri = row.data("foundation-collection-item-id");
+                }
+                config["jcr:content"] = content;
+
+                row.find(".rowSelectBoxes").data("config", config);
+            });
+
+            if(CONFIG_IS_ADMIN_USER) {
+                $("#presetPublishButton").show();
+                $("#presetUnpublishButton").show();
+                $("#editPresetButton").show();
+                $("#downloadAssetButton").show();
+                if(showHideDeletePresetButton()) {
+			$("#deletePresetButton").show();
+	    	} else {
+			$("#deletePresetButton").hide();
+	  	}    
+            }
+
+            var sortableDirection = Coral.Table.Column.sortableDirection;
+            if(!firstLoaddone){ // set ASCENDING sort marker for 'Preset Title' column on start
+            	$('#presetsListTbl col[data-foundation-layout-table-column-name="titleCol"]').get(0).trigger('coral-table-column:_beforecolumnsort', {
+                    newSortableDirection: Coral.Table.Column.sortableDirection.ASCENDING
+                });
+                firstLoaddone = true;
+            }
+        }
+
+        waitReady();
+    });
+
+    function waitSortControlIsReady() {
+        var sortctrls = $("#presetsListTbl .statectnr");
+        for(var i=0; i < sortctrls.length; i++) {
+            var chk = typeof($(sortctrls[i]).find('coral-switch').get(0).checked) == 'boolean' ;
+            if(!chk) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function presetDir() {
+        var sortableDir = Coral.Table.Column.sortableDirection;
+        var columns = $("#presetsListTbl").get(0).querySelectorAll('col[is="coral-table-column"]');
+        var col;
+        var cursort;
+        for(var i=1; i< columns.length; i++) {
+            var cur = columns[i];
+            if(cur.sortableDirection && cur.sortableDirection != sortableDir.DEFAULT) {
+                col = cur;
+                cursort = cur.sortableDirection;
+                cur.sortableDirection = sortableDir.DEFAULT;
+                break;
+            }
+        }
+        var sortctrls = $("#presetsListTbl .statectnr");
+        for(var i=0; i < sortctrls.length; i++) {
+            var chk = $(sortctrls[i]).find('coral-switch').get(0).checked;
+            $(sortctrls[i]).get(0).value = chk.toString();
+        }
+        if(col) {
+            cur.sortableDirection = cursort;
+        }
+    }
+
+    //Button to set active/inactive preset
+    
+    $(document).on("click", ".activePreset", function(e) {
+    	var switchbtn = $(e.target).closest('coral-switch').get(0);
+    	var ctrlVal = !switchbtn.checked;
+		Coral.commons.nextFrame(function() {
+			switchbtn.value = ctrlVal ? 'on' : 'off';
+			switchbtn.checked = ctrlVal;
+	    	toggleState(switchbtn);    		
+		});
+    });
+
+    /**
+     * Redirect to preset editor and encode dialog input in URL
+     */
+    function submitNewPreset(event) {
+        event.preventDefault();
+        var viewerPresetName = $("#newViewerPresetName").val();
+        var viewerPresetType = $("#newViewerPresetType")[0].value;
+
+        var url = editorUrl + "?presetType=" + viewerPresetType + "&presetName=" + encodeURIComponent(viewerPresetName);
+        window.location = url;
+    }
+
+    /**
+     * Toggle between active / inactive
+     */
+
+    function toggleState(switchbtn) {
+        var postUrl = $(switchbtn).closest(".foundation-collection-item").data("foundation-collection-item-id") + ".viewerpresets.json";
+
+        var url = ":operation=update";
+        //url += "&category=" + config["jcr:content"]["category"];
+        url += "&isactive=" + switchbtn.checked;
+        url += "&_charset_=utf-8";
+        $.post(postUrl, url).done(function(){
+            presetDir();
+        });
+
+
+        //update value on cached record object
+        var record;
+        for (var i=0; i < presetList.length; i++) {
+            record = presetList[i];
+
+            if (record["uri"] === config["uri"]) {
+                record["jcr:content"]["isactive"] = newStatus;
+                record.active = (newStatus)? 'on' : 'off';
+                break;
+            }
+        }
+
+    }
+
+    function isPresetCustom(cfg){
+        if(!cfg || !cfg["jcr:content"] || !cfg["jcr:content"].hasOwnProperty("iscustom")) {
+            return true;
+        }
+        return Boolean(cfg["jcr:content"]["iscustom"]);
+    }
+
+    function uncheckCheckboxes(op) {
+        var list = $(".rowSelectBoxes[checked]");
+    	var api = $('#presetsListTbl').adaptTo("foundation-selections");
+        list.each( function(val) {
+        	var row = $(this).closest('.foundation-collection-item');
+            var itm = row.get(0);
+            if(typeof(op) != 'undefined') {
+                var outdatedPublish = $(itm).find(".outdated-publish");
+                if(outdatedPublish.get(0)) {
+                    outdatedPublish.remove();
+                }
+                var publishTxt = op ? $(itm).data("config").publishedi18n : $(itm).data("config").unpublishedi18n;
+                var itmpublish = $(itm).find(".published-col");
+                $(itmpublish).get(0).innerText = publishTxt;
+            	$(row).find('.rowSelectBoxes').get(0).checked = false;
+                api.deselect(itm);
+            }
+        });
+    }
+
+
+// -------------------------------------------
+    var cache = new Map();
+    function resolveToggleable(src) {
+        if (cache.has(src)) {
+            var el = cache.get(src);
+            el.appendTo(document.body);
+            return $.Deferred().resolve(el).promise();
+        }
+
+        return $.ajax({
+            url: src,
+            cache: false
+        }).then(function(html) {
+            var el = $(html).on("foundation-toggleable-hide", function(e) {
+                var target = $(e.target);
+                requestAnimationFrame(function() {
+                    target.detach();
+                });
+            }).appendTo(document.body).trigger("foundation-contentloaded");
+
+            cache.set(src, el);
+            return el;
+        });
+    }
+
+
+    function replicatePresets(presetsPathsList, responseHandler, cmd) {
+        if (presetsPathsList.length > 0) {
+            var url = Granite.HTTP.externalize(presetsPathsList[1] + replicationUrlSuffix);
+            var settings = {
+                "type": "POST",
+                "data": {
+                    "_charset_": "utf-8",
+                    "action": cmd,
+                    "paths": presetsPathsList
+                },
+                "complete": responseHandler ? responseHandler : replicationStarted
+            };
+            $.ajax(url, settings);
+        }
+    }
+
+    function publishReplicationStarted(xhr, status) {
+        $('.foundation-content').overlayMask('hide');
+        if (status === "success") {
+            resolveToggleable(successModal).then(function(toggleable) {
+                var api = toggleable.adaptTo("foundation-toggleable");
+                if(api){
+                    $("#successUnpublish").hide();
+                    $("#successPublish").show();
+                    api.show($(this));
+                }
+                uncheckCheckboxes(true);
+            });
+        } else {
+            resolveToggleable(errorModal).then(function(toggleable) {
+                var api = toggleable.adaptTo("foundation-toggleable");
+                if(api){
+                    $("#errorUnpublish").hide();
+                    $("#errorPublish").show();
+                    api.show($(this));
+                }
+            });
+        }
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.clearWait();
+    }
+
+    function unpublishReplicationStarted(xhr, status) {
+        if (status === "success") {
+            resolveToggleable(successModal).then(function(toggleable) {
+                var api = toggleable.adaptTo("foundation-toggleable");
+                if(api){
+                    $("#successPublish").hide();
+                    $("#successUnpublish").show();
+                    api.show($(this));
+                }
+                uncheckCheckboxes(false);
+            });
+        } else {
+            resolveToggleable(errorModal).then(function(toggleable) {
+                var api = toggleable.adaptTo("foundation-toggleable");
+                if(api){
+                    $("#errorPublish").hide();
+                    $("#errorUnpublish").show();
+                    api.show($(this));
+                }
+            });
+        }
+    }
+
+    $.fn.overlayMask = function (action, appendEl) {
+        var mask = this.find('.overlay-mask');
+        // Creates required mask
+
+        if (!mask.length && (!action || action === 'show')) {
+            mask = $('<div class="overlay-mask"></div>');
+            mask.css({
+                position: 'absolute',
+                width: '100%',
+                height: '100%',
+                top: '0px',
+                left: '0px',
+                zIndex: 10000
+            }).appendTo(this);
+            mask.append(appendEl);
+        }
+
+        // Act based on params
+
+        if (!action || action === 'show') {
+            this.fadeTo(0, 0.5);
+            mask.show();
+        } else if (action === 'hide') {
+            this.fadeTo(0, 1);
+            mask.hide();
+        }
+        return this;
+    };
+
+    function publishPreset(e) {
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        var list = $(".rowSelectBoxes[checked]");
+        successModal = $(e.target).closest(".cq-damadmin-admin-rendition-publish-activator").data("success-src");
+        errorModal = $(e.target).closest(".cq-damadmin-admin-rendition-publish-activator").data("error-src");
+        resolveToggleable(successModal);
+        resolveToggleable(errorModal);
+        var paths = [];
+        for (var i = 0; i < list.length; i++){
+            var config = $(list[i]).data("config");
+            paths = paths.concat(parsePublishPaths(config));
+        }
+        replicatePresets(paths, publishReplicationStarted, 'Activate');
+    }
+
+    /**
+     * Parse preset config object to determine related paths for publish/unpublish
+     * @param presetConfig
+     * @returns path {Array} Array of related paths
+     */
+    function parsePublishPaths(presetConfig) {
+        var paths = [];
+
+        paths.push(presetConfig["uri"]);
+        if (presetConfig["jcr:content"]["style"]) {
+            // style is the CSS for the preset
+            var cssPath = "/" + presetConfig["jcr:content"]["style"];
+            // special case:  if css is in the /etc folder it should not be published
+            if (!cssPath.startsWith("/etc/dam")) {
+                paths.push(cssPath);
+            }
+
+            // art is a list of images referenced by CSS
+            var imgList = presetConfig["jcr:content"]["art"];
+            if (imgList && imgList.length) {
+                for (var j = 0; j < imgList.length; j++) {
+                    paths.push(imgList[j]);
+                }
+            }
+        }
+        return paths;
+    }
+
+    function unpublishPreset(e) {
+
+        successModal = $(e.target).closest("coral-dialog").data("success-src");
+        errorModal = $(e.target).closest("coral-dialog").data("error-src");
+        resolveToggleable(successModal);
+        resolveToggleable(errorModal);
+
+        var list = $( ".rowSelectBoxes[checked]" );
+        var paths = [];
+        for (var i = 0; i < list.length; i++){
+            var config = $(list[i]).data("config");
+            paths = paths.concat(parsePublishPaths(config));
+        }
+        replicatePresets(paths, unpublishReplicationStarted, 'Deactivate');
+    }
+
+
+    $(document).ready(function() {
+        loadPresets();
+    });
+
+    $.loadExistingPresets =  (function loadExistingPresets($url) {
+        return $.ajax({
+            dataType: "json",
+            url: $url
+        }).pipe(function (response) {
+            return response;
+        });
+    });
+
+    function loadPresets() {
+        var ts = new Date().getTime();
+        $.loadExistingPresets(Granite.HTTP.externalize(CONST_VIEWER_PRESETS_ALL) + '&ts=' + ts)
+            .done(function (response) {
+                usedNames = [];
+            	if(Array.isArray(response)) {
+                	for(var i=0; i<response.length; i++) {
+                		var cur = response[i];
+                		if(cur && typeof(cur.id) == 'string' && cur['jcr:content'] && cur['jcr:content']['dam:s7damType'] ) {
+                			usedNames.push(cur);
+                		}
+                	}
+            	}
+            });
+    }
+
+})(document, Granite.$);

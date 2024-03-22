@@ -1,0 +1,648 @@
+/*
+* ADOBE CONFIDENTIAL
+*
+* Copyright 2020 Adobe Systems Incorporated
+* All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and may be covered by U.S. and Foreign Patents,
+* patents in process, and are protected by trade secret or copyright law.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+*/
+(function (document, $)  {
+    "use strict";
+
+    // containers
+    var SEL_PANEL_STANDARD      = ".content-panel.standard",
+        SEL_PANEL_CUSTOM        = ".content-panel.custom",
+        SEL_PANEL_CONTENT_AI    = ".content-panel.contentai",
+        SEL_PANEL_SMARTCROP     = ".content-panel.smartcrop",
+        SEL_PANEL_CREATIVE      = ".content-panel.creative",
+        SEL_PANEL_DIMENSION     = ".content-panel.dimension",
+        SEL_PANEL_VIDEO         = ".content-panel.video",
+        SEL_PROFILE_INFO        = "#profile-info";
+
+    // selectors
+    var SEL_STANDARD_ITEMS_CONTAINER    = SEL_PANEL_STANDARD + " #items-container";
+    var SEL_CUSTOM_ITEMS_CONTAINER      = SEL_PANEL_CUSTOM + " #items-container";
+    var SEL_CONTENT_AI_ITEMS_CONTAINER  = SEL_PANEL_CONTENT_AI + " #items-container";
+    var SEL_SMARTCROP_ITEMS_CONTAINER   = SEL_PANEL_SMARTCROP + " #items-container";
+    var SEL_CREATIVE_ITEMS_CONTAINER    = SEL_PANEL_CREATIVE + " #items-container";
+    var SEL_DIMENSION_ITEMS_CONTAINER   = SEL_PANEL_DIMENSION + " #items-container";
+    var SEL_VIDEO_ITEMS_CONTAINER       = SEL_PANEL_VIDEO + " #items-container";
+    var SEL_PROFILE_NAME                = "input#profile-name";
+    var SEL_STANDARD_WRAPPER            = SEL_PANEL_STANDARD + " > coral-panel-content .item-wrapper";
+    var SEL_VIDEO_WRAPPER               = SEL_PANEL_VIDEO + " > coral-panel-content .item-wrapper";
+    var SEL_CUSTOM_WRAPPER              = SEL_PANEL_CUSTOM + " > coral-panel-content .item-wrapper";
+    var SEL_CONTENT_AI_WRAPPER          = SEL_PANEL_CONTENT_AI + " > coral-panel-content .item-wrapper";
+    var SEL_SMARTCROP_WRAPPER           = SEL_PANEL_SMARTCROP + " > coral-panel-content .item-wrapper";
+    var SEL_CREATIVE_WRAPPER            = SEL_PANEL_CREATIVE + " > coral-panel-content .item-wrapper";
+    var SEL_DIMENSION_WRAPPER           = SEL_PANEL_DIMENSION + " > coral-panel-content .item-wrapper";
+    var SEL_RENDITION_NAME              = "input.rendition-name";
+    var CONTENT_AI_SEL_RENDITION_NAME   = "input.contentai.rendition-name";
+
+    // events
+    var ITEM_ADDED      = "ITEM_ADDED",
+        ITEM_REMOVED    = "ITEM_REMOVED",
+        ITEM_UPDATED    = "ITEM_UPDATED",
+        VALIDATE_FORM   = "VALIDATE_FORM";
+
+    // reserved prefixes
+    var CQ5     = "cq5",
+        CQDAM   = "cqdam",
+        CQ5DAM  = "cq5dam";
+
+    // messages
+    var MSG_PROILE_NAME_IN_USE    = Granite.I18n.get("The profile name is already in use"),
+        MSG_GENERIC_ERROR         = Granite.I18n.get("An error has occurred"),
+        MSG_SYS_RENDITION_NAME    = Granite.I18n.get('The profile has renditions that use resevered names or prefixes. Rendition names cannot begin with "' +CQ5+ '", "' +CQDAM+ '", or "' +CQ5DAM+ '". Please update the invalid fields:');
+
+    var originalName;
+
+    var IS_INVALID     = "is-invalid",
+        PROFILE_PATH   = "profilePath";
+
+    // workers
+    var imageWorker;
+    var customWorker;
+    var azureMediaServicesWorker;
+    var smartcropWorker;
+    var creativeWorker;
+    var dimensionWorker;
+    var videoWorker;
+
+    $(document).one("foundation-contentloaded", function () {
+
+        // disable save button
+        $("#btn-save").prop("disabled", true);
+
+        // get foundation ui
+        var ui = $(window).adaptTo('foundation-ui');
+
+        // create profile worker (image)
+        imageWorker = new StandardWorker({
+            $parent :$(SEL_STANDARD_ITEMS_CONTAINER), 
+            $container :$(SEL_PANEL_STANDARD)
+        });
+
+        // create profile worker (video)
+        videoWorker = new VideoWorker({
+            $parent:$(SEL_VIDEO_ITEMS_CONTAINER), 
+            $container:$(SEL_PANEL_VIDEO)
+        });
+
+        // create profile worker (custom)
+        customWorker = new CustomWorker({
+            $parent:$(SEL_CUSTOM_ITEMS_CONTAINER), 
+            $container:$(SEL_PANEL_CUSTOM)
+            });
+
+        if ($("coral-tab#contentai").length > 0) {
+            // create content ai worker (content-ai)
+            azureMediaServicesWorker = new AzureMediaServicesWorker({
+                $parent:$(SEL_CONTENT_AI_ITEMS_CONTAINER), 
+                $container:$(SEL_PANEL_CONTENT_AI)
+            });
+        }
+        // create profile worker (smartcrop)
+        smartcropWorker = new SmartcropWorker({
+            $parent:$(SEL_SMARTCROP_ITEMS_CONTAINER), 
+            $container:$(SEL_PANEL_SMARTCROP)
+        });
+
+        // create profile worker (creative)
+        creativeWorker = new CreativeWorker({
+            $parent:$(SEL_CREATIVE_ITEMS_CONTAINER), 
+            $container:$(SEL_PANEL_CREATIVE)
+        });
+
+        // create profile worker (dimension)
+        dimensionWorker = new DimensionWorker({
+            $parent:$(SEL_DIMENSION_ITEMS_CONTAINER),
+            $container:$(SEL_PANEL_DIMENSION)
+        })
+
+        // show wait cursor
+        ui.wait();
+
+        // update ui layout (css styles)
+        setup();
+
+        // updated tabs
+        updateTabCount();
+
+        // load profile
+        loadProfile();
+
+        // add listener to track updates (items added or removed) for item count in tab name
+        $(SEL_PROFILE_INFO).on(ITEM_ADDED, updateTabCount);
+        $(SEL_PROFILE_INFO).on(ITEM_UPDATED, validate);
+        $(SEL_PROFILE_INFO).on(VALIDATE_FORM, validate);
+        $(SEL_PROFILE_INFO).on(ITEM_REMOVED, updateTabCount);
+        $("#btn-save").on("click", submitChanges);
+
+        // check form
+        $("#btn-save").on("mouseover", function() {
+            $("input.key").change();
+            $("input.endpoint").change();
+            $(".rendition-name input").change();
+        });
+    });
+
+    function setup() {
+        $("coral-tablist").css("padding-left", "0px");
+        $("coral-tablist").css("justify-content", "left");
+        $("coral-tab-label").css("margin", "0px");
+        $(".section-header").css("margin-bottom", "20px");
+        setTimeout(function() {
+            $("#profile-name ++").css("width", "100%");
+        }, 100);
+    }
+
+    function selectProfile() {
+        var tabProfileLength = {
+            standard: $(SEL_STANDARD_WRAPPER).length,
+            video: $(SEL_VIDEO_WRAPPER).length,
+            custom: $(SEL_CUSTOM_WRAPPER).length,
+            contentai: $(SEL_CONTENT_AI_WRAPPER).length,
+            smartcrop: $(SEL_SMARTCROP_WRAPPER).length,
+            creative: $(SEL_CREATIVE_WRAPPER).length,
+            dimension: $(SEL_DIMENSION_WRAPPER).length
+        };
+        var profileLength = (profile) => profile > 0;
+        var profileTarget = Object.values(tabProfileLength).findIndex(profileLength);
+        var selectedProfile = $("coral-tab#" + Object.keys(tabProfileLength)[profileTarget]);
+        selectedProfile.click();
+
+    }
+
+    function updateTabCount() {
+        // update "standard" & "custom" profile count
+        $("coral-tab#standard").text("Image (" + $(SEL_STANDARD_WRAPPER).length + ")");
+        $("coral-tab#video").text("Video (" + $(SEL_VIDEO_WRAPPER).length + ")");
+        $("coral-tab#custom").text("Custom (" + $(SEL_CUSTOM_WRAPPER).length + ")");
+        $("coral-tab#contentai").text("Content AI (" + $(SEL_CONTENT_AI_WRAPPER).length + ")");
+        $("coral-tab#smartcrop").text("SmartCrop (" + $(SEL_SMARTCROP_WRAPPER).length + ")");
+        $("coral-tab#creative").text("Creative (" + $(SEL_CREATIVE_WRAPPER).length + ")");
+        $("coral-tab#dimension").text("3D (" + $(SEL_DIMENSION_WRAPPER).length + ")");
+
+        // add listener to create jcr safe name
+        $("input.rendition-name").off("keyup").on("keyup", function() {
+            cleanIllegalCharacter($(this));
+        });
+    }
+
+    function getRenditionCount() {
+        var renditionLen = $(SEL_RENDITION_NAME).length;
+        // dimension rendion names are auto-generated so they do not use the same selector/field as other rendition types
+        // so calclulate dimension renditions length and add to total.
+        var dimesionRenditionLen = $(".dimension .item-content").length;
+        var total = renditionLen + dimesionRenditionLen;
+        return total;
+    }
+
+    function validate() {
+        var invalid = false;
+
+        // if dimension Feature Toggle is enabled, and there are no fields with the "is-invalid" class, the profile name is good  
+        // and the dimesion worker is enabled, verify dimesion fields
+        if ($("coral-tab#dimension").length > 0) {
+            var dimensionInvalid = isDimensionContentInvalid();
+            if (dimensionInvalid) {
+                invalid = true;
+            }
+        }
+
+        // check if there are invalid renditions
+        // must be checked after isDimensionContentInvalid(), 
+        // which removes is-invalid tags for camerasList, glbCheckbox
+        var inputInvalid = $("input.is-invalid").length > 0;
+        var renditionsLen = getRenditionCount();
+
+        var hasContentAIRendition = $(CONTENT_AI_SEL_RENDITION_NAME).length > 0
+
+        if (hasContentAIRendition) {
+            invalid = $(SEL_PROFILE_NAME).val().length < 1;
+        }  else {
+            // set invalid to true if inputInvalid is true
+            // this is to avoid writing over dimensions invalid check
+            if (inputInvalid) {
+                invalid = true;
+            // if no invalid renditions and rendition count less than one
+            // make sure fpo is checked, if not set invalid
+            } else if (renditionsLen < 1) {
+                var noFpo = $("#fpo").attr("checked") !== "checked";
+                invalid = noFpo;
+                //check profile name
+                if (!invalid) {
+                    invalid = $(SEL_PROFILE_NAME).val().length < 1;
+                }
+            }
+        }
+
+        // enable/disable submit button
+        $("#btn-save").prop("disabled", invalid);
+
+        // update tabs
+        var id = $("coral-tab.is-selected").attr("id");
+        var hasErrors = $("coral-panel[data-tab=" + id + "] input.is-invalid").length > 0;
+        if (!hasErrors) {
+            $("coral-tab.is-selected").removeClass(IS_INVALID);
+        }
+    }
+
+    function isDimensionContentInvalid(invalid) {
+        if ($(".dimension .item-content").length > 0) { // validate dimension if applicable
+            // if there are no selected cameras or no glb export checked, the editor is invalid
+            // there needs to be either cameras selected or the glb export box checked for the editor to be valid
+            if ($(".cameraList .tag").length < 1 && $(".glbCheckbox").attr("checked") !== "checked") {
+                $(".cameraList").find("input[type=text]").removeClass(IS_INVALID);
+                $(".cameraList").find("input[type=text]").addClass(IS_INVALID);
+
+                $(".glbCheckbox").removeClass(IS_INVALID);
+                $(".glbCheckbox").addClass(IS_INVALID)
+                invalid = true;
+            }
+            else {
+                $(".cameraList").find("input[type=text]").removeClass(IS_INVALID);
+                $(".glbCheckbox").removeClass(IS_INVALID);
+            }
+
+            // if there is no selected replace option the editor is invalid
+            if ($(".dimension coral-select.replace").is(":visible") 
+                && $(".dimension coral-select.replace").val().length < 1) {
+                $("coral-select.replace").attr("invalid", true);
+                invalid = true;
+            }
+            else {
+                $("coral-select.replace").removeAttr("invalid");
+            }
+
+            // if there is no replacement texture and selected the editor is invalid
+            if ($(".dimension coral-select.texture").is(":visible")) {
+                var notValid = $(".dimension coral-select.texture").val().length < 1;
+                if (notValid) {
+                    $("coral-select.texture").attr("invalid", true);
+                    invalid = true;
+                }
+                else {
+                    $("coral-select.texture").removeAttr("invalid");
+                }
+            }
+    
+            // if there is no replacement object selected the editor is invalid
+            if ($(".dimension coral-select.object").is(":visible")) {
+                var notValid = $(".dimension coral-select.object").val().length < 1;
+                if (notValid) {
+                    $("coral-select.object").attr("invalid", true);
+                    invalid = true;
+                }
+                else {
+                    $("coral-select.object").removeAttr("invalid");
+                }
+            }
+        }
+
+        // return false if there are no invalid fields
+        return invalid || false;
+    }
+
+    function loadProfile() {
+        // load profile data
+        var path = $(SEL_PROFILE_INFO).data(PROFILE_PATH);
+        var ui = $(window).adaptTo('foundation-ui');
+        if (path) {
+            path += ".4.json";
+
+            // get profile
+            $.ajax({
+                url: path,
+                cache: false
+            }).done(function(data) {
+
+                // set original name
+                originalName = data["jcr:content"]["jcr:title"];
+
+                // create profile for edit
+                var profile = {};
+                profile["formats"] = [];
+                profile["customs"] = [];
+                profile["creatives"] = [];
+                profile["dimensions"] = [];
+
+                // update profile name
+                $(SEL_PROFILE_NAME).val(originalName);
+
+                // roll dimension worker renditions into one rendition
+                var dimensionformatsData;
+
+                // add options/formats
+                for (var prop in data) {
+                    if(!data.hasOwnProperty(prop)) continue;
+                    if (!data[prop].hasOwnProperty("jcr:content")) {
+                        continue;
+                    }
+
+                    // get jcrTitle
+                    var jcrTitle = data[prop]["jcr:content"]["jcr:title"];
+
+                    // resourceType
+                    var resourceType = data[prop]["jcr:content"]["sling:resourceType"];
+
+                    // get name
+                    data[prop]["jcr:content"]["name"] = jcrTitle? jcrTitle : prop;
+
+                    // handle image profile worker (nui profiles)
+                    if ( resourceType === "dam/processing/profile/rendition") {
+                        imageWorker.addRow(data[prop]["jcr:content"]);
+                    }
+
+                    // handle video profile worker (FFMPEG)
+                    if ( resourceType === "dam/processing/profile/video") {
+                        videoWorker.addRow(data[prop]["jcr:content"]);
+                    }
+
+                    // handle custom profile worker
+                    if ( resourceType === "dam/processing/profile/custom") {
+                        customWorker.addRow(data[prop]);
+                    }
+
+                    // handle content ai worker
+                    if ($("coral-tab#contentai").length > 0) {
+                        if ( resourceType === "dam/processing/profile/contentai") {
+                            azureMediaServicesWorker.addRow(data[prop]);
+                        }
+                    }
+
+                    // handle smartcrop profile worker
+                    if ( resourceType === "dam/processing/profile/smartcrop") {
+                        smartcropWorker.addRow(data[prop]["jcr:content"]);
+                    }
+
+                    // handle creative profile worker
+                    if ( resourceType === "dam/processing/profile/creative") {
+                        creativeWorker.addRow(data[prop]["jcr:content"]);
+                    }
+
+                     // handle dimension profile worker
+                    if ( resourceType === "dam/processing/profile/dimension") {
+                        var dimensionRef = data[prop]["jcr:content"];
+                        if (!dimensionformatsData) {
+                            // dimensionFormatsData is the singular representation
+                            // of all the dimension renditions
+                            // this will include, a list of cameras and glb export
+                            dimensionformatsData = dimensionRef;
+                        }
+                        else {
+                            if (dimensionRef && dimensionRef.operation && dimensionRef.operation.cameras) {
+                                var camera = JSON.parse(dimensionRef.operation.cameras)[0];
+
+                                // stringified list of camera object if it exists
+                                // it may not exist if the first rendition added was glb export
+                                const existingCameras = dimensionformatsData.operation.cameras || "[{}]";
+                                var rootCameras = JSON.parse(existingCameras);
+                                rootCameras.push(camera);
+                                dimensionformatsData.operation.cameras = JSON.stringify(rootCameras);
+                            }   
+                        }
+
+                        // add glb export back into main rendition
+                        if (dimensionRef && dimensionRef.fmt === "glb") {
+                            dimensionformatsData.glbExport = true;
+                        }
+                    }
+                }
+
+                // add dimension data if applicable
+                if (dimensionformatsData) {
+                    dimensionWorker.addRow(dimensionformatsData);
+                }
+
+                // select profile
+                selectProfile();
+                // remove wait cursor
+                ui.clearWait();
+            });
+        }
+        else {
+            // remove wait cursor
+            ui.clearWait();
+        }
+    }
+
+    function submitChanges() {
+        var postUrl = $(SEL_PROFILE_INFO).data(PROFILE_PATH);
+        postUrl = postUrl ? postUrl : "";
+        postUrl += ".nuiprofiles.json";
+
+        var profile = {};
+        profile.name = $.trim($(SEL_PROFILE_NAME).val());
+        profile.oldname = originalName? $.trim(originalName) : undefined;
+        profile.targetFolder = $("input.target-folder").val();
+        profile.dimensionTargetFolder = $("input.dimension-target-folder").val();
+
+        // get image profiles
+        profile.formats = imageWorker.data();
+
+        // get video profiles
+        var videoformatsData = videoWorker.data();
+        if (videoformatsData.length) {
+            profile.videoformats = videoformatsData;
+        }
+
+        // get custom profiles
+        var customFormatsData = customWorker.data();
+        if (customFormatsData.length) {
+            profile.customformats = customFormatsData;
+        }
+
+        if ($("coral-tab#contentai").length > 0) {
+            // get content-ai profiles
+            var contentAIFormatsData = azureMediaServicesWorker.data();
+            if (contentAIFormatsData.length) {
+                profile.contentaiformats = contentAIFormatsData;
+            }
+        }
+
+        // get smartcrop profiles
+        var smartcropFormatsData = smartcropWorker.data();
+        if (smartcropFormatsData.length) {
+            profile.smartcropformats = smartcropFormatsData;
+        }
+
+        // get creative profiles
+        var creativeformatsData = creativeWorker.data();
+        if (creativeformatsData.length) {
+            profile.creativeformats = creativeformatsData;
+        }
+
+        // get dimension profiles
+        var dimensionformatsData = dimensionWorker.data();
+        if (dimensionformatsData.length) {
+            var renditions = [];
+            var dimensionData = dimensionformatsData[0];
+            var baseName = dimensionData.name;
+
+            // if glb export is selected, add another rendition
+            if (dimensionData.glbExport) {
+                var glbRendition = JSON.parse(JSON.stringify(dimensionData)); // deep copy
+                glbRendition.format = "glb";
+                glbRendition.name = `${baseName}_glbExport`;
+                delete glbRendition.operation.cameras; // cameras not needed for glb export
+                renditions.push(glbRendition);
+                delete dimensionData.glbExport;
+            }
+            
+            // if there are multiple cameras separate into multiple renditions
+            var cameras = dimensionData.operation.cameras;
+            var len = cameras && cameras.length;
+            if (len > 0) {
+                for (var i = 0; i < len; i++) {
+                    var renditionBase = JSON.parse(JSON.stringify(dimensionData));
+                    var camera = cameras[i];
+                    renditionBase.format = "png";
+                    renditionBase.name = baseName + "_" + camera.label.replace(/ /g, "_");
+                    var newCameras = [camera];
+                    renditionBase.operation.cameras = newCameras;
+                    renditions.push(renditionBase);
+                }
+            }
+            if (renditions.length < 1) {
+                renditions = dimensionformatsData;
+            }
+
+            // add formats
+            profile.dimensionformats = renditions;
+        }
+
+        // create param object
+        var param = {};
+        param.oldname = profile.oldname;
+        param.name = profile.name;
+        param.profile = JSON.stringify(profile);
+        param._charset_ = "utf-8";
+
+        //disable save button for form submission
+        $(this).prop('disabled', true);
+
+        // check form to verify system names are not in use.
+        var invalidNames = [];
+        $(SEL_RENDITION_NAME).each(function() {
+            var renditionName = $(this).val().toLowerCase();
+            if (renditionName.startsWith(CQ5)
+                    || renditionName.startsWith(CQDAM)
+                    || renditionName.startsWith(CQ5DAM)) {
+
+                // if invalid check to see if a worker owns this rendition, if so let the owner (worker) validate the rendition name
+                var owner = $(this).data("owner");
+                if (owner) {
+                    var isValid = owner.isValidRenditionName(renditionName);
+                    if (!isValid) {
+                        invalidNames.push(renditionName);
+                        $(this).removeClass(IS_INVALID);
+                        $(this).addClass(IS_INVALID);
+                        setTimeout(function() {
+                            validate();
+                        }, 1);
+                    }
+                    // skip default validation
+                    return false;
+                }
+
+                invalidNames.push($(this).val());
+                $(this).removeClass(IS_INVALID);
+                $(this).addClass(IS_INVALID);
+                setTimeout(function() {
+                    validate();
+                }, 1);
+            }
+        });
+
+        // if has errors show error message and bail
+        if (invalidNames.length > 0) {
+            var formattedErrors = "";
+            var i;
+            var len = invalidNames.length;
+            for (i = 0; i < len; i++) {
+                formattedErrors += "* " + invalidNames[i] + "<br>";
+            }
+            var dialogSystemNameInUse = new Coral.Dialog().set({
+                header: {innerHTML: Granite.I18n.get("Error")},
+                content: {innerHTML: MSG_SYS_RENDITION_NAME + "<br>" + formattedErrors},
+                footer: {innerHTML: '<button id="btnOk" is="coral-button" variant="error">' + Granite.I18n.get("OK") + '</button>'},
+                variant: "error"
+            });
+            document.body.appendChild(dialogSystemNameInUse);
+            dialogSystemNameInUse.show();
+
+            // handle OK button click
+            $(dialogSystemNameInUse).find("#btnOk").on("click", function(){
+                dialogSystemNameInUse.hide();
+            });
+            return;
+        }
+
+        // save profile
+        $.post(postUrl, param).always(function(response) {
+            //if check for duplicate name on failure from server response, if so show error
+            if (response.status === 409) {
+                // dialog for duplicate name
+                var duplicateProfileName = new Coral.Dialog().set({
+                    header: {innerHTML: Granite.I18n.get("Error")},
+                    content: {innerHTML: MSG_PROILE_NAME_IN_USE + ': <br>"' + $(SEL_PROFILE_NAME).val() + '"'},
+                    footer: {innerHTML: '<button id="btnOk" is="coral-button" variant="error">' + Granite.I18n.get("OK") + '</button>'},
+                    variant: "error"
+                });
+
+                document.body.appendChild(duplicateProfileName);
+                duplicateProfileName.show();
+
+                // handle ok button click
+                $(duplicateProfileName).find("#btnOk").on("click", function() {
+                    // set field invalid
+                    $(SEL_PROFILE_NAME).removeClass(IS_INVALID);
+                    $(SEL_PROFILE_NAME).addClass(IS_INVALID);
+                    duplicateProfileName.hide();
+                });
+            } else if (response.status === 500) {
+                // dialog for generic error
+                var genericError = new Coral.Dialog().set({
+                    header: {innerHTML: Granite.I18n.get("Error")},
+                    content: {innerHTML: MSG_GENERIC_ERROR},
+                    footer: {innerHTML: '<button id="btnOk" is="coral-button" variant="error">' + Granite.I18n.get("OK") + '</button>'},
+                    variant: "error"
+                });
+
+                document.body.appendChild(genericError);
+                genericError.show();
+
+                // handle ok button click
+                $(genericError).find("#btnOk").on("click", function() {
+                    genericError.hide();
+                });
+            } else {
+                document.location.assign(Granite.HTTP.externalize('/mnt/overlay/dam/gui/content/processingprofiles.html'));
+            }
+        });
+    }
+
+    function cleanIllegalCharacter(field) {
+        var name = field.val();
+        var val = "-";
+        // illegal character for JCR ", ', *, /, :, [, \, ], |
+        // other non-valid characters %, ?, \n, \t, \r, ., #, {, }, ^, ;, +, &, <, >, comma(,)
+        var newnm = name.replace(/[\"\'\*\/\:\[\\\]\|%?\n\t\r. #{}^;+&<>,]/g, val);
+
+        if(newnm != name) {
+            var start = field.get(0).selectionStart;
+            var end = field.get(0).selectionEnd;
+            field.val(newnm);
+            field.get(0).setSelectionRange(start, end);
+        }
+    }
+})(document, Granite.$);

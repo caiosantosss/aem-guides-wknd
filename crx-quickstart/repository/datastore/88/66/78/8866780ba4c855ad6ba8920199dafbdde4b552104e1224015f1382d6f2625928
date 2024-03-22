@@ -1,0 +1,388 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2012 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%><%
+%><%@include file="/libs/foundation/global.jsp" %><%
+%><%@page session="false" contentType="text/html; charset=utf-8"%><%
+%><%@page import="com.adobe.cq.wcm.launches.utils.LaunchUtils,
+                  com.adobe.granite.security.user.util.AuthorizableUtil,
+                  com.adobe.granite.workflow.exec.WorkItem,
+                  com.adobe.granite.workflow.exec.Workflow,
+                  com.adobe.granite.workflow.status.WorkflowStatus,
+                  com.adobe.granite.xss.XSSAPI,
+                  com.day.cq.commons.date.RelativeTimeFormat,
+                  com.day.cq.i18n.I18n,
+                  com.day.cq.wcm.msm.api.LiveRelationshipManager,
+                  org.apache.commons.lang.StringUtils,
+                  org.apache.jackrabbit.api.security.user.Authorizable,
+                  org.apache.jackrabbit.api.security.user.Group,
+                  org.apache.jackrabbit.api.security.user.UserManager,
+                  javax.jcr.RepositoryException,
+                  javax.jcr.Session,
+                  javax.jcr.security.AccessControlManager,
+                  javax.jcr.security.Privilege,
+                  java.io.UnsupportedEncodingException,
+                  java.net.URLEncoder,
+                  java.text.SimpleDateFormat,
+                  java.util.ArrayList,
+                  java.util.Calendar,
+                  java.util.List,
+                  java.util.ResourceBundle,
+                  java.util.HashMap,
+                  java.util.LinkedHashMap,
+                  java.util.Map,
+                  com.day.cq.wcm.api.PageInfoAggregator,
+                  com.adobe.cq.contentinsight.ProviderSettingsManager" %><%
+
+    I18n i18n = new I18n(slingRequest);
+    ResourceBundle resourceBundle = slingRequest.getResourceBundle(slingRequest.getLocale());
+
+    AccessControlManager acm = null;
+    try {
+        acm = resourceResolver.adaptTo(Session.class).getAccessControlManager();
+    } catch (RepositoryException e) {
+        log.error("Unable to get access manager", e);
+    }
+
+    Page childPage = resource.adaptTo(Page.class);
+    if (childPage == null) {
+        return;
+    }
+
+    ValueMap childPageProperties = childPage.getProperties();
+
+    UserManager userManager = resource.adaptTo(UserManager.class);
+    WorkflowStatus workflowStatus = resource.adaptTo(WorkflowStatus.class);
+
+    Calendar modifiedDateRaw = childPage.getLastModified();
+    String modifiedDate = formatDate(modifiedDateRaw, i18n.get("never"), resourceBundle);
+    String modifiedBy = AuthorizableUtil.getFormattedName(resourceResolver, childPage.getLastModifiedBy());
+
+    Calendar publishedDateRaw = childPageProperties.get("cq:lastReplicated", Calendar.class);
+    String publishedDate = formatDate(publishedDateRaw, null, resourceBundle);
+    String publishedBy = AuthorizableUtil.getFormattedName(resourceResolver, childPageProperties.get("cq:lastReplicatedBy", String.class));
+
+    ProviderSettingsManager providerSettingsManager = sling.getService(ProviderSettingsManager.class);
+    boolean hasAnalytics = false;
+    if(providerSettingsManager != null) {
+        hasAnalytics = providerSettingsManager.hasActiveProviders(resource);
+    }
+
+    boolean deactivated = "Deactivate".equals(childPageProperties.get("cq:lastReplicationAction", String.class));
+
+    LiveRelationshipManager liveRelationshipManager = resourceResolver.adaptTo(LiveRelationshipManager.class);
+
+    boolean isLanguageCopy = false; // TODO: Determine if page is a language copy. Maybe LanguageManager helps.
+    boolean isLaunchCopy = LaunchUtils.isLaunchResourcePath(childPage.getPath());
+    boolean isLiveCopy = liveRelationshipManager.hasLiveRelationship(resource);
+
+    String type = "";
+    if (childPage.listChildren().hasNext()) {
+        type = "stack";
+    }
+
+    String imageUrl = request.getContextPath() + childPage.getPath() + ".thumb.319.319.png" + pageCK(childPage);
+
+    List<String> applicableRelationships = new ArrayList<String>();
+    applicableRelationships.add("cq-siteadmin-admin-actions-create-activator");
+    applicableRelationships.add("cq-siteadmin-admin-actions-copy-activator");
+
+    if (hasAnalytics) {
+        applicableRelationships.add("cq-siteadmin-admin-actions-open-content-insight-activator");
+    }
+
+    if (childPage != null && hasPermission(acm, childPage, Privilege.JCR_LOCK_MANAGEMENT)) {
+        if (!childPage.isLocked()) {
+            applicableRelationships.add("cq-siteadmin-admin-actions-lockpage-activator");
+        } else if (childPage.canUnlock()) {
+            applicableRelationships.add("cq-siteadmin-admin-actions-unlockpage-activator");
+        }
+    }
+
+    if (hasPermission(acm, childPage, Privilege.JCR_READ)) {
+        applicableRelationships.add("cq-siteadmin-admin-actions-edit-activator");
+        applicableRelationships.add("cq-siteadmin-admin-actions-properties-activator");
+    }
+
+    if (hasPermission(acm, childPage, Privilege.JCR_REMOVE_NODE)) {
+        applicableRelationships.add("cq-siteadmin-admin-actions-move-activator");
+        applicableRelationships.add("cq-siteadmin-admin-actions-delete-activator");
+    }
+
+    if (hasPermission(acm, childPage, "crx:replicate")) {
+        applicableRelationships.add("cq-siteadmin-admin-actions-publish-activator");
+        applicableRelationships.add("cq-siteadmin-admin-actions-publishlater-activator");
+        applicableRelationships.add("cq-siteadmin-admin-actions-unpublish-activator");
+        applicableRelationships.add("cq-siteadmin-admin-actions-unpublishlater-activator");
+    }
+
+    Calendar createdDateRaw = childPageProperties.get("jcr:created", Calendar.class);
+    Calendar twentyFourHoursAgo = Calendar.getInstance();
+    twentyFourHoursAgo.add(Calendar.DATE, -1);
+
+    if ((createdDateRaw == null) || (modifiedDateRaw != null && modifiedDateRaw.before(createdDateRaw))) {
+        createdDateRaw = modifiedDateRaw;
+    }
+    boolean isNew = createdDateRaw != null && twentyFourHoursAgo.before(createdDateRaw);
+
+
+    List<WorkItem> workItems = new ArrayList<WorkItem>();
+
+    if (workflowStatus != null && workflowStatus.isInRunningWorkflow(true)) {
+        Authorizable currentUser = resourceResolver.adaptTo(Authorizable.class);
+
+        List<Workflow> workflows = workflowStatus.getWorkflows(true);
+
+        for (Workflow workflow: workflows) {
+            for (WorkItem item : workflow.getWorkItems()) {
+                boolean isAssigned = false;
+                String assigneeId = item.getCurrentAssignee();
+                Authorizable assignee = (assigneeId != null) ? userManager.getAuthorizable(assigneeId) : null;
+
+                if (assignee != null) {
+                    if (assignee.isGroup()) {
+                        Group group = (Group) assignee;
+                        isAssigned = group.isMember(currentUser);
+                    } else {
+                        isAssigned = assignee.getID().equals(currentUser.getID());
+                    }
+                }
+                if (isAssigned) {
+                    workItems.add(item);
+                }
+            }
+        }
+    }
+
+    int sortkey = 0;
+
+    if (childPage.isHideInNav()) {
+        sortkey += -5;
+    }
+    if (isNew) {
+        sortkey += 10;
+    }
+    if (!workItems.isEmpty()) {
+        sortkey += 20;
+    }
+
+%><article class="card-page foundation-collection-item <%= type %>" itemprop="item" itemscope data-foundation-collection-item-id="<%= xssAPI.encodeForHTMLAttr(childPage.getPath()) %>" data-path="<%= xssAPI.encodeForHTMLAttr(childPage.getPath()) %>" data-item-title="<%= xssAPI.encodeForHTMLAttr(childPage.getTitle()) %>" data-timeline="true" data-gridlayout-sortkey="<%= sortkey %>">
+    <i class="select"></i>
+    <i class="move"></i><%
+
+    for (WorkItem item: workItems) {
+        String title = i18n.getVar(item.getNode().getTitle());
+
+%><div class="coral-Alert coral-Alert--notice">
+    <i class="coral-Icon coral-Icon--sizeS coral-Icon--alert"></i>
+    <strong class="coral-Alert-heading"><%= xssAPI.encodeForHTMLAttr(title) %></strong>
+</div><%
+    }
+%><a href="<%= request.getContextPath() %><%= xssAPI.getValidHref(getAdminUrl(currentPage) + childPage.getPath()) %>" itemprop="admin" x-cq-linkchecker="skip"><%
+    if (isNew) {
+%><span class="flag info"><%= i18n.get("New") %></span><%
+    }
+%><span class="image"><img itemprop="thumbnail" width="192" src="<%= xssAPI.getValidHref(imageUrl) %>" alt=""></span>
+    <div class="label">
+        <div class="main"><%
+            if (isLanguageCopy) {
+        %><p class="descriptor" title="<%= i18n.get("Page is a Language Copy") %>"><%= i18n.get("Language Copy") %></p><%
+            }
+            if (isLaunchCopy) {
+        %><p class="descriptor" title="<%= i18n.get("Page is a Launch Copy") %>"><%= i18n.get("Launch Copy") %></p><%
+            }
+            if (isLiveCopy) {
+        %><p class="descriptor" title="<%= i18n.get("Page is a Live Copy") %>"><%= i18n.get("Live Copy") %></p><%
+            }
+        %><h4 class="foundation-collection-item-title" itemprop="title"><%= xssAPI.filterHTML(childPage.getTitle()) %></h4>
+        </div>
+        <div class="info">
+            <p class="meta-info"><%
+                if (childPage.isHideInNav()) {
+            %><span class="hideinnav">
+                            <i class="coral-Icon coral-Icon--viewOff" title="<%= i18n.get("Hidden in Navigation") %>"></i>
+                        </span><%
+                }
+                if (childPage.isLocked()) {
+            %><span class="islocked">
+                            <i class="coral-Icon coral-Icon--lockOn" title="<%= i18n.get("Locked") %>"></i>
+                        </span><%
+                }
+            %></p>
+            <p class="modified" title="<%= i18n.get("Modified") %>">
+                <i class="coral-Icon coral-Icon--edit"></i><%
+                if (modifiedDateRaw != null) {
+            %><span class="date" itemprop="lastmodified" data-timestamp="<%= modifiedDateRaw.getTimeInMillis() %>"><%= xssAPI.encodeForHTML(modifiedDate) %></span>
+                <span class="user" itemprop="lastmodifiedby"><%= xssAPI.encodeForHTML(modifiedBy) %></span><%
+                }
+            %></p><%
+            String publishStatus = "";
+            String publishIcon = "";
+            if (publishedDate != null) {
+                if (!deactivated) {
+                    publishStatus = i18n.get("Published");
+                    publishIcon = "coral-Icon coral-Icon--globe";
+                } else {
+                    publishStatus = i18n.get("Not published");
+                    publishIcon = "coral-Icon coral-Icon--globeRemove";
+                }
+            } else {
+                publishedDate = "";
+                publishedDateRaw = Calendar.getInstance();
+                publishedDateRaw.setTimeInMillis(0);
+                publishStatus = i18n.get("Not published");
+                publishIcon = "coral-Icon coral-Icon--globeRemove";
+            }
+        %><p class="published" title="<%= publishStatus %>">
+            <i class="<%= publishIcon %>"></i>
+            <span class="date" itemprop="published" data-timestamp="<%= publishedDateRaw.getTimeInMillis() %>"><%= xssAPI.encodeForHTML(publishedDate) %></span>
+            <span class="user" itemprop="publishedby"><%= publishedBy != null ? xssAPI.encodeForHTML(publishedBy) : ""%></span>
+        </p><%
+
+            // add the custom data
+            PageInfoAggregator piAggregatorService = sling.getService(PageInfoAggregator.class);
+            LinkedHashMap<String, Map<String, Object>> showColumnInfo = (LinkedHashMap<String, Map<String, Object>>) request.getAttribute("sites.listView.info.providers");
+
+            if (piAggregatorService != null
+                    && showColumnInfo != null) {
+
+                Map<String, Object> customPageData = piAggregatorService.getAggregatedPageInfo(slingRequest, resource);
+
+                for (Map.Entry<String, Map<String, Object>> columnInfoEntry : showColumnInfo.entrySet()) {
+                    String providerName = columnInfoEntry.getKey();
+                    Map<String, Object> providerCustomProperties = (Map<String, Object>) customPageData.get(providerName);
+
+                    if (providerCustomProperties != null) {
+                        List<String> columnProviderProperties = (List<String>) columnInfoEntry.getValue().get("properties");
+                        List<String> columnResourceTypes = (List<String>) columnInfoEntry.getValue().get("resourceTypes");
+                        for (String columnProviderProperty : columnProviderProperties) {
+                            Object propValue = providerCustomProperties.get(columnProviderProperty);
+                            Object trendInfo = providerCustomProperties.get(columnProviderProperty + "trend");
+                            int index = columnProviderProperties.indexOf(columnProviderProperty);
+                            String resourceType = columnResourceTypes.get(index);
+                            if (propValue != null) {
+                                request.setAttribute("sites.listView.info.render.provider", providerName);
+                                request.setAttribute("sites.listView.info.render.providerProperty", columnProviderProperty);
+                                request.setAttribute("sites.listView.info.render.value", propValue.toString());
+                                request.setAttribute("sites.listView.info.render.trend", trendInfo);
+                                %>
+                                <cq:include path="<%=resource.getPath()%>" resourceType="<%=resourceType%>"/>
+                                <%
+                                }
+                            }
+                        } else {
+                            log.warn("No custom information found for provider '" + providerName + "'!");
+                        }
+                    }
+                } else {
+                    log.debug("No PageInfoAggregator service found and/or no column information found on request attributes, no custom data will be available!");
+                }
+        %></div>
+    </div>
+</a>
+    <div class="foundation-collection-quickactions" data-foundation-collection-quickactions-rel="<%= StringUtils.join(applicableRelationships, " ") %>"><%
+        if (hasPermission(acm, childPage, Privilege.JCR_READ)) {
+    %><button class="foundation-collection-action" data-foundation-collection-action='{"action": "cq.wcm.open", "data": {"cookiePath":"<%= request.getContextPath() %>/","href":"<%= request.getContextPath() %>/bin/wcmcommand?cmd=open&_charset_=utf-8&path={item}"}}'
+         type="button" autocomplete="off" title="<%= i18n.get("Open") %>"
+            ><i class="coral-Icon coral-Icon--edit coral-Icon--sizeXS"></i>
+    </button><%
+
+    %><a title="<%= i18n.get("Properties") %>" x-cq-linkchecker="skip"
+         href="<%= xssAPI.getValidHref(request.getContextPath() + "/libs/wcm/core/content/sites/properties.html" + childPage.getPath()) %>"
+            ><i class="coral-Icon coral-Icon--infoCircle coral-Icon--sizeXS"></i>
+    </a><%
+
+    %><button class="foundation-collection-action" data-foundation-collection-action='{"action": "cq.wcm.copy"}'
+              type="button" autocomplete="off" title="<%= i18n.get("Copy") %>"
+            ><i class="coral-Icon coral-Icon--copy coral-Icon--sizeXS"></i>
+    </button><%
+        }
+
+        if (hasPermission(acm, childPage, Privilege.JCR_REMOVE_NODE)) {
+    %><a title="<%= i18n.get("Move") %>" x-cq-linkchecker="skip"
+         href="<%= xssAPI.getValidHref(request.getContextPath() + "/libs/wcm/core/content/sites/movepagewizard.html" + encodeURIComponent(childPage.getPath())) %>"
+            ><i class="coral-Icon coral-Icon--move coral-Icon--sizeXS"></i></a><%
+        }
+
+        if (hasPermission(acm, childPage, "crx:replicate")) {
+    %><button class="cq-siteadmin-admin-actions-quickpublish-activator"
+              type="button" title="<%= i18n.get("Publish") %>" data-path="<%= xssAPI.encodeForHTMLAttr(childPage.getPath()) %>"
+            ><i class="coral-Icon coral-Icon--globe coral-Icon--sizeXS"></i></button><%
+        }
+    %></div>
+</article><%!
+    private boolean hasPermission(AccessControlManager acm, Page page, String privilege) {
+        try {
+            if (acm != null) {
+                Privilege p = acm.privilegeFromName(privilege);
+                return acm.hasPrivileges(page.getPath(), new Privilege[]{p});
+            }
+        } catch (RepositoryException ignore) {
+        }
+        return false;
+    }
+
+    private String encodeURIComponent(String s) {
+        try {
+            return URLEncoder.encode(s, "UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String getAdminUrl(Page page) {
+        String url = page.getVanityUrl();
+
+        if (url == null) {
+            ValueMap vm = page.getProperties();
+            if (vm.containsKey("sling:vanityPath")) {
+                url = page.getProperties().get("sling:vanityPath", String.class);
+            }
+        }
+
+        if (url == null) {
+            url = page.getPath();
+        }
+
+        return url + ".html";
+    }
+
+    private String formatDate(Calendar cal, String defaultValue, ResourceBundle rb) {
+        try {
+            if (cal == null) return defaultValue;
+
+            RelativeTimeFormat rtf = new RelativeTimeFormat("r", rb);
+            return rtf.format(cal.getTimeInMillis(), true);
+        } catch (IllegalArgumentException e) {
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+            return sdf.format(cal.getTime());
+        }
+    }
+
+    private String pageCK(Page page) {
+        ValueMap metadata = page.getProperties("image/file/jcr:content");
+        if (metadata == null) return "";
+
+        Calendar cal = metadata.get("jcr:lastModified", Calendar.class);
+        if (cal == null) return "";
+
+        return "?ck=" + (cal.getTimeInMillis() / 1000);
+    }
+
+    private String outVar(XSSAPI xssAPI, I18n i18n, String text) {
+        if (text == null) return "";
+        return xssAPI.filterHTML(i18n.getVar(text));
+    }
+%>

@@ -1,0 +1,896 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.msm.BlueprintStatus.Commands
+ * Container for the static methods to operate on a Blueprint and its Live Copies.
+ * Main entry is the MSM Control Center
+ * @private
+ */
+CQ.wcm.msm.BlueprintStatus.Commands = {};
+
+/**
+ * Menus container
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.Menus = {};
+
+/**
+ * Live Copy header menu items
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.Menus.LCHeaderMenu = [{
+    "text": CQ.I18n.getMessage("Live Copy drill down"),
+    "handler": CQ.Ext.emptyFn
+}];
+
+/**
+ * Blueprint menu items
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.Menus.BPMenu = [{
+    "text": CQ.I18n.getMessage("Open page"),
+    "handler": function(item) {
+        var data = item.parentMenu.data;
+        for(var i=0;i<data.length;i++) {
+            var path = CQ.wcm.msm.MSM.filterPagePath(data[i]["srcPath"]);
+            if (path) CQ.wcm.SiteAdmin.openPage(path, "page", true);
+        }
+    }
+},{
+    "text": CQ.I18n.getMessage("Edit blueprint config"),
+    "handler": function(item) {
+        var data = item.parentMenu.data;
+        for(var i=0;i<data.length;i++) {
+            var path = data[i]["srcPath"];
+            if (path){
+                CQ.wcm.msm.BlueprintStatus.Commands.openBlueprintDialog(path);
+            }
+        }
+    },
+    "disableHandler": function(data) {
+        if (data && data.srcPath) {
+            var disable = true;
+
+            /* to check if jcr:content node exists */
+            $.ajax({ type: "HEAD", async: false, url: data.srcPath + '/jcr:content.json',
+                success: function() { disable = false; }
+            });
+            return disable;
+        }
+        return false;
+    }
+},{
+    "text": CQ.I18n.getMessage("Rollout"),
+    "handler": function(item) {
+        var data = item.parentMenu.data;
+        for(var i=0;i<data.length;i++) {
+            var path = CQ.wcm.msm.MSM.filterPagePath(data[i]["srcPath"]);
+            if (path){
+                CQ.wcm.SiteAdmin.openRolloutDialog(path);
+            }
+        }
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-synchronized"]["iconClass"]
+}, "-", {
+    "text": CQ.I18n.getMessage("View server caches"),
+    "handler": function() {
+        CQ.wcm.msm.BlueprintStatus.Commands.openCachesDialog();
+    }
+}];
+
+/**
+ * Live Copy page menu items
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.Menus.LCPageMenu =[{
+    "text": CQ.I18n.getMessage("Open page"),
+    "handler": function(item) {
+        var data = item.parentMenu.data;
+        for(var i=0;i<data.length;i++) {
+            CQ.wcm.SiteAdmin.openPage(CQ.wcm.msm.MSM.filterPagePath(data[i]["targetPath"]), "page", true);
+        }
+    },
+    "disableHandler": function(data) {
+        return !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_EXISTING];
+    }
+},{
+    "text": CQ.I18n.getMessage("View relationship details"),
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.openLiveRelationshipsDialogs(
+                CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(item.parentMenu.data),
+                item.parentMenu.widget);
+    }
+},{
+    "text": CQ.I18n.getMessage("View side-by-side with Blueprint"),
+    "handler": function(item) {
+        var data = item.parentMenu.data;
+        for(var i=0;i<data.length;i++) {
+            var url = CQ.wcm.msm.MSM.filterPagePath(data[i]["targetPath"]);
+            url = CQ.HTTP.addParameter(url,CQ.wcm.ContentFinder.SIDEVIEW_PARAM,CQ.wcm.msm.MSM.filterPagePath(data[i]["srcPath"]));
+            CQ.wcm.SiteAdmin.openPage(url, "page", true);
+        }
+    },
+    "disableHandler": function(data) {
+        return !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_EXISTING];
+    }
+},{
+    "text": CQ.I18n.getMessage("Rollout"),
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.rolloutLiveCopy(item.parentMenu.widget.grid, item.parentMenu.data,  item.parentMenu.widget.tree);
+    },
+    "disableHandler": function(data) {
+        return CQ.wcm.msm.BlueprintStatus.Commands.isOrphaned(data) ||
+               // not part of lc
+               data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_MANUALLY_CREATED] ||
+                //or has been delted
+               data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_DELETED] ||
+                //or has been skipp
+               data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED];
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-synchronized"]["iconClass"]
+}, "-", {
+    "text": CQ.I18n.getMessage("Re-create"),
+    "disabled": true,
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.recreateLiveCopy(item.parentMenu.widget.grid, CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(item.parentMenu.data));
+    },
+    "disableHandler": function(data) {
+        return data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_MANUALLY_CREATED] ||
+               data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_DELETED] ||
+               !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_EXISTING] ||
+               data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED];
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-synchronized"]["iconClass"]
+},{
+    "text": CQ.I18n.getMessage("Restore"),
+    "disabled": true,
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.restoreLiveCopy(item.parentMenu.widget.grid, CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(item.parentMenu.data));
+    },
+    "disableHandler": function(data) {
+        return !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_DELETED] ||
+               data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED];
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-synchronized"]["iconClass"]
+},{
+    "text": CQ.I18n.getMessage("Attach"),
+    "disabled": true,
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.attachLiveCopy(item.parentMenu.widget.grid, CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(item.parentMenu.data));
+    },
+    "disableHandler": function(data) {
+        return !( data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_MANUALLY_CREATED] &&
+                data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_SOURCE_EXISTING] &&
+                !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED] &&
+                data["parentLr"] && data["parentLr"][CQ.wcm.msm.MSM.PARAM_IS_DEEP]);
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-target-modified"]["iconClass"]
+},{
+    "text": CQ.I18n.getMessage("Detach"),
+    "disabled": true,
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.detachLiveCopy(item.parentMenu.widget.grid, CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(item.parentMenu.data));
+    },
+    "disableHandler": function(data) {
+        return !(!data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_MANUALLY_CREATED] &&
+                data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_SOURCE_EXISTING] &&
+                data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_EXISTING])
+                || data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED];
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-new"]["iconClass"]
+},{
+    "text": CQ.I18n.getMessage("Create LiveCopy"),
+    "disabled": true,
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.createLiveCopy(item.parentMenu.widget.grid, CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(item.parentMenu.data));
+    },
+    "disableHandler": function(data) {
+        return CQ.wcm.msm.BlueprintStatus.Commands.isOrphaned(data) ||
+                !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED] ||
+                data["lr"][CQ.wcm.msm.MSM.PARAM_IS_INHERITED_CONFIG];
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-synchronized"]["iconClass"]
+},{
+    "text": CQ.I18n.getMessage("Skip"),
+    "disabled": true,
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.skipLiveCopy(item.parentMenu.widget.grid, CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(item.parentMenu.data), true);
+    },
+    "disableHandler": function(data) {
+        return CQ.wcm.msm.BlueprintStatus.Commands.isOrphaned(data) ||
+                //not an added page
+                !(!data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_MANUALLY_CREATED] &&
+                //source required
+                data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_SOURCE_EXISTING] &&
+                //not exist
+                !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_EXISTING] &&
+                //not skipped
+                !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED]);
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-skipped"]["iconClass"]
+},{
+    "text": CQ.I18n.getMessage("Unskip"),
+    "disabled": true,
+    "handler": function(item) {
+        CQ.wcm.msm.BlueprintStatus.Commands.unskipLiveCopy(item.parentMenu.widget.grid, CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(item.parentMenu.data), false);
+    },
+    "disableHandler": function(data) {
+        return !data["lr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED] ||
+                CQ.wcm.msm.BlueprintStatus.Commands.isOrphaned(data) ||
+                !data["lr"][CQ.wcm.msm.MSM.PARAM_IS_INHERITED_CONFIG] ||
+                data["parentLr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_SKIPPED];
+    },
+    "iconCls": "cq-msm-menu-status-icon " + CQ.wcm.msm.MSM.Texts.LR.States["msm-status-never-created"]["iconClass"]
+}];
+
+/**
+ * Opens a dialog to view and edit a LiveRelationship.
+ * @param {Object} lr Live relationship
+ * @param {Function} callback (optional) After command callback, see {@link CQ.Ext.Ajax#request}
+ * @private
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.openLiveRelationshipDialog = function(lr /*liverelationship*/, callback) {
+    if(lr) {
+        var srcPath = CQ.wcm.msm.MSM.filterPagePath(lr[CQ.wcm.msm.MSM.PARAM_SOURCEPATH]);
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lr[CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        var statusURL = "/libs/wcm/msm/content/commands/liverelationshipstatus.json";
+        statusURL = CQ.HTTP.addParameter(statusURL,"srcPath",srcPath);
+        statusURL = CQ.HTTP.addParameter(statusURL,"targetPath",targetPath);
+
+        var inheritanceURL = "/libs/wcm/msm/content/commands/livecopyinheritance.json";
+        inheritanceURL = CQ.HTTP.addParameter(inheritanceURL,"targetPath",targetPath);
+
+        var lrStatusItems = [{
+            "collapsed": false,
+            "collapsible": true,
+            "title": CQ.I18n.getMessage("Blueprint and Live Copy pages"),
+            "xtype": "dialogfieldset",
+            "labelWidth": 200,
+            "defaults": {
+                "readOnly": true
+            },
+            "items": [{
+                "name": "srcPath",
+                "fieldLabel": CQ.I18n.getMessage("Blueprint path"),
+                "xtype": "textfield"
+            },{
+                "name": "srcLastModified",
+                "fieldLabel": CQ.I18n.getMessage("Blueprint last modified"),
+                "xtype": "datetime"
+            },{
+                "name": "srcLastModifiedBy",
+                "fieldLabel": CQ.I18n.getMessage("Blueprint last modified by"),
+                "xtype": "textfield"
+            },{
+                "name": "targetPath",
+                "fieldLabel": CQ.I18n.getMessage("Live Copy path"),
+                "xtype": "textfield"
+            },{
+                "name": "targetLastModified",
+                "fieldLabel": CQ.I18n.getMessage("Live Copy last modified"),
+                "xtype": "datetime"
+            },{
+                "name": "targetLastModifiedBy",
+                "fieldLabel": CQ.I18n.getMessage("Live Copy last modified by"),
+                "xtype": "textfield"
+            },{
+                "name": "lastRolledout",
+                "fieldLabel": CQ.I18n.getMessage("Last rolled out"),
+                "xtype": "datetime"
+            },{
+                "name": "lastRolledoutBy",
+                "fieldLabel": CQ.I18n.getMessage("Last rolled out by"),
+                "xtype": "textfield"
+            }]
+        }];
+
+        if(lr[CQ.wcm.msm.MSM.PARAM_STATUS]) {
+            var statuses = [];
+            for(var s in CQ.wcm.msm.MSM.Texts.LR.Statuses) {
+                statuses.push({
+                    "name": "lr/" + CQ.wcm.msm.MSM.PARAM_STATUS + "/" + s,
+                    "fieldLabel": CQ.wcm.msm.MSM.Texts.LR.Statuses[s],
+                    "type": "checkbox",
+                    "xtype": "selection",
+                    "optionsConfig": {
+                        "readOnly": true
+                    }
+                });
+            }
+
+            lrStatusItems.push({
+                "collapsed": true,
+                "collapsible": true,
+                "title": CQ.I18n.getMessage("Computed statuses"),
+                "xtype": "dialogfieldset",
+                "labelWidth": 400,
+                "defaults": {
+                    "readOnly": true
+                },
+                "items": statuses
+            });
+        }
+
+        var dialog = new CQ.Dialog({
+            "width": 600,
+            "height": 500,
+            "warnIfModified": false,
+            "success":callback,
+            "items": {
+                "xtype": "tabpanel",
+                "items": [{
+                    "xtype": "customcontentpanel",
+                    "stateful":false,
+                    "executePost":false,
+                    "pathGet": CQ.HTTP.externalize(statusURL),
+                    //"disabled": true,
+                    "title": CQ.I18n.getMessage("Relationship status"),
+                    "defaults": {
+                        "readOnly": true
+                    },
+                    "submitPanel": function() {
+                        if (!this.disabled) {
+                            var fields = CQ.Util.findFormFields(this.formPanel);
+                            for (var name in fields) {
+                                for (var i = 0; i < fields[name].length; i++) {
+                                    fields[name][i].setDisabled(true);
+                                }
+                            }
+                        }
+                        return true;
+                    },
+                    "items": lrStatusItems
+                },{
+                    "title": CQ.I18n.getMessage("Livecopy"),
+                    "xtype": "livecopyproperties"
+                },{
+                    "xtype": "customcontentpanel",
+                    "stateful":false,
+                    "executePost":false,
+                    "pathGet": CQ.HTTP.externalize(inheritanceURL),
+                    "title": CQ.I18n.getMessage("Live Copies inheritance"),
+                    "defaults": {
+                        "readOnly": true
+                    },
+                    "submitPanel": function() {
+                        if (!this.disabled) {
+                            var fields = CQ.Util.findFormFields(this.formPanel);
+                            for (var name in fields) {
+                                for (var i = 0; i < fields[name].length; i++) {
+                                    fields[name][i].setValue();
+                                }
+                            }
+                        }
+                        return true;
+                    },
+                    "items": [{
+                        "xtype": "textfield",
+                        "name": "targetPath",
+                        "fieldLabel": CQ.I18n.getMessage("Live Copy page")
+                    },{
+                        "xtype": "multifield",
+                        "name": "inheritance",
+                        "fieldLabel": CQ.I18n.getMessage("Inherited from source page(s)"),
+                        "fieldDescription": CQ.I18n.getMessage("Live Copy page inherits from the above page(s). Each of these pages is a Live Copy of following one."),
+                        "defaults":{
+                            "listeners":{
+                                "afterlayout": function(cont, layout) {
+                                    if (layout && layout.table) {
+                                        CQ.Ext.DomHelper.applyStyles(layout.table, "width:100%");//fix a css issue solved in 5.4
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                }]
+            },
+            "buttons": CQ.Dialog.OKCANCEL
+        });
+        dialog.loadContent(targetPath);
+        dialog.show();
+    }
+};
+
+/**
+ * Queues containers for bulk commands
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.queues = {};
+
+/**
+ * Creates a bulk message box and runs the <code>toCall</code> method afterward.
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object[]} lrs List of Live Relationships
+ * @param {String} queueName Execution queue name
+ * @param {Function} toCall Function to call on ok of the message box
+ * @param {Number} nbArgs Number of arguments to pass to toCall method
+ * @param {Object[]} buttons Buttons config
+ * @param {String} title Box name
+ * @param {String} msg Box message
+ * @param {String} mask Text of the box
+ * @param {Object} tree (optional) Tree to reload
+ * @private
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox = function(container, lrs, queueName, toCall, nbArgs, buttons, title, msg, mask, tree) {
+    if( !CQ.wcm.msm.BlueprintStatus.Commands.queues[queueName]) {
+        CQ.wcm.msm.BlueprintStatus.Commands.queues[queueName] = [];
+    }
+
+    CQ.wcm.msm.BlueprintStatus.Commands.queues[queueName] = CQ.wcm.msm.BlueprintStatus.Commands.queues[queueName].concat(lrs);
+
+    var fct = function(deep) {
+        var lr = CQ.wcm.msm.BlueprintStatus.Commands.queues[queueName].pop();
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lr[CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        var srcPath = CQ.wcm.msm.MSM.filterPagePath(lr[CQ.wcm.msm.MSM.PARAM_SOURCEPATH]);
+        container.getEl().mask(CQ.Util.patchText(mask,[targetPath]));
+
+        var callBack = function(options, success, xhr) {
+            var response = CQ.HTTP.buildPostResponseFromHTML(xhr.responseText);
+            var status = response.headers[CQ.utils.HTTP.HEADER_STATUS];
+            if (status != 200) {
+                CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"), response.headers[CQ.HTTP.HEADER_MESSAGE]);
+                container.getEl().unmask();
+                container.reload();
+            } else {
+                if( CQ.wcm.msm.BlueprintStatus.Commands.queues[queueName].length > 0) {
+                    fct.call(this, deep);
+                } else {
+                    container.getEl().unmask();
+                    container.reload();
+                    if (tree) {
+                        var n = tree.getSelectionModel().getSelectedNode();
+                        if (!n) {
+                            n = tree;
+                        }
+                        n.reload();
+                    }
+                }
+            }
+        };
+
+        if(nbArgs==1) {
+            toCall.call(this, targetPath, callBack);
+        } else if(nbArgs==2) {
+            toCall.call(this, srcPath, targetPath, callBack);
+        } else if(nbArgs==3) {
+            toCall.call(this, srcPath, targetPath, deep, callBack);
+        }
+    };
+
+    return CQ.Ext.Msg.show({
+        "title": title,
+        "msg": msg,
+        "buttons": buttons,
+        "icon": CQ.Ext.MessageBox.QUESTION,
+        "fn":function(btnId) {
+            if(buttons["cancel"] /*CQ.Ext.MessageBox.YESNOCANCEL*/) {
+                if(btnId == "cancel") {
+                    CQ.wcm.msm.BlueprintStatus.Commands.queues[queueName] = [];
+                } else {
+                    fct.call(this, (btnId == "no")); // no button used for "deep"
+                }
+            } else /*CQ.Ext.MessageBox.YESNO*/ {
+                if(btnId == "no") {
+                    CQ.wcm.msm.BlueprintStatus.Commands.queues[queueName] = [];
+                } else {
+                    fct.call(this, true);
+                }
+            }
+        },
+        "scope":this
+    });
+};
+
+/**
+ * Provides UI to roll out a Live Copy set.
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object} data Live Relationship data wrapper
+ * @param {Object} tree (optional) Tree to reload
+ * @private
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.rolloutLiveCopy = function(container, data, tree) {
+    var lrs = CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs(data);
+    lrs = CQ.wcm.msm.BlueprintStatus.Commands.assertArray(lrs);
+    if (!lrs) {
+        return;
+    }
+    var msg;
+    if( lrs.length == 1) {
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lrs[0][CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        msg = CQ.I18n.getMessage("Do you want to rollout page {0} only or page and its sub pages?",[targetPath]);
+    } else {
+         msg = CQ.I18n.getMessage("Do you want to rollout selected pages only or pages and their sub pages?");
+    }
+    CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox(
+            container,
+            lrs,
+            "rollout",
+            CQ.wcm.msm.MSM.Commands.rolloutLiveCopy,
+            3,
+            {"yes":CQ.I18n.getMessage("Page only"), "no":CQ.I18n.getMessage("Page and sub pages"), "cancel":true},
+            CQ.I18n.getMessage("Rollout Live Copy"),
+            msg,
+            CQ.I18n.getMessage("Rolling out {0}", null, "{0} is a placeholder for a content path"),
+            tree);
+};
+
+/**
+ * Provides UI to recreate a set of Live Copies
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object[]} lrs List of Live Relationships
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.recreateLiveCopy = function(container, lrs /*liverelationship*/) {
+    lrs = CQ.wcm.msm.BlueprintStatus.Commands.assertArray(lrs);
+    if (!lrs) {
+        return;
+    }
+
+    var msg;
+    if( lrs.length == 1) {
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lrs[0][CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        msg = CQ.I18n.getMessage("Are you sure you want to re-create page {0} and its sub pages? Re-creation process will run a rollout with reset option. Warning: all local modifications on Live Copy pages will be lost.",[targetPath]);
+    } else {
+        msg = CQ.I18n.getMessage("Are you sure you want to re-create selected pages and their sub pages? Re-creation process will run a rollout with reset option. Warning: all local modifications on Live Copy pages will be lost.");
+    }
+    CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox(
+            container,
+            lrs,
+            "recreate",
+            CQ.wcm.msm.MSM.Commands.resetLiveCopy,
+            3,
+            CQ.Ext.MessageBox.YESNO,
+            CQ.I18n.getMessage("Recreate Live Copy"),
+            msg,
+            CQ.I18n.getMessage("Recreating {0}", null, "{0} is a placeholder for a content path"));
+};
+
+/**
+ * Provides UI to restore a set of Live Copies
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object[]} lrs List of Live Relationships
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.restoreLiveCopy = function(container, lrs /*liverelationship*/) {
+    lrs = CQ.wcm.msm.BlueprintStatus.Commands.assertArray(lrs);
+    if (!lrs) {
+        return;
+    }
+
+    var msg;
+    if( lrs.length == 1) {
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lrs[0][CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        msg = CQ.I18n.getMessage("Do you want to restore page {0} only or page and its sub pages?",[targetPath]);
+    } else {
+        msg = CQ.I18n.getMessage("Do you want to restore selected pages only or pages and their sub pages?");
+    }
+    CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox(
+            container,
+            lrs,
+            "restore",
+            CQ.wcm.msm.MSM.Commands.resetLiveCopy,
+            3,
+            {"yes":CQ.I18n.getMessage("Page only"), "no":CQ.I18n.getMessage("Page and sub pages"), "cancel":true},
+            CQ.I18n.getMessage("Restore Live Copy"),
+            msg,
+            CQ.I18n.getMessage("Restoring {0}", null, "{0} is a placeholder for a content path"));
+};
+
+/**
+ * Provides UI to attach a set of Live Copies
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object[]} lrs List of Live Relationships
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.attachLiveCopy = function(container, lrs /*liverelationship*/) {
+    lrs = CQ.wcm.msm.BlueprintStatus.Commands.assertArray(lrs);
+    if (!lrs) {
+        return;
+    }
+
+    var msg;
+    if( lrs.length == 1) {
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lrs[0][CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        msg = CQ.I18n.getMessage("Do you want to attach page {0} only or page and its sub pages to their corresponding Blueprint pages ? Attachment process will NOT delete or modify any existing content. A rollout is needed afterward.",[targetPath]);
+    } else {
+        msg = CQ.I18n.getMessage("Do you want to attach selected pages only or page and their sub pages to their corresponding Blueprint pages ? Attachment process will NOT delete or modify any existing content. A rollout is needed afterward.");
+    }
+    CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox(
+            container,
+            lrs,
+            "attach",
+            CQ.wcm.msm.MSM.Commands.attachLiveCopy,
+            3,
+            {"yes":CQ.I18n.getMessage("Page only"), "no":CQ.I18n.getMessage("Page and sub pages"), "cancel":true},
+            CQ.I18n.getMessage("Attach Live Copy"),
+            msg,
+            CQ.I18n.getMessage("Attaching {0}", null, "{0} is a placeholder for a content path"));
+};
+
+/**
+ * Provides UI to detach a set of Live Copies
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object[]} lrs List of Live Relationships
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.detachLiveCopy = function(container, lrs /*liverelationship*/) {
+    lrs = CQ.wcm.msm.BlueprintStatus.Commands.assertArray(lrs);
+    if (!lrs) {
+        return;
+    }
+
+    var msg;
+    if( lrs.length == 1) {
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lrs[0][CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        msg = CQ.I18n.getMessage("Are you sure you want to detach page {0} and its sub pages from their Blueprint pages and create a standalone copy?",[targetPath]);
+    } else {
+        msg = CQ.I18n.getMessage("Are you sure you want to detach selected pages and their sub pages from their Blueprint pages and create standalone copies?");
+    }
+    CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox(
+            container,
+            lrs,
+            "detach",
+            CQ.wcm.msm.MSM.Commands.detachLiveCopy,
+            1,
+            CQ.Ext.MessageBox.YESNO,
+            CQ.I18n.getMessage("Detach Live Copy"),
+            msg,
+            CQ.I18n.getMessage("Detaching {0}", null, "{0} is a placeholder for a content path"));
+};
+
+/**
+ * Provides UI to add a set of Live Copies to list of skipped pages.
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object[]} lrs List of Live Relationships
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.skipLiveCopy = function(container, lrs /*liverelationship*/) {
+    lrs = CQ.wcm.msm.BlueprintStatus.Commands.assertArray(lrs);
+    if (!lrs) {
+        return;
+    }
+
+    var msg;
+    if( lrs.length == 1) {
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lrs[0][CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        msg = CQ.I18n.getMessage("Are you sure you want to skip page {0} and its sub pages? Pages will be excluded from the rollout process.",[targetPath]);
+    } else {
+        msg = CQ.I18n.getMessage("Are you sure you want to skip selected pages and their sub pages? Pages will be excluded from the rollout process.");
+    }
+    CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox(
+            container,
+            lrs,
+            "skip",
+            CQ.wcm.msm.MSM.Commands.skipLiveCopy,
+            1,
+            CQ.Ext.MessageBox.YESNO,
+            CQ.I18n.getMessage("Skip Live Copy"),
+            msg,
+            CQ.I18n.getMessage("Skipping {0}", null, "{0} is a placeholder for a content path"));
+};
+
+/**
+ * Provides UI to remove a set of Live Copies from the list of skipped pages.
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object[]} lrs List of LiveRelationships
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.unskipLiveCopy = function(container, lrs /*liverelationship*/) {
+    lrs = CQ.wcm.msm.BlueprintStatus.Commands.assertArray(lrs);
+    if (!lrs) {
+        return;
+    }
+
+    var msg;
+    if( lrs.length == 1) {
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lrs[0][CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        msg = CQ.I18n.getMessage("Are you sure you want to re-integrate page {0} and its sub pages to the rollout process?",[targetPath]);
+    } else {
+        msg = CQ.I18n.getMessage("Are you sure you want to re-integrate selected pages and its sub pages to the rollout process?");
+    }
+    CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox(
+            container,
+            lrs,
+            "unskip",
+            CQ.wcm.msm.MSM.Commands.unskipLiveCopy,
+            1,
+            CQ.Ext.MessageBox.YESNO,
+            CQ.I18n.getMessage("Unskip Live Copy"),
+            msg,
+            CQ.I18n.getMessage("Unskipping {0}", null, "{0} is a placeholder for a content path"));
+};
+
+/**
+ * Provides UI create a LiveCopy below a shallow LiveCopy.
+ * @param {CQ.Ext.Element/CQ.Ext.Container} container Container item
+ * @param {Object[]} lrs List of LiveRelationships
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.createLiveCopy = function(container, lrs /*liverelationship*/) {
+    lrs = CQ.wcm.msm.BlueprintStatus.Commands.assertArray(lrs);
+    if (!lrs) {
+        return;
+    }
+    var funct = function(source, target, callback) {
+        if (target && target.indexOf("/")>-1) {
+            var idx = target.lastIndexOf("/");
+            CQ.wcm.msm.MSM.Commands.createLiveCopy(source, target.substring(0, idx), "", target.substring(idx+1), false, null, callback);
+        }
+    };
+
+    var msg;
+    if( lrs.length == 1) {
+        var targetPath = CQ.wcm.msm.MSM.filterPagePath(lrs[0][CQ.wcm.msm.MSM.PARAM_TARGETPATH]);
+        msg = CQ.I18n.getMessage("Are you sure you want to re-integrate page {0} and its sub pages to the rollout process?",[targetPath]);
+    } else {
+        msg = CQ.I18n.getMessage("Are you sure you want to re-integrate selected pages and its sub pages to the rollout process?");
+    }
+    CQ.wcm.msm.BlueprintStatus.Commands.createBulkMsgBox(
+            container,
+            lrs,
+            "create",
+            funct,
+            2,
+            CQ.Ext.MessageBox.YESNO,
+            CQ.I18n.getMessage("Creating LiveCopy"),
+            msg,
+            CQ.I18n.getMessage("Creating LiveCopy at {0}", null, "{0} is a placeholder for a content path"));
+};
+
+/**
+ * Opens a dialog to view and edit the Blueprint config.
+ * @param {String} path Blueprint page path
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.openBlueprintDialog = function(path) {
+    var dialog = new CQ.Dialog({
+        "height":480,
+        "warnIfModified":false,
+        "items": {
+            "xtype": "tabpanel",
+            "items": [{
+                    "hideTargets": true,
+                    "title": "Blueprint",
+                    "xtype": "blueprintconfig"
+            }]
+        },
+        "buttons": CQ.Dialog.OKCANCEL
+    });
+    if (path.lastIndexOf("/jcr:content")<path.length-11) {
+        path += "/jcr:content";
+    }
+    dialog.loadContent(path);
+    dialog.show();
+};
+
+/**
+ * Opens a dialog to view and flush server caches.
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.openCachesDialog = function() {
+    var dialog = null;
+    var loadContent = function() {
+        dialog.body.mask("Loading...");
+        dialog.loadContent(CQ.HTTP.externalize("/libs/wcm/msm/content/commands/servercaches"));
+    };
+
+    dialog = new CQ.Dialog({
+        "title": CQ.I18n.getMessage("Server caches"),
+        "warnIfModified": false,
+        "items": {
+            "xtype": "panel",
+            "items": [{
+                "collapsed": true,
+                "collapsible": true,
+                "title": CQ.I18n.getMessage("Live Copies cache"),
+                "xtype": "dialogfieldset",
+                "items": [{
+                    "name": "livecopiesCacheSize",
+                    "xtype": "hidden",
+                    "listeners": {
+                        "loadcontent": function() {
+                            var value = this.getValue();
+                            var newTitle = CQ.I18n.getMessage("Live Copies cache (size {0})",[value || 0]);
+                            this.findParentByType("dialogfieldset").setTitle(newTitle);
+                        }
+                    }
+                },{
+                    "name": "livecopiesCache",
+                    "readOnly": true,
+                    "xtype": "multifield",
+                    "hideLabel": true,
+                    "defaults":{
+                        "listeners":{
+                            "afterlayout": function(cont, layout) {
+                                if (layout && layout.table) {
+                                    CQ.Ext.DomHelper.applyStyles(layout.table, "width:100%");//fix a css issue solved in 5.4
+                                }
+                            }
+                        }
+                    }
+                }]
+            }]
+        },
+        "buttons": [{
+                "text": CQ.I18n.getMessage("Flush caches"),
+                "handler": function() {
+                    CQ.wcm.msm.MSM.Commands.flushServerCaches();
+                    loadContent.call(this);
+                }
+            },{
+            "text": CQ.I18n.getMessage("Close"),
+            "handler": function() {
+                dialog.hide();
+            }
+        }]
+    });
+    dialog.show();
+    dialog.on("loadcontent", function() {
+        dialog.body.unmask();
+    });
+
+    loadContent.call(this);
+};
+
+/**
+ * Opens a list of dialog to view and edit a LiveRelationship.
+ * @param {Object[]} lrs List of Live Relationships
+ * @private
+ **/
+CQ.wcm.msm.BlueprintStatus.Commands.openLiveRelationshipsDialogs = function(lrs /*liverelationship[]*/, wdgt) {
+    if( !lrs || lrs.length == 0) return;
+    if( !CQ.Ext.isArray(lrs)) lrs = [lrs];
+    for(var i=0;i<lrs.length;i++) {
+        var lr = lrs[i];
+        var rel = function() {
+            wdgt.checkGridReload();
+        };
+        CQ.wcm.msm.BlueprintStatus.Commands.openLiveRelationshipDialog(lr, rel);
+    }
+};
+
+/**
+ * Transforms an array of objects like [{lr: {}}] into a array of [lr].
+ * @param {Object} data Data
+ * @return {Object[]} Array of Live Relationships
+ * @private
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.dataToLRs = function(data) {
+    var ret = [];
+    for(var i=0;i<data.length;i++) {
+        if(data[i]["lr"]) {
+            ret.push(data[i]["lr"]);
+        }
+    }
+    return ret;
+};
+
+/**
+ * Returns true if the Live Relationship is orphan, i.e. parent Live Copy page does not exist.
+ * @param {Object} lr Live Relationship
+ * @return {Boolean} True if orphan, false otherwise.
+ * @private
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.isOrphaned = function(lr) {
+    return lr["parentLr"] &&
+            !lr["parentLr"][CQ.wcm.msm.MSM.PARAM_STATUS][CQ.wcm.msm.MSM.PARAM_IS_TARGET_EXISTING];
+};
+
+/**
+ * Returns data if data is an array or [data].
+ * @param {Object} data An object
+ * @return {Object[]} data if data is an array or [data]. Null is data is null.
+ * @private
+ */
+CQ.wcm.msm.BlueprintStatus.Commands.assertArray = function(data) {
+    if( data && data.length > 0) {
+        if( !CQ.Ext.isArray(data)) data= [data];
+        return data;
+    }
+    return null;
+};

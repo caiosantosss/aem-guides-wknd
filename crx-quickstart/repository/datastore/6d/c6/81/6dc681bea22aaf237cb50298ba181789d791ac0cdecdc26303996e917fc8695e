@@ -1,0 +1,718 @@
+/*
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2013 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+
+/* eslint no-use-before-define: 0, no-unused-vars: 0 */
+
+ContextHub.console.log(ContextHub.Shared.timestamp(), '[loading] contexthub.utils - ContextHub.Utils.eventing.js');
+
+(function($, window) {
+    'use strict';
+
+    window.ContextHub.Utils = window.ContextHub.Utils || {};
+
+    /* scheduling a job */
+    var scheduleJob = (function() {
+        var method = $.grep([
+            window.requestAnimationFrame,
+            window.msRequestAnimationFrame,
+            window.mozRequestAnimationFrame,
+            window.webkitRequestAnimationFrame,
+            window.oRequestAnimationFrame
+        ], $.isFunction)
+            .shift();
+
+        if (!method) {
+            var lastExecution = 0;
+
+            method = function(callback) {
+                var currentTime = new Date().getTime();
+                var defer = Math.max(0, 16 - (currentTime - lastExecution));
+                var job = window.setTimeout(function() {
+                    callback(currentTime + defer);
+                }, defer);
+
+                lastExecution = currentTime + defer;
+
+                return job;
+            };
+        }
+
+        return method;
+    })();
+
+    /* cancelling the job */
+    var unscheduleJob = (function() {
+        var method = $.grep([
+            window.cancelAnimationFrame,
+            window.cancelRequestAnimationFrame,
+            window.msCancelRequestAnimationFrame,
+            window.mozCancelRequestAnimationFrame,
+            window.webkitCancelRequestAnimationFrame,
+            window.oCancelRequestAnimationFrame
+        ], $.isFunction)
+            .shift();
+
+        if (!method) {
+            method = function(job) {
+                window.clearTimeout(job);
+            };
+        }
+
+        return method;
+    })();
+
+    /* Keeps a list of event names triggered in past */
+    var eventHistory = {};
+
+    /* List of currently handled events */
+    var handledEvents = {};
+
+    /**
+     * Adds event 'channel' to it's queue. Object 'data' should contain element 'key' to distinguish unique events.
+     *
+     * @param {String} channel
+     * @param {Object} data
+     * @param {Object} options
+     */
+    var trigger = function(channel, data, options) {
+        channel = (channel || '').replace(/^ *| *$/g, '');
+
+        if (channel.length) {
+            /* create a new event */
+            options = options || {};
+
+            if (!options.hasOwnProperty('defer')) {
+                options.defer = this.config.defer;
+            }
+
+            addToQueue.call(this, this.config.namespace, {
+                channel: channel,
+                data: data,
+                defer: options.defer,
+                _: options._ || {}
+            });
+        }
+    };
+
+    /**
+     * Internal method to add event to a queue and update it's execution time if necessary.
+     *
+     * @private
+     * @param {String} namespace
+     * @param {Object} userEvent
+     */
+    // eslint-disable-next-line complexity
+    var addToQueue = function(namespace, userEvent) {
+        /* get current value */
+        var key = '/' + namespace + '/' + userEvent.channel;
+        var channelEvents = ContextHub.Utils.JSON.tree.getItem(this.queue, key) || {};
+
+        /* initial values */
+        if (!channelEvents.hasOwnProperty('executeAt')) {
+            channelEvents.executeAt = null;
+        }
+
+        if (!channelEvents.hasOwnProperty('data')) {
+            channelEvents.data = [];
+        }
+
+        for (var item in userEvent._) {
+            if (userEvent._.hasOwnProperty(item) && (typeof channelEvents[item] === 'undefined')) {
+                channelEvents[item] = userEvent._[item];
+            }
+        }
+
+        /* update channel - change execution time if given event should be executed immediately or earlier than it was previously scheduled */
+        var executeAt = new Date().getTime() + userEvent.defer;
+
+        if (!channelEvents.executeAt || (userEvent.defer === 0) || (channelEvents.executeAt > executeAt)) {
+            channelEvents.executeAt = executeAt;
+        }
+
+        if (!$.isEmptyObject(userEvent.data)) {
+            channelEvents.data.push(userEvent.data);
+        }
+
+        /* save */
+        this.queue = ContextHub.Utils.JSON.tree.setItem(this.queue, key, channelEvents);
+        this.eventingCounter = userEvent.defer ? this.eventingCounter : 0;
+
+        /* check if queue was empty and start eventing monitor if needed */
+        var startEventingMonitor = this.queueIsEmpty === true;
+        this.queueIsEmpty = false;
+
+        if (startEventingMonitor) {
+            this.eventingMonitor();
+        }
+    };
+
+    /**
+     * Returns event queue.
+     *
+     * @this ContextHub.Utils.Eventing
+     * @return {Object}
+     */
+    var getQueue = function() {
+        return this.queue;
+    };
+
+    /**
+     * Adds given item to an array.
+     *
+     * @private
+     * @param {Object} where
+     * @param {Object} item
+     */
+    var addItemTo = function(where, item) {
+        where.list.push(item.key);
+        where.hash[item.key] = item;
+    };
+
+    /**
+     * Optimizes event removing redundant actions (like indirect values of the same key).
+     *
+     * @private
+     * @param {Object} event
+     * @return {Object}
+     */
+    // eslint-disable-next-line complexity
+    var optimizeEvent = function(event) {
+        var optimized = $.extend(true, {}, event, { data: [] });
+        var data = {};
+
+        var updateData = function(entry, idx1, idx2) {
+            var entryKey = entry.key || ('temp' + Math.random());
+            var previous = data[entryKey];
+            var old = (previous || {}).old || null;
+
+            /* update data */
+            data[entryKey] = $.extend(true, {}, entry);
+            data[entryKey]._idx = parseFloat(idx1 + '.' + (idx2 || 0));
+
+            /* update old value if we are overwriting previously processed data */
+            if (previous) {
+                data[entryKey].old = old;
+            }
+        };
+
+        /* reduce unnecessary actions */
+        for (var idx = 0; idx < event.data.length; idx++) {
+            var item = event.data[idx];
+
+            /* multiple updates? */
+            var oldKeys = ContextHub.Utils.JSON.tree.getKeys(item.old);
+            var newKeys = ContextHub.Utils.JSON.tree.getKeys(item.value);
+
+            if (oldKeys.length || newKeys.length) {
+                var keyPrefix = (item.key === '/') ? '' : item.key;
+                var counter = 1;
+                var x;
+                var key;
+
+                /* old elements */
+                for (x = 0; x < oldKeys.length; x++, counter++) {
+                    key = oldKeys[x];
+
+                    updateData({
+                        key: keyPrefix + key,
+                        value: null,
+                        old: ContextHub.Utils.JSON.tree.getItem(item.old, key),
+                        action: 'remove'
+                    }, idx, counter);
+                }
+
+                /* new elements */
+                for (x = 0; x < newKeys.length; x++, counter++) {
+                    key = newKeys[x];
+
+                    updateData({
+                        key: keyPrefix + key,
+                        value: ContextHub.Utils.JSON.tree.getItem(item.value, key),
+                        old: ContextHub.Utils.JSON.tree.getItem(item.old || {}, key),
+                        action: 'set'
+                    }, idx, counter);
+                }
+            } else {
+                /* indicates if a given item can be optimized (contains key that is not internal "_" and action is set) */
+                var canBeOptimized = !!(item.key && item.action) && !/^\/_\//.test(item.key);
+                var previousOccurrence = data[item.key] || {};
+
+                /* check if previous occurrence in the queue has the same value as current one */
+                if (canBeOptimized && (previousOccurrence.old === item.value)) {
+                    delete data[item.key];
+                } else {
+                    updateData(item, idx);
+                }
+            }
+        }
+
+        /* sort the result to maintain the original order */
+        data = $.map(data, function(entry) { return entry; })
+            .sort(function(a, b) {
+                return a._idx - b._idx;
+            });
+
+        /* prepare a list of modified keys for easier data manipulation (list - good for iteration, hash - good for O(1) access) */
+        var keys = {
+            set: { list: [], hash: {} },
+            removed: { list: [], hash: {} },
+            all: { list: [], hash: {} }
+        };
+
+        /* iterate over data set and create data.keys object (with properties: all, set, removed) */
+        $.each(data, function(nr, entry) {
+            /* remove sorting index */
+            delete entry._idx;
+
+            /* items with key and action are added to a "keys" property (to sort out items by action: removed, set, all) */
+            if (entry.key && entry.action) {
+                addItemTo(this.keys.all, entry);
+
+                if (entry.action === 'set') {
+                    addItemTo(this.keys.set, entry);
+                }
+
+                if (entry.action === 'remove') {
+                    addItemTo(this.keys.removed, entry);
+                }
+            }
+        }.bind({ keys: keys }));
+
+        /* overwrite data property and set information regarding keys */
+        optimized.data = data;
+        optimized.keys = keys;
+
+        return optimized;
+    };
+
+    /**
+     * Returns true if specified event was triggered in past. Useful when one want to check if event was triggered before
+     * .on() trap was set. Allows to avoid endless waiting if specified event is triggered only once.
+     *
+     * @param {String} eventName - event name
+     * @return {boolean} true if specified event was already triggered
+     */
+    var alreadyTriggered = function(eventName) {
+        var key = eventName;
+
+        /* add the namespace if needed */
+        if (key.indexOf(this.config.namespace + '-') !== 0) {
+            key = this.config.namespace + '-' + key;
+        }
+
+        /* drop the selector if present */
+        if (key.indexOf('.') !== -1) {
+            key = key.split(/\./).shift();
+        }
+
+        return eventHistory[key] === true;
+    };
+
+    /**
+     * Returns the top window to broadcast to
+     * @returns {null}
+     */
+    var getTopWindowBroadcast = function() {
+        if (!this.windowBroadcast.initialized) {
+            var w = window;
+            var parent = window.parent;
+            try {
+                while (w.location.origin === parent.location.origin) {
+                    w = parent;
+                    parent = parent.parent;
+                    if ( w === window.top) {
+                        break;
+                    }
+                }
+            } catch (e) {
+                // ignore SecurityError
+            }
+            try {
+                this.windowBroadcast.top = (this.config.broadcast === w) ? null : w;
+            } catch(e) {
+                // ignore SecurityError
+            }
+            this.windowBroadcast.initialized = true;
+        }
+        return this.windowBroadcast.top;
+    };
+
+    /**
+     * Fires event (if channel is "namespace:one:two" three events will get fired: "namespace:one:two", "namespace:one"
+     * and "namespace" to allow listeners decide to which namespace they should bind their handlers).
+     *
+     * @private
+     * @param {String} channelName
+     * @param {Object} event
+     */
+    // eslint-disable-next-line complexity
+    var fireEvent = function(channelName, event) {
+        var name = this.config.namespace + '-' + channelName;
+        var duration = event.duration ? '(' + event.duration + ') ' : '';
+        var debugEnabled = ContextHub.debug();
+        var eventBroadcast = $(this.config.broadcast);
+        var topWindowBroadcast = getTopWindowBroadcast.call(this);
+
+        /* optimize event's data and set a name */
+        event = optimizeEvent(event);
+        event.event = name;
+
+        /* overlay event data if needed */
+        if (event.overlay) {
+            event = $.extend(true, event, event.overlay);
+        }
+
+        /* remove event from the queue */
+        delete (this.queue[this.config.namespace] || {})[channelName];
+        this.queueIsEmpty = $.isEmptyObject(this.queue[this.config.namespace]);
+
+        /* should we trigger event if data is empty? */
+        if (!event.muteWhenNoData || (event.muteWhenNoData && (event.data.length > 0))) {
+            /* trigger event (several events will get triggered - see method's description) */
+            for (var namespace = name.split(/:/), currentChannel = channelName.split(/:/), chunk = namespace.length; chunk > 0; chunk--) {
+                event.channel = currentChannel.slice(0, chunk).join(':');
+
+                /* fire event */
+                var group = namespace.slice(0, chunk).join(':');
+                eventBroadcast.trigger(group, event);
+
+                /* broadcast to window.top if ContextHub is using different broadcast */
+                if (topWindowBroadcast && topWindowBroadcast.document) {
+                    /* externalEvent handler can reach data by accessing: event.originalEvent.data */
+                    var externalEvent = topWindowBroadcast.document.createEvent('Event');
+                    externalEvent.initEvent(group, true, true);
+                    externalEvent.data = event;
+                    topWindowBroadcast.dispatchEvent(externalEvent);
+                }
+
+                /* low level debug (debugEnabled used to avoid redundant call in case debug is disabled) */
+                if (debugEnabled) {
+                    ContextHub.console.debug(ContextHub.Shared.timestamp(), group, '-', event);
+                }
+
+                /* memorize, that it was executed already */
+                eventHistory[group] = true;
+            }
+
+            ContextHub.console.log(ContextHub.Shared.timestamp(), '[event]', name, duration + '-', event);
+        }
+    };
+
+    /**
+     * Eventing loop, it's called every 16ms (with skipping to avoid throttling on heavy loaded computers) to
+     * make website highly responsive (60fps). It fires events at scheduled time. Eventing can be paused and later resumed.
+     * If queue is empty, eventing monitor gets suspended and initialized again when new event arrives.
+     *
+     * @this ContextHub.Utils.Eventing
+     * @private
+     */
+    var eventingMonitor = function() {
+        if (!this.running || this.queueIsEmpty) {
+            return;
+        }
+
+        /* event throttling - execute monitor's routines at every n-th call (n * 16 ms) */
+        if ((this.eventingCounter++ % this.periodicity) === 0) {
+            $.each(this.queue[this.config.namespace] || {}, function(name, channel) {
+                if (!channel.paused && new Date().getTime() > channel.executeAt) {
+                    fireEvent.call(this, name, channel);
+                }
+            }.bind(this));
+        }
+
+        scheduleJob(this.eventingMonitor);
+    };
+
+    /**
+     * Enables eventing (while eventing is disabled, events are queued).
+     *
+     * @this ContextHub.Utils.Eventing
+     */
+    var enableEventing = function() {
+        this.running = true;
+        this.eventingMonitor();
+    };
+
+    /**
+     * Disabled eventing (new events will be queued).
+     *
+     * @this ContextHub.Utils.Eventing
+     */
+    var disableEventing = function() {
+        this.running = false;
+    };
+
+    /**
+     * Checks if eventing is running.
+     *
+     * @this ContextHub.Utils.Eventing
+     */
+    var isRunning = function() {
+        return this.running;
+    };
+
+    /**
+     * Clears eventing queue.
+     *
+     * @this ContextHub.Utils.Eventing
+     */
+    var clearQueue = function() {
+        this.queue = {};
+    };
+
+    /**
+     * Sets attribute/value pair for a given channel.
+     *
+     * @private
+     * @this ContextHub.Utils.Eventing
+     */
+    var setAttribute = function(channel, attribute, value) {
+        this.queue = ContextHub.Utils.JSON.tree.setItem(this.queue, '/' + this.config.namespace + '/' + channel + '/' + attribute, value);
+    };
+
+    /**
+     * Returns attribute of a given channel.
+     *
+     * @private
+     * @this ContextHub.Utils.Eventing
+     */
+    var getAttribute = function(channel, attribute) {
+        return ContextHub.Utils.JSON.tree.getItem(this.queue, '/' + this.config.namespace + '/' + channel + '/' + attribute);
+    };
+
+    /**
+     * Flushes all events of a given channel.
+     *
+     * @this ContextHub.Utils.Eventing
+     */
+    var flush = function(channel) {
+        setAttribute.call(this, channel, 'executeAt', 0);
+    };
+
+    /**
+     * Pauses eventing of a given channel.
+     *
+     * @this ContextHub.Utils.Eventing
+     */
+    var pause = function(channel) {
+        setAttribute.call(this, channel, 'paused', true);
+    };
+
+    /**
+     * Resumes eventing of a given channel.
+     *
+     * @this ContextHub.Utils.Eventing
+     */
+    var resume = function(channel) {
+        setAttribute.call(this, channel, 'paused', undefined);
+    };
+
+    /**
+     * Checks if eventing is paused for a given channel.
+     *
+     * @this ContextHub.Utils.Eventing
+     */
+    var isPaused = function(channel) {
+        return getAttribute.call(this, channel, 'paused') === true;
+    };
+
+    /**
+     * Splits name by space characters and adds specified namespace to each element if necessary. Returns back string
+     * with space-separated elements (prefixed with namespace).
+     *
+     * @private
+     * @param {String|Array} name - single event name or a list
+     * @param {String} namespace - namespace
+     * @param {String} selector - selector
+     * @return {String}
+     */
+    var addNamespace = function(name, namespace, selector) {
+        var eventNameSuffix = selector ? ('.' + selector) : '';
+        var events = (typeof name === 'string') ? name.split(/ /) : name;
+
+        for (var x = 0; x < events.length; x++) {
+            var item = events[x];
+
+            /* add a namespace if needed */
+            if (item.indexOf(namespace + '-') !== 0) {
+                events[x] = namespace + '-' + item + eventNameSuffix;
+            }
+        }
+
+        return events.join(' ');
+    };
+
+    /**
+     * Binds handler for a specific event name (containing eventing namespace).
+     *
+     * @this ContextHub.Utils.Eventing
+     * @param {String|Array} name - event name
+     * @param {Function} handler - event handler
+     * @param {String} [selector] - selector
+     * @param {Boolean} [triggerForPastEvents] - if handler should be called also if a given even was triggered in the past
+     */
+    var on = function(name, handler, selector, triggerForPastEvents) {
+        name = addNamespace(name, this.config.namespace, selector);
+
+        /* bind event handler */
+        $(this.config.broadcast).on(name, handler);
+        handledEvents[name] = true;
+
+        /* execute handler if event was already triggered in past */
+        if (triggerForPastEvents) {
+            var executeHandler = false;
+            var context = this;
+
+            $.each(name.split(/ /), function(idx, group) {
+                executeHandler = alreadyTriggered.call(context, group);
+                return executeHandler !== true;
+            });
+
+            if (executeHandler) {
+                handler();
+            }
+        }
+    };
+
+    /**
+     * Binds handler for a specific event name (containing eventing namespace) for one time execution.
+     *
+     * @this ContextHub.Utils.Eventing
+     * @param {String|Array} name - event name
+     * @param {Function} handler - event handler
+     * @param {String} [selector] - selector
+     * @param {Boolean} [triggerForPastEvents] - if handler should be called also if a given even was triggered in the past
+     */
+    var once = function(name, handler, selector, triggerForPastEvents) {
+        var executeHandler = false;
+        name = addNamespace(name, this.config.namespace, selector);
+
+        /* execute handler if event was already triggered in past */
+        if (triggerForPastEvents) {
+            var context = this;
+
+            $.each(name.split(/ /), function(idx, group) {
+                executeHandler = alreadyTriggered.call(context, group);
+                return executeHandler !== true;
+            });
+        }
+
+        if (executeHandler) {
+            handler();
+        } else {
+            /* bind event handler for one time execution */
+            $(this.config.broadcast).one(name, handler);
+            handledEvents[name] = true;
+        }
+    };
+
+    /**
+     * Unbinds handler for a specific event name (containing eventing namespace).
+     *
+     * @this ContextHub.Utils.Eventing
+     * @param {String|Array} name - event name
+     * @param {String} selector - selector
+     */
+    var off = function(name, selector) {
+        name = addNamespace(name, this.config.namespace, selector);
+
+        /* unbind event handler */
+        $(this.config.broadcast).off(name);
+        delete handledEvents[name];
+    };
+
+    /**
+     * Unbinds all event handlers.
+     */
+    var unbindAllHandlers = function() {
+        for (var eventName in handledEvents) {
+            if (handledEvents.hasOwnProperty(eventName)) {
+                ContextHub.eventing.off(eventName);
+            }
+        }
+
+        handledEvents = {};
+    };
+
+    /**
+     * Constructs a ContextHub.Utils.Eventing.
+     *
+     * @this ContextHub.Utils.Eventing
+     * @namespace ContextHub.Utils.Eventing
+     * @param {Object} config
+     * @return {Object}
+     * @constructor
+     */
+    ContextHub.Utils.Eventing = function(config) {
+        this.config = $.extend(true, {}, ContextHub.Utils.Eventing.defaultConfig, config);
+        this.eventingCounter = 0;
+        this.periodicity = Math.floor(Math.max(16, this.config.periodicity) / 16);
+        this.eventingMonitor = eventingMonitor.bind(this);
+
+        this.windowBroadcast = {
+            top: null,
+            initialized: false
+        };
+
+        /* clear eventing queue */
+        clearQueue.call(this);
+
+        /* enable eventing if autoStart is set */
+        if (this.config.autoStart) {
+            enableEventing.call(this);
+        } else {
+            disableEventing.call(this);
+        }
+
+        /* public interface */
+        return {
+            log: this.log,
+            trigger: trigger.bind(this),
+            getQueue: getQueue.bind(this),
+            isRunning: isRunning.bind(this),
+            enableEventing: enableEventing.bind(this),
+            disableEventing: disableEventing.bind(this),
+            alreadyTriggered: alreadyTriggered.bind(this),
+            clearQueue: clearQueue.bind(this),
+            flush: flush.bind(this),
+            pause: pause.bind(this),
+            resume: resume.bind(this),
+            isPaused: isPaused.bind(this),
+            once: once.bind(this),
+            on: on.bind(this),
+            off: off.bind(this),
+            unbindAllHandlers: unbindAllHandlers.bind(this),
+            namespace: this.config.namespace,
+            broadcast: this.config.broadcast,
+            handledEvents: handledEvents
+        };
+    };
+
+    /**
+     * Default configuration of ContextHub.Utils.Eventing
+     *
+     * @namespace ContextHub.Utils.Eventing.defaultConfig
+     */
+    ContextHub.Utils.Eventing.defaultConfig = {
+        autoStart: true,
+        defer: 100,
+        periodicity: 16 * 12,
+        namespace: ContextHub.Constants.EVENT_NAMESPACE,
+        broadcast: window
+    };
+
+}(ContextHubJQ, window));

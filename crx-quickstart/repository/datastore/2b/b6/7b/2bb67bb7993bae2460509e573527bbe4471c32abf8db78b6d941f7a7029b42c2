@@ -1,0 +1,735 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function(document, Class, $) {
+    "use strict";
+
+    var contentPath = null;
+    var relDamCreateFolder = "#dam-create-folder";
+    var folderMetadataSchemas = [];
+
+    $(document).on("foundation-contentloaded", initCreateDamFolder);
+    $(document).on("click", relDamCreateFolder, initCreateDamFolder);
+
+    var createDialogEl;
+
+    var DamCreateFolder = new Class({
+
+        createFolder: null,
+        dialog: null,
+        _ILLEGAL_FILENAME_CHARS: "%/\\:*?\"[]|\n\t\r. #{}^;+",
+        nameForceChanged: false,
+
+        set: function(prop, value) {
+            this[prop] = value;
+            return this;
+        },
+
+        initialize: function() {
+            var self = this;
+
+            if (!self.dialog) {
+                self.dialog = self.createDialog();
+                document.body.appendChild(self.dialog);
+            }
+            self._refreshDialog(self.dialog, contentPath);
+
+            Coral.commons.ready(self.createFolder, function() {
+                self.createFolder
+                    .on("click", function(event) {
+                        var parentAPI = $(self.createFolder).closest(".foundation-toggleable")
+                            .adaptTo("foundation-toggleable");
+                        if (parentAPI) {
+                            parentAPI.hide();
+                        }
+                        // Clicking on Cancel button calls cleanDialog, but on closing the dialog
+                        // with the cross button(X) doesn't, hence the cleanup before show
+                        self._cleanDialog();
+                        self.dialog.show();
+                    });
+            });
+        },
+
+        createDialog: function() {
+            var self = this;
+            var dialogExist = true;
+            if (!createDialogEl) {
+                dialogExist = false;
+                createDialogEl = new Coral.Dialog().set({
+                    id: "createfolder",
+                    header: {
+                        innerHTML: Granite.I18n.get("Create Folder")
+                    },
+                    closable: "on"
+                });
+            }
+
+            var dialog = createDialogEl;
+            var content = dialog.content;
+            var contentForm;
+            if (!dialogExist) {
+            // The modal is basically a form
+                contentForm = content.appendChild(document.createElement("form"));
+                contentForm.className += " coral-Form--vertical";
+                contentForm.action = contentPath;
+                contentForm.method = "POST";
+                contentForm.encType = "application/x-www-form-urlencoded";
+
+                // Title
+                contentForm.appendChild(function() {
+                    var fieldDiv = document.createElement("div");
+                    var titleLabel = document.createElement("label");
+                    fieldDiv.className += " coral-Form-fieldwrapper";
+                    titleLabel.innerHTML = Granite.I18n.get("Title *");
+                    titleLabel.className += " coral-Form-fieldlabel";
+                    titleLabel.setAttribute("for", "create-folder-title-input");
+                    var input = new Coral.Textfield().set({
+                        name: "./jcr:content/jcr:title"
+                    }).on("input", function(event) {
+                        var title = $(this).get(0);
+                        self._validateAndAddTooltip(title.value);
+                    }).on("keypress", function(event) {
+                        var charCode = event.which || event.keyCode;
+                        if (charCode === 13 && dialog.submit.disabled === false) { // Enter keycode
+                            self._submit();
+                        }
+                    });
+                    input.className += " coral-Form-field";
+                    input.id = "create-folder-title-input";
+                    input.setAttribute("aria-required", "true");
+                    dialog.titleInput = input;
+                    fieldDiv.appendChild(titleLabel);
+                    fieldDiv.appendChild(input);
+                    return fieldDiv;
+                }());
+
+                // Name
+                contentForm.appendChild(function() {
+                    var fieldDiv = document.createElement("div");
+                    var titleLabel = document.createElement("label");
+                    fieldDiv.className += " coral-Form-fieldwrapper";
+                    titleLabel.innerHTML = Granite.I18n.get("Name");
+                    titleLabel.className += " coral-Form-fieldlabel";
+                    titleLabel.setAttribute("for", "create-folder-name-input");
+                    var input = new Coral.Textfield().set({
+                        name: ":name"
+                    }).on("keypress", function(event) {
+                        var charCode = event.which || event.keyCode;
+                        if (self._isRestricted(charCode)) {
+                            event.preventDefault();
+                        }
+                        if (charCode === 13 && dialog.submit.disabled === false) { // Enter keycode
+                            self._submit();
+                        }
+                    }).on("change", function(event) {
+                        var name = $(this).get(0);
+                        self._validateAndAddTooltip(name.value);
+                    }).on("input", function(event) {
+                        self.nameForceChanged = true;
+                    });
+                    input.className += " coral-Form-field";
+                    input.id = "create-folder-name-input";
+                    dialog.nameInput = input;
+                    fieldDiv.appendChild(titleLabel);
+                    fieldDiv.appendChild(input);
+                    return fieldDiv;
+                }());
+
+                // Hidden. For folder type.
+                contentForm.appendChild(function() {
+                    var dom = document.createElement("input");
+                    dom.type = "hidden";
+                    dom.name = "./jcr:primaryType";
+                    dom.value = "sling:Folder";
+                    return dom;
+                }());
+
+                // Hidden. To create jcr:content under folder.
+                contentForm.appendChild(function() {
+                    var dom = document.createElement("input");
+                    dom.type = "hidden";
+                    dom.name = "./jcr:content/jcr:primaryType";
+                    dom.value = "nt:unstructured";
+                    return dom;
+                }());
+
+                // Hidden. To save sourcing property on contribution folder.
+                contentForm.appendChild(function() {
+                    var dom = document.createElement("input");
+                    dom.type = "hidden";
+                    dom.name = "./jcr:content/sourcing";
+                    dom.value = false;
+                    return dom;
+                }());
+
+                // Hidden. for _charset_.
+                contentForm.appendChild(function() {
+                    var dom = document.createElement("input");
+                    dom.type = "hidden";
+                    dom.name = "_charset_";
+                    dom.value = "UTF-8";
+                    return dom;
+                }());
+                if (folderMetadataSchemas.length > 0) {
+                    contentForm.appendChild(function() {
+                        var fieldDiv = document.createElement("div");
+                        var titleLabel = document.createElement("label");
+                        fieldDiv.className += " coral-Form-fieldwrapper";
+                        titleLabel.innerHTML = Granite.I18n.get("Folder Metadata Schema");
+                        titleLabel.className += " coral-Form-fieldlabel";
+                        titleLabel.id = "create-folder-metadata-schema-label";
+                        var select = new Coral.Select().set({
+                            name: "./jcr:content/folderMetadataSchema"
+                        });
+                        select.className += " coral-Form-field";
+                        select.setAttribute("aria-labelledby", "create-folder-metadata-schema-label");
+                        dialog.folderMetadataInput = select;
+
+                        select.items.add(
+                            { content: { innerHTML: Granite.I18n.get("None") }, value: "", disabled: false }
+                        );
+                        folderMetadataSchemas.forEach(function(child) {
+                            select.items.add(
+                                { content: { innerHTML: child.title }, value: child.path, disabled: false }
+                            );
+                        });
+
+                        var infoIcon = new Coral.Icon().set({
+                            id: "dam-folder-create-folderschemameta",
+                            icon: "infoCircle",
+                            size: "S"
+                        });
+                        infoIcon.classList.add("coral-Form-fieldinfo");
+
+                        fieldDiv.appendChild(titleLabel);
+                        fieldDiv.appendChild(select);
+                        return fieldDiv;
+                    }());
+                }
+
+
+                var privateCheckbox = new Coral.Checkbox().on("change", function(event) {
+                    dialog.isPrivate = this.checked;
+                });
+                privateCheckbox.label.innerHTML = Granite.I18n.get("Private");
+                $(privateCheckbox).addClass("private-folder-chkbox");
+                contentForm.appendChild(privateCheckbox);
+
+                var reorderableCheckbox = new Coral.Checkbox().on("change", function(event) {
+                    if (this.checked) {
+                        dialog.querySelector('[name="./jcr:primaryType"]').value = "sling:OrderedFolder";
+                    } else {
+                        dialog.querySelector('[name="./jcr:primaryType"]').value = "sling:Folder";
+                    }
+                });
+                reorderableCheckbox.label.innerHTML = Granite.I18n.get("Orderable");
+                contentForm.appendChild(reorderableCheckbox);
+
+                var assetContributionCheckbox = new Coral.Checkbox().on("change", function(event) {
+                    if (this.checked) {
+                        dialog.querySelector('[name="./jcr:content/sourcing"]').value = true;
+                        dialog.isSourcing = true;
+                    } else {
+                        dialog.querySelector('[name="./jcr:content/sourcing"]').value = false;
+                        dialog.isSourcing = false;
+                    }
+                });
+                assetContributionCheckbox.label.innerHTML = Granite.I18n.get("Asset Contribution");
+                $(assetContributionCheckbox).addClass("asset-contribution-checkbox");
+
+                var showAssetContributionCheckBox = ($("input[name='asset-sourcing-flag']").length > 0);
+                if (showAssetContributionCheckBox) {
+                    contentForm.appendChild(assetContributionCheckbox);
+                }
+
+                var footer = dialog.footer;
+                var cancel = new Coral.Button();
+                cancel.label.textContent = Granite.I18n.get("Cancel");
+                footer.appendChild(cancel).on("click", function() {
+                    self._cleanDialog();
+                    dialog.hide();
+                });
+
+                var submitButton = new Coral.Button().set({
+                    variant: "primary",
+                    disabled: true
+                }).on("click", function() {
+                    self._submit();
+                });
+                submitButton.label.textContent = Granite.I18n.get("Create");
+
+                footer.appendChild(submitButton);
+
+                // Few settings to be used on various actions
+                dialog.submit = submitButton;
+                dialog.isPrivate = false;
+                dialog.isSourcing = false;
+            } else {
+                contentForm = content.childNodes.item(0);
+                contentForm.action = contentPath;
+            }
+
+            return dialog;
+        },
+        _refreshDialog: function(dialog, contentPath) {
+            var self = this;
+            // Sync private folder checkbox according to permission on current folder
+            var privateCheckbox = $(".private-folder-chkbox", $(dialog))[0];
+            var canModifyAccessControl = self._checkPermission(contentPath, "jcr:modifyAccessControl");
+            if (canModifyAccessControl) {
+                privateCheckbox.disabled = false;
+                privateCheckbox.hidden = false;
+            } else {
+                privateCheckbox.disabled = true;
+                privateCheckbox.hidden = true;
+            }
+            // show "Asset Contribution" checkbox based on whether it is sourcing shared folder
+            var assetContributionCheckbox = $(".asset-contribution-checkbox", $(dialog))[0];
+            if (assetContributionCheckbox !== undefined) {
+                var isSourcingSharedFolder = self._checkSourcingSharedFolder(contentPath);
+                if (!isSourcingSharedFolder) {
+                    assetContributionCheckbox.disabled = false;
+                    assetContributionCheckbox.hidden = false;
+                } else {
+                    assetContributionCheckbox.hidden = true;
+                }
+            }
+        },
+
+        _checkPermission: function(contentPath, privilege) {
+            var hasPermission = false;
+            var servletUrl = Granite.HTTP.externalize(contentPath + ".permissions.json");
+            $.ajax({
+                url: servletUrl,
+                type: "GET",
+                dataType: "json",
+                data: {
+                    "privileges": privilege
+                },
+                async: false
+            }).done(function(responseJson) {
+                if (responseJson.hasOwnProperty(privilege)) {
+                    hasPermission = responseJson[privilege] || false;
+                }
+            }
+            );
+            return hasPermission;
+        },
+
+        _checkSourcingSharedFolder: function(contentPath) {
+            var newContentPath = contentPath;
+            if (contentPath !== undefined && contentPath.charAt(contentPath.length - 1) === "/") {
+                newContentPath = contentPath.substr(0, contentPath.length - 1);
+            }
+            var parentPath = newContentPath.substr(0, newContentPath.lastIndexOf("/"));
+            var serverUrl = Granite.HTTP.externalize(parentPath + ".1.json");
+            var parentResult = $.ajax({
+                url: serverUrl,
+                type: "GET",
+                dataType: "json",
+                async: false
+            });
+            var parentOutput = JSON.parse(parentResult.responseText);
+            var isParentSourcing = false;
+            if (parentOutput.hasOwnProperty("jcr:content")) {
+                if (parentOutput["jcr:content"].hasOwnProperty("sourcing")) {
+                    isParentSourcing = parentOutput["jcr:content"].sourcing || false;
+                }
+            }
+
+            // return false if parent folder is not sourcing
+            if (isParentSourcing === false) {
+                return false;
+            }
+            var sharedFolderName = "";
+            if (parentOutput.hasOwnProperty("jcr:content")) {
+                if (parentOutput["jcr:content"].hasOwnProperty("sharedFolderName")) {
+                    sharedFolderName = parentOutput["jcr:content"].sharedFolderName;
+                }
+            }
+
+            var server = Granite.HTTP.externalize(newContentPath + ".1.json");
+            var result = $.ajax({
+                url: server,
+                type: "GET",
+                dataType: "json",
+                async: false
+            });
+            var output = JSON.parse(result.responseText);
+            var sharedFolderTitle = null;
+            if (output.hasOwnProperty("jcr:content")) {
+                if (output["jcr:content"].hasOwnProperty("jcr:title")) {
+                    sharedFolderTitle = output["jcr:content"]["jcr:title"];
+                }
+            }
+
+            if (isParentSourcing === true && sharedFolderTitle.toLowerCase() === sharedFolderName.toLowerCase()) {
+                return true;
+            } else {
+                return false;
+            }
+        },
+
+        _submit: function() {
+            var self = this;
+
+            var nameInput = $('input[name=":name"]', self.dialog)[0];
+            var name = nameInput.value;
+            if (self._checkExistence(name) || self._hasRestrictedChar(name)) {
+                Array.prototype.slice.call(nameInput.parentElement.getElementsByTagName("coral-tooltip"))
+                    .forEach(function(item) {
+                        item.remove();
+                    });
+                if (self._checkExistence(name)) {
+                    nameInput.parentElement.appendChild(new Coral.Tooltip().set({
+                        variant: "error",
+                        content: {
+                            innerHTML: Granite.I18n.get("Resource already exists")
+                        },
+                        target: nameInput,
+                        placement: "bottom"
+                    })).show();
+                } else {
+                    var errorIcon = new Coral.Icon().set({
+                        id: "dam-folder-name-textfield-fielderror-submit",
+                        icon: "infoCircle",
+                        size: "S"
+                    });
+                    errorIcon.className += " coral-Form-fielderror error-info-icon";
+                    nameInput.parentElement.appendChild(errorIcon);
+                    var errorTooltip = new Coral.Tooltip().set({
+                        content: {
+                            // es
+                            innerHTML: Granite.I18n.get("The name contained {0}. These characters are not allowed and were replaced by {1}", // eslint-disable-line max-len
+                                [ self._getInvalidCharSet(), "-" ])
+                        },
+                        variant: "error",
+                        target: "#dam-folder-name-textfield-fielderror-submit",
+                        placement: "right",
+                        id: "dam-folder-name-textfield-fielderror-tooltip"
+                    });
+                    nameInput.parentElement.appendChild(errorTooltip);
+                }
+                self.dialog.submit.disabled = true;
+            } else {
+                var form = self.dialog.querySelector("form");
+                var basePath = form.getAttribute("action");
+                // CQ-4194504 Creating folder when a folder is selected,
+                // the folder should be created inside the selected folder..
+                if ($(".foundation-selections-item").length > 0) {
+                    basePath = $(".foundation-selections-item").data("foundation-collection-item-id") + "/";
+                }
+                var data = $(form).serialize();
+                var sharedFolderName = "shared";
+                var newFolderName = "new";
+                var sharedFolderTitle = Granite.I18n.get("Shared");
+                var newFolderTitle = Granite.I18n.get("New");
+                var sharedFolderPath = basePath + self.dialog.nameInput.value + "/" + sharedFolderName;
+                var newFolderPath = basePath + self.dialog.nameInput.value + "/" + newFolderName;
+                if (self.dialog.isSourcing) {
+                    // shared folder creation in sourcing flow
+                    data = data + "&" + encodeURIComponent(sharedFolderPath + "/jcr:content/jcr:primaryType") + "=" +
+                        encodeURIComponent("nt:unstructured") + "&" +
+                        encodeURIComponent(sharedFolderPath + "/jcr:content/jcr:title") + "=" + sharedFolderTitle +
+                        "&" + encodeURIComponent("./jcr:content/sharedFolderName") + "=" + sharedFolderName;
+
+                    // new folder creation in sourcing flow
+                    data = data + "&" + encodeURIComponent(newFolderPath + "/jcr:content/jcr:primaryType") + "=" +
+                        encodeURIComponent("nt:unstructured") + "&" +
+                        encodeURIComponent(newFolderPath + "/jcr:content/jcr:title") + "=" + newFolderTitle + "&" +
+                        encodeURIComponent("./jcr:content/newFolderName") + "=" + newFolderName;
+                }
+                $.ajax({
+                    type: form.method,
+                    // form.action returns an absolute path which cannot be externalized
+                    url: Granite.HTTP.externalize(basePath + self.dialog.nameInput.value),
+                    contentType: form.encType,
+                    data: data,
+                    cache: false
+                }).done(function(data, textStatus, jqXHR) {
+                    if (self.dialog.isPrivate) {
+                        $.ajax({
+                            type: "POST",
+                            // form.action returns an absolute path which cannot be externalized
+                            url: Granite.HTTP.externalize(basePath),
+                            data: {
+                                "_charset_": "utf-8",
+                                ":operation": "dam.share.folder",
+                                "path": (($(".foundation-selections-item").length > 0) ? basePath : contentPath) +
+                                        self.dialog.nameInput.value,
+                                "private": true
+                            }
+                        }).fail(function(jqXHR, textStatus, errorThrown) {
+                            var errDialog = new Coral.Dialog().set({
+                                header: {
+                                    innerHTML: Granite.I18n.get("Error")
+                                },
+                                content: {
+                                    innerHTML: Granite.I18n.get("Error in making the folder private, created as a public folder.")// eslint-disable-line max-len
+                                }
+                            });
+                            var errorDlgOkBtn = new Coral.Button();
+                            errorDlgOkBtn.variant = "primary";
+                            errorDlgOkBtn.label.textContent = Granite.I18n.get("Ok");
+                            errDialog.footer.appendChild(errorDlgOkBtn)
+                                .on("click", function(event) {
+                                    self._cleanDialog();
+                                    errDialog.hide();
+                                });
+                        });
+                    }
+                    //Need to reset the isPrivate to false else it  retain its state if the page is not refreshed.
+                    self.dialog.isPrivate = false;
+
+                    if (self.dialog.isSourcing) {
+                        var href = "/mnt/overlay/dam/gui/content/sourcing/createsourcingfolderwizard.html" +
+                            basePath + self.dialog.nameInput.value;
+                        window.location.href = Granite.HTTP.externalize(href);
+                    }
+                    self._cleanDialog();
+                    self.dialog.hide();
+                    self._refresh();
+                }).fail(function(jqXHR, textStatus, errorThrown) {
+                    var errDialog = new Coral.Dialog().set({
+                        header: {
+                            innerHTML: Granite.I18n.get("Error")
+                        },
+                        content: {
+                            innerHTML: Granite.I18n.get("Failed to create folder.")
+                        }
+                    });
+                    var errorDlgOkBtn = new Coral.Button();
+                    errorDlgOkBtn.variant = "primary";
+                    errorDlgOkBtn.label.textContent = Granite.I18n.get("Ok");
+                    errDialog.footer.appendChild(errorDlgOkBtn)
+                        .on("click", function(event) {
+                            self._cleanDialog();
+                            errDialog.hide();
+                        });
+                    self.dialog.hide();
+                    errDialog.show();
+                });
+            }
+        },
+
+        _checkExistence: function(name) {
+            var newContentPath = contentPath;
+            if (contentPath !== undefined && contentPath.charAt(contentPath.length - 1) === "/") {
+                newContentPath = contentPath.substr(0, contentPath.length - 1);
+            }
+
+            var result = $.ajax({
+                type: "GET",
+                async: false,
+                url: Granite.HTTP.externalize(newContentPath + "/" + name + ".json"),
+                cache: false
+            });
+            if (result.status === 200 && result.responseText) {
+                var resultJSON = JSON.parse(result.responseText);
+                if (resultJSON && resultJSON["jcr:primaryType"]) {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+            return false;
+        },
+
+        _validateAndAddTooltip: function(enteredText) {
+            var self = this;
+            var toDisable = false;
+            if (enteredText === "") {
+                toDisable = toDisable || true;
+            }
+            // Remove the stale tooltips if any
+            Array.prototype.slice.call(self.dialog.nameInput.parentElement.getElementsByClassName("error-info-icon"))
+                .forEach(function(item) {
+                    item.remove();
+                });
+
+            // Do validation and add tooltip if required
+            if (self._hasRestrictedChar(enteredText)) {
+                var errorIcon = new Coral.Icon().set({
+                    id: "dam-folder-name-textfield-fielderror",
+                    icon: "infoCircle",
+                    size: "S"
+                });
+                errorIcon.setAttribute("tabindex", "0");
+                errorIcon.className += " coral-Form-fieldinfo error-info-icon";
+                self.dialog.nameInput.parentElement.appendChild(errorIcon);
+
+                var errorTooltip = new Coral.Tooltip().set({
+                    content: {
+                        // eslint-disable-next-line max-len
+                        innerHTML: Granite.I18n.get("The name contained {0}. These characters are not allowed and were replaced by {1}", [ self._getInvalidCharSet(), "-" ])
+                    },
+                    variant: "inspect",
+                    target: "#dam-folder-name-textfield-fielderror",
+                    placement: "left",
+                    id: "dam-folder-name-textfield-fielderror-tooltip"
+                });
+                self.dialog.nameInput.parentElement.appendChild(errorTooltip);
+                var validValue;
+                if (Dam.Util.NameValidation !== undefined) {
+                    validValue = Dam.Util.NameValidation.getValidFolderName(enteredText)
+                        .replace(/ /g, "-");
+                } else {
+                    // This block is to support backward compatibility.
+                    validValue = self._replaceRestrictedCodes(enteredText).replace(/ /g, "-");
+                }
+                self.dialog.nameInput.value = validValue;
+            } else {
+                self.dialog.nameInput.value = enteredText.replace(/ /g, "-");
+            }
+            if (!self.nameForceChanged) { // if folder name is not force changed, change case to lower
+                self.dialog.nameInput.value = self.dialog.nameInput.value.toLowerCase();
+            }
+
+            self.dialog.submit.disabled = toDisable;
+        },
+
+        _getInvalidCharSet: function() {
+            if (Dam.Util.NameValidation !== undefined) {
+                return Dam.Util.NameValidation.getInvalidFolderCharSet();
+            } else {
+                // This block is to support backward compatibility
+                return self._ILLEGAL_FILENAME_CHARS.toString().replace(/,/g, " ");
+            }
+        },
+        _cleanDialog: function() {
+            var self = this;
+            $.each(self.dialog.getElementsByTagName("input"), function(cnt, input) {
+                if (input.type === "text") {
+                    input.value = "";
+                } else if (input.type === "checkbox") {
+                    input.checked = false;
+                }
+            });
+            self.dialog.submit.disabled = true;
+            // Remove the stale tooltips if any
+            Array.prototype.slice.call(self.dialog.getElementsByClassName("error-info-icon")).forEach(function(item) {
+                item.remove();
+            });
+            $(self.dialog).find("coral-tooltip[variant='error']").remove();
+            self.nameForceChanged = false;
+        },
+
+        // @Deprecated, Use Dam.Util.NameValidation
+        _isRestricted: function(code) {
+            var self = this;
+            var charVal = String.fromCharCode(code);
+            if (Dam.Util.NameValidation !== undefined) {
+                return !Dam.Util.NameValidation.isValidFolderName(charVal);
+            } else {
+                // This block is to support backward compatibility
+                if (self._ILLEGAL_FILENAME_CHARS.indexOf(charVal) > -1) {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+        },
+
+        _hasRestrictedChar: function(textValue) {
+            var self = this;
+            for (var i = 0, ln = textValue.length; i < ln; i++) {
+                if (self._isRestricted(textValue.charCodeAt(i))) {
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        _replaceRestrictedCodes: function(name) {
+            var self = this;
+            var jcrValidName = "";
+            for (var i = 0, ln = name.length; i < ln; i++) {
+                if (self._isRestricted(name.charCodeAt(i))) {
+                    jcrValidName += "-";
+                } else {
+                    jcrValidName += name[i];
+                }
+            }
+            return jcrValidName;
+        },
+
+        _refresh: function() {
+            var collectionAPI =
+                $(".cq-damadmin-admin-childpages.foundation-collection").adaptTo("foundation-collection");
+            if (collectionAPI && ("reload" in collectionAPI)) {
+                collectionAPI.reload();
+            } else {
+                location.reload(true);
+            }
+        }
+    });
+
+    $(document).on("foundation-selections-change", function(e) {
+        var localName = e.target.localName;
+        var showCreateAction = true;
+        if (localName === "coral-masonry" || localName === "table") { // If view is changed to card view
+            showCreateAction = $(".foundation-collection-meta").data("foundationCollectionMetaFolder");
+        } else { // In cloumn view, create action should only be visible for directory and not for asset
+            var item = e.target.activeItem;
+            if (item && $(item).data("itemType") === "asset") {
+                showCreateAction = false;
+            }
+        }
+
+        if (showCreateAction) {
+            $(".cq-damadmin-admin-createasset").removeClass("granite-collection-create-hidden");
+        } else {
+            $(".cq-damadmin-admin-createasset").addClass("granite-collection-create-hidden");
+            $(".cq-damadmin-assets-empty-content").text("There is no content to display.");
+        }
+
+        if ($(".foundation-selections-item").length === 1) {
+            // In columns view we have create folder functionality in selection mode as well.
+            contentPath = $(".foundation-selections-item").data("foundation-collection-item-id");
+            if (contentPath !== undefined && contentPath.charAt(contentPath.length - 1) !== "/") {
+                contentPath = contentPath + "/";
+            }
+            if (document.querySelector(".cq-damadmin-admin-actions-createfolder-at-activator")) {
+                var damCreateFolder = new DamCreateFolder().set("createFolder",
+                    document.querySelector(".cq-damadmin-admin-actions-createfolder-at-activator"));
+                damCreateFolder.initialize();
+            }
+        }
+    });
+
+    function initCreateDamFolder() {
+        $.ajax({
+            type: "GET",
+            async: false,
+            url: "/libs/dam/gui/content/foldermetadataschemaeditor/schemalist/jcr:content/views/list/datasource.data.json", // eslint-disable-line max-len
+            cache: false,
+            dataType: "json",
+            success: function(responseJson) {
+                folderMetadataSchemas = responseJson;
+            }
+        });
+
+        // Default content path
+        contentPath = $(".cq-damadmin-admin-childpages.foundation-collection").data("foundationCollectionId");
+        if (contentPath !== undefined && contentPath.charAt(contentPath.length - 1) !== "/") {
+            contentPath = contentPath + "/";
+        }
+        if (document.querySelector(relDamCreateFolder)) {
+            var damCreateFolder = new DamCreateFolder().set("createFolder", document.querySelector(relDamCreateFolder));
+            damCreateFolder.initialize();
+        }
+    }
+})(document, Class, Granite.$);

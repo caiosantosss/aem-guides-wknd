@@ -1,0 +1,490 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2020 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (Granite, $, window, Coral) {
+    'use strict';
+
+    const $document = $(window.document);
+    const $window = $(window);
+
+    const VALIDATION_TYPES_URL = Granite.HTTP.externalize("/mnt/overlay/settings/dam/cfm/models/formbuilderconfig/validationtypes.2.json");
+    const CONTENT_TO_VALIDATE_SELECTOR = [
+        "[data-thumbnail-validation*='cfm.validation.thumbnail.show']",
+        "[data-foundation-validation*='cfm.validation.contenttype']",
+        "[data-filesize-validation*='cfm.validation.filesize']",
+        "[data-imagewidth-validation*='cfm.validation.imagewidth']",
+        "[data-imageheight-validation*='cfm.validation.imageheight']"
+    ].join(",");
+    const SELECTION_CHANGE_EVENT = "foundation-selections-change.cfm-picker-contentref";
+
+    const _contentDataCache = {};
+    const _contentTypeCriteriaCache = {};
+    const _minMaxCriteriaCache = {};
+
+    let _validators;
+
+    const fieldsToValidate = getFieldsToValidate();
+
+    if (fieldsToValidate.length) {
+        // retrieve content type data
+        $.ajax({
+            type: "GET",
+            dataType: "json",
+            url: VALIDATION_TYPES_URL,
+            success: function(data) {
+                _validators = parseValidators(data);
+                restrictPickers();
+                registerValidator();
+            },
+        });
+    }
+
+    /**
+     * Get fields with relevant validator(s)
+     *
+     * @returns {NodeList}
+     */
+    function getFieldsToValidate() {
+        return document.querySelectorAll(CONTENT_TO_VALIDATE_SELECTOR);
+    }
+
+    /**
+     * Build dictionaries of validator objects with validator name as key.
+     *
+     * @param {Object} data
+     * @returns {Object|null}
+     */
+    function parseValidators(data) {
+        const parsedData = {};
+        data = data || {};
+
+        for (const group in data) {
+            if (data.hasOwnProperty(group)) {
+                const groupData = data[group];
+
+                for (const key in groupData) {
+                    if (groupData.hasOwnProperty(key) && groupData[key].validator) {
+                        parsedData[group] = parsedData[group] || {};
+                        parsedData[group][groupData[key].validator] = groupData[key];
+                    }
+                }
+            }
+        }
+
+        return parsedData;
+    }
+
+    /**
+     * Disable picker select button if invalid content is selected
+     */
+    function restrictPickers() {
+        $document.on("foundation-contentloaded", function(e) {
+            // exit if loaded content is not dialog or has no ID
+            const dialog = e.target;
+            if (dialog.tagName !== "CORAL-DIALOG" || dialog.id === "") return;
+
+            // exit if loaded dialog has no corresponding autocomplete field
+            const $controllingInput = $("[aria-controls~=\"" + dialog.id + "\"]");
+            const $autocomplete = $controllingInput.closest("foundation-autocomplete");
+            if ($autocomplete.length === 0) return;
+
+            const autocomplete = $autocomplete[0];
+
+            let shouldRestrict = false;
+
+            // We must do a fresh retrieval of fields as there may be new ones (e.g. in multifield)
+            const fields = getFieldsToValidate();
+            for (var i = 0; i < fields.length; i++) {
+                // Restrictions should be applied if the corresponding autocomplete is one with contenttype validation
+                if (fields[i] === autocomplete) {
+                    shouldRestrict = true;
+                }
+            }
+
+            // Remove any existing selection change handler
+            $document.off(SELECTION_CHANGE_EVENT);
+
+            if (shouldRestrict) {
+                validatePickerSelection(dialog, autocomplete);
+            }
+        });
+    }
+
+    /**
+     * Add selection change handler to picker dialog
+     *
+     * @param {Coral.Dialog} dialog
+     * @param {Element} autocomplete
+     */
+    function validatePickerSelection(dialog, autocomplete) {
+        const submitBtn = dialog.querySelector(".granite-pickerdialog-submit");
+        const acceptanceCriteria = getAcceptanceCriteria(autocomplete);
+
+        const errorAlert = new Coral.Alert();
+        errorAlert.variant = Coral.Alert.variant.ERROR;
+        errorAlert.classList.add("cfm-content-type-alert");
+        errorAlert.hide();
+        dialog.appendChild(errorAlert);
+
+        $document.on(SELECTION_CHANGE_EVENT, ".foundation-picker-collection", function() {
+            const items = document.querySelectorAll(".foundation-selections-item");
+
+            errorAlert.hide();
+
+            if (items.length) {
+                const path = items[0].dataset.foundationCollectionItemId;
+                const contentData = getContentData(path);
+                const isValid = validateContent(contentData, acceptanceCriteria);
+
+                if (isValid) {
+                    submitBtn.setAttribute("disabled", "");
+                    errorAlert.content.innerText = isValid;
+                    errorAlert.show();
+                } else {
+                    submitBtn.removeAttribute("disabled");
+                }
+            }
+        });
+    }
+
+    function registerValidator() {
+        const registry = $window.adaptTo("foundation-registry");
+
+        registry.register("foundation.validation.validator", {
+            selector: CONTENT_TO_VALIDATE_SELECTOR,
+            validate: function (el) {
+                // no value to test
+                if (!el.value) {
+                    return;
+                }
+
+                const acceptanceCriteria = getAcceptanceCriteria(el);
+                const contentData = getContentData(el.value);
+
+                updateThumbnail(el, contentData.thumbnailPath);
+
+                return validateContent(contentData, acceptanceCriteria);
+            }
+        });
+    }
+
+
+    /**
+     * Method to update the src of the thumbnail div element with the rendition path.
+     * Obtains the available renditions and looks for the 140x100 rendition.
+     * If available, it uses it; If not, use the default blank image path.
+     * @param {Element} el the path field element
+     * @param thumbnailPath the path of the preview thumbnail
+     */
+    function updateThumbnail(el, thumbnailPath) {
+        let parentElem = $(el).parents('.con-ref-with-preview');
+        if (parentElem) {
+            let previewElem = parentElem.find('span.preview');
+            previewElem.empty();
+            if (thumbnailPath == null) {
+                let coralIcon = $("<coral-icon></coral-icon>").attr({class: "", alt: "", icon: "asset", size: "S"});
+                previewElem.append(coralIcon);
+            } else {
+                let imageIcon = $("<img>").attr("src", thumbnailPath);
+                previewElem.append(imageIcon);
+            }
+        }
+    }
+
+    /**
+     * Test content data against acceptance criteria for current validator(s)
+     * Returns with falsey value if errors. Otherwise returns error message.
+     *
+     * @param {Object} contentData
+     * @param {Object} acceptanceCriteria
+     * @returns {string|undefined}
+     */
+    function validateContent(contentData, acceptanceCriteria) {
+        const contentTypeCriteria = acceptanceCriteria.contentType;
+        const minMaxCriteria = acceptanceCriteria.minMax;
+        const errorMsgArr = [];
+
+        // There are content type restrictions
+        if (contentTypeCriteria !== null) {
+            let contentTypeValid = false;
+
+            // Content Fragment is valid
+            if (contentTypeCriteria.acceptContentFragment && contentData.isContentFragment) {
+                contentTypeValid = true;
+            } else if (contentData.mimeType) {
+                for (let i = 0; i < contentTypeCriteria.acceptedMimeTypes.length; i++) {
+                    // Exact MIME type/subtype match
+                    if (contentData.mimeType === contentTypeCriteria.acceptedMimeTypes[i]) {
+                        contentTypeValid = true;
+                        break;
+                    }
+                    // MIME type has wildcard subtype
+                    if (contentTypeCriteria.acceptedMimeTypes[i].substring(contentTypeCriteria.acceptedMimeTypes[i].length - 2) === "/*") {
+                        // Type match
+                        if (contentData.mimeType.split("/")[0] === contentTypeCriteria  .acceptedMimeTypes[i].split("/")[0]) {
+                            contentTypeValid = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!contentTypeValid) {
+                errorMsgArr.push(contentTypeCriteria.errorMsg);
+            }
+        }
+
+        // Check min max restrictions
+        for (const criteria in minMaxCriteria) {
+            if (minMaxCriteria.hasOwnProperty(criteria) && minMaxCriteria[criteria] !== null && typeof contentData[criteria] === "number") {
+                let isValid = true;
+
+                if ((criteria === "imageWidth" || criteria === "imageHeight") && contentData.noAssetMetadata) {
+                    isValid = false;
+                    errorMsgArr.push(Granite.I18n.get("Asset has been not processed."));
+                }
+
+                if (contentData[criteria] < minMaxCriteria[criteria].min) {
+                    isValid = false;
+                }
+
+                if (typeof minMaxCriteria[criteria].max === "number" && contentData[criteria] > minMaxCriteria[criteria].max) {
+                    isValid = false;
+                }
+
+                if (!isValid) {
+                    errorMsgArr.push(minMaxCriteria[criteria].errorMsg);
+                }
+            }
+        }
+
+        return errorMsgArr.join(" ");
+    }
+
+    /**
+     * Retrieve relevant content data from cfm.validation endpoint.
+     *
+     * @param {string} path
+     * @returns {object}
+     */
+    function getContentData(path) {
+        let isAsset = false;
+        let isFile = false;
+        let isContentFragment = false;
+        let noAssetMetadata = false;
+        let mimeType = null;
+        let fileSize = null;
+        let imageWidth = null;
+        let imageHeight = null;
+        let thumbnailPath = null;
+
+        if (!_contentDataCache[path]) {
+            try {
+                $.ajax({
+                    url: path + ".cfm.validation.json",
+                    async: false,
+                    success: function(data) {
+                        if (data) {
+                            isAsset = data.isAsset;
+                            isFile = data.isFile;
+                            isContentFragment = data.isContentFragment;
+                            noAssetMetadata = data.noAssetMetadata;
+                            mimeType = data.mimeType;
+                            fileSize = data.fileSize;
+                            imageWidth = data.imageWidth;
+                            imageHeight = data.imageHeight;
+                            thumbnailPath = data.thumbnailPath;
+                        }
+                    }
+                });
+            } catch (err) {
+                console.warn("Content Reference: Not a valid path.");
+            }
+
+            _contentDataCache[path] = {
+                isAsset: isAsset,
+                isFile: isFile,
+                isContentFragment: isContentFragment,
+                noAssetMetadata: noAssetMetadata,
+                mimeType: mimeType,
+                fileSize: fileSize,
+                imageWidth: imageWidth,
+                imageHeight: imageHeight,
+                thumbnailPath: thumbnailPath
+            };
+        }
+
+        return Object.assign({}, _contentDataCache[path]);
+    }
+
+    /**
+     * Build accepted criteria for content reference field
+     *
+     * @param {Element} field
+     * @returns {Object}
+     */
+    function getAcceptanceCriteria(field) {
+        return {
+            contentType: getContentTypeCriteria(field),
+            minMax: {
+                fileSize: getMinMaxCriteria(field, "filesize", getSizeInBytes),
+                imageWidth: getMinMaxCriteria(field, "imagewidth"),
+                imageHeight: getMinMaxCriteria(field, "imageheight")
+            }
+        };
+    }
+
+    /**
+     * @param {Element} field
+     * @returns {Object|null}
+     */
+    function getContentTypeCriteria(field) {
+        // space separated string of validator keys (e.g. cfm.validation.contenttype.plaintext)
+        const contentTypeStr = (field.dataset.foundationValidation || "").trim();
+        const contentTypes = _validators.contenttypes;
+
+        if (contentTypeStr === "") {
+            return null;
+        }
+
+        const contentTypeValidators = contentTypeStr.split(" ");
+
+        if (!_contentTypeCriteriaCache[contentTypeStr]) {
+            const acceptedContentTypeNames = [];
+            let acceptedMimeTypes = [];
+            let acceptContentFragment = false;
+
+            if (contentTypeValidators.length > 0) {
+                for (let i = 0; i < contentTypeValidators.length; i++) {
+                    if (contentTypes[contentTypeValidators[i]].contentFragment) {
+                        acceptContentFragment = true;
+                        acceptedContentTypeNames.push(contentTypes[contentTypeValidators[i]].friendlyName);
+                    } else if (Array.isArray(contentTypes[contentTypeValidators[i]].mimeTypes)) {
+                        acceptedMimeTypes = acceptedMimeTypes.concat(contentTypes[contentTypeValidators[i]].mimeTypes);
+                        acceptedContentTypeNames.push(contentTypes[contentTypeValidators[i]].friendlyName);
+                    }
+                }
+            }
+
+            const errorMsg = Granite.I18n.get("Please select a valid content type") +
+                (acceptedContentTypeNames.length ? " (" + acceptedContentTypeNames.join(", ") + ")." : ".");
+
+            _contentTypeCriteriaCache[contentTypeStr] = {
+                acceptedContentTypeNames: acceptedContentTypeNames,
+                acceptedMimeTypes: acceptedMimeTypes,
+                acceptContentFragment: acceptContentFragment,
+                errorMsg: errorMsg
+            };
+        }
+
+        return Object.assign({}, _contentTypeCriteriaCache[contentTypeStr]);
+    }
+
+    /**
+     * @param {Element} field
+     * @param {string} property
+     * @param {Function=} unitConversion - conversion function, to be used (if units used)
+     * @returns {Object|null}
+     */
+    function getMinMaxCriteria(field, property, unitConversion) {
+        const validationType = (field.dataset[`${property}Validation`] || "").trim();
+
+        if (!field.name || !validationType.length || validationType === "None") return null;
+
+        _minMaxCriteriaCache[field.name] = _minMaxCriteriaCache[field.name] || {};
+
+        if (!_minMaxCriteriaCache[field.name][validationType]) {
+            const validators = _validators[property];
+            const useUnits = typeof unitConversion === "function";
+
+            let min = 0;
+            let max = null;
+            let errorMsg = "";
+
+            const validationTypes = {
+                min: `cfm.validation.${property}.min`,
+                max: `cfm.validation.${property}.max`,
+                interval: `cfm.validation.${property}.interval`
+            };
+
+            const attrValues = {
+                min: field.dataset[`${property}Min`],
+                max: field.dataset[`${property}Max`],
+                minUnit: field.dataset[`${property}Minunit`],
+                maxUnit: field.dataset[`${property}Maxunit`],
+            }
+
+            const errorMsgVariables = [];
+
+            if (validationType === validationTypes.min || validationType === validationTypes.interval) {
+                min =  useUnits ? unitConversion(Number(attrValues.min), attrValues.minUnit) : Number(attrValues.min);
+                errorMsgVariables.push(attrValues.min);
+
+                if (useUnits) {
+                    errorMsgVariables.push(attrValues.minUnit);
+                }
+            }
+
+            if (validationType === validationTypes.max || validationType === validationTypes.interval) {
+                max =  useUnits ? unitConversion(Number(attrValues.max), attrValues.maxUnit) : Number(attrValues.max);
+                errorMsgVariables.push(attrValues.max);
+
+                if (useUnits) {
+                    errorMsgVariables.push(attrValues.maxUnit);
+                }
+            }
+
+            errorMsg = Granite.I18n.get(validators[validationType].errorMessage, errorMsgVariables);
+
+            _minMaxCriteriaCache[field.name][validationType] = {
+                min: min,
+                max: max,
+                errorMsg: errorMsg
+            }
+        }
+
+        return Object.assign({}, _minMaxCriteriaCache[field.name][validationType]);
+    }
+
+    /**
+     * @param {number} sizeValue
+     * @param {string|null} unit
+     *
+     * @return {number}
+     */
+    function getSizeInBytes(sizeValue, unit) {
+        unit = typeof unit === "string" ? unit.toUpperCase() : null;
+
+        if (unit === "KB") {
+            return sizeValue * 1024;
+        }
+
+        if (unit === "MB") {
+            return sizeValue * (Math.pow(1024, 2));
+        }
+
+        if (unit === "GB") {
+            return sizeValue * (Math.pow(1024, 3));
+        }
+
+        if (unit === "TB") {
+            return sizeValue * (Math.pow(1024, 4));
+        }
+
+        return sizeValue;
+    }
+
+}(Granite, jQuery, window, Coral));

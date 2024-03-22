@@ -1,0 +1,611 @@
+var Granite = Granite || {};
+Granite.UI = Granite.UI || {};
+
+var ACTION_STATUS_KEY = "page.action.status";
+var DEFAULT_DESTINATION_PATH = "/content";
+var DEFAULT_OMNISEARCH_PATH = "/aem/search.html";
+var wait;
+
+/**
+ * @param  options                 Options for this wizard
+ *         options.selectedItems   The path of the selected items to move
+ */
+
+var MovePageWizard = function(options) {
+
+    var ns = ".move-page-wizard";
+
+    this.selectedItems = options.selectedItems;  // Paths of pages to be moved
+    this.unloadText = options.unloadText;        // Text displayed when user tries to leave page while move in progress
+    this.wizardElement = options.wizardElement;
+    this.itemTemplate = options.itemTemplate;
+    this.itemName = options.itemName; // original name (before renaming)
+
+    this.references = {};                       // list of reference objects, grouped by item
+    this.flatReferences = {};                   // flat list of all reference objects
+    this.referencesReady = false;               // are all references loaded?
+    this.movePages = {};                        // objects of pages to be moved, for republish
+    this.maxRefNo = null;
+    this.totalRefs = 0;
+    this.isInLaunch = options.isInLaunch;
+    this.consolePath = options.consolePath;
+
+    this.destinationPath = options.contentPath || DEFAULT_DESTINATION_PATH;     // Start destination selection at original path
+
+    this.ui = $(window).adaptTo("foundation-ui");
+
+    this.waitTicker = null;
+
+    $(".rename-item-title").get(0).value = options.itemTitle;
+    $(".rename-item-name").get(0).value = options.itemName;
+
+
+    var maxRef = $(".list-referencing").data("maxref");
+    this.maxRefNo = maxRef ? parseInt(maxRef, 10) : null;
+
+    var rcount = 0;
+    var collectAllReferences = function() {
+        if (rcount >= this.selectedItems.length) {
+            this.referencesReady = true;
+            this.renderReferences();
+            return;
+        }
+
+        this.collectReferences(this.selectedItems[rcount], function(data) {
+            var pages = data.pages;
+            this.references[this.selectedItems[rcount]] = pages;
+            this.totalRefs = data.totalPages;
+            if(this.totalRefs <= this.maxRefNo){
+                for(var i = 0; i < pages.length; i++) {
+                    if (pages[i].path != this.selectedItems[rcount]) {
+                        this.flatReferences[pages[i].path] = pages[i];
+                    }
+                    if (pages[i].path == this.selectedItems[rcount]) {
+                        this.movePages[pages[i].path] = pages[i];
+                    }
+                }
+            }
+            rcount++;
+            collectAllReferences();
+        }.bind(this));
+    }.bind(this);
+
+    collectAllReferences();
+
+    var adviseMoveDestination = true;
+
+    var selectionListener = function () {
+        var id = $(".cq-siteadmin-admin-movepage-destination-container coral-columnview")
+            .data("foundation-collection-id") + "'] [handle='input']";
+        var selection = $("coral-columnview-item[data-foundation-collection-item-id='" + id);
+        if (selection.length) {
+            selection.click();
+            document.removeEventListener('coral-columnview:loaditems', selectionListener);
+        }
+    };
+
+    // Initialize event listeners
+
+    this.wizardElement.on("foundation-wizard-stepchange" + ns, function(e, el) {
+        var step = $(el);
+
+        if (step.is(".cq-siteadmin-admin-movepage-select-destination")) {
+            // advise move destination when coming first time
+            if (adviseMoveDestination) {
+                document.addEventListener('coral-columnview:loaditems', selectionListener);
+                adviseMoveDestination = false;
+            } else {
+                document.removeEventListener('coral-columnview:loaditems', selectionListener);
+            }
+
+            //hide last step if there are no references
+            if(this.totalRefs === 0){
+                var destinationNext = $("coral-panel[selected] button[data-foundation-wizard-control-action='next']");
+                destinationNext.text(Granite.I18n.get("Move"));
+                destinationNext.off("click").on("click", function(event) {
+                    this.wizardElement.closest("form").trigger("submit" + ns);
+                }.bind(this));
+                return;
+            }
+        }
+
+        if (step.is(".cq-siteadmin-admin-movepage-references")) {
+            this.adjustHeaderCheckbox();
+        }
+    }.bind(this));
+
+    this.wizardElement.closest("form").off("submit" + ns).on("submit" + ns, function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        var items = this.getSelectedItems();
+        var toPath = this.getDestinationPath();
+
+        var url = $(".foundation-wizard-control[data-foundation-wizard-control-action='cancel']").attr("href");
+        url = url.replace(DEFAULT_OMNISEARCH_PATH, this.consolePath);
+        var referer = url.substring(0, url.indexOf(".html") + 5);
+
+        this.processMovePages(items, toPath, function(status) {
+            var message = "";
+            var self = this;
+            if (status === "success") {
+                message = Granite.I18n.get("Request to move Page has been submitted");
+                sessionStorage.setItem(ACTION_STATUS_KEY, JSON.stringify({status: status, text: message}));
+                this.ui.prompt(Granite.I18n.get("Page Move"),
+                    Granite.I18n.get("A background job to move the page has been submitted"), "notice", [{
+                        text: Granite.I18n.get("Okay"),
+                        primary: true,
+                        handler: function() {
+                            location.href = Granite.HTTP.externalize(referer) + self.getDestinationPath();
+                        }
+                }]);
+            } else if (status === "rename-failure") {
+                // Rename failure; page *has* been moved, so we might as well exit wizard in new location:
+                message = Granite.I18n.get("Error changing page title");
+                sessionStorage.setItem(ACTION_STATUS_KEY, JSON.stringify({status: status, text: message}));
+                this.ui.prompt(Granite.I18n.get("Page Rename"), message, "error", [{
+                    text: Granite.I18n.get("Okay"),
+                    primary: true,
+                    handler: function() {
+                        location.href = Granite.HTTP.externalize(referer) + self.getDestinationPath();
+                    }
+                }]);
+            } else {
+                // Move failure; stay in wizard
+                message = Granite.I18n.getVar(status);
+                this.ui.alert(Granite.I18n.get("Error"), message, "error");
+            }
+            this.waitTicker.clear();
+        }.bind(this));
+
+
+
+
+    }.bind(this));
+
+    $(".cq-siteadmin-admin-movepage-references .list-referencing thead .select-adjust")
+        .on("change.adjustall", function(event) {
+            var selectAll = event.currentTarget.checked;
+            $.each($(".cq-siteadmin-admin-movepage-references .list-referencing tbody tr .select-adjust"), function (i, checkbox) {
+                checkbox.checked = selectAll;
+            });
+        }.bind(this));
+
+    $(".cq-siteadmin-admin-movepage-references .list-referencing thead .select-republish")
+        .on("change.republishall", function(event) {
+            var selectAll = event.currentTarget.checked;
+            $.each($(".cq-siteadmin-admin-movepage-references .list-referencing tbody tr .select-republish"), function (i, checkbox) {
+                checkbox.checked = selectAll;
+            });
+        }.bind(this));
+};
+
+MovePageWizard.prototype.adjustHeaderCheckbox = function() {
+    var adjustRefs = $(".list-referencing tbody tr .select-adjust").length;
+    var republishRefs = $(".list-referencing tbody tr .select-republish").length;
+    var adjustRefSelected = $(".list-referencing tbody tr .select-adjust[checked]").length;
+    var republishRefSelected = $(".list-referencing tbody tr .select-republish[checked]").length;
+
+    if(adjustRefs == 0){
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-adjust").get(0).disabled = true;
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-adjust").get(0).checked = false;
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-adjust").get(0).indeterminate = false;
+    }else if(adjustRefs > adjustRefSelected){
+        if(adjustRefSelected == 0){
+            $(".cq-siteadmin-admin-movepage-references .list thead .select-adjust").get(0).indeterminate = false;
+        }else{
+            $(".cq-siteadmin-admin-movepage-references .list thead .select-adjust").get(0).indeterminate = true;
+        }
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-adjust").get(0).checked = false;
+    }else{
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-adjust").get(0).indeterminate = false;
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-adjust").get(0).checked = (adjustRefs === adjustRefSelected);
+    }
+
+    if(republishRefs == 0){
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-republish").get(0).disabled = true;
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-republish").get(0).checked = false;
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-republish").get(0).indeterminate = false;
+    }else if(republishRefs > republishRefSelected){
+        if(republishRefSelected == 0){
+            $(".cq-siteadmin-admin-movepage-references .list thead .select-republish").get(0).indeterminate = false;
+        }else{
+            $(".cq-siteadmin-admin-movepage-references .list thead .select-republish").get(0).indeterminate = true;
+        }
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-republish").get(0).checked = false;
+    }else{
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-republish").get(0).indeterminate = false;
+        $(".cq-siteadmin-admin-movepage-references .list thead .select-republish").get(0).checked = (republishRefs === republishRefSelected);
+    }
+};
+
+
+/**
+ * @param items    Array of paths for the items being moved
+ * @param to       Path to move items to
+ * @param callback Function to call when finished moving pages
+ */
+MovePageWizard.prototype.processMovePages = function(items, to, callback) {
+
+    this.itemsTodo = this.totalItems = items.length;
+    this.status = null;
+    
+    // cache and call existing unload function. Allows jscover to save coverage results
+    this.beforeunload = (window.onbeforeunload) ? window.onbeforeunload : function () {};
+
+    window.onbeforeunload = function() {
+        this.beforeunload();
+        return this.unloadText;
+    }.bind(this);
+
+    var wizard = this;
+
+    for (var i = 0; i < items.length; i++) {
+        var from = items[i];
+
+        var references = this.getSelectedReferences(from);
+        var republishes = this.getSelectedRepublishes(from);
+        var newName = $(".rename-item-name").val();
+
+        var data = {
+            cmd: "movePage",
+            integrity: "true",
+            _charset_: "utf-8",
+            ":status": "browser",
+            srcPath: from,
+            destParentPath: to
+        };
+        if (this.totalRefs > this.maxRefNo) {
+            data["retrieveAll"] = true;
+        } else {
+            if (references.length > 0) {
+                data["adjust"] = JSON.stringify(references);
+            }
+            if (republishes.length > 0) {
+                data["publish"] = JSON.stringify(republishes);
+            }
+        }
+        if (newName) {
+            data["destName"] = newName;
+        }
+        
+        data.operation = "asyncPageMove";
+        
+        window.onbeforeunload = null;
+        this.showScheduleDialog(function(status) {
+          if (status === "done") {
+            var schedultOptionNow =
+              $(".schedule-move-options-now", ".schedule-move-options");
+            var $scheduleOptionLater = $(".schedule-move-options-later", ".schedule-move-options");
+            var scheduleOptionDatePicker = $(".schedule-move-datepicker", "#aem-page-move-schedule-dialog");
+
+            if (schedultOptionNow.length && schedultOptionNow[0].checked) {
+              data["" + schedultOptionNow[0].name] = schedultOptionNow[0].value;
+            } else if ($scheduleOptionLater.length && $scheduleOptionLater[0].checked) {
+              data[$scheduleOptionLater[0].name] = $scheduleOptionLater[0].value;
+              data[scheduleOptionDatePicker[0].name] = scheduleOptionDatePicker[0].value;
+            }
+  
+            var $titleField = $(".rename-item-title");
+            data["destTitle"] = $titleField.get(0).value;
+              
+            wizard.waitTicker = wizard.ui.waitTicker(Granite.I18n.get("Move page ..."), Granite.I18n.get("Your page is being moved asynchronously."));
+              
+            $.post(Granite.HTTP.externalize("/bin/asynccommand"), data, function(responseText, status, r) {
+                var message = $(responseText).find("#Message").html();                  
+                if (status === "success") {
+                  this.status = "success";
+                } else {
+                    // Error during move.
+                    this.status = message;
+                  }
+                callback(this.status);
+            });
+
+            } else {
+              callback(status);
+            }
+          });
+    }
+};
+
+/**
+ * Method to return no of total references
+ */
+
+MovePageWizard.prototype.getTotalReferencesToAdjust = function() {
+  if (this.totalRefs > this.maxRefNo) {
+      return this.totalRefs;
+  }
+  var totReferences = 0;
+  var items = this.getSelectedItems();
+  for (var i = 0; i < items.length; i++) {
+      totReferences += this.getSelectedReferences(items[i]).length;
+  }
+  return totReferences;
+};
+
+MovePageWizard.prototype.flatReferencesCount = function() {
+    if (this.totalRefs > this.maxRefNo) {
+        return this.totalRefs;
+    }
+    return Object.keys(this.flatReferences).length;
+};
+
+/**
+ * Method to show Schedule Dialog for scheduling of async job
+ */
+
+MovePageWizard.prototype.showScheduleDialog = function(callback) {
+  var dialog = $("#aem-page-move-schedule-dialog");
+  if (dialog.length) {
+      var isDone = false;
+      $(".schedule-move-done", dialog).off("click").on("click", function() {
+          callback("done");
+          isDone = true;
+      });
+
+      dialog[0].show();
+  } else {
+      callback();
+  }
+};
+
+MovePageWizard.prototype.itemDone = function(itemStatus, callback) {
+    this.itemsTodo--;
+    if (!this.status || itemStatus !== "success") {
+        this.status = itemStatus;
+    }
+
+    if (this.itemsTodo <= 0) {
+        window.onbeforeunload = this.beforeunload;
+        callback(this.status);
+    }
+};
+
+MovePageWizard.prototype.getDestinationPath = function() {
+    if ($(".cq-siteadmin-admin-movepage-destination-container > .foundation-advancedselect-values > input").length > 0) {
+        return $(".cq-siteadmin-admin-movepage-destination-container > .foundation-advancedselect-values > input").val();
+    }
+    return DEFAULT_DESTINATION_PATH;
+};
+
+MovePageWizard.prototype.getSelectedItems = function() {
+    return this.selectedItems;
+};
+
+MovePageWizard.prototype.getSelectedReferences = function(item) {
+    var references = [];
+    var pages = (item) ? this.references[item] : null;
+    if(pages && this.totalRefs <= this.maxRefNo){
+        $(".list-referencing tbody tr .select-adjust[checked]").each(function() {
+            var p = $(this).closest("tr").data("path");
+            if (item) {
+                var belongsToItem = false;
+                for (var i = 0; pages && i < pages.length; i++) {
+                    if (pages[i].path == p) {
+                        belongsToItem = true;
+                    }
+                }
+                if (!belongsToItem) {
+                    return;
+                }
+            }
+            references.push(p);
+        });
+    }
+
+    return references;
+};
+
+MovePageWizard.prototype.getSelectedRepublishes = function(item) {
+    var references = [];
+    var pages = (item) ? this.references[item] : null;
+    if (pages && this.totalRefs <= this.maxRefNo) {
+        $(".list-referencing tbody tr .select-republish[checked]").each(function() {
+            var p = $(this).closest("tr").data("path");
+            if (item) {
+                var belongsToItem = (item == p);
+                for (var i = 0; pages && i < pages.length; i++) {
+                    if (pages[i].path == p) {
+                        belongsToItem = true;
+                    }
+                }
+                if (!belongsToItem) {
+                    return;
+                }
+            }
+            references.push(p);
+        });
+    }
+
+    return references;
+};
+
+MovePageWizard.prototype.collectReferences = function(item, callback) {
+    wait = new Coral.Wait().set({
+        centered: true,
+        size: "L"
+    });
+
+
+    jQuery.get(Granite.HTTP.externalize("/bin/wcm/heavymove"), {path: item, maxRefNo: this.maxRefNo},
+
+        function(data) {
+            if (!data.pages && data.success === false) {
+                // error handling
+                //TO DO GRANITE-2444 - Action eventing/reporting
+                /*var message = Granite.I18n.getVar(data.message);
+                 CUI.util.state.setSessionItem(ACTION_STATUS_KEY, {status: "error", text: message});*/
+                location.href = Granite.HTTP.externalize("/sites.html") + item;
+            }
+            if (!data.pages) {
+                return;
+            }
+
+            callback(data);
+        }.bind(this), "json");
+
+};
+
+MovePageWizard.prototype.formatDate = function(time) {
+    if (!time) {
+        return "";
+    }
+    // Set the correct locale to display time information
+    moment.locale(Granite.I18n.getLocale());
+    return moment(time).fromNow();
+};
+
+MovePageWizard.prototype.renderReferences = function() {
+    var pageTemplate = function (page) {
+        var refStatus, status, badge = '<coral-icon icon="minus" size="S"></coral-icon>';
+        if (page.published) {
+            if (page.deactivated) {
+                status = badge;
+            } else {
+                status = '<coral-checkbox class="select-republish"></coral-checkbox>';
+            }
+        } else {
+            status = badge;
+        }
+
+        refStatus = page.containsReference ? '<coral-checkbox class="select-adjust"></coral-checkbox>' : badge;
+        return `<tr is="coral-table-row" data-path="${page.path}">
+                <td is="coral-table-cell" class="select-option">${refStatus}</td>
+                <td is="coral-table-cell" class="select-option">${status}</td>
+                <td is="coral-table-cell" class="main" value="${page.path}">
+                    <p class="full-info"> 
+                        <span class="title">${page.title}</span>
+                        <span class="path">${page.path}</span>
+                    </p>
+                </td>
+                <td is="coral-table-cell" class="modified" value="${page.lastModified}">
+                    <span class="date">${page.lastModifiedString}</span>
+                    <span class="user">${page.lastModifiedBy}</span>
+                </td>
+                <td is="coral-table-cell" class="modified" value="${page.replication.published}">
+                    <span class="date">${page.publishedString}</span>
+                    <span class="user">${page.publishedBy}</span>
+                </td>
+            </tr>`;
+    };
+
+    var getFormattedDate = this.formatDate.bind(this);
+    var selector = ".list-referencing";
+
+    $(".cq-siteadmin-admin-movepage-rename .info-details .badge").html(this.flatReferencesCount());
+
+    if(this.totalRefs == 0){
+        //step over Adjust/Republish step
+        this.wizardElement.adaptTo("foundation-wizard").remove($(".cq-siteadmin-admin-movepage-references"));
+        $(selector).find("header").hide();
+        if(wait) {
+            wait.hide();
+        }
+        return;
+    }else if(this.maxRefNo && this.totalRefs > this.maxRefNo){
+        $(".cq-siteadmin-admin-movepage-references h2.republish-title").text(Granite.I18n.get("Notice"));
+        $(selector).find('table[is="coral-table"]').hide();
+        if(wait) {
+            wait.hide();
+        }
+        $(selector).find(".notice").remove();
+        $(selector).append('<p class="notice"><coral-icon icon="alert" size="L"></coral-icon></p>');
+        var message = Granite.I18n.get("The move you are about to make has more than {0} references and will be automatically adjusted and republished.", [this.maxRefNo]);
+        $(selector).append('<p class="notice">' + message+ '</p>');
+        return;
+    } else {
+        $(".cq-siteadmin-admin-movepage-references h2.republish-title").text(Granite.I18n.get("Pages to be adjusted/republished ({0})",[this.totalRefs]));
+    }
+
+
+    var pages = $.extend( true, this.movePages, this.flatReferences );
+    var table = $(selector).find('table[is="coral-table"]');
+
+    //remove existing table records
+    $.each($('table[is="coral-table"]').get(0).items.getAll(), function (i, row) {
+        row.remove();
+    });
+
+    for(var u in pages) {
+        pages[u].lastModifiedString = getFormattedDate(pages[u].lastModified);
+        pages[u].publishedString = "";
+        pages[u].publishedBy = "";
+        if(pages[u].published){
+            var replicationStatus = getFormattedDate(pages[u].replication.published);
+            if(pages[u].replication.action === "DEACTIVATE"){
+                replicationStatus = "Deactivated";
+                pages[u].deactivated = true;
+            }
+            pages[u].publishedString = replicationStatus;
+            pages[u].publishedBy = pages[u].replication.publishedBy;
+        }
+
+        var html = pageTemplate(pages[u]);
+        var $elData = $(html).filter("tr").toArray();
+        $.each($elData, function(i,row) {
+            table.get(0).items.add(row);
+        });
+    }
+
+    $(".list-referencing tbody .select-republish, .list-referencing tbody .select-adjust")
+        .on("change.actions", function(event) {
+            event.stopPropagation();
+            this.adjustHeaderCheckbox();
+        }.bind(this));
+
+    Coral.commons.nextFrame(function() {
+        $.each($(selector).find('table[is="coral-table"]'), function(i, table) {
+            Coral.commons.ready(table, function(el) {
+                el.items.getAll().forEach(function(item) {
+                    var selectAdjustElement = item.querySelector(".select-adjust");
+                    var selectRepublishElement = item.querySelector(".select-republish");
+                    if (selectAdjustElement != null) {
+                        selectAdjustElement.setAttribute("checked", true);
+                    }
+                    if (selectRepublishElement != null) {
+                        selectRepublishElement.setAttribute("checked", true);
+                    }
+                });
+
+            });
+
+        });
+    });
+};
+
+
+$(document).off("foundation-contentloaded.movepageWizard").on("foundation-contentloaded.movepageWizard", function(e) {
+
+	// This event is triggered multiple times during the lifetime of the wizard as it contains a lazy step,
+	// but the initialization below is meant to be only done once so we bail out if it's not the first step
+    if ($(e.target).is("coral-columnview-column") || ($(e.target).is(".foundation-wizard-step") && !$(e.target).is(".cq-siteadmin-admin-movepage-rename"))) {
+		return;
+	}
+
+    var configOptions = $(".move-wizard-config").data("config");
+
+    $.extend(configOptions, {'wizardElement': $(".move-page-wizard .foundation-wizard")});
+
+    var wizard = new MovePageWizard(configOptions);
+
+    $(window).adaptTo("foundation-registry").register("foundation.validation.validator", {
+        selector: ".cq-siteadmin-admin-movepage-destination-container",
+        validate: function () {
+            var dstPath = wizard.getDestinationPath();
+            var srcPath = $(".rename-item-name-path_0").val();
+            var destinationIsChildOfSource = dstPath ? (dstPath+"/").indexOf(srcPath+"/") > -1 : false;
+
+            // disable next button in one of the following cases
+            if (dstPath === DEFAULT_DESTINATION_PATH // destination equals "/content"
+                    || !wizard.referencesReady // references not ready
+                    || destinationIsChildOfSource // destination is inside or equals source
+                    || (dstPath + "/" + wizard.itemName === srcPath && wizard.itemName === $(".rename-item-name").val()) // parent selected but no rename (default when moving)
+                    ) {
+                return "A valid destination must be selected.";
+            }
+        }
+    });
+
+});

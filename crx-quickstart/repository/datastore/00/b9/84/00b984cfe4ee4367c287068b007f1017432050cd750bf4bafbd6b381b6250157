@@ -1,0 +1,509 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (document, Granite, $) {
+    "use strict";
+
+    var DEFAULT_INBOX_SETTINGS = {
+        sortByProperty: 'startTime',
+        sortOrder: 'DESC'
+    };
+
+    var ns = ".cq-inbox-settings";
+    var viewSettingsAction = undefined; // the 'View Settings' action element
+    var viewConfigurationAction = undefined; // the 'view configuration' action element
+    var INBOX_SETTINGS_DIALOG_URL = "/mnt/overlay/cq/inbox/content/inbox/dialogs/inboxsettingsdialog.html";
+    var INBOX_VIEW_CONFIGURATION_DIALOG_URL = "/mnt/overlay/cq/inbox/content/inbox/dialogs/inboxviewconfigurationdialog.html";
+    var ui = $(window).adaptTo("foundation-ui");
+    var DIALOG_CONTAINER = "#inboxSettingsDialog";
+    var VIEW_CONFIGURATION_DIALOG_CONTAINER = "#inboxViewConfigurationDialog";
+    var SHARES_INBOX_WITH_TABLE = "#shares-inbox-with-table";
+    var HAS_ACCESS_TO_TABLE = "#has-access-to-table";
+    var REQUEST_ACCESS_BUTTON_ID = "#request-access";
+    var PROVIDE_ACCESS_BUTTON_ID = "#provide-access";
+    var USER_PERMITTED_AUTOCOMPLETE_ID = "#userPermitted";
+    var USER_REQUESTED_AUTOCOMPLETE_ID = "#userRequested";
+    var FOUNDATION_COLLECTION_ITEM = "foundation-collection-item";
+    var STATUS_MAP = {pending: Granite.I18n.get("Request Pending"), rejected: Granite.I18n.get("Rejected")};
+    var SETTINGS_DELETE_ROW = "settings-delete-row";
+    var PREFERENCES_NODE_JSON = "/libs/cq/inbox/gui/components/inbox/preferences.json";
+    var VIEW_CONFIGURATION_NODE = "/conf/global/settings/inbox";
+    var SHARES_INBOX_WITH_USER_ID = "shares-inbox-with-user-id";
+    var HAS_ACCESS_TO_USER_ID = "has-access-to-user-id";
+    var REQUEST_STATUS = "requestStatus";
+    var SHARING_PREFERENCES_KEY = "sharingPreferences";
+    var SAVE_SETTINGS = ".inbox-settings-dialog-save";
+    var SAVE_VIEWCONFIGURATION_SETTINGS = ".inbox-view-configuration-dialog-save";
+    var OUT_OF_OFFICE_PREFERENCES_KEY = "outOfOfficePreferences";
+    var CQ_INBOX_DATA_WORKFLOW_ID = "data-workflow-id";
+    var CQ_INBOX_ENDUSER_SECTION = "#cq-inbox-enduser-section";
+    var CQ_INBOX_SHELL_HEADER = ".inbox-shell-header";
+    var INBOX_CUSTOMIZATION_SECTION = "#cq-inbox-customization-section";
+
+    function toggleViewSettingsAction(selectedView, $collection) {
+        var foundationModeGroup = $collection.data('foundationModeGroup');
+        if (!foundationModeGroup) {
+            // use a default. Looks like calendar doesn't have a data-foundation-mode-group setting ...
+            foundationModeGroup = "cq-workflow-inbox-list";
+        }
+
+        var collectionSelector = foundationModeGroup === 'granite-omnisearch-result' ? '#granite-omnisearch-result' : "." + foundationModeGroup;
+
+        var cycleButton = $("[data-granite-collection-switcher-target='" + collectionSelector + "']").get(0);
+        var URITemplate = $collection.data("inboxSettingsDialogUriTemplate") || INBOX_SETTINGS_DIALOG_URL;
+        var URITemplateforViewConfiguration = $collection.data("inboxEndUserSettingsDialogUriTemplate") || INBOX_VIEW_CONFIGURATION_DIALOG_URL;
+
+        if (cycleButton) {
+            //explicitly test to see if we get one of the expected views back
+            //to avoid omni search breaking the viewsettings drop down
+            if (selectedView === "list") {
+                var actionObject = {
+                    target: collectionSelector,
+                    action: "cq.inbox.action.showsettingsdialog",
+                    data: {
+                        src: URITemplate
+                    },
+                    relScope: "none"
+                };
+                var actionObjectForViewConfiguration = {
+                    target: collectionSelector,
+                    action: "cq.inbox.action.showviewconfigurationdialog",
+                    data: {
+                        src: URITemplateforViewConfiguration
+                    },
+                    relScope: "none"
+                };
+            } else if (selectedView === "calendar") {
+                //get rid of action bar if it is not closed
+                $('.granite-collection-selectionbar .foundation-mode-switcher-item').removeClass('foundation-mode-switcher-item-active');
+                var actionObject = {
+                    target: collectionSelector,
+                    action: "cq.inbox.action.showcalendarsettings",
+                    relScope: "none"
+                };
+                var actionObjectForViewConfiguration = {
+                    target: collectionSelector,
+                    action: "cq.inbox.action.showviewconfigurationdialog",
+                    data: {
+                        src: URITemplateforViewConfiguration
+                    },
+                    relScope: "none"
+                };
+            }
+            var actionText = Granite.I18n.get("Settings");
+            var actionHTML = '<coral-cyclebutton-action icon="gear" class="foundation-collection-action">' + actionText + '</coral-quickactions-item>';
+            var $action = $(actionHTML);
+
+            var actionTextForViewConfiguration = Granite.I18n.get("Admin Control");
+            var actionHTMLForViewConfiguration = '<coral-cyclebutton-action icon="gearsEdit" class="foundation-collection-action">' + actionTextForViewConfiguration + '</coral-quickactions-item>';
+            var $actionForViewConfiguration= $(actionHTMLForViewConfiguration);
+
+
+            $action.data("foundationCollectionAction", actionObject);
+            $actionForViewConfiguration.data("foundationCollectionAction", actionObjectForViewConfiguration);
+            Coral.commons.ready(cycleButton.actions, function() {
+                if($('.foundation-layout-panel-content').length == 1) {
+                    if(viewSettingsAction != undefined) {
+                        cycleButton.actions.remove(viewSettingsAction);
+                    }
+                    viewSettingsAction = cycleButton.actions.add($action.get(0));
+                    var inboxShellHeader = $(CQ_INBOX_SHELL_HEADER);
+                    if (inboxShellHeader.length > 0 && inboxShellHeader[0].dataset && inboxShellHeader[0].dataset.isWorkflowAdmin === "true") {
+                        if(viewConfigurationAction != undefined) {
+                            cycleButton.actions.remove(viewConfigurationAction);
+                            }
+                            viewConfigurationAction = cycleButton.actions.add($actionForViewConfiguration.get(0));
+                    }
+                }
+            });
+        }
+    }
+
+    $(document).on("foundation-layout-perform", ".foundation-collection", function (e) {
+        var $collection = $(e.currentTarget);
+        var config = $collection.data("foundationLayout");
+
+        if ("calendar" == config.layoutId || "list" == config.layoutId) {
+            // calendar doens't trigger selection changes
+            // -> hide the View Settings action
+            toggleViewSettingsAction(config.layoutId, $collection);
+        }
+    });
+
+    $(window).adaptTo("foundation-registry").register("foundation.collection.action.action", {
+        name: "cq.inbox.action.showsettingsdialog",
+        handler: function(name, el, config, collection, selections) {
+            CQ.Inbox.UI.commons.loadDialog(INBOX_SETTINGS_DIALOG_URL, true, DIALOG_CONTAINER).done(function () {
+                showInboxSettingsDialog();
+            }).fail(function (error) {
+                ui.alert(Granite.I18n.get("Error"), error, "error");
+            });
+        }
+    });
+
+    $(window).adaptTo("foundation-registry").register("foundation.collection.action.action", {
+        name: "cq.inbox.action.showviewconfigurationdialog",
+        handler: function(name, el, config, collection, selections) {
+            CQ.Inbox.UI.commons.loadDialog(INBOX_VIEW_CONFIGURATION_DIALOG_URL, true, VIEW_CONFIGURATION_DIALOG_CONTAINER).done(function () {
+                showViewConfigurationDialog();
+            }).fail(function (error) {
+                ui.alert(Granite.I18n.get("Error"), error, "error");
+            });
+        }
+    });
+    $(window).adaptTo("foundation-registry").register("foundation.collection.action.action", {
+        name: "cq.inbox.action.showcalendarsettings",
+        handler: function(name, el, config, collection, selections) {
+            // @coral usage of internals
+            $('aeon-pane-button[handle="settingbutton"]').click();
+            
+            // @coral usage of internals
+            $('.aeon-Settings-buttons [handle="apply"]')
+                .off('click' + ns)
+                .on("click" + ns, function () {
+                    // @coral usage of internals
+                    var groupBySelected = $('.coral-Well coral-checkbox[handle="enablegroup"]').attr('checked') == "checked";
+                    var groupVal = $('.coral-Well coral-select[handle="group"] span').text()
+                    var card = $('.aeon-Settings-sizeOptions [name="size"]:checked').val();
+                    var calPrefs = {cardSize:card, groupBySelected:groupBySelected, groupByValue:groupVal};
+
+                    var data = {
+                        'cq.inbox.calSettings': JSON.stringify(calPrefs)
+                    };
+
+                    postUserPreferences(data);
+                });
+        }
+    });
+
+    function showInboxSettingsDialog() {
+        var dialog = $(DIALOG_CONTAINER);
+        var form = $("form", dialog);
+
+        // need to set the current defaults
+        getUserPromise().then(function (user) {
+            getCurrentSettings(user.home + "/preferences/cq.inbox.settings", DEFAULT_INBOX_SETTINGS).done(function (data) {
+                // select the property name
+                selectItem('sortByProperty', data.sortByProperty);
+                selectItem('sortOrder', data.sortOrder);
+                if ($("#cq-inbox-out-of-office-tab") && $("#cq-inbox-out-of-office-tab")[0]) {
+                    CQ.Inbox.UI.OutOfOfficeController.setOutOfOfficeSettingsInUi(data.outOfOfficePreferences);
+                }
+
+                dialog.get(0).show();
+
+                $(document).off('click' + ns, "." + SETTINGS_DELETE_ROW).on('click', "." + SETTINGS_DELETE_ROW, function (event) {
+                    window.CQ.Inbox.UI.tableUtils.removeTableRow($(event.target).closest("tr"), '.user-table', null, true);
+                });
+
+                dialog.find(SAVE_SETTINGS)
+                    .off('click' + ns)
+                    .on('click' + ns, function () {
+                        var that = this;
+
+                        ui.wait();
+                        this.disabled = true;
+
+                        var formData = form.serializeAsJSON();
+                        // remove the unused @Delete keys
+                        delete formData['sortByProperty@Delete'];
+                        delete formData['sortOrder@Delete'];
+                        delete formData['userRequested'];
+                        delete formData['userPermitted'];
+                        delete formData['userRequested@Delete'];
+                        delete formData['userPermitted@Delete'];
+
+                        var sharesInboxWith = getUsersList(SHARES_INBOX_WITH_TABLE, SHARES_INBOX_WITH_USER_ID);
+
+                        var data = makeSettingsPayload(formData, sharesInboxWith);
+
+                        saveSettings(PREFERENCES_NODE_JSON, data)
+                            .done(function () {
+                                var omniSearchForm = $(".granite-omnisearch-form");
+                                if (omniSearchForm.length > 0) {
+                                    // we're in omnisearch -> just re-submit the search form
+                                    omniSearchForm.submit();
+                                } else {
+                                    window.location.reload(true);
+                                }
+                            })
+                            .fail(function (xhr) {
+                                form.trigger("foundation-form-submit-callback", [xhr]);
+                            })
+                            .always(function () {
+                                dialog.get(0).hide();
+                                ui.clearWait();
+                                that.disabled = false;
+                            });
+
+
+                    });
+
+                // Callback function to be called for checking duplicate entries
+                var isEntryUniqueCallback = function (tableId, elementId)
+                {
+                    return !checkDuplicateUsers(tableId, elementId);
+                };
+
+                dialog.find(USER_REQUESTED_AUTOCOMPLETE_ID)
+                    .off('change' + ns)
+                    .on('change' + ns, function () {
+                        window.CQ.Inbox.UI.tableUtils.toggleButton(HAS_ACCESS_TO_TABLE, USER_REQUESTED_AUTOCOMPLETE_ID, REQUEST_ACCESS_BUTTON_ID, isEntryUniqueCallback);
+                    });
+
+                dialog.find(USER_PERMITTED_AUTOCOMPLETE_ID)
+                    .off('change' + ns)
+                    .on('change' + ns, function () {
+                        window.CQ.Inbox.UI.tableUtils.toggleButton(SHARES_INBOX_WITH_TABLE, USER_PERMITTED_AUTOCOMPLETE_ID, PROVIDE_ACCESS_BUTTON_ID, isEntryUniqueCallback);
+                    });
+
+                dialog.find(REQUEST_ACCESS_BUTTON_ID)
+                    .off('click' + ns)
+                    .on('click' + ns, function () {
+                        handleUserAddition(USER_REQUESTED_AUTOCOMPLETE_ID, HAS_ACCESS_TO_TABLE, HAS_ACCESS_TO_USER_ID, REQUEST_ACCESS_BUTTON_ID, null, null, true, true);
+                    });
+
+                dialog.find(PROVIDE_ACCESS_BUTTON_ID)
+                    .off('click' + ns)
+                    .on('click' + ns, function () {
+                        var deleteRowCallback = function (event, tableId)
+                        {
+                            window.CQ.Inbox.UI.tableUtils.removeTableRow($(event.target).closest("tr"), null, tableId, true);
+                        }
+                        ;
+                        handleUserAddition(USER_PERMITTED_AUTOCOMPLETE_ID, SHARES_INBOX_WITH_TABLE, SHARES_INBOX_WITH_USER_ID, PROVIDE_ACCESS_BUTTON_ID, SETTINGS_DELETE_ROW, deleteRowCallback, false, true);
+                    });
+
+            }).fail(function (data) {
+                console.error("Failed to load user preferences" + data);
+            });
+        });
+    }
+
+    function handleUserAddition(userAutocompleteId, tableId, idCellClass, addUserButtonId, deleteButtonClass, deleteRowCallback, addRequestStatusCell, handleEmptyRow) {
+         var userInfo = CQ.Inbox.UI.commons.getUserNameAndIdFromAutoComplete(userAutocompleteId);
+         // Add status
+         if(tableId === HAS_ACCESS_TO_TABLE) {
+            $.extend(userInfo, {status: STATUS_MAP.pending});
+         }
+         window.CQ.Inbox.UI.tableUtils.addTableRow(tableId, userInfo, idCellClass, deleteButtonClass, deleteRowCallback, addRequestStatusCell, handleEmptyRow);
+         $(userAutocompleteId).val(null);
+         $(addUserButtonId).attr("disabled", true);
+
+    }
+
+    function checkDuplicateUsers(tableId, elementId){
+     var inputValue = $(elementId).val().trim();
+     if(elementId === USER_PERMITTED_AUTOCOMPLETE_ID) {
+          return (getUsersList(tableId, SHARES_INBOX_WITH_USER_ID).indexOf(inputValue) >= 0) ? true: false ;
+     } else {
+          var categorizedUsersObject = getCategorizedUsers(tableId);
+          if(Object.keys(categorizedUsersObject['pendingRequestMap']).indexOf(inputValue) >= 0 || categorizedUsersObject['hasSharedInboxAccessTo'].indexOf(inputValue) >= 0 ) {
+              return true;
+            }
+        }
+    }
+
+    function getUsersList(tableId, userIdColumnClass ) {
+        var userList = [];
+        var tableObject = $(tableId);
+        var allRows = tableObject.get(0).items.getAll();
+            $.each(allRows, function(index, row) {
+                var userIdObject = tableObject.find(row).find("td."+userIdColumnClass + " span");
+                if(userIdObject.length > 0) {
+                   userList.push(userIdObject.get(0).innerText);
+                }
+            });
+        return userList;
+    }
+
+    function getCategorizedUsers(tableId) {
+        var requestsMap = {pendingRequestMap: {}, rejectedRequests: [], hasSharedInboxAccessTo: []};
+        var allRows = $(tableId).get(0).items.getAll();
+            $.each(allRows, function(index, rowElement){
+                if(rowHasData(rowElement)) {
+                    var rowData = getDataFromRow(rowElement);
+                    if (rowData.status === STATUS_MAP.pending) {
+                        requestsMap.pendingRequestMap[rowData.userId] = rowData.workflowId;
+                    } else if (rowData.status === STATUS_MAP.rejected) {
+                        requestsMap.rejectedRequests.push(rowData.userId);
+                    } else {
+                        requestsMap.hasSharedInboxAccessTo.push(rowData.userId);
+                    }
+                }
+            });
+        return requestsMap;
+    }
+
+    function getDataFromRow(row) {
+        var data ={userId: null, status: null, workflowId: null};
+        data.status = row.cells.item(2).innerText;
+        data.userId = row.cells.item(1).innerText;
+        data.workflowId = row.cells.item(3).getAttribute(CQ_INBOX_DATA_WORKFLOW_ID);
+        return data;
+    }
+
+    function rowHasData(row) {
+        return (row.cells.length <= 1) ? false : true;
+    }
+
+    function selectItem(selectName, selectedValue) {
+        var $select = $("coral-select[name='" + selectName +"']");
+        if ($select.length==1) {
+            var coralSelect = $select.get(0);
+            var selectItems = coralSelect.items.getAll();
+            for (var index = 0; index < selectItems.length; index++) {
+                if (selectItems[index].value == selectedValue) {
+                    selectItems[index].selected = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    function getCurrentSettings(url, defaultSettings) {
+        var deferred = $.Deferred();
+        $.get(Granite.HTTP.externalize(url))
+            .done(function (settingsFromServer) {
+                try {
+                    var settings = JSON.parse(settingsFromServer);
+                    deferred.resolve(settings);
+                } catch (e) {
+                    deferred.resolve(defaultSettings);
+                }
+            })
+            .fail(function(jqXHR, textStatus, errorThrown) {
+                if (jqXHR.status==404) {
+                    // no settings found, resolve with the defaults
+                    deferred.resolve(defaultSettings)
+                } else {
+                    deferred.reject(Granite.I18n.get("Unable to load " + dialogPath));
+                }
+            });
+        return deferred.promise();
+    }
+
+    function saveSettings(url, data){
+        var deferred = $.Deferred();
+        $.ajax({
+            type: "POST",
+            url: Granite.HTTP.externalize(url),
+            data: data
+        }).done(function(data, textStatus, jqXHR) {
+            deferred.resolve(data, textStatus, jqXHR);
+        }).fail(function(jqXHR, textStatus, errorThrown) {
+            deferred.reject(jqXHR, textStatus, errorThrown);
+        });
+        return deferred.promise();
+    }
+
+    function postUserPreferences(data) {
+        var deferred = $.Deferred();
+
+        getUserPromise().then(function (user) {
+            $.ajax({
+                type: "POST",
+                url: Granite.HTTP.externalize(user.home + "/preferences"),
+                data: data
+            }).done(function(data, textStatus, jqXHR) {
+                deferred.resolve(data, textStatus, jqXHR);
+            }).fail(function(jqXHR, textStatus, errorThrown) {
+                deferred.reject(jqXHR, textStatus, errorThrown);
+            })
+        }).fail(function (jqXHR, textStatus, errorThrown) {
+            deferred.reject(jqXHR, textStatus, errorThrown);
+        });
+        return deferred.promise();
+    };
+
+    var cachedUserPromise;
+    function getUserPromise() {
+        if (!cachedUserPromise) {
+            cachedUserPromise = $.ajax({url: Granite.HTTP.externalize("/libs/granite/security/currentuser.json")});
+        }
+        return cachedUserPromise;
+    }
+
+    function makeSettingsPayload(formData, sharesInboxWith){
+        var data = formData;
+        data[SHARING_PREFERENCES_KEY] = getCategorizedUsers(HAS_ACCESS_TO_TABLE);
+        data[SHARING_PREFERENCES_KEY]['sharesInboxWith'] = sharesInboxWith;
+        if($("#cq-inbox-out-of-office-tab") && $("#cq-inbox-out-of-office-tab")[0]) {
+            data[OUT_OF_OFFICE_PREFERENCES_KEY] = CQ.Inbox.UI.OutOfOfficeController.getOutOfOfficeSettings();
+        }
+        data = JSON.stringify(data);
+        return {
+            'cq.inbox.settings': data
+        };
+    }
+
+    function showViewConfigurationDialog() {
+        var dialog = $(VIEW_CONFIGURATION_DIALOG_CONTAINER);
+        var form = $("form", dialog);
+
+        getCurrentSettings(VIEW_CONFIGURATION_NODE + "/view.configuration", {}).done(function(data) {
+            if($(CQ_INBOX_ENDUSER_SECTION).length > 0 || $(INBOX_CUSTOMIZATION_SECTION).length > 0) {
+                CQ.Inbox.UI.ViewConfigurationController.setViewConfigurationInUi(data, dialog);
+            }
+            dialog.get(0).show();
+
+            dialog.find(SAVE_VIEWCONFIGURATION_SETTINGS)
+                .off('click' + ns)
+                .on('click' + ns, function() {
+                    var that = this;
+
+                    ui.wait();
+                    this.disabled = true;
+
+                    var data = getViewConfigurationPayload();
+
+                    saveSettings(VIEW_CONFIGURATION_NODE, data)
+                        .done(function() {
+                            var omniSearchForm = $(".granite-omnisearch-form");
+                            if (omniSearchForm.length > 0) {
+                                // we're in omnisearch -> just re-submit the search form
+                                omniSearchForm.submit();
+                            } else {
+                                window.location.reload(true);
+                            }
+                        })
+                        .fail(function (xhr) {
+                            form.trigger("foundation-form-submit-callback", [xhr]);
+                        })
+                        .always(function() {
+                            dialog.get(0).hide();
+                            ui.clearWait();
+                            that.disabled = false;
+                        });
+                });
+
+        }).fail(function(data) {
+            console.error("Failed to load view configuration" + data);
+        });
+    }
+
+    function getViewConfigurationPayload() {
+        var viewConfiguration = CQ.Inbox.UI.ViewConfigurationController.getViewConfiguration();
+        if (!viewConfiguration.customHelpUrl) {
+            // Remove the key, since creating a URL from empty string would fail.
+            delete viewConfiguration.customHelpUrl;
+        }
+        return {
+            'view.configuration': JSON.stringify(viewConfiguration)
+        };
+    }
+
+})(document, Granite, Granite.$);

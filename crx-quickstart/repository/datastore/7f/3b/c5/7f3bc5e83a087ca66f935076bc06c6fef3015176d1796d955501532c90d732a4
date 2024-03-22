@@ -1,0 +1,667 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2012 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%>
+<%@page import="javax.jcr.Property"%>
+<%@page session="false" %><%
+%><%@include file="/libs/granite/ui/global.jsp" %><%
+%><%@page import="java.util.Iterator,
+				  org.apache.sling.api.scripting.SlingScriptHelper,
+				  org.apache.sling.api.resource.Resource,
+                  org.apache.sling.featureflags.Features,
+				  org.apache.jackrabbit.util.Text,
+                  org.apache.commons.lang.StringUtils,
+				  com.day.cq.dam.api.Asset,
+				  com.day.cq.dam.api.DamConstants,
+				  com.day.cq.dam.api.s7dam.constants.S7damConstants,
+				  com.day.cq.dam.api.Rendition,
+                  com.day.cq.dam.api.renditions.DynamicMediaRenditionProvider,
+				  com.day.cq.dam.api.s7dam.set.ImageSet,
+				  com.day.cq.dam.commons.util.DamUtil,
+                  com.day.cq.dam.entitlement.api.EntitlementConstants,
+				  com.day.cq.dam.video.VideoConstants,
+				  com.adobe.granite.toggle.api.ToggleRouter,
+				  javax.jcr.Node,
+				  javax.jcr.Session,
+				  java.util.StringTokenizer,
+				  java.util.HashMap,
+				  java.util.Iterator,
+				  java.util.List,
+				  java.util.Map,
+				  java.util.Map.Entry,
+				  java.util.TreeMap,
+				  java.awt.Dimension,
+				  com.adobe.granite.ui.components.Config,
+                  com.adobe.granite.ui.components.AttrBuilder,
+                  com.adobe.dam.print.ids.StringConstants,
+                  java.util.HashMap,
+                  com.day.cq.dam.commons.util.UIHelper,
+                  org.apache.jackrabbit.commons.JcrUtils,
+                  com.day.cq.replication.ReplicationStatus,
+                  com.day.cq.dam.scene7.api.constants.Scene7Constants,
+                  org.apache.jackrabbit.commons.JcrUtils,
+                  com.day.cq.replication.ReplicationActionType" %>
+<%
+
+String VAL_UNKNOWN = "-";
+    final String CQ5DAM_PREVIEW_PDF_RENDITION = "cq5dam.preview.pdf";
+    final String CQDAM_PREVIEW_GLB_RENDITION = "cq5dam.preview.glb";
+    Config cfg = new Config(resource);
+    AttrBuilder attrs = new AttrBuilder(request, xssAPI);
+
+    attrs.add("id", cfg.get("id", String.class));
+    attrs.addClass(cfg.get("class", String.class));
+    attrs.addRel(cfg.get("rel", String.class));
+    attrs.add("title", i18n.getVar(cfg.get("title", String.class)));
+    attrs.addDisabled(cfg.get("disabled", false));
+    attrs.add("form", cfg.get("formId", String.class));
+
+    attrs.addOthers(cfg.getProperties(), "id", "class", "rel", "title", "disabled", "text", "formId");
+
+    %>
+
+<nav <%= attrs.build() %>>
+    <%
+
+        String contentPath = slingRequest.getRequestPathInfo().getSuffix();
+        Resource currentResource = slingRequest.getResourceResolver().getResource(contentPath);
+
+        //get original asset node
+        Session session = slingRequest.getResourceResolver().adaptTo(Session.class);
+        String metadataPath = "jcr:content/metadata";
+        String originalDimension = VAL_UNKNOWN;
+        String originalBitrate = "";
+        String originalFormat = "";
+        int originalWidth = 0;
+        int originalHeight = 0;
+        boolean isThreeDPublished = false;
+        String threeDSourcePath = "";
+        Node assetNode = null;
+        if (contentPath != null && session.nodeExists(contentPath)) {
+            assetNode = session.getNode(contentPath);
+
+            if(assetNode != null && assetNode.hasNode(metadataPath)) {
+
+                Node metadataNode = assetNode.getNode(metadataPath);
+
+                if(metadataNode.hasProperty("size")) {
+
+                    String dimensionStr = metadataNode.getProperty("size").getValue().getString();
+
+                    if(dimensionStr.length() > 0) {
+                        String[] dimensionArr = dimensionStr.split("x");
+                        originalWidth 	= Integer.parseInt(dimensionArr[0]);
+                        originalHeight 	= Integer.parseInt(dimensionArr[1]);
+                    }
+                }
+                if(metadataNode.hasProperty("bitrate")) {
+
+                    String bitrateStr = metadataNode.getProperty("bitrate").getValue().getString();
+
+                    if(bitrateStr.length() > 0) {
+                        originalBitrate = bitrateStr + "kbps";
+                    }
+                }
+                if(metadataNode.hasProperty(DamConstants.DC_FORMAT)) {
+
+                    String formatStr = metadataNode.getProperty(DamConstants.DC_FORMAT).getValue().getString();
+
+                    if(formatStr.length() > 0 && formatStr.startsWith("video/")) {
+                        originalFormat = formatStr.replace("video/", "");
+                    }
+                }
+                if (metadataNode.hasProperty(DamConstants.TIFF_IMAGELENGTH)) {
+
+                    // get props
+                    Property imageLength = (metadataNode.getProperty(DamConstants.TIFF_IMAGEWIDTH));
+                    Property imageWidth = (metadataNode.getProperty(DamConstants.TIFF_IMAGELENGTH));
+
+                    String height = (imageLength != null)? imageLength.getValue().getString() : "";
+                    String width = (imageWidth != null)? imageWidth.getValue().getString() : "";
+
+                    // set dimension
+                    originalDimension = height + "x" + width;
+                }
+                if (assetNode.hasNode("jcr:content")) {
+                    Node jcrContent = assetNode.getNode("jcr:content");
+                    if(metadataNode.hasProperty(Scene7Constants.PN_S7_TYPE) && jcrContent.hasProperty(ReplicationStatus.NODE_PROPERTY_LAST_REPLICATION_ACTION)) {
+                        threeDSourcePath = assetNode.getPath();
+                        isThreeDPublished = S7damConstants.THREE_D.equals(JcrUtils.getStringProperty(metadataNode, Scene7Constants.PN_S7_TYPE, null)) &&
+                                ReplicationActionType.ACTIVATE.getName().equals(JcrUtils.getStringProperty(jcrContent, ReplicationStatus.NODE_PROPERTY_LAST_REPLICATION_ACTION, null));
+                    }
+                }
+            }
+    	}
+		boolean isVideo = false;
+        boolean hasPreviewRendition = false;
+        Rendition previewRendition = null;
+        ImageSet imageSet = (currentResource != null ? currentResource.adaptTo(ImageSet.class) : null);
+        if (imageSet != null) {
+            return;
+        }
+        Asset asset = (currentResource != null ? currentResource.adaptTo(Asset.class) : null);
+
+        if(asset == null) {
+            return;
+        }
+
+        String assetOrigName = asset.getName();
+        String assetName = assetOrigName.lastIndexOf('.') == -1 ? assetOrigName : assetOrigName.substring(0, assetOrigName.lastIndexOf('.'));
+
+        String assetType = asset.getMimeType();
+
+        if(assetType != null){
+            isVideo = assetType.startsWith("video/") || assetType.equals("application/mxf") || assetType.equals("application/x-shockwave-flash");
+            // does the given resource has a valid pdf rendition
+
+            if(asset.getRendition(CQ5DAM_PREVIEW_PDF_RENDITION) != null) {
+                previewRendition = asset.getRendition(CQ5DAM_PREVIEW_PDF_RENDITION);
+            } else if(asset.getRendition(CQDAM_PREVIEW_GLB_RENDITION) != null) {
+                previewRendition = asset.getRendition(CQDAM_PREVIEW_GLB_RENDITION);
+            }
+
+            hasPreviewRendition = previewRendition != null;
+        }
+
+        List<Rendition> listRenditions = asset.getRenditions();
+
+        if(isVideo && asset.getMetadata("dam:scene7ID") != null){
+            DynamicMediaRenditionProvider dynamicMediaRenditionProvider = sling.getService(DynamicMediaRenditionProvider.class);
+            HashMap<String, Object> rules = new HashMap<>();
+            rules.put("remote", true);
+            rules.put("video", true);
+            List<Rendition> dmRenditions = dynamicMediaRenditionProvider.getRenditions(asset, rules);
+            if(listRenditions==null){
+            	if (!dmRenditions.isEmpty()) {
+            		listRenditions = dmRenditions;
+            	}
+            	return;
+            } else {
+            	listRenditions.addAll(dmRenditions);
+            }
+
+        }
+
+        if(listRenditions==null){
+            return;
+        }
+
+		final Features featureManager = sling.getService(Features.class);
+		final String premiumFeatureFlag = "com.adobe.dam.feature.flag.premium";
+
+		boolean dynamicMediaInstalled = featureManager.isEnabled(premiumFeatureFlag);
+		boolean loadDMRenderer = (isVideo && dynamicMediaInstalled);// && assetNode.hasProperty(S7damConstants.S7_ASSET_METADATA_NODE + "/" + S7damConstants.PN_S7_TYPE));
+
+		if (loadDMRenderer){
+    %>
+	<%@include file="/libs/dam/gui/components/s7dam/videorendition/damrenditions/damrenditions.jsp"%>
+	<%
+} else {
+
+    Iterator <Rendition>it = listRenditions.iterator();
+
+    int keyIndex = 0;
+    Map<String, Map<String, String>> renditions = new HashMap<String, Map<String, String>>();
+	for (;it.hasNext ();) {
+        Rendition rend = it.next ();
+        boolean isCustomRendition = false;
+
+        //Do not show text and xml renditions in asset detail view
+        if(rend.getName().equals("cqdam.metadata.xml") || rend.getName().equals("cqdam.text.txt") || rend.getName().startsWith("cqdam.machine.metadata") ) {
+            continue;
+        }
+
+        //Check for the proxy renditions
+        boolean isProxyRendition = false;
+        Node rendNode =  rend.adaptTo(Node.class);
+
+        boolean hiddenRendition = false;//To hide some rendition created for internal use i.e. Scene7 PTIFF
+        Node rendContent = null;
+        if(rendNode.hasNode("jcr:content")){
+            rendContent = rendNode.getNode("jcr:content");
+            if(rendContent.hasProperty("rendition.handler.id")){
+                String renditonHandlerId = rendContent.getProperty("rendition.handler.id").getValue().getString();
+                if(!renditonHandlerId.equals("jcr.default")){
+                    isProxyRendition = true;
+                }
+                //To hide smart crop renditions from static renditions
+                if (renditonHandlerId.equals("smartcrop.rendition.handler")) {
+                    hiddenRendition = true;
+                }
+            }
+
+            //To hide Dynamic Media optimized image from static rendition
+            if(S7damConstants.PN_S7_PTIFF_RENDITION_NAME.equals(rendNode.getName())){
+                hiddenRendition = true;
+            }
+            //To hide Indesign print asset tag mapping node
+            if(StringConstants.CQ_INDESIGN_PRINT.equals(rendNode.getName())){
+                hiddenRendition = true;
+            }
+        }
+
+        String rendPath = rendNode.getPath();
+        String href = rendPath;
+        if (rend.getResourceType().equals("cq:Page")){
+            href = rendPath +".html";
+        }
+        if(isProxyRendition){
+            href = "/libs/dam/gui/components/admin/resources/white_1x1.png";
+        }
+        if(rend != null && rendContent != null){
+            String name = "";
+            String bitrate = "";
+            String width = "";
+            String height = "";
+            String type = "";
+            String rendName = rend.getName();
+            long rendSize = 0;
+            String mimetype = rend.getMimeType();
+
+            StringTokenizer st = new StringTokenizer(rendName, ".");
+            String[] shots = new String[st.countTokens()];
+            int i = 0;
+            while(st.hasMoreTokens()){
+                shots[i++] = st.nextToken();
+            }
+
+            if (shots.length == 0) {
+                continue;
+            } else if (shots.length == 1) {
+                name = shots[0];
+            } else if(shots.length > 1){
+                name = shots[0] + " " + shots[1];
+            }
+            if (rendContent.hasNode("metadata")) {
+                Node rendMetadata = rendContent.getNode("metadata");
+                if (isProxyRendition) {
+                    if (rendMetadata.hasProperty("width") && rendMetadata.hasProperty("height")) {
+                        width = rendMetadata.getProperty("width").getString();
+                        height = rendMetadata.getProperty("height").getString();
+
+                        if (width.equals("0")) {
+                            int w = originalWidth * Integer.parseInt(height) / originalHeight;
+                            width = Integer.toString(w);
+                        }
+
+                        if (height.equals("0")) {
+                            int h = originalHeight * Integer.parseInt(width) / originalWidth;
+                            height = Integer.toString(h);
+                        }
+                    }
+                }
+                if (rendMetadata.hasProperty(VideoConstants.PN_VIDEO_BITRATE)) {
+                    bitrate = rendMetadata.getProperty(VideoConstants.PN_VIDEO_BITRATE).getString();
+                    if (!bitrate.equals("")) {
+                        bitrate += "kbps";
+                    }
+                }
+                // if rendition is not a proxy rendition and there is no width and height, attempt to
+                // get the width and height from the metadata node
+                if (width.equals("") 
+                        && height.equals("") 
+                        && rendMetadata.hasProperty(DamConstants.TIFF_IMAGEWIDTH) 
+                        && rendMetadata.hasProperty(DamConstants.TIFF_IMAGELENGTH)) {
+ 
+                    // get props
+                    Property imageLength = rendMetadata.getProperty(DamConstants.TIFF_IMAGELENGTH);
+                    Property imageWidth = rendMetadata.getProperty(DamConstants.TIFF_IMAGEWIDTH);
+
+                    height = (imageLength != null)? imageLength.getValue().toString() : "";
+                    width = (imageWidth != null)? imageWidth.getValue().toString() : "";
+
+                    if (width.equals("0")) {
+                        int w = originalWidth * Integer.parseInt(height) / originalHeight;
+                        width = Integer.toString(w);
+                    }
+
+                    if (height.equals("0")) {
+                        int h = originalHeight * Integer.parseInt(width) / originalWidth;
+                        height = Integer.toString(h);
+                    }
+                }
+            } else if (cfg.get("computeDimension", true) && DamUtil.isImage(rend.getMimeType())) {
+                // get image dimensions
+                Dimension dim = DamUtil.getImageDimension(rend);
+
+                if (dim != null) {
+                    width = Integer.valueOf(Double.valueOf(dim.getWidth()).intValue()).toString();
+                    height = Integer.valueOf(Double.valueOf(dim.getHeight()).intValue()).toString();
+                }
+            } else if (shots.length > 4) {
+                width = shots[shots.length - 3];
+                height = shots[shots.length - 2];
+            }
+
+            if (rendName.equals("original")) {
+
+                int extnIdx = contentPath.lastIndexOf(".");
+                if (-1 == extnIdx) {
+                    type = "";
+                } else {
+                    type = contentPath.substring(extnIdx + 1);
+                }
+            } else {
+                int index = rendName.lastIndexOf(".");
+                if (index > 0) {
+                    type = rendName.substring(index + 1);
+                }
+            }
+
+            String unencodedName = name;
+            int unencodedLen = name.length();
+            int typeLength = cfg.get("mimetypelength", Integer.class) != null ? cfg.get("mimetypelength", Integer.class) : 4;
+            String displayType = type;
+            if (displayType.length() > typeLength) {
+                displayType = displayType.substring(0,typeLength-1)+"..";
+            }
+            //for Scene7 Proxy Rendition of MP4 video 
+            if ((displayType.equalsIgnoreCase("mp4") || displayType.equalsIgnoreCase("webm")) && isProxyRendition) {
+                href = rendPath;
+            }
+            href = Text.escapePath(href);
+
+            int nameLength = cfg.get("namelength", Integer.class) != null ? cfg.get("namelength", Integer.class) : 16;
+            name = xssAPI.encodeForHTML(name);
+            String displayName = name;
+            if (displayName.indexOf("thumbnail") != -1) {
+                displayName = i18n.get("Thumbnail");
+            } else if (displayName.indexOf("web") != -1) {
+                displayName = i18n.get("Web");
+            } else if (displayName.indexOf("cq5dam preview") != -1) {
+                displayName = i18n.get("Preview");
+            } else if (displayName.startsWith("cq5dam")) {
+                displayName = displayName.substring("cq5dam".length() + 1).trim();
+            } else if (displayName.startsWith("cqdam video")) {
+                displayName = i18n.get("Video");
+            }
+            else {
+                //CQ-4296022 showing custom rendtion name as it is given by customer
+                displayName = rend.getName();
+                isCustomRendition = true;
+            }
+
+            if(unencodedLen > nameLength) {
+                displayName = xssAPI.encodeForHTML(unencodedName.substring(0,nameLength-3))+"...";
+            }
+
+            if (!hiddenRendition) {
+				Map<String, String> rendInfo = new HashMap<String, String>();
+                rendInfo.put("rendName", rendName);
+				rendInfo.put("mimeType", mimetype);
+				rendInfo.put("href", href);
+                rendInfo.put("path", rendPath);
+				rendSize = rend.getSize();
+				String size = UIHelper.getSizeLabel(rendSize, slingRequest);
+                if (rendSize == 0 && isProxyRendition) {
+                    rendInfo.put("rendSize", "");
+                } else {
+                    rendInfo.put("rendSize", size);
+                }
+                if (mimetype!=null && mimetype.startsWith("video")) {
+                    rendInfo.put("dimension", rendName.equals("original") ? "" : width + "x" + height);
+                    rendInfo.put("bitrate", rendName.equals("original") ? "" : bitrate);
+                    rendInfo.put("type", rendName.equals("original") ? "" : displayType);
+                    // we want sort the order by "key" and the display order is orignal, videos, theumbnails
+                    displayType = (mimetype.startsWith("video") ? "1" + displayType : "2" + displayType);
+                    String key = (rendName.equals("original") ? "0" + rendName : displayType + "-" + rendName);
+                    renditions.put(key, rendInfo);
+                }
+                else {
+                    rendInfo.put("width", width);
+                    rendInfo.put("height", height);
+                    rendInfo.put("type", displayType);
+                    if (rendName.equals("original") || isCustomRendition || (width.isEmpty() && height.isEmpty())) {
+                        rendInfo.put("name", displayName);
+                    }
+                    else {
+                        rendInfo.put("name", displayName + " " + width + "x" + height);
+                    }
+                    String key = (displayName.equals("original") ? "0" + displayName : displayType + "-" + displayName + width + "x" + height); 
+
+                    // check to see if key is already in use, if so make unique
+                    if (renditions.containsKey(key)) {
+                        key = key + keyIndex++;
+                    }
+
+                    renditions.put(key, rendInfo);
+                }
+            }
+        }
+    }
+
+    if (!renditions.isEmpty()) {
+        // FT for PDF as standard a rendition
+        final String FT_ASSETS_12109 = "ft-assets-12109";
+        // FT for GLB as a standard rendition
+        final String FT_ASSETS_8367 = "FT_ASSETS-8367";
+
+        // sort and list the rendition list
+        Map<String, Map<String, String>> sortedRenditions = new TreeMap<String, Map<String, String>>(renditions);
+        // CQ-28620 Renditions Rail is not listing renditions in the correct order. Make original as the first entry above rendition subtitle and highlight the default rendition displayed on asset
+        // details page
+        Rendition defaultViewRendition = UIHelper.getBestfitRendition(asset,1280);
+        String defaultViewRenditionName = "";
+        if (null != defaultViewRendition) {
+        	defaultViewRenditionName = defaultViewRendition.getName();
+        }
+
+        // get toggle router for PDF Viewer feature
+        ToggleRouter toggleRouter = sling.getService(ToggleRouter.class);
+
+        // if this the PDF viewer select the original rendition
+        if ("application/pdf".equals(asset.getMimeType())) {
+            // set default rendition name to "original" rendition name to prevent web renditions from being selected
+            defaultViewRenditionName = "original";
+        } else if ((toggleRouter.isEnabled(FT_ASSETS_12109) || toggleRouter.isEnabled(FT_ASSETS_8367)) && hasPreviewRendition) {
+            // set default rendition name to preview rendition name to prevent web renditions from being selected
+            defaultViewRenditionName = previewRendition.getName();
+        }
+
+
+        Iterator entries = sortedRenditions.entrySet().iterator();
+        while (entries.hasNext()) {
+            Entry entry = (Entry) entries.next();
+            Map<String, String> val = (HashMap<String, String>)entry.getValue();
+            
+            if (val.get("rendName").equals("original")) {
+                AttrBuilder attrSpStatic = new AttrBuilder(request, xssAPI);
+                attrSpStatic.add("title", xssAPI.encodeForHTMLAttr(assetOrigName));
+                attrSpStatic.add("data-type", xssAPI.encodeForHTMLAttr(val.get("mimeType")));
+                attrSpStatic.add("href", xssAPI.getValidHref(val.get("href")));
+                attrSpStatic.add("style", "font-size:1.09rem");
+                attrSpStatic.add("role", "presentation");
+
+                if(isThreeDPublished) {
+                    attrSpStatic.add("data-threeDSourcePath", xssAPI.encodeForHTMLAttr(threeDSourcePath));
+                }
+
+				AttrBuilder attrLinkStatic = new AttrBuilder(request, xssAPI);
+                attrLinkStatic.add("role", "button");
+                attrLinkStatic.add("tabindex", "0");
+
+                if (!isVideo && val.get("rendName").equals(defaultViewRenditionName)) {
+                    attrSpStatic.add("class", "each-rendition rendition-active");
+                    attrLinkStatic.add("aria-pressed", "true");
+                } else {
+                    attrSpStatic.add("class", "each-rendition");
+                    attrLinkStatic.add("aria-pressed", "false");
+                }
+
+                String nameVal;
+                String typeVal;
+                String dimensionVal = "";
+
+                AttrBuilder attrSpName = new AttrBuilder(request, xssAPI);
+
+                String rendSizeVal = xssAPI.encodeForHTML(val.get("rendSize"));
+                if(isVideo) {
+                    attrSpName.add("class", "col1presetname");
+                    nameVal = xssAPI.encodeForHTML(i18n.get("original","asset metadata"));
+                    typeVal = xssAPI.encodeForHTML(StringUtils.isEmpty(val.get("bitrate")) ?
+                            (StringUtils.isEmpty(val.get("type")) ? VAL_UNKNOWN + " " : val.get("type"))
+                            : val.get("bitrate") + (StringUtils.isEmpty(val.get("type")) ? "" : ", " + val.get("type")));
+                } else {
+                    nameVal = xssAPI.encodeForHTML(val.get("name").equals("original") ? i18n.get("original","asset metadata") : val.get("name"));
+                    dimensionVal = xssAPI.encodeForHTML((val.get("width").length() > 0 && val.get("height").length() > 0) ?
+                            val.get("width") + "x" + val.get("height") :
+                            val.get("name").equals("original") ? originalDimension : VAL_UNKNOWN);
+                    typeVal = xssAPI.encodeForHTML(val.get("type"));
+
+                    // don't show value if it could not be retrieved
+                    dimensionVal = (dimensionVal.equals("0x0"))? "" : dimensionVal;
+                }
+    	%>
+                <span <%= attrSpStatic.build() %>>
+				<a <%= attrLinkStatic.build() %>>
+					<table class="renddetailstrip aem-asset-rendition-item" role="presentation">
+                        <tr role="presentation">
+                            <td class="name" colspan="2" role="presentation">
+                                <span <%= attrSpName.build() %> ><%= nameVal %></span>
+                            </td>
+                        </tr>
+                        <tr role="presentation">
+                            <td class="rendsize" role="presentation">
+                                <span><%= rendSizeVal %></span>
+                            </td>
+                            <% if(!isVideo) {%>
+                              <td class="dimension" role="presentation"><%= dimensionVal %></td>
+    						<%}%>
+                            <td class="type" role="presentation"><%= typeVal %></td>
+                        </tr>
+					</table>
+				</a>
+			</span>
+        <%
+            }
+        }
+
+        %>
+        
+        <div class="colorpalette-headings aem-asset-rendition-item aem-asset-rendition-item--header" role="heading" aria-level="2"><%=i18n.get("Static")%></div>
+        <div role="list">
+        <%
+
+        entries = sortedRenditions.entrySet().iterator();
+        while (entries.hasNext()) {
+            Entry entry = (Entry) entries.next();
+            Map<String, String> val = (HashMap<String, String>)entry.getValue();
+            boolean isVideoRendition=false;
+            String mimeType = val.get("mimeType");
+
+            if (mimeType != null) {
+                isVideoRendition = mimeType.startsWith("video") ||  mimeType.equals("application/mxf");
+            }
+
+            if (!val.get("rendName").equals("original")) { 
+            	String displTitle = val.get("rendName");
+            	if(displTitle.indexOf("cq5dam.") == 0) {
+            		displTitle = assetName + "-" + (val.get("width") + "x" + val.get("height")) + "." + val.get("type").toLowerCase(); 
+            	} else {
+            		displTitle = assetName + "." + displTitle;
+            	}
+
+                AttrBuilder attrSpStatic = new AttrBuilder(request, xssAPI);
+                attrSpStatic.add("title", xssAPI.encodeForHTMLAttr(displTitle));
+                attrSpStatic.add("data-type", xssAPI.encodeForHTMLAttr(val.get("mimeType")));
+                attrSpStatic.add("data-path", xssAPI.encodeForHTMLAttr(val.get("path")));
+                attrSpStatic.add("href", xssAPI.getValidHref(val.get("href")));
+
+                AttrBuilder attrLinkStatic = new AttrBuilder(request, xssAPI);
+                attrLinkStatic.add("role", "button");
+                attrLinkStatic.add("tabindex", "0");
+
+
+                // if the PDF viewer feature is in use do not select the web rendition
+                if (!isVideoRendition && val.get("rendName").equals(defaultViewRenditionName)) {
+                    //original-alt-preview will be added only if PDF rendition present
+                    if ((toggleRouter.isEnabled(FT_ASSETS_12109) || toggleRouter.isEnabled(FT_ASSETS_8367))
+                            && hasPreviewRendition) {
+                        attrSpStatic.add("class", "each-rendition rendition-active original-alt-preview");
+                    } else {
+                        attrSpStatic.add("class", "each-rendition rendition-active");
+                    }
+                    attrLinkStatic.add("aria-pressed", "true");
+                } else {
+                    attrSpStatic.add("class", "each-rendition");
+                    attrLinkStatic.add("aria-pressed", "false");
+                }
+
+                String thirdColVal;
+                String firstColVal;
+                String dimensionVal;
+
+                AttrBuilder attrSpFirstCol = new AttrBuilder(request, xssAPI);
+                AttrBuilder attrTdDimensionCol = new AttrBuilder(request, xssAPI);
+                AttrBuilder attrTdThirdCol = new AttrBuilder(request, xssAPI);
+
+                String rendSizeVal = xssAPI.encodeForHTML(val.get("rendSize"));
+
+                if(isVideoRendition) {
+                    firstColVal = xssAPI.encodeForHTML(val.get("type"));
+                    attrSpFirstCol.add("class", "type");
+                    attrTdDimensionCol.add("class", "videodimension");
+                    dimensionVal = xssAPI.encodeForHTML(val.get("dimension").equals("x") ? originalDimension : val.get("dimension"));
+                    attrTdThirdCol.add("class", "bitrate");
+                    thirdColVal = xssAPI.encodeForHTML(val.get("bitrate"));
+                } else {
+                    firstColVal = xssAPI.encodeForHTML(val.get("name").equals("original") ? i18n.get("original","asset metadata") : val.get("name"));
+                    attrSpFirstCol.add("class", "name col1presetname");
+                    dimensionVal = xssAPI.encodeForHTML((val.get("width").length() > 0 && val.get("height").length() > 0) ?
+                            val.get("width") + "x" + val.get("height") :
+                            val.get("name").equals("original") ? originalDimension : VAL_UNKNOWN);
+                    attrTdDimensionCol.add("class", "dimension");
+                    attrTdDimensionCol.add("role", "presentation");
+
+                    attrTdThirdCol.add("class", "type");
+                    attrTdThirdCol.add("role", "presentation");
+                    thirdColVal = xssAPI.encodeForHTML(val.get("type"));
+                }
+            %>
+               <div <%= attrSpStatic.build() %>>
+               <a <%= attrLinkStatic.build() %>>
+					<table class="renddetailstrip aem-asset-rendition-item" role="presentation">
+                        <tr role="presentation">
+                            <td class="name" colspan="2" role="presentation">
+                                <span <%= attrSpFirstCol.build() %>><%= firstColVal %></span>
+                            </td>
+                        </tr>
+                        <tr role="presentation">
+                            <td class="rendsize" role="presentation">
+                                <span><%= rendSizeVal %></span>
+                            </td>
+                            <td <%= attrTdDimensionCol.build() %>><%= dimensionVal %></td>
+                            <td <%= attrTdThirdCol.build() %>><%= thirdColVal %></td>
+                        </tr>
+					</table>
+               </a>
+			</div>
+        <%
+             }
+    	  }
+       }
+
+	    %>
+    </div>
+</nav>
+        <%
+    }
+	    %>
+
+<script type="text/javascript">
+    var CONST_IS_VIDEO_ASSET = <%= isVideo %>;
+    var ASSET_ORIGINAL_NAME = "<%= xssAPI.encodeForJSString(assetOrigName) %>";
+    var ASSET_NAME = "<%= xssAPI.encodeForJSString(assetName) %>";
+</script>

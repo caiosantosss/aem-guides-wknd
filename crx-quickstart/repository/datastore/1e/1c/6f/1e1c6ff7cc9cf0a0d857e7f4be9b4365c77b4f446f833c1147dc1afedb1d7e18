@@ -1,0 +1,449 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2015 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+(function(document, $) {
+    "use strict";
+    var EXPLAIN_URL = "/libs/settings/granite/operations/diagnosis/granite_queryperformance.explain.json";
+    var RESET_URL = "/libs/settings/granite/operations/diagnosis/granite_queryperformance.reset.json";
+
+    var ui = $(window).adaptTo("foundation-ui");
+
+    var selectedQuery, selectedLanguage;
+
+    $(document).on("submit", ".granite-explain-form", function(e) {
+        var language = $("#languageSelect")[0].value;
+        var statement = $("#statementInput").val();
+        var includeExecutionTime = $("#executionTimeCheckbox").prop("checked");
+        var includeNodeCount = $("#nodeCountCheckbox").prop("checked");
+        var readFirstResultsPage =  $("#readResultsCheckbox").prop("checked");
+
+        explainQuery(language, statement, includeExecutionTime, readFirstResultsPage, includeNodeCount);
+
+        e.preventDefault()
+    });
+
+    $(document).on("click", "#query-info-activator", function(e) {
+        document.querySelector("#moreInformationModal").show();
+        e.preventDefault()
+    });
+
+    $(document).on("click", "#explain-query-activator", function(e) {
+        explainQuery(selectedLanguage, selectedQuery, true);
+        e.preventDefault()
+    });
+
+    $(document).on("click", "#reset-stats-activator", function(e) {
+
+        $.ajax({
+            url: Granite.HTTP.externalize(RESET_URL),
+            type: 'POST',
+            async: true,
+            data: {},
+            headers: {
+                'Content-Type':'application/x-www-form-urlencoded; charset=utf-8'
+            },
+            dataType: 'json',
+            success: function (data) {
+                reloadTableRows();
+            },
+            error: function (xmlhttprequest, textStatus, message) {
+                showErrorDialog("Unable to reset query statistics");
+            }
+        });
+
+        e.preventDefault()
+    });
+
+    function explainQuery(language, statement, includeExecutionTime, readFirstResultsPage, includeNodeCount) {
+        if(language && statement) {
+            // only show the spinner if the request takes a considerable amount of time, otherwise
+            // the flash of the spinner is a little ugly
+            var timer = setTimeout(function () {
+                toggleWaitTicker(true);
+            }, 100);
+
+            $.ajax({
+                url: Granite.HTTP.externalize(EXPLAIN_URL),
+                type: 'POST',
+                async: true,
+                data: {
+                    'statement': statement,
+                    'language': language,
+                    'executionTime': includeExecutionTime,
+                    'readFirstResultsPage': readFirstResultsPage,
+                    'resultCount': includeNodeCount,
+                    '_charset_': "UTF-8"
+                },
+                timeout: 60000,
+                headers: {
+                    'Content-Type':'application/x-www-form-urlencoded; charset=utf-8'
+                },
+                dataType: 'json',
+                success: function (data) {                    
+                    handleExplainQuerySuccess(data, language, statement, includeExecutionTime, readFirstResultsPage, includeNodeCount);
+
+                    clearTimeout(timer);
+                    reloadTableRows();
+                    toggleWaitTicker(false);
+                   
+                },
+                error: function (xmlhttprequest, textStatus, message) {
+                    handleExplainQueryError(xmlhttprequest, textStatus, message);
+
+                    clearTimeout(timer);
+                    reloadTableRows();
+                    toggleWaitTicker(false);
+                }
+            });
+        }
+    };
+
+    function handleExplainQueryError(xmlhttprequest, textStatus, message) {
+        if(textStatus === "timeout") {
+            showErrorDialog(Granite.I18n.get("The query explanation request timed out."));
+        } else {
+            if(xmlhttprequest.status==400){
+                var jsonResponse = JSON.parse(xmlhttprequest.responseText);
+                var errorMessage = jsonResponse.error;
+            } else {
+                var errorMessage = xmlhttprequest.responseText;
+            }
+            showErrorDialog(errorMessage);
+        }
+    }
+
+    function handleExplainQuerySuccess(data, language, statement, includeExecutionTime, readFirstResultsPage, includeNodeCount) {
+        var explanationContainer = $("#queryExplanationContainer")
+        if(data && data.explain && explanationContainer.length > 0) {
+            var indexesDiv = explanationContainer.find("#explainUsedIndexes");
+            var indexesDivContent = "";
+            if(indexesDiv.length > 0) {
+                if(data.explain.propertyIndexes) {
+                    indexesDivContent = data.explain.propertyIndexes.join('\n');
+                } else {
+                    indexesDivContent = Granite.I18n.get("No indexes were used.");
+                }
+
+                if(data.explain.traversal === true) {
+                    indexesDivContent += "\n";
+                    indexesDivContent += Granite.I18n.get("This is a traversal query.");
+                }
+
+                if(data.explain.aggregate === true) {
+                    indexesDivContent += "\n";
+                    indexesDivContent += Granite.I18n.get("A full-text index was used.");
+                }
+
+                indexesDiv.text(indexesDivContent);
+            }
+
+            var planDiv = explanationContainer.find("#explainQueryPlan");
+            if(planDiv.length > 0) {
+                if(data.explain.plan) {
+                    planDiv.text(data.explain.plan);
+                } else {
+                    planDiv.text(Granite.I18n.get("Execution plan could not be retrieved."));
+                }
+
+            }
+
+            var logsDiv = explanationContainer.find("#explainQueryLogs");
+            if(logsDiv.length > 0) {
+                if(data.explain.logs) {
+                    var logContent = data.explain.logs.join("");
+
+                    if(data.explain.logsTruncated) {
+                        logContent += " ...";
+                    }
+
+                    logsDiv.text(logContent);
+                } else {
+                    logsDiv.text(Granite.I18n.get("Execution logs could not be retrieved."));
+                }
+            }
+
+            var executionTimeSection = explanationContainer.find("#explainExecutionTimeSection");
+            var executionTimeDiv = explanationContainer.find("#explainExecutionTime");
+            if(executionTimeDiv.length > 0) {
+                if(includeExecutionTime) {
+                    executionTimeSection.removeClass("granite-explain-hidden");
+
+                    if(data.heuristics) {
+                        var executionTimeText = "";
+                        var heuristics = data.heuristics;
+
+                        if(heuristics.totalTime !== undefined) {
+                            executionTimeText += "<h4 class=''>" + Granite.I18n.get("Total time: {0} ms\n", heuristics.totalTime + "", "0 is the total execution time in milliseconds") + "</h4>";
+                        }
+
+                        executionTimeText += "<ul>";
+
+                        if(heuristics.executionTime !== undefined) {
+                            executionTimeText += "<li>" + Granite.I18n.get("Query execution time: {0} ms\n", heuristics.executionTime + "", "0 is the query execution time in milliseconds") + "</li>";
+                        }
+
+                        if(heuristics.getNodesTime !== undefined) {
+                            executionTimeText +=  "<li>" + Granite.I18n.get("Get nodes time: {0} ms\n", heuristics.getNodesTime + "", "0 is the time it takes to fetch nodes in milliseconds") + "</li>";
+                        }
+
+
+                        if(readFirstResultsPage) {
+                            if(heuristics.readPageTime !== undefined) {
+                                executionTimeText +=  "<li>" + Granite.I18n.get("Read result page time: {0} ms\n", heuristics.readPageTime + "", "0 is the time it takes to read a page of result nodes") + "</li>";
+                            }
+
+                            if(!includeNodeCount) {
+
+                                if(heuristics.count !== undefined) {
+                                    executionTimeText +=  "<li>" + Granite.I18n.get("Number of nodes in result: {0} \n", heuristics.count + "", "0 is the total node count") + "</li>";
+                                }
+                            }
+                        }
+
+
+                        if(includeNodeCount) {
+                            if(heuristics.countTime !== undefined) {
+                                executionTimeText +=  "<li>" + Granite.I18n.get("Result node count time: {0} ms\n", heuristics.countTime + "", "0 is the time it takes to count the result nodes") + "</li>";
+                            }
+
+                            if(heuristics.count !== undefined) {
+                                executionTimeText +=  "<li>" + Granite.I18n.get("Number of nodes in result: {0} \n", heuristics.count + "", "0 is the total node count") + "</li>";
+                            }
+                        }
+
+                        executionTimeText += "</ul>";
+
+                        executionTimeDiv.html(executionTimeText);
+                    } else {
+                        executionTimeDiv.text(Granite.I18n.get("Query execution time was not retrieved."));
+                    }
+
+                } else {
+                    executionTimeSection.addClass("granite-explain-hidden");
+                }
+            }
+
+            var slowQueryAlert = $("#granite-explain-long-query-warning");
+            if(slowQueryAlert.length > 0) {
+                if(data.explain.slow === true){
+
+                    var alert = new Coral.Alert();
+                    alert.variant("WARNING");
+                    alert.header("WARNING");
+                    alert.content("Please be patient. Large or expensive queries may cause longer explanation times.");
+                    slowQueryAlert.removeClass("granite-explain-hidden");
+                } else {
+                    slowQueryAlert.addClass("granite-explain-hidden");
+                }
+            }
+
+            //generate the download button href
+            var downloadButton = $("#downloadExplainResult");
+            if(downloadButton.length == 1) {
+                downloadButton.attr("href", "data:application/json;charset=utf-8," + exportAsJson(data));
+                downloadButton.attr("download", "queryExplanation.json");
+            }
+
+            // enable the first results page if required
+            var tabList = $("#explainResultModal coral-tablist")[0];
+            var resultsTabHeader = tabList.items.getAll()[1];
+            var resultsTab = $("#queryResultsTab");
+
+            if(readFirstResultsPage){
+                var table = $("#queryResultsTable")[0];
+                clearTableRows(table);
+
+                if(data.heuristics.results && data.heuristics.results.length>0){
+                    table.items.getAll()[0].hide();
+
+                    for (var i = 0; i < data.heuristics.results.length; i++){
+                        var row = table.items.add({});
+                        row.appendChild(new Coral.Table.Cell().set({
+                          content: {
+                           textContent : i+1
+                          }
+                        }));
+                        row.appendChild(new Coral.Table.Cell().set({
+                          content: {
+                           textContent : data.heuristics.results[i]
+                          }
+                        }));
+                    }
+                } else {
+                    table.items.getAll()[0].show();
+                }
+                resultsTabHeader.show();
+                resultsTab.show();
+            } else {
+                resultsTabHeader.hide();
+                resultsTab.hide();
+            }
+
+            tabList.items.first().selected = true;
+
+            //show the explanation in a modal
+            var dialog = document.querySelector("#explainResultModal");
+            dialog.show();
+        } else {
+            showErrorDialog(Granite.I18n.get("The response data is empty."));
+        }
+    }
+
+    $(document).on("coral-tabview:change", function(event) {
+        var newTab = event.originalEvent.detail.selection;
+        var ariaId = $(newTab).attr("aria-controls");
+
+        var collection = $("#" + ariaId).find(".foundation-collection");
+        if(collection.length > 0) {
+            handleQueryCollectionSelection(collection, true);
+        } else {
+            //the explain-query tab has no collection in it, so hide the explain button
+            toggleItemVisibility("#explain-query-activator", false)
+        }
+    });
+
+    $(document).on("foundation-selections-change", ".granite-explain-slow-queries", function() {
+        handleQueryCollectionSelection($(this));
+    });
+
+    $(document).on("foundation-selections-change", ".granite-explain-popular-queries", function() {
+        handleQueryCollectionSelection($(this));
+    });
+
+    $(document).on("change", "coral-select#languageSelect", function (e) {
+        var languageSelect = $("#languageSelect");
+        if(languageSelect.length > 0) {
+            var isQueryBuilder = ("queryBuilder" === languageSelect[0].value);
+            toggleItemVisibility("#queryBuilderDisclaimer", isQueryBuilder);
+        }
+    });
+
+    /**
+     * Based on the selected collection row, it shows / hides the actionbar Explain button
+     * @param collection
+     */
+    function handleQueryCollectionSelection(collection){
+        if (collection.length > 0) {
+            var items = collection.find(".foundation-selections-item");
+            if (items.length == 1) {
+                selectedQuery = items.data("statement");
+                selectedLanguage = items.data("language");
+            } else {
+                selectedLanguage = "";
+                selectedQuery = "";
+            }
+            toggleItemVisibility("#explain-query-activator", (items.length == 1))
+        }
+    }
+
+    /** Creates an error dialog containinf the given message
+     * @param message
+     */
+    function showErrorDialog(message) {
+        //show the explanation in a modal
+        var dialog = document.querySelector("#explainErrorModal");
+        var errorContainer = document.querySelector("#errorContainer");
+
+        if(dialog && errorContainer) {
+            errorContainer.innerHTML = message;
+            dialog.show();
+        }
+    };
+
+    /**
+     * Shows or hides the "loading" modal (while the AJAX call hasn't returned yet)
+     * @param title
+     * @param show
+     */
+    function toggleWaitTicker(show) {
+        if(show){
+            ui.wait();
+        } else {
+            ui.clearWait();
+        }
+    }
+
+    function exportAsJson(data) {
+        return encodeURIComponent(JSON.stringify(data, null, 4));
+    }
+
+    // the node count checkbox is only enabled if the execution time is checked
+    $(document).on("change", "#executionTimeCheckbox", function() {
+        var includeExecutionTime = this.checked;
+        var nodeCountCheckbox = document.querySelector("#nodeCountCheckbox");
+        var readFirstResultsPageCheckbox =  document.querySelector("#readResultsCheckbox");
+
+        if(nodeCountCheckbox != null){
+            if(!includeExecutionTime) {
+                nodeCountCheckbox.disabled = true;
+                nodeCountCheckbox.checked = false; 
+
+                readFirstResultsPageCheckbox.disabled = true;
+                readFirstResultsPageCheckbox.checked = false;
+            } else {
+                nodeCountCheckbox.disabled = false;
+                readFirstResultsPageCheckbox.disabled = false;
+            }
+        }
+    });
+
+    // warn user when node count checkbox is checked
+    $(document).on("change", "#nodeCountCheckbox", function() {
+        if(this.checked){
+            ui.alert(Granite.I18n.get("Warning"), Granite.I18n.get("Producing an accurate query result count can be slow (since all matching rows / nodes will be iterated and access-control checks performed for each) and in-general should be avoided."), "warning");
+        }
+    });
+
+    function toggleItemVisibility(itemId, show) {
+        var item = $(itemId);
+        if(item.length > 0) {
+            if (show) {
+                item.removeProp("hidden");
+            } else {
+                item.prop("hidden", true);
+            }
+        }
+    }
+
+    // 'clears' the rows of the table whilst preserving row 0
+    function clearTableRows(table) {
+        var row0 = table.items.first();
+        table.items.clear();
+        table.items.add(row0);
+    }
+
+    // Reloads the tables of query stats
+    function reloadTableRows(){
+
+        $.ajax({
+          url: "/libs/granite/operations/content/diagnosistools/queryPerformance/content/items/tabs/items/queryPerformanceTab/items/querycollection.html",
+          type: "GET",
+          success: function(data){
+            $('#graniteExplainSlowQueries').parent().html(data);
+          }
+        });
+
+        $.ajax({
+          url: "/libs/granite/operations/content/diagnosistools/queryPerformance/content/items/tabs/items/popularQueriesTab/items/popularquerycollection.html",
+          type: "GET",
+          success: function(data){
+            $('#graniteExplainPopularQueries').parent().html(data);
+          }
+        });
+    }
+
+})(document, Granite.$);

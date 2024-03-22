@@ -1,0 +1,490 @@
+/*************************************************************************
+ *
+ * ADOBE CONFIDENTIAL
+ * __________________
+ *
+ *  Copyright 2015 Adobe Systems Incorporated
+ *  All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ **************************************************************************/
+(function(document, $) {
+    "use strict";
+
+    var timer;
+
+    var REPORT_URL = "/libs/granite/operations/content/monitoring/page/content/items/content.report.json";
+    var PER_SECOND = "per second";
+    var PER_MINUTE = "per minute";
+    var PER_HOUR = "per hour";
+    var PER_WEEK = "per week";
+
+    var INTERVALS = {"per second": 1000,
+        "per minute": 60000,
+        "per hour": 3600000,
+        "per week": 3600000 * 24}
+
+    var charts = [];
+
+    var chartsInitialized = false;
+
+    // start with "per minute" sampling
+    var reportPeriod = PER_MINUTE;
+    var pollingInterval = INTERVALS[PER_MINUTE];
+
+    var ui = $(window).adaptTo("foundation-ui");
+
+    $(document).on("change", ".reportPeriodSelect", function(e) {
+        reportPeriod = this.value;
+
+        if(reportPeriod !== undefined) {
+            $(".reportPeriodSelect").not($(this)).each(function(index, select) {
+                select.value = reportPeriod;
+            });
+            // we want the chart refresh interval to be proportional to the data observation interval
+            pollingInterval = INTERVALS[reportPeriod];
+
+            fetchAndPlotAllReports(reportPeriod);
+        }
+    });
+
+    function CustomCloudVizChart(dataSeries, parent, height) {
+        this.dataSeries = dataSeries;
+
+        this.initialize = function(parent, data) {
+            if(parent && ! this.chart) {
+                var opts = {
+                    width: '100%',
+                    height: height,
+                    data: data,
+                    parent: parent,
+                    interactive: true,
+                    autoResize: true,
+                    legendOrientation: "bottom",
+                    dateGranularity: "second",
+
+                    mappings: {
+                        "x": "x",
+                        "y": "y",
+                        "fill": "series",
+                        "stroke": "dataSeries",
+                        "series": "dataSeries"
+                    },
+
+                    formats: {
+                        x: "time",
+                        y: "decimal"
+                    }
+                };
+
+                this.chart = cloudViz.line(opts);
+            }
+
+            if(this.chart) {
+                this.chart.setOption("data", data);
+
+                //change the date granularity based on the sampling interval selection
+                var granularity;
+                if(PER_SECOND === reportPeriod) {
+                    granularity = "second"
+                } else if(PER_MINUTE === reportPeriod) {
+                    granularity = "minute";
+                } else if(PER_HOUR === reportPeriod){
+                    granularity = "hour";
+                } else {
+                    granularity = "day";
+                }
+
+                this.chart.setOption("dateGranularity", granularity);
+
+                this.chart.render(false);
+            }
+
+        }
+
+        // create the chart instance
+        this.initialize(parent);
+
+        this.updateReport = function(data) {
+            var oldSeriesStates = this.chart._seriesState ? this.chart._seriesState.getStateObjects() : null;
+            this.initialize(null, data);
+
+            if(oldSeriesStates) {
+                var series;
+                for (var i = 0; i < oldSeriesStates.length; i++) {
+                    series = oldSeriesStates[i];
+                    this.chart._seriesState.enableStateByTypeAndId(series.type, series.name, series.enabled);
+                }
+            }
+        }
+    }
+
+    function enableDisablePollingOnWindowFocus() {
+        var hidden = "hidden";
+        var visible = "visible";
+
+        // Standards:
+        if (hidden in document) {
+            document.addEventListener("visibilitychange", onFocusChange);
+        }  else if ((hidden = "mozHidden") in document) {
+            document.addEventListener("mozvisibilitychange", onFocusChange);
+        } else if ((hidden = "webkitHidden") in document) {
+            document.addEventListener("webkitvisibilitychange", onFocusChange);
+        } else if ((hidden = "msHidden") in document) {
+            document.addEventListener("msvisibilitychange", onFocusChange);
+        } else if ("onfocusin" in document) {
+            // IE 9 and lower:
+            document.onfocusin = document.onfocusout = onFocusChange;
+        } else {
+            // all other events:
+            window.onfocus = window.onblur = window.onpageshow = window.onpagehide = onFocusChange;
+        }
+
+        function onFocusChange (event) {
+            var eventMap = {
+                focus: visible, focusin: visible, pageshow: visible,
+                blur: hidden, focusout: hidden, pagehide: hidden
+            };
+
+            event = event || window.event;
+
+            // remove existing classes and re-evaluate visible status
+            var documentBody = $(document.body);
+            documentBody.removeClass(visible);
+            documentBody.removeClass(hidden);
+            if (event.type in eventMap) {
+                documentBody.addClass(eventMap[event.type]);
+            } else {
+                documentBody.addClass(this[hidden] ? hidden : visible);
+            }
+            
+            if(documentBody.hasClass(hidden)) {
+                clearTimeout(timer);
+            } else {
+                fetchAndPlotAllReports(reportPeriod);
+            }
+        }
+
+        // set the initial state (but only if browser supports the Page Visibility API)
+        if(document[hidden] !== undefined) {
+            onFocusChange({type: document[hidden] ? "blur" : "focus"});
+        }
+    };
+
+    $(document).on("foundation-contentloaded", function(e) {
+        if(!chartsInitialized) {
+            var height = 500;
+            var chartContainers = $(".chartContainer");
+
+            if (chartContainers && chartContainers.length > 0) {
+                var dataSeries;
+                for (var i = 0; i < chartContainers.length; i++) {
+                    dataSeries = $(chartContainers[i]).data("dataseries");
+                    dataSeries = dataSeries.split(",");
+                    charts.push(new CustomCloudVizChart(dataSeries, chartContainers[i], height));
+                }
+
+                enableDisablePollingOnWindowFocus();
+
+                // override the default time granularity template to allow minute and second granularity
+                // TODO - when the library supports these out of the box, remove this override
+                cloudViz.dvcore._timeGranTemplate = function (gran, format) {
+                    var t;
+                    switch (gran) {
+                        case 'hour' :
+                            t = format.hour;
+                            break;
+                        case 'day' :
+                            t = format.day;
+                            break;
+                        case 'week' :
+                            t = format.week;
+                            break;
+                        case 'month' :
+                            t = format.month;
+                            break;
+                        case 'quarter' :
+                            t = format.quarter;
+                            break;
+                        case 'year' :
+                            t = format.year;
+                            break;
+                        case 'minute' :
+                            t = "%H:%M";
+                            break;
+                        case 'second' :
+                            t = "%H:%M:%S";
+                            break;
+                        default :
+                            t = format.fallback;
+                            break;
+                    }
+                    return t;
+                };
+            }
+
+            // this is important to avoid reinitialization when contentloaded is thrown multiple times, from different locations
+            // fix for GRANITE-16712
+            chartsInitialized = true;
+        }
+    });
+
+    $(document).on("submit", "#updateChartForm", function(e) {
+        // preventing the default submit
+        e.preventDefault();
+
+        var form = $(this);
+        var selectList = document.querySelector("#selectList");
+        var data = {};
+
+        if(selectList) {
+            var path, groupItems, item, prefix, packagePrefix, beanName;
+            var groups = selectList.groups.getAll();
+            var currentGroup;
+            for(var i = 0; i < groups.length; i++) {
+                currentGroup = $(groups[i]);
+                path = currentGroup.data("path");
+
+                if(path) {
+                    packagePrefix = currentGroup.data("prefix");
+
+                    // add the package prefix to the MBean config
+                    if(packagePrefix) {
+                        form.append("<input type='hidden' name='" + path + "/packagePrefix'" + " value='" + packagePrefix + "'>");
+                    }
+
+                    beanName = currentGroup.data("beanname");
+
+                    // add the bean name to the MBean config
+                    if(beanName) {
+                        form.append("<input type='hidden' name='" + path + "/beanName'" + " value='" + beanName + "'>");
+                    }
+
+                    // build the data series list
+                    path += "/data";
+                    form.append("<input type='hidden' name='" + path + "@TypeHint' value='String[]'>");
+                    form.append("<input type='hidden' name='" + path + "@Patch' value='true'>");
+
+                    if(groups[i].items) {
+                        groupItems = groups[i].items.getAll();
+                        for (var j = 0; j < groupItems.length; j++) {
+                            item = groupItems[j]
+
+                            // add or remove the series from the set, depending on the selection
+                            prefix = "-";
+                            if (item.selected) {
+                                prefix = "+";
+                            }
+                            form.append("<input type='hidden' name='" + path + "' value='" + prefix + item.value + "'>");
+                        }
+                    }
+                }
+            }
+        }
+
+        // doing a manual submit to fix CQ-76483 (MS Edge)
+        makeSimplePostCall(form, Granite.I18n.get("Update Chart"));
+    });
+
+    $(document).on("coral-selectlist:change", "#selectList", function(e) {
+        var form = $("#updateChartForm");
+        if(form.length > 0) {
+            var submits = form.find(".foundation-validation-bind");
+
+            var allValid = true;
+            form.find(":-foundation-submittable").each(function() {
+                var api = $(this).adaptTo("foundation-validation");
+                // ignore the coral-selectlist form validation
+                if (!$(this).is("coral-selectlist") && !api.checkValidity()) {
+                    allValid = false;
+                }
+            });
+
+            if(allValid) {
+                submits.prop("disabled", !allValid);
+            }
+        }
+    });
+
+    $(document).on("click", "#deleteChartButton", function(e) {
+        var path = $(this).data("path");
+        var name = Granite.I18n.get($(this).data("name"));
+        var isDefaultChart = $(this).data("isdefaultchart");
+
+        var text = $("#deleteChartText");
+        var form = $("#deleteChartForm");
+        var modal = $("#deleteChartModal");
+
+        if(text.length > 0 && form.length > 0 && modal.length > 0) {
+            text.text(Granite.I18n.get("Are you sure you want to delete chart {0}?", name, "0 is the name of the chart"));
+            form.attr("action", Granite.HTTP.externalize(path));
+
+            var deleteInput = $("#deleteInput");
+            // the main chart needs to be hidden
+            if(isDefaultChart) {
+                deleteInput.prop("name", "sling:hideResource");
+                deleteInput.val("true");
+            } else {
+                deleteInput.prop("name", ":operation");
+                deleteInput.val("delete");
+            }
+
+            modal[0].show();
+        }
+    });
+
+    $(document).on("submit", "#deleteChartForm", function(e) {
+        e.preventDefault();
+        // doing a manual submit to fix CQ-76483 (MS Edge)
+        makeSimplePostCall($(this), Granite.I18n.get("Delete Chart"));
+    });
+
+    function makeSimplePostCall(form, operation) {
+        var successHandler = function(data) {
+            window.location.href =
+                Granite.HTTP.externalize("/libs/granite/operations/content/monitoring/page.html");
+        };
+
+        var errorHandler = function(xmlhttprequest, textStatus, msg) {
+            if(ui) {
+                ui.clearWait();
+                ui.alert(Granite.I18n.get("Error"),
+                    Granite.I18n.get("Failed to perform operation: {0}.", [operation]), "error");
+            }
+        };
+
+        makeAjaxCall(form.attr("action"), form.serialize(), "POST", "html",
+            successHandler, errorHandler, true);
+    }
+
+    function makeAjaxCall(url, data, method, dataType,
+                successHandler, errorHandler,
+                waitVisible) {
+        // doing a manual submit to fix CQ-76483 (MS Edge)
+        if(url) {
+            if(waitVisible) {
+                ui.wait();
+            }
+
+            if(!dataType) {
+                dataType = "html";
+            }
+
+            var _internalMakeAjaxCall = function () {
+                $.ajax({
+                    url: Granite.HTTP.externalize(url),
+                    type: method,
+                    data: data,
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    timeout: 30000,
+                    dataType: dataType,
+                    success: function (data) {
+                        successHandler(data)
+
+                        if(waitVisible) {
+                            ui.clearWait();
+                        }
+                    },
+                    error: function (xmlhttprequest, textStatus, msg) {
+                        errorHandler(xmlhttprequest, textStatus, msg);
+
+                        if(waitVisible) {
+                            ui.clearWait();
+                        }
+                    }
+                });
+            }
+
+            // update parent configuration for POSTs
+            if (method == "POST") {
+                var parentUrl = url.substring(0, url.lastIndexOf("/"));
+                $.ajax({
+                    url: Granite.HTTP.externalize(parentUrl),
+                    type: "POST",
+                    data: {
+                        "sling:configPropertyInherit": "true",
+                        "sling:configCollectionInherit": "true"
+                    },
+                    timeout: 60000,
+                    success: function (data) {
+                        _internalMakeAjaxCall();
+                    },
+                    error: function (xmlhttprequest, textStatus, msg) {
+                        ui.clearWait();
+                    }
+                });
+            } else {
+                _internalMakeAjaxCall();
+            }
+        }
+    }
+
+    function fetchAndPlotAllReports(period) {
+        clearTimeout(timer);
+
+        var successHandler = function(data) {
+            var dvData, tmp;
+            var timeArray = [];
+            var chart, currentChart;
+
+            if(data) {
+                var labels = data["labels"];
+                if(data["timeArray"]) {
+                    var millisAray = JSON.parse(data["timeArray"]);
+
+                    for (var i = 0; i < millisAray.length; i++) {
+                        timeArray.push(new Date(millisAray[i]));
+                    }
+                    //re-plot all the charts
+                    for (var index = 0; index < charts.length; index++) {
+                        chart = charts[index];
+
+                        dvData = {};
+                        dvData["y"] = [];
+                        dvData["x"] = [];
+                        dvData["dataSeries"] = [];
+
+                        for (var j = 0; j < chart.dataSeries.length; j++) {
+                            currentChart = chart.dataSeries[j];
+                            if ($.trim(currentChart).length > 0) {
+
+                                if(data[currentChart]) {
+                                    tmp = JSON.parse(data[currentChart]);
+                                    dvData["y"] = dvData["y"].concat(tmp);
+                                    dvData["x"] = dvData["x"].concat(timeArray);
+                                    dvData["dataSeries"] = dvData["dataSeries"].concat(
+                                        Array.apply(null,
+                                            Array(tmp.length)).map(String.prototype.valueOf, labels[currentChart]));
+                                }
+                            }
+                        }
+                        chart.updateReport(dvData);
+                    }
+
+
+                    timer = setTimeout(function () {
+                        fetchAndPlotAllReports(period);
+                    }, pollingInterval);
+                }
+            }
+        }
+
+        var errorHandler = function(data) {
+            // TODO better error handling here
+            console.log(data);
+        }
+
+        makeAjaxCall(Granite.HTTP.externalize(REPORT_URL),
+            "reportPeriod=" + period, "GET", "json",
+            successHandler, errorHandler, false);
+    }
+})(document, Granite.$);

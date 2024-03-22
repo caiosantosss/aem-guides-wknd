@@ -1,0 +1,987 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function ($, ns, channel, window, undefined) {
+
+    var PLUGIN_CONFIG_ALL_FEATURES = "*";
+    var PLUGIN_CONFIG_NO_FEATURES = "-";
+    var AUTHOR_IMAGE_SELECTOR = ".cq-dd-image";
+
+    /**
+     * Converts configuration list of entries into IPE format
+     *
+     * Parses a comma separated list if values into an actual array
+     *
+     * @param value
+     * @returns {*}
+     */
+    function parseConfigValue(value) {
+        if (value.indexOf(",") > 0) {
+            value = value.split(",");
+        }
+
+        if (!$.isArray(value)) {
+            value = [value];
+        }
+
+        return value;
+    }
+
+
+    var ui = {};
+
+    var Editor = new Class({
+        extend: CUI.ImageEditor,
+
+        switchToInline : function () {
+            this.options.parent.append(this.$ui);
+            ns.editor.fullscreenController.finish();
+
+            return this.inherited(arguments);
+        },
+
+        switchToFullscreen : function () {
+            var cont = ns.editor.fullscreenController.start();
+            cont.append(this.$ui);
+
+            return this.inherited(arguments);
+        },
+
+        setupEventHandling : function () {
+            var self = this;
+            this.options.parent.on("click.imageeditor-ooa", function (e) {
+                self.finish();
+            });
+
+            return this.inherited(arguments);
+        },
+
+        destroyEventHandling : function () {
+            this.options.parent.off("click.imageeditor-ooa");
+
+            return this.inherited(arguments);
+        },
+
+        destroyUI : function () {
+            var result = this.inherited(arguments);
+
+            ns.editor.fullscreenController.finish();
+
+            return result;
+        },
+
+        focus : function () {
+            var toolbar = this.options.mode ? this.toolbars[this.options.mode] : this.toolbars.inline;
+            toolbar.$toolbars.first(":not(.u-coral-hidden)").find('button:not([disabled]):not([tabindex="-1"])').first().focus();
+    	}
+    });
+
+    /**
+     * @class Granite.author.editor.ImageEditor
+     * @classdesc The ImageEditor is an in-place editor that allows to edit images.
+     */
+    ns.editor.ImageEditor = function () {
+        var self = this;
+
+        // Still here for compatibility reasons, but it's better
+        // to launch the editor via startImageEditor() directly
+        channel.on("inline-edit-start", function (e) {
+            var editable = e.editable;
+            self.startImageEditor(editable);
+        });
+    };
+
+    ns.editor.ImageEditor.PluginMixins = {};
+
+
+    /* Editor
+     ------------------------------------------------------------------------------------*/
+
+    /**
+     * Starts the image in-place editor on the given Editable
+     *
+     * @function Granite.author.editor.ImageEditor#setUp
+     *
+     * @param {Granite.author.Editable} editable The editable containing the image to edit
+     * @param {string} dropTargetId The identifier of the [dropTarget]{@link Granite.author.Component#getDropTarget} that contains the image to be edited
+     */
+    ns.editor.ImageEditor.prototype.setUp = function (editable, dropTargetId) {
+        this.startImageEditor(editable, dropTargetId);
+    };
+
+    /**
+     * Stops the image in-place editor on the given Editable
+     *
+     * @function Granite.author.editor.ImageEditor#tearDown
+     *
+     * @param {Granite.author.Editable} editable The editable containing the image to edit
+     */
+    ns.editor.ImageEditor.prototype.tearDown = function (editable) {
+        this.endImageEditor(editable);
+    };
+
+    /**
+     * Starts inline/in-place editing of the Editable.
+     *
+     * @fires Document#cq-hide-overlays
+     * @fires Document#inline-edit-before-start
+     *
+     * @param {Object} editable The editable
+     */
+    ns.editor.ImageEditor.prototype.startImageEditor = function (editable, dropTargetId) {
+        var self = this;
+        var wcmProperties = {};
+        var classicConfig = {};
+        var options = {};
+        var originalImage;
+        var ipeConfig = (editable.config && editable.config.ipeConfig) ? self.formatIpeConfig(editable.config.ipeConfig) : {};
+        ipeConfig = dropTargetId ? (ipeConfig[dropTargetId] || {}) : ipeConfig;
+
+        if (editable.dom.has(".cq-dd-" + dropTargetId + ".cq-placeholder").length === 1) {
+            return;
+        }
+
+        ns.history.Manager.setBlocked(true);
+        channel.trigger("cq-hide-overlays");
+        channel.trigger("inline-edit-before-start");
+
+        ui[editable.path] = $("<div class='cq-imageeditor-ui'></div>");
+        $("#InlineEditingUI").append(ui[editable.path]).show();
+
+        // We are ready to start up CUI.ImageEditor when the original image has loaded.
+        self.loadRendition(editable, dropTargetId)
+            .then(function (oImageAndData) {
+                originalImage = oImageAndData[0];
+                wcmProperties = oImageAndData[1];
+            })
+            .then(function () {
+                // Try fetching the legacy Classic UI config object.
+                self.loadClassicDialogConfig(editable, function (data) {
+                    if (data.items && data.items.image) {
+                        classicConfig = self.classicConfigToCUIConfig(ns.configCleaner(data.items.image));
+                    }
+                })
+                    .always(function () {
+                        // Deep copy the classic UI config onto the defaults
+                        options = $.extend(true, {}, ns.editor.ImageEditor.defaults, classicConfig);
+
+                        /**
+                         * Convert all plugin features of the IPEConfig from string to array
+                         *
+                         * Address an issue where plugin features are not individually disabled when listed in a comma separated string
+                         *
+                         * CUI-6363 - Image Editor Map Plugin doesn't restrict features with comma separated strings
+                         *
+                         * Unless its especially set as:
+                         *
+                         * *: All features
+                         * -: No features / disabled
+                         */
+                        for (var key in ipeConfig.plugins) {
+                            if (ipeConfig.plugins.hasOwnProperty(key)) {
+                                var features = ipeConfig.plugins[key].features;
+                                if (features && features.length > 0 && features !== PLUGIN_CONFIG_ALL_FEATURES && features !== PLUGIN_CONFIG_NO_FEATURES) {
+                                    ipeConfig.plugins[key].features = parseConfigValue(features);
+                                }
+                            }
+                        }
+
+                        // Deep extend without extending arrays
+                        options.plugins = Granite.Util.applyDefaults({}, options.plugins, ipeConfig.plugins);
+                        options.ui = Granite.Util.applyDefaults({}, options.ui, ipeConfig.ui);
+
+                        // determine width of image and its container; sizeOptions.width uses lesser value (image might be cropped by the container)
+                        var $image = dropTargetId ? editable.dom.find(".cq-dd-" + dropTargetId) : editable.dom.find(AUTHOR_IMAGE_SELECTOR);
+                        var width = 0;
+                        if ($image.length !== 0) {
+                            var image = $image[0];
+                            var containerWidth = 0;
+                            var container = image;
+                            while (containerWidth === 0 && container !== editable.dom[0]) {
+                                // traversal required; parents might be inline elements w/o width e.g. an anchor
+                                container = container.parentElement;
+                                containerWidth = container.clientWidth;
+                            }
+                            width = containerWidth < image.clientWidth ? containerWidth : image.clientWidth
+                        } else {
+                            width = editable.dom[0].clientWidth;
+                        }
+
+                        var sizeOptions = {
+                            naturalHeight: originalImage.naturalHeight,
+                            naturalWidth: originalImage.naturalWidth,
+                            width: width
+                        };
+
+                        $.extend(options, sizeOptions);
+
+                        options.result = self.fromWCMtoCUI(editable, sizeOptions, wcmProperties);
+
+                        var componentOptions = $.extend({
+                            element: $image,
+                            image: originalImage,
+                            parent: ui[editable.path],
+                            theme: "dark"
+                        }, sizeOptions);
+
+                        self.checkFeaturesForSupportedMimeTypes(options, wcmProperties);
+
+                        var editor = new Editor(componentOptions);
+
+                        editor.start(options);
+
+                        editable.dom.one("editing-finished", function (e, content) {
+                            self.onFinishEditing(editable, sizeOptions, content, dropTargetId);
+                        });
+
+                        editable.dom.one("editing-cancelled", function (e, content) {
+                            self.onCancelEditing(editable);
+                        });
+
+                        // Cache the initial data, useful for setting up undo/redo history step
+                        self.startData = self.fromCUItoWCM(editable, sizeOptions, options, dropTargetId);
+
+                        editor.focus();
+                    });
+            })
+            .fail(function () {
+                var msg;
+                if (arguments.length > 0 && typeof arguments[0] === 'string') {
+                    msg = Granite.I18n.get("Sorry, could not start image editor:") + " " + Granite.I18n.get(arguments[0]);
+                } else {
+                    msg = Granite.I18n.get("Sorry, image editor could not start.");
+                }
+
+                ns.ui.helpers.notify({
+                    content: msg,
+                    type: ns.ui.helpers.NOTIFICATION_TYPES.ERROR
+                });
+
+                self.onCancelEditing(editable);
+            });
+    };
+
+    /**
+     * Sets up the undo/redo history step for the image editing update.
+     * @param {Object} editable The editable
+     * @param {Object} sizeOptions
+     * @param {Object} properties The transformation properties of the editing session.
+     */
+    ns.editor.ImageEditor.prototype.addHistoryStep = function(editable, sizeOptions, properties, dropTargetId) {
+        var key,
+            self = this,
+            originalData = {},
+            changedData = this.fromCUItoWCM(editable, sizeOptions, properties, dropTargetId),
+            hasChanged = false;
+
+        if (editable) {
+            for (key in self.startData) {
+                if (self.startData.hasOwnProperty(key) && key.indexOf("image") !== -1) {
+                    originalData[key] = self.startData[key];
+                }
+            }
+
+            for (key in changedData) {
+                if (originalData.hasOwnProperty(key) && originalData[key] !== changedData[key]) {
+                    hasChanged = true;
+                    break;
+                }
+            }
+
+            // only add an history step if something changed
+            if (hasChanged) {
+                ns.history.util.Utils.addUpdateParagraphStep(editable.path, editable.type, originalData, changedData);
+            }
+        }
+    };
+
+    /**
+     * End image editing. Kill the UI and events
+     * @param {Object} editable The editable
+     */
+    ns.editor.ImageEditor.prototype.endImageEditor = function (editable) {
+        ui[editable.path].remove();
+        delete ui[editable.path];
+        $("#InlineEditingUI").hide();
+        ns.history.Manager.setBlocked(false);
+    };
+
+    /**
+     * Update the image component properties
+     *
+     * @fires Document#inline-edit-finish
+     * @fires Document#cq-show-overlays
+     *
+     * @param {Object} editable The editable
+     * @param {Object} sizeOptions
+     * @param {Object} properties The transformation properties of the editing session. Passed to the callback.
+     */
+    ns.editor.ImageEditor.prototype.updateProperties = function (editable, sizeOptions, properties, dropTargetId) {
+        var self = this;
+        editable.refresh()
+            .then(function () {
+                ns.overlayManager.recreate(editable);
+                ns.selection.select(editable);
+
+                ns.edit.EditableActions.UPDATE.execute(editable, self.fromCUItoWCM(editable, sizeOptions, properties, dropTargetId)).always(function (e) {
+
+                    channel.trigger($.Event('inline-edit-finish', {
+                        editable: editable,
+                        properties: properties
+                    }));
+
+                    channel.trigger("cq-show-overlays");
+                });
+            });
+    };
+
+    /**
+     * Load the DAM rendition for the editable and calls a callback
+     *
+     * @param {Object} editable The editable
+     * @param {Function} callback Called when rendition has loaded
+     * @returns {$.Promise} of [img, data]
+     */
+    ns.editor.ImageEditor.prototype.loadRendition = function (editable, dropTargetId) {
+        var self = this;
+        var path = editable.path;
+        var prefix = this.getImagePrefix(editable, dropTargetId);
+        var fileReference = "fileReference";
+        var filePathSuffix = "/file";
+
+        if (prefix) {
+            path += "/" + prefix;
+        }
+
+        return $.getJSON(path + '.json')
+            .then(function (data) {
+                if (data.hasOwnProperty(fileReference)) {
+                    // Prefer reference if present
+                    path = data[fileReference];
+
+                    return self.getMimeType(path + '/jcr:content/metadata').then(function (mimeType) {
+                        data.mimeType = mimeType;
+                        // Get renditions and use web or original (as fallback) because web might be smaller than original, and server is
+                        // applying rendering transformations to the web rendition if it is available (CQ-28503).
+                        return self.loadWebRendition(path).then(function (webRenditionPath) {
+
+                            if (webRenditionPath) {
+                                path = webRenditionPath;
+                            }
+
+                            return self.loadImage(path).then(function (img) {
+                                return [img, data];
+                            });
+                        });
+                    });
+                } else {
+                    path = path + filePathSuffix;
+                    return self.getMimeType(path + '/jcr:content').then(function (mimeType) {
+                        data.mimeType = mimeType;
+                        return self.loadImage(path).then(function (img) {
+                            return [img, data];
+                        });
+                    });
+                }
+            });
+    };
+
+    /**
+     * Load the DAM web rendition for the image asset at the given path and calls a callback
+     * @param {Object} path the path to a possible DAM asset
+     * @returns {Object} $.Promise
+     */
+    ns.editor.ImageEditor.prototype.loadWebRendition = function (path) {
+        var RENDITIONS_PATH = '/jcr:content/renditions',
+            WEB_RENDITION_PREFIX = 'cq5dam.web',
+            requestPath = path + RENDITIONS_PATH + '.1.json';
+
+        return $.getJSON(requestPath).then(function(renditionsData) {
+            var webRenditionPath = null;
+            for (var prop in renditionsData) {
+                if (renditionsData.hasOwnProperty(prop)) {
+                    if (prop.indexOf(WEB_RENDITION_PREFIX) === 0) {
+                        webRenditionPath = path + RENDITIONS_PATH + '/' + prop;
+                        break; // only one web rendition currently. Doing same as WCMRenditionPicker.java (2014-11-13)
+                    }
+                }
+            }
+
+            return webRenditionPath;
+        }, function () {
+            return 'Expecting DAM asset to have renditions, but request to ' + requestPath + ' failed';
+        });
+    };
+
+    /**
+     * Loads the mime type of the current image
+     * @param path of the current image
+     * @returns {Object} $.Promise
+     */
+    ns.editor.ImageEditor.prototype.getMimeType = function (path) {
+
+        var PN_MIME_TYPE = 'jcr:mimeType',
+            PN_DC_FORMAT = 'dc:format',
+            requestPath = path + '.json';
+
+        return $.getJSON(requestPath).then(function(contentData) {
+            var mimeType = null;
+            if(contentData.hasOwnProperty(PN_MIME_TYPE)) {
+                mimeType = contentData[PN_MIME_TYPE];
+            } else if (contentData.hasOwnProperty(PN_DC_FORMAT)) {
+                mimeType = contentData[PN_DC_FORMAT];
+            }
+            return mimeType;
+        }, function () {
+            return 'Could not load mimeType information of image resource, request to ' + requestPath + ' failed';
+        });
+    };
+
+    /**
+     * Loads the Classic UI image editing configuration for this editable, if available.
+     * @param {Object} editable The editable to load the legacy image config for
+     * @param {Function} callback Called on dialog config load
+     * @returns $.Deferred
+     */
+    ns.editor.ImageEditor.prototype.loadClassicDialogConfig = function (editable, callback) {
+        var self = this,
+            configPath;
+
+        if (editable.config && editable.config.dialogClassic) {
+            configPath = editable.config.dialogClassic;
+
+            return $.getJSON(configPath + ".infinity" + ".json", function (data) {
+                if (callback) {
+                    callback.call(self, data);
+                }
+            });
+        } else {
+            return $.Deferred().reject().promise();
+        }
+    };
+
+    /* Event handling
+     ------------------------------------------------------------------------------------*/
+
+    /**
+     * Handle edit session 'finish'. Opportunity to interpret and persist transformation results.
+     * @param {Object} sizeOptions sizeOptions
+     * @param {Object} properties Edit session transformation properties
+     */
+    ns.editor.ImageEditor.prototype.onFinishEditing = function (editable, sizeOptions, properties, dropTargetId) {
+        this.endImageEditor(editable);
+        this.updateProperties(editable, sizeOptions, properties,dropTargetId);
+        this.addHistoryStep(editable, sizeOptions, properties, dropTargetId);
+    };
+
+    /**
+     * Handle edit session cancellation
+     *
+     * @fires Document#inline-edit-cancel
+     * @fires Document#cq-show-overlays
+     *
+     * @param {Object} editable The editable
+     */
+    ns.editor.ImageEditor.prototype.onCancelEditing = function (editable) {
+        this.endImageEditor(editable);
+
+        editable.refresh().then(function () {
+            editable.afterEdit();
+            var editableParent = ns.editables.getParent(editable);
+            editableParent && editableParent.afterChildEdit(editable);
+            ns.overlayManager.recreate(editable);
+            ns.selection.select(editable);
+        });
+
+        channel.trigger($.Event('inline-edit-cancel', {editable: editable}));
+
+        channel.trigger("cq-show-overlays");
+    };
+
+
+
+    /* Utilities
+     ------------------------------------------------------------------------------------*/
+
+    /**
+     * Utility function which creates a DOM image node for `path` and triggers
+     * `callback(img)`, when image resource is fully loaded. It works around the
+     * fact that the jQuery load event "doesn't work consistently nor reliably
+     * cross-browser" and it "can cease to fire for images that already live in
+     * the browser's cache".
+     */
+    ns.editor.ImageEditor.prototype.loadImage = function (path, callback) {
+        var POLL_INTERVAL = 100,
+            triggered = false,
+            self = this,
+            img, cont,
+            pollForLoad, onLoad,
+            start = new Date().getTime(),
+            WARN_DELAY_MS = 5*1000,
+            warnedLast = start,
+            ERROR_DELAY_MS = 30*1000,
+            timeoutReference = null,
+            deferred = $.Deferred();
+
+        pollForLoad = function () {
+            var now = new Date().getTime();
+            // While loading FF returns dimensions of placeholder image when
+            // querying $.fn.width(). Therefore we're using naturalWidth which
+            // is correctly reported as 0.
+            if (img.get(0).naturalWidth) {
+                onLoad();
+            }
+            else {
+                if (now - warnedLast > WARN_DELAY_MS) {
+                    ns.ui.helpers.notify({
+                        content: Granite.I18n.get('Loading image since {0} seconds. Will abort after {1} seconds.', [Math.floor((now-start)/1000), ERROR_DELAY_MS/1000]),
+                        type: ns.ui.helpers.NOTIFICATION_TYPES.INFO
+                    });
+                    warnedLast = now;
+                }
+
+                if (now - start > ERROR_DELAY_MS) {
+                    return deferred.reject(Granite.I18n.get('Image did not load (timeout after {0} seconds).', [(ERROR_DELAY_MS/1000)]));
+                } else {
+                    timeoutReference = setTimeout(pollForLoad, POLL_INTERVAL);
+                }
+            }
+        };
+
+        onLoad = function () {
+            if (triggered) {
+                return;
+            }
+
+            triggered = true;
+            if (timeoutReference) {
+                clearTimeout(timeoutReference);
+                timeoutReference = null;
+            }
+
+            cont.remove();
+            deferred.resolveWith(self, img);
+        };
+
+        var imgSrc = Granite.HTTP.externalize(path);
+
+        // In case the image src doesn't change
+        // add a cache killer query parameter to force the browser to reload the url
+        imgSrc += imgSrc.indexOf("?") > -1 ? "&" : "?";
+        imgSrc += "cq_ck=" + new Date().getTime();
+
+        img = $("<img>", {src: imgSrc});
+        cont = $("<div>").css({position: "absolute", left: "-1000000px"});
+
+        // append img to DOM, so that it gets dimensions
+        cont.append(img).appendTo("body");
+
+        img.on('load', onLoad);
+        pollForLoad();
+        return deferred.promise();
+    };
+
+    ns.editor.ImageEditor.prototype.fromWCMtoCUI = function (editable, sizeOptions, properties) {
+        var result = [], self = this, registeredPlugins = {};
+
+        sizeOptions = $.extend({}, sizeOptions);
+
+        // some plugins need to be handled before others to be able to provide complete sizing info: rotate and crop
+        this.iteratePluginsForStaticUse(function (pluginName, plugin) {
+            registeredPlugins[pluginName] = plugin;
+        });
+        if (registeredPlugins.rotate) {
+            registeredPlugins.rotate.fromWCMtoCUI(this, editable, sizeOptions, properties, result);
+        }
+        if (registeredPlugins.crop) {
+            registeredPlugins.crop.fromWCMtoCUI(this, editable, sizeOptions, properties, result);
+        }
+
+        this.iteratePluginsForStaticUse(function (pluginName, plugin) {
+            if (["crop", "rotate"].indexOf(pluginName) >= 0) {
+                return; // processed them already
+            }
+            if (plugin.fromWCMtoCUI) {
+                plugin.fromWCMtoCUI(self, editable, sizeOptions, properties, result);
+            }
+        });
+
+        return result;
+    };
+
+    /**
+     * Translates CUI.ImageEditor transformation properties to WCM properties
+     */
+    ns.editor.ImageEditor.prototype.fromCUItoWCM = function (editable, sizeOptions, properties, dropTargetId) {
+        var i, registeredPlugins = null, result = {}, prefix = this.getImagePrefix(editable, dropTargetId);
+
+        sizeOptions = $.extend({}, sizeOptions);
+
+        registeredPlugins = CUI.imageeditor.plugins.PluginRegistry.createRegisteredPlugins(this);
+
+        // some plugins need to be handled before others to be able to provide complete sizing info: rotate and crop
+        if (registeredPlugins.rotate) {
+            registeredPlugins.rotate.fromCUItoWCM(this, editable, sizeOptions, properties, result);
+        }
+        if (registeredPlugins.crop) {
+            registeredPlugins.crop.fromCUItoWCM(this, editable, sizeOptions, properties, result);
+        }
+
+        for (i = 0; i < properties.result.length; i++) {
+            var transformation = properties.result[i];
+
+            switch (transformation.transformation) {
+                case "crop":
+                    // already handled above
+                    break;
+
+                case "rotate":
+                    // already handled above
+                    break;
+
+                default:
+                    if (registeredPlugins[transformation.transformation] && registeredPlugins[transformation.transformation].fromCUItoWCM) {
+                        registeredPlugins[transformation.transformation].fromCUItoWCM(this, editable, sizeOptions, properties, result);
+                    }
+            }
+        }
+
+        if (prefix) {
+            prefix = prefix + "/";
+
+            for (var prop in result) {
+                if (result.hasOwnProperty(prop)) {
+                    result[prefix + prop] = result[prop];
+                    delete result[prop];
+                }
+            }
+
+            result[prefix + "jcr:lastModified"] = null;
+            result[prefix + "jcr:lastModifiedBy"] = null;
+        }
+
+        return result;
+    };
+
+    ns.editor.ImageEditor.prototype.getImagePrefix = function (editable, dropTargetId) {
+        if (!(editable && editable.dropTargets)) {
+            // Unexpected: editable has no dropTargets. Using no prefix
+            return "";
+        }
+
+        var imageIdDropTarget = null;
+        for (var i = 0; i<editable.dropTargets.length; i++) {
+            var current = editable.dropTargets[i];
+            if (current.accept && current.accept.length === 1 && current.accept[0] === "image/.*") {
+                imageIdDropTarget = current;
+                if(dropTargetId !== null && dropTargetId !== undefined && dropTargetId === current.id) {
+                    break;
+                } else if(dropTargetId === null || dropTargetId === undefined) {
+                    break;
+                }
+            }
+        }
+
+        var name = null;
+        if (imageIdDropTarget) {
+            name = imageIdDropTarget.name;
+        }
+
+        var retval = "";
+
+        if (name) {
+
+            var pathParts = name.split('/');
+            if (pathParts.length > 1) {
+                // cut the last
+                pathParts.splice(pathParts.length - 1);
+                retval = pathParts.join("/");
+            }
+        }
+
+        return retval;
+    };
+
+    ns.editor.ImageEditor.prototype.extractTransformations = function (transformationResults, transformationType) {
+        var retval = [];
+        for (var i = 0; i < transformationResults.length; i++) {
+            var current = transformationResults[i];
+            if (current.transformation === transformationType) {
+                retval.push(current);
+            }
+        }
+        return retval;
+    };
+
+    /**
+     * Check for the optional supportedMimeTypes property of each plugin and disable all features of that plugin if the mime type of
+     * the current image is not provided in this property. If no supportedMimeTypes property is set, the features property of that
+     * plugin stays unchanged.
+     * @param options ipeConfig options
+     * @param wcmProperties of the asset
+     */
+    ns.editor.ImageEditor.prototype.checkFeaturesForSupportedMimeTypes = function (options, wcmProperties) {
+        var PN_SUPPORTED_MIME_TYPES = 'supportedMimeTypes',
+            mimeType = wcmProperties.mimeType;
+
+        if(options.plugins) {
+            for(var plugin in options.plugins) {
+                if (options.plugins.hasOwnProperty(plugin)) {
+                    if(options.plugins[plugin].hasOwnProperty(PN_SUPPORTED_MIME_TYPES)) {
+                        var mimeTypes = options.plugins[plugin][PN_SUPPORTED_MIME_TYPES];
+                        var enableFeatures = mimeTypes.some(function (allowedMimeType) {
+                            return allowedMimeType === mimeType || allowedMimeType === "*" || (new RegExp(allowedMimeType)).test(mimeType);
+                        });
+                        if (!enableFeatures) {
+                            options.plugins[plugin].features = PLUGIN_CONFIG_NO_FEATURES;
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    /**
+     * Conscious conversion of legacy Classic UI image editing config
+     * to a CUI.ImageEditor-compatible one.
+     * @param {Object} classicConfig The Classic UI in-place image editing configuration
+     * @returns {Object} the converted config object
+     */
+    ns.editor.ImageEditor.prototype.classicConfigToCUIConfig = function (classicConfig) {
+        var self = this,
+            pluginsConfig = {}, config = {};
+
+        this.iteratePluginsForStaticUse(function (pluginName, plugin) {
+            if (plugin.classicConfigToCoralConfig) {
+                pluginsConfig[pluginName] = plugin.classicConfigToCoralConfig(self, classicConfig);
+            }
+        });
+        config.plugins = pluginsConfig;
+
+        return config;
+    };
+
+    /**
+     * Prepares the image ipeConfig for use in CUI.ImageEditor. Handles conversion of relevant
+     * Objects to Arrays.
+     * @param {Object} ipeConfig The in-place image editing configuration
+     * @returns {Object} A CUI.ImageEditor-compatible configuration
+     */
+    ns.editor.ImageEditor.prototype.formatIpeConfig = function (ipeConfig) {
+        var self = this, config = $.extend(true, {}, ipeConfig);
+
+        // Plugins
+        if (config.plugins) {
+            this.iteratePluginsForStaticUse(function (pluginName, plugin) {
+                var pluginConfig = config.plugins[pluginName];
+                if (pluginConfig && plugin.formatIpeConfig) {
+                    config.plugins[pluginName] = plugin.formatIpeConfig(self, pluginConfig);
+                }
+            });
+        }
+
+        // UI
+        if (config.ui) {
+            if (config.ui.fullscreen) {
+                if (config.ui.fullscreen.toolbar) {
+                    $.each(config.ui.fullscreen.toolbar, function(key, value) {
+                        config.ui.fullscreen.toolbar[key] = parseConfigValue(value);
+                    });
+                    config.ui.fullscreen.toolbar = self.ipeArrayToJsArray(config.ui.fullscreen.toolbar);
+                }
+
+                if (config.ui.fullscreen.replacementToolbars) {
+                    $.each(config.ui.fullscreen.replacementToolbars, function(key, value) {
+                        $.each(config.ui.fullscreen.replacementToolbars[key], function(k, v) {
+                            config.ui.fullscreen.replacementToolbars[key][k] = parseConfigValue(v);
+                        });
+                        config.ui.fullscreen.replacementToolbars[key] = self.ipeArrayToJsArray(value);
+                    });
+                }
+            }
+        }
+
+        return config;
+    };
+
+    ns.editor.ImageEditor.prototype.ipeArrayToJsArray = function (obj) {
+        var key, retval = [];
+        if ($.isArray(obj)) {
+            return obj;
+        }
+
+        for (key in obj) {
+            if (obj.hasOwnProperty(key)) {
+                retval.push(obj[key]);
+            }
+        }
+
+        return retval;
+    };
+
+    /**
+     * Tells if the given editable can be edited.
+     * Here, the editable should contain an image (cannot edit if no image)
+     * @param editable
+     * @returns {boolean}
+     */
+    ns.editor.ImageEditor.prototype.canEdit = function (editable) {
+        return editable.dom.find(AUTHOR_IMAGE_SELECTOR + ":not(.cq-placeholder)").length;
+    };
+
+    /**
+     * Uses instances created independent of CoralUI editor - so only CQ-specific plugin methods are available.
+     *
+     * @param callback is called with (pluginName, pluginInstance).
+     */
+    ns.editor.ImageEditor.prototype.iteratePluginsForStaticUse = function (callback) {
+        var pluginName;
+
+        if (!this.registeredPlugins) {
+            this.registeredPlugins = CUI.imageeditor.plugins.PluginRegistry.createRegisteredPlugins(this);
+        }
+
+        for (pluginName in this.registeredPlugins) {
+            if (this.registeredPlugins.hasOwnProperty(pluginName)) {
+                callback(pluginName, this.registeredPlugins[pluginName]);
+            }
+        }
+    };
+
+    /* Default options
+     ------------------------------------------------------------------------------------*/
+
+    /**
+     * CUI ImageEditor default options in page authoring.
+     * The UI and Plugins can be overridden by setting up an in-place
+     * editing config for a component (editable.config.ipeConfig).
+     */
+    ns.editor.ImageEditor.defaults = {
+        "ui": {
+            "inline": {
+                "toolbar": [
+                    "crop#launch",
+                    "rotate#right",
+                    "history#undo",
+                    "history#redo",
+                    "fullscreen#fullscreen",
+                    "control#close",
+                    "control#finish"
+                ],
+                "replacementToolbars": {
+                    "crop": [
+                        "crop#identifier",
+                        "crop#unlaunch",
+                        "crop#confirm"
+                    ]
+                }
+            },
+            "fullscreen": {
+                "toolbar": [
+                    [
+                        "crop#launchwithratio",
+                        "rotate#right",
+                        "map#launch",
+                        "zoom#reset100",
+                        "zoom#popupslider"
+                    ],
+                    [
+                        "history#undo",
+                        "history#redo",
+                        "fullscreen#fullscreenexit"
+                    ]
+                ],
+                "replacementToolbars": {
+                    "crop": [
+                        [
+                            "crop#identifier"
+                        ],
+                        [
+                            "crop#unlaunch",
+                            "crop#confirm"
+                        ]
+                    ],
+                    "map": [
+                        [
+                            "map#rectangle",
+                            "map#circle",
+                            "map#polygon"
+                        ],
+                        [
+                            "map#unlaunch",
+                            "map#confirm"
+                        ]
+                    ]
+                }
+            }
+        },
+        plugins: {
+            crop: {
+                features: '*'
+            },
+            map: {
+                features: '*',
+                pathbrowser: {
+                    type: 'picker',
+
+                    /* options for autocomplete and picker: */
+                    rootPath: '/content',
+                    showTitles: false,
+                    optionLoader: function(path, callback) {
+                        jQuery.get(path + ".pages.json", {
+                                predicate: "hierarchyNotFile"
+                            },
+                            function(data) {
+                                var pages = data.pages;
+                                var result = [];
+                                for(var i = 0; i < pages.length; i++) {
+                                    result.push(pages[i].label);
+                                }
+                                if (callback) {
+                                    callback(result);
+                                }
+                            }, "json");
+                        return false;
+                    },
+
+                    /* autocomplete configuration: */
+                    optionLoaderRoot: null, // provide property path to array in return value of optionLoader, e.g. 'results.values',
+                    optionValueReader: function (object) {
+                        return '' + object;
+                    },
+                    optionTitleReader: function (object) {
+                        return '' + object;
+                    },
+
+                    /* picker configuration: */
+                    pickerSrc: '/libs/wcm/core/content/common/pathbrowser/column.html' + '/content' + '?predicate=hierarchyNotFile',
+                    pickerTitle: 'Choose a target path',
+                    picketCrumbRoot: {
+                        title: 'Content Root',
+                        icon: 'coral-Icon-home'
+                    }
+                }
+            },
+            rotate: {
+                features: '*'
+            }
+        }
+    };
+
+    // register the editor to the editor registry
+    ns.editor.register('image', new ns.editor.ImageEditor());
+
+}(jQuery, Granite.author, jQuery(document), this));

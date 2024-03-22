@@ -1,0 +1,818 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * The <code>CQ.tagging.TagAdmin</code> class provides the admin console for 
+ * WCM tag administration.
+ * @class CQ.tagging.TagAdmin
+ * @extends CQ.Ext.Viewport
+ *
+ * @private
+ */
+CQ.tagging.TagAdmin = CQ.Ext.extend(CQ.Ext.Viewport, {
+
+    TAG_GRID_PAGING_INITIAL_OFFSET: 0,
+
+    TAG_GRID_PAGING_MAX_SIZE: 30,
+
+    treeMask: false,
+    
+    /**
+     * Creates a new <code>CQ.tagging.TagAdmin</code> instance.
+     * @constructor
+     * @param {Object} config The config object
+     */
+    constructor: function(config) {
+        this.debug = config.debug;
+        var admin = this;
+        this.checkedActions = [];
+        var tagroot = $(".cq-tagging-root-path").attr("data-cq-tagging-root-path");
+        if (tagroot == undefined) {
+    		var tagrootjson = this.loadJson("/etc/tags" + CQ.tagging.TAG_JSON_SUFFIX);
+    		if(tagrootjson) {
+    			tagroot = tagrootjson.path;
+    		}
+    	}
+        
+        /**
+         * @cfg {String} tagsBasePath  The base path for the tag storage on the server (defaults to /content/cq:tags).
+         * Should not contain a trailing "/".
+         */
+        
+        this.tagsBasePath = tagroot;
+        
+        CQ.Util.applyDefaults(config, {
+            tagsBasePath: tagroot
+        });
+
+        // actions
+        var actions = [];
+        var disabledActions = [];
+        var tagActions = [];
+        actions.push({
+            "id":"cq-tagadmin-grid-refresh",
+            "iconCls":"cq-siteadmin-refresh",
+            "handler":this.reloadAll,
+            "scope":this,
+            "tooltip": {
+                "text":CQ.I18n.getMessage("Refresh the list of tags"),
+                "autoHide":true
+            }
+        });
+        actions.push("-");
+        if (config.actions) {
+            actions = actions.concat(
+                    this.formatActions(config.actions, disabledActions, tagActions));
+        }    
+
+        actions.push("-");
+        actions.push({
+            xtype: "button",
+            enableToggle: true,
+            text: CQ.I18n.getMessage("Count usage"),
+            handler: function(b) {
+                this.mask();
+                var checked = b.pressed;
+                var grid = CQ.Ext.getCmp("cq-tagadmin-grid");
+                grid.getColumnModel().setHidden(5, !checked);
+                grid.getStore().reload({
+                    params: {
+                        count: checked ? "true" : "false"
+                    },
+                    callback: function() { this.unmask(); },
+                    scope: this
+                });
+            },
+            scope:this
+        });
+        
+        actions.push("->");
+        
+        var userLocale = CQ.User.getCurrentUser().getLanguage();
+        this.setLocale(userLocale);
+        
+        actions.push(
+            CQ.tagging.getLocaleSelectCombo(function(locale) {
+                admin.setLocale(locale, true);
+            }, userLocale)
+        );
+        
+        var treeLoader = new CQ.tree.SlingTreeLoader({
+            // sling tree loader config
+            path: config.tagsBasePath,
+            typeIncludes: ["cq:Tag"],
+            filterFn: function(name, o) {
+                if (o["cq:movedTo"]) {
+                    return null;
+                }
+                return o;
+            },
+            getTitle: function(name, o) {
+                return CQ.tagging.getLocalizedTitle(o, admin.locale, "jcr:title", name);
+            },
+            // standard tree loader config
+            baseAttrs: {
+                singleClickExpand: true,
+                allowDrop: true,
+                uiProvider: CQ.tagging.TagAdmin.TreeNodeUI
+            }
+        });
+        
+        var treeRoot = new CQ.Ext.tree.AsyncTreeNode({
+            // no leading slash for name of root node, will be added automatically in getPath()
+            name: config.tagsBasePath.substring(1),
+            text: CQ.I18n.getMessage("Tags"),
+            draggable: false,
+            expanded: true
+        });
+        
+        var tree = new CQ.Ext.tree.TreePanel({
+            //"xtype":"treepanel",
+            "id":"cq-tagadmin-tree",
+            "region":"west",
+            "margins":"5 0 5 5",
+            "width": CQ.themes.TagAdmin.TREE_WIDTH,
+            "autoScroll":true,
+            "containerScroll":true,
+            "collapsible":true,
+            "collapseMode":"mini",
+            "hideCollapseTool": true,
+            "animate":true,
+            "split":true,
+            "enableDD":true,
+            "ddScroll":true,
+            "ddAppendOnly": true, // no ordering
+            "ddGroup":CQ.tagging.TagAdmin.DD_GROUP,
+            "dropConfig": {
+                ddGroup: CQ.tagging.TagAdmin.DD_GROUP,
+                appendOnly: true,
+                completeDrop : function(de){
+                    var ns = de.dropNode, p = de.point, t = de.target;
+                    if(!CQ.Ext.isArray(ns)){
+                        ns = [ns];
+                    }
+                    var n;
+                    for(var i = 0, len = ns.length; i < len; i++){
+                        n = ns[i];
+                        if(p == "above"){
+                            t.parentNode.insertBefore(n, t);
+                        }else if(p == "below"){
+                            t.parentNode.insertBefore(n, t.nextSibling);
+                        }else{
+                            // CQ START: add support for "merge" point
+                            if (admin.mergeNode) {
+                                var node = n;
+                                n = t; // focus/highlight ui on target node
+                                // fire custom event
+                                if (this.tree.fireEvent("beforemergenode", this.tree, node, t)) {
+                                    node.remove();
+                                }
+                            } else {
+                                t.appendChild(n);
+                            }
+                            // CQ END: add support for "merge" point
+                        }
+                    }
+                    n.ui.focus();
+                    if(CQ.Ext.enableFx && this.tree.hlDrop){
+                        n.ui.highlight();
+                    }
+                    t.ui.endDrop();
+                    this.tree.fireEvent("nodedrop", de);
+                }
+            },
+            "loader": treeLoader,
+            "root": treeRoot,
+            "rootVisible": true,
+            "tbar": [
+                {
+                    "id":"cq-tagadmin-tree-refresh",
+                    "iconCls":"cq-siteadmin-refresh",
+                    "handler":function(){
+                        admin.reloadTree();
+                    },
+                    "tooltip": {
+                        "text":CQ.I18n.getMessage("Refresh the tree"),
+                        "autoHide":true
+                    }
+                }
+            ],
+            listeners: {
+                click: function(node, event) {
+                    if (!node.expanded && !node.isRoot) {
+                        admin.treeMask = true;
+                    }
+                    admin.loadPath(node.getPath());
+                },
+                nodedragover: function(e) {
+                    // change drag icon to show difference between move and merge (ctrl)
+                    var ghost = e.source.getProxy().getEl();
+                    if (e.rawEvent.browserEvent.ctrlKey) {
+                        ghost.addClass("x-tree-drop-ok-append");
+                        ghost.removeClass("x-dd-drop-ok");
+                    } else {
+                        ghost.removeClass("x-tree-drop-ok-append");
+                        ghost.addClass("x-dd-drop-ok");
+                    }
+                },
+                beforenodedrop: function(dropEvent) {
+                    admin.mergeNode = dropEvent.rawEvent.browserEvent.ctrlKey;
+                },
+                beforemovenode: function(tree, node, oldParent, newParent, index) {
+                    return admin.performMoveOrMerge(node, newParent);
+                },
+                // custom event (see completeDrop above)
+                beforemergenode: function(tree, node, target) {
+                    return admin.performMoveOrMerge(node, target, true);
+                },
+                append: function(tree, parent, node, index) {
+                    if (node.getDepth() > 1) {
+                        node.attributes.cls = "tag";
+                    } else {
+                        node.attributes.cls = "namespace";
+                    }
+                    node.ui.render();
+                },
+                beforeexpandnode: function(node) {
+                    admin.mask();
+                    admin.treeMask = true;
+                },
+                expandnode: function(node) {
+                    if (admin.treeMask) {
+                        admin.treeMask = false;
+                        admin.unmask();
+                    }
+                }
+            }
+        });
+
+        new CQ.Ext.tree.TreeSorter(tree, {
+            folderSort: true
+        });
+        
+        // grid config
+        var cm = new CQ.Ext.grid.ColumnModel({
+            defaults: {
+                sortable: true
+            },
+            columns: [
+                new CQ.Ext.grid.RowNumberer(),
+                {
+                    "header":CQ.I18n.getMessage("Title"),
+                    "dataIndex":"title",
+                    "renderer": function(value, metadata, record){
+                        return CQ.shared.XSS.getXSSValue(value);
+                    }
+
+                },{
+                    "header":CQ.I18n.getMessage("Name"),
+                    "dataIndex":"name"
+                },{
+                    "header":CQ.I18n.getMessage("Description"),
+                    "dataIndex":"description",
+                    "renderer": function(value, metadata, record){
+                        return CQ.shared.XSS.getXSSRecordPropertyValue(record, "description");
+                    }
+                },{
+                    "header":CQ.I18n.getMessage("TagID"),
+                    "dataIndex":"tagID"
+                },{
+                    "header":CQ.I18n.getMessage("Count"),
+                    "dataIndex":"count",
+                    hidden: true
+                },{
+                    "header":CQ.I18n.getMessage("Published"),
+                    "dataIndex":"replication.published",
+                    "renderer": function(v, params, record) {
+                        var clazz = "";
+                        var text = "";
+                        var repl = record.data.replication;
+                        var qtip = "";
+                        var strOnTime = CQ.I18n.getMessage("N/A");
+                        var strOffTime = CQ.I18n.getMessage("N/A");
+
+                        if (repl && repl.published) {
+                            text = CQ.tagging.TagAdmin.formatDate(new Date(repl.published));
+                            text += " (" + CQ.shared.XSS.getXSSTablePropertyValue(repl, "publishedBy") + ")";
+                            if (repl.numQueued) {
+                                qtip = " ext:qtip=\"<nobr>";
+                                if (repl.action == "ACTIVATE") {
+                                    clazz = "status-pending-activation";
+                                    qtip += CQ.I18n.getMessage("Activation pending. #{0} in Queue.", repl.numQueued);
+                                } else {
+                                    clazz = "status-pending-deactivation";
+                                    qtip += CQ.I18n.getMessage("Deactivation pending. #{0} in Queue.", repl.numQueued);
+                                }
+                                qtip += "</nobr>\"";
+                            } else if (repl.action == "ACTIVATE") {
+                                if (!record.data.timeUntilValid) {
+                                    if (!record.data.offTime){
+                                        clazz = 'status-activated';
+                                    } else {
+                                        clazz = 'status-offtime';
+                                    }
+                                } else if (record.data.timeUntilValid){
+                                    if (record.data.offTime) {
+                                        clazz = "status-onofftime";
+                                    } else {
+                                        clazz = 'status-ontime';
+                                    }
+                                }
+                                else{
+                                    clazz = 'status-deactivated';
+                                }
+                            } else {
+                                clazz = "status-deactivated";
+                            }
+                            if(record.data.timeUntilValid && (record.data.onTime || record.data.offTime)){
+                                qtip = "ext:qtip=\"<nobr>";
+                                if(record.data.onTime){
+                                    strOnTime = CQ.tagging.TagAdmin.formatDate(new Date(record.data.onTime));
+                                    qtip += "<b>"+CQ.I18n.getMessage("On Time")+":</b> "+strOnTime+"<br/>";
+                                }
+                                if(record.data.offTime){
+                                    strOffTime = CQ.tagging.TagAdmin.formatDate(new Date(record.data.offTime));
+                                    qtip += "<b>"+CQ.I18n.getMessage("Off Time")+":</b> "+strOffTime+"<br/>";
+                                }
+                                qtip += "</nobr>\"";
+                            }
+                        } else{
+                            clazz = "status-none";
+                        }
+                        return "<div class=\"status double " + clazz + "\" "+qtip+"><span>" + text + "</span></div>";
+                    }
+
+                },{
+                    "header":CQ.I18n.getMessage("Modified"),
+                    "dataIndex":"lastModified",
+                    "renderer": function(v, params, record) {
+                        var repl = record.data.replication;
+                        var lastMod = record.data.lastModified;
+                        var text = "";
+                        var clazz = "";
+                        if (lastMod > 0) {
+                            text = CQ.tagging.TagAdmin.formatDate(new Date(record.data.lastModified));
+                            var lastModifiedBy = CQ.shared.XSS.getXSSTablePropertyValue(record.data, "lastModifiedBy");
+                            if (lastModifiedBy && lastModifiedBy.length > 0) {
+                                text += " (" + lastModifiedBy + ")";
+                            }
+                            clazz = "status-localmodified";
+                        }
+                        if (repl && repl.published) {
+                            if (repl.action == "ACTIVATE") {
+                                if (lastMod > repl.published) {
+                                    clazz = "status-modified";
+                                }
+                            }
+                        }
+                        if (!clazz) {
+                            clazz = "status-localmodified";
+                        }
+                        return "<div class=\"status " + clazz + "\">" + text + "</div>";
+                    }
+                }
+            ]
+        });
+
+        var sm = new CQ.Ext.grid.RowSelectionModel({
+            "singleSelect":true,
+            "listeners": {
+                "selectionchange": function(sm) {
+                    for (var i=0; i<disabledActions.length; i++) {
+                        disabledActions[i].setDisabled(!sm.hasSelection());
+                    }
+                    admin.checkActions();
+                }
+            }
+        });
+        
+        var gridReader = new CQ.Ext.data.JsonReader({
+            totalProperty: "results",
+            root: "tags",
+            id: "path",
+            fields: [
+                "name",
+                {
+                    name: "title",
+                    mapping: function(o) {
+                        return CQ.tagging.getLocalizedTitle(o, admin.locale, "title");
+                    }
+                },
+                "description", "description" + CQ.shared.XSS.KEY_SUFFIX, "tagID", "count",
+                "lastModified", "lastModifiedBy",
+                "pubDate", "publisher", "replication", "cq:movedTo"
+            ]
+        });
+        
+        var store = new CQ.Ext.data.GroupingStore({
+            autoLoad: false,
+            proxy: new CQ.Ext.data.HttpProxy({
+                url: treeRoot.getPath() + CQ.tagging.TAG_LIST_JSON_SUFFIX,
+                method: "GET"
+            }),
+            reader: gridReader,
+            baseParams: {
+                count: "false"
+            },
+            listeners: {
+                load: function(store, records, options){
+                    // Filter out the moved tags
+                    store.filterBy(function(record,id) {
+                        if (record.data["cq:movedTo"]) {
+                            return false;
+                        }
+                        return true;
+                    });
+                },
+                scope: this
+            }
+        });
+
+        var tagGrid = new CQ.Ext.grid.GridPanel({
+            "id":"cq-tagadmin-grid",
+            "region":"center",
+            "margins":"5 5 5 0",
+            "stripeRows":true,
+            "cm":cm,
+            "sm":sm,
+            "viewConfig": new CQ.Ext.grid.GroupingView({
+                "forceFit":true,
+                "groupTextTpl": '{text} ({[values.rs.length]} {[values.rs.length > 1 ? "'
+                    + CQ.I18n.getMessage("Tags") + '" : "'
+                    + CQ.I18n.getMessage("Tag") + '"]})'
+            }),
+            "store":store,
+            "tbar": actions,
+            "listeners": {
+                "rowcontextmenu": function(grid, index, e) {
+                    if (!this.contextMenu && (tagActions.length > 0)) {
+                        this.contextMenu = new CQ.Ext.menu.Menu({
+                            "items": tagActions
+                        });
+                    }
+                    var xy = e.getXY();
+                    this.contextMenu.showAt(xy);
+                    e.stopEvent();
+                },
+                "rowdblclick": function() {
+                    CQ.tagging.TagAdmin.editTag.call(admin);
+                }
+            },
+            "bbar": new CQ.Ext.PagingToolbar({
+                "store": store,       // grid and PagingToolbar using same store
+                "displayInfo": true,
+                "pageSize": this.TAG_GRID_PAGING_MAX_SIZE,
+                "prependButtons": true
+            })
+        });
+
+        // init component by calling super constructor
+        CQ.tagging.TagAdmin.superclass.constructor.call(this, {
+            "id":"cq-tagadmin",
+            "layout":"border",
+            "renderTo":"CQ",
+            "stateful":true,
+            "stateEvents": [ "pathselected" ],
+            "items": [
+                {
+                    "id":"cq-tagadmin-wrapper",
+                    "xtype":"panel",
+                    "layout":"border",
+                    "region":"center",
+                    "border":false,
+                    "items": [
+                        {
+                            "id":"cq-header",
+                            "xtype":"container",
+                            "autoEl":"div",
+                            "region":"north",
+                            "items": [
+                                {
+                                    "xtype":"panel",
+                                    "border":false,
+                                    "layout":"column",
+                                    "cls": "cq-header-toolbar",
+                                    "items": [
+                                        new CQ.Switcher({}),
+                                        new CQ.UserInfo({})
+                                    ]
+                                },
+                                new CQ.HomeLink({})
+                            ]
+                        },
+                        tree,
+                        tagGrid
+                    ]
+                }
+            ]
+        });
+        this.loadPath();
+    },
+
+    initComponent : function() {
+        CQ.tagging.TagAdmin.superclass.initComponent.call(this);
+
+        this.addEvents(
+            /**
+             * @event pathselected
+             * Fires when a path in the pages tree was selected.
+             * @param {CQ.Ext.TagAdmin} this
+             * @param {String} path The selected path
+             */
+            "pathselected"
+        );
+    },
+
+    performMoveOrMerge: function(node, newParent, isMerge) {
+        // need to execute this request synchronous to prevent
+        // nodes from being moved if the request fails
+        this.mask();
+        
+        var newParentPath = newParent.getPath();
+        var params = {
+            "cmd": isMerge ? "mergeTag" : "moveTag",
+            "path": node.getPath(),
+            "dest": isMerge ? newParentPath : newParentPath + "/" + node.attributes.name
+        };
+        var response = CQ.HTTP.post("/bin/tagcommand", null, params);
+        
+        this.unmask();
+        
+        var success = (response.headers.Status || "500") == "200";
+        if (success) {
+            this.reloadGrid();
+        }
+        return success;
+    },
+
+    // All Params are optional
+    // If Path is not passed, simply select the root
+    // If offset is not given, its equal to TAG_GRID_PAGING_INITIAL_OFFSET
+    // If maxSize is not given, its equal to TAG_GRID_PAGING_MAX_SIZE
+    loadPath: function(path, offset, maxSize) {
+        this.mask();
+        // if path is not given, simply select the root (eg. on startup)
+        this.treePath = path = path && path.length > 0 ? path : this.tagsBasePath;
+        
+        // workaround for buggy selectPath(): when selecting the root node, no slash must be at the beginning
+        CQ.Ext.getCmp("cq-tagadmin-tree").selectPath(path == this.tagsBasePath ? this.tagsBasePath.substring(1) : path, "name");
+
+        // now load the data from the server
+        var store = CQ.Ext.getCmp("cq-tagadmin-grid").getStore();
+        if(!offset)
+            offset = this.TAG_GRID_PAGING_INITIAL_OFFSET;
+        if(!maxSize)
+            maxSize = this.TAG_GRID_PAGING_MAX_SIZE;
+
+        store.proxy.api["read"].url = path + CQ.tagging.TAG_LIST_JSON_SUFFIX;
+        store.load({
+            params: {
+                // specify params for the first page load if using paging
+                start: offset,
+                limit: maxSize
+            },
+            callback: function() {
+                if (!this.treeMask) {
+                    this.unmask();
+                }
+            },
+            scope: this
+        });
+
+        this.checkActions();
+        CQ.Ext.getCmp("cq-tagadmin-grid").getSelectionModel().selectFirstRow();
+        this.fireEvent("pathselected", this, path);
+    },
+
+    getState:function() {
+        return { "treePath": this.treePath };
+    },
+
+    setLocale: function(locale, reload) {
+        // set this.locale to a locale object
+        // make sure "de_de" style is enforced (and not "de-DE")
+        this.locale = typeof locale === "object" ? locale : CQ.I18n.parseLocale(CQ.tagging.getTagLocaleCode(locale));
+
+        if (reload) {
+            var store = CQ.Ext.getCmp("cq-tagadmin-grid").getStore();
+            this.reloadAll();
+        }
+    },
+    
+    reloadTree: function() {
+        CQ.Ext.getCmp("cq-tagadmin-tree").getRootNode().reload();
+    },
+
+    reloadGrid: function() {
+        this.loadPath(this.treePath);
+    },
+
+    reloadAll: function() {
+        this.reloadTree();
+        this.reloadGrid();
+    },
+
+    /**
+     * Masks the main panel for loading.
+     */
+    mask: function() {
+        if (!this.loadMask) {
+            this.loadMask = new CQ.Ext.LoadMask(this.id + "-wrapper", {
+                "msg": CQ.I18n.getMessage("Loading...")
+            });
+        }
+        this.loadMask.show();
+    },
+
+    /**
+     * Unmasks the main panel after loading.
+     */
+    unmask: function(timeout) {
+        if (!this.loadMask) return;
+        this.loadMask.hide();
+    },
+
+    checkActions: function() {
+        (function() {
+            var admin = this;
+            for (var i = 0; i < admin.checkedActions.length; i++) {
+                var action = admin.checkedActions[i];
+                if ((action instanceof CQ.PrivilegedAction)
+                        && action.target) {
+                    action.setPath(action.target.call(admin), action.forceCheck);
+                }
+            }
+        }).defer(1,this);
+    },
+
+    // private
+    formatActions: function(actionCfgs, disabledActions, tagActions) {
+        var actions = [];
+        for (var a in actionCfgs) {
+            if (typeof(actionCfgs[a]) != "object") {
+                continue;
+            }
+            // check for separators, splits, ...
+            if (actionCfgs[a].xtype == "separator") {
+                actions.push(actionCfgs[a].value);
+                tagActions.push(actionCfgs[a].value);
+            } else {
+                if (actionCfgs[a].menu) {
+                    actionCfgs[a].menu = new CQ.Ext.menu.Menu({
+                        "items":this.formatActions(actionCfgs[a].menu,
+                                disabledActions, tagActions)
+                    });
+                }
+                var actionCfg = this.formatActionConfig(actionCfgs[a]);
+                var action = this.createAction(actionCfg);
+                actions.push(action);
+
+                if (actionCfg.disabled) {
+                    disabledActions.push(action);
+                }
+
+                tagActions.push(action);
+            }
+        }
+        return actions;
+    },
+    
+    createAction: function(config) {
+        var action = new CQ.PrivilegedAction(config);
+        if (config.target) {
+            action.target = eval("(" + config.target + ")");
+        }
+        if (!config.menu) {
+            this.checkedActions.push(action);
+        }
+        return action;
+    },
+
+    // private
+    formatActionConfig: function(config) {
+        if (!config.scope) {
+            config.scope = this;
+        }
+        if (typeof(config.handler) == "string") {
+            config.handler = eval(config.handler);
+        }
+        if (config.text) {
+            config.text = CQ.I18n.getVarMessage(config.text);
+        }
+        if (config.tooltip && config.tooltip.text) {
+            config.tooltip.text = CQ.I18n.getVarMessage(config.tooltip.text);
+        }
+        if (config.tooltip && config.tooltip.title) {
+            config.tooltip.title = CQ.I18n.getVarMessage(config.tooltip.title);
+        }
+        return config;
+    },
+
+    postTagCommand: function(cmd, tag, params) {
+        this.mask();
+        
+        params = CQ.Util.applyDefaults(params || {}, {
+            cmd: cmd,
+            path: tag,
+            "_charset_": "utf-8"
+        });
+        CQ.HTTP.post(
+            CQ.tagging.TagAdmin.TAG_COMMAND_URL,
+            function(options, success, response) {
+                if (success) {
+                    this.reloadAll();
+                } else {
+                    this.unmask();
+                }
+            },
+            params,
+            this
+        );
+    },
+    
+    /**
+     * Helper function that loads a json from the given URL. If there is no
+     * response or any other error, it will be logged and <code>null</code> returned.
+     * @private
+     */
+    loadJson: function(url, noCaching) {
+        try {
+            if (url) {
+                if (noCaching) {
+                    url = CQ.HTTP.noCaching(url);
+                }
+                var response = CQ.HTTP.get(url);
+                if (CQ.HTTP.isOk(response)) {
+                    return CQ.Util.eval(response);
+                } else {
+                    CQ.Log.debug("CQ.tagging.TagInputField#loadTags: no response for {0}, empty data}", url);
+                    return null;
+                }
+            }
+        } catch (e) {
+            CQ.Log.warn("CQ.tagging.TagInputField#loadTags: {0}", e.message);
+            return null;
+        }
+        
+    },
+
+    createDialog: function(config, errorMsg) {
+        var dialog = CQ.WCM.getDialog(config);
+        dialog.on("beforesubmit", function() {
+            this.mask();
+        }, this);
+        dialog.responseScope = this;
+        dialog.success = this.reloadAll;
+        dialog.failure = function(form, action) {
+            this.unmask();
+            CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"), errorMsg);
+        };
+        return dialog;
+    }
+});
+
+CQ.Ext.reg("tagadmin", CQ.tagging.TagAdmin);
+
+CQ.tagging.TagAdmin.TAG_COMMAND_URL = "/bin/tagcommand";
+
+// constants
+CQ.tagging.TagAdmin.DD_GROUP = "cq.tagadmin.tree";
+
+/**
+ * Overrides Tree node UI for XSS escaping of the qtips.
+ * @private
+ */
+CQ.tagging.TagAdmin.TreeNodeUI = CQ.Ext.extend(CQ.Ext.tree.TreeNodeUI, {
+
+    // private
+    // should maybe put into the overriden TreeNodeUI.js as well, just
+    // as that overrides the renderElements() method for xss escaping the text
+    render : function(bulkRender){
+        var a = this.node.attributes;
+        if (a.qtip) {
+            a.qtip = CQ.shared.XSS.getXSSValue(a.qtip);
+        }
+        if (a.qtipTitle) {
+            a.qtipTitle = CQ.shared.XSS.getXSSValue(a.qtipTitle);
+        }
+        CQ.tagging.TagAdmin.TreeNodeUI.superclass.render.call(this,bulkRender);
+    }
+});
+
+CQ.tagging.TagAdmin.formatDate = function(date) {
+    if (typeof date == "number") {
+        date = new Date(date);
+    }
+    var fmt = CQ.I18n.getMessage("d-M-Y H:i", null, "Date format for ExtJS SiteAdmin (short, eg. two-digit year, http://extjs.com/deploy/ext/docs/output/Date.html)");
+    return date.format(fmt);
+};
+

@@ -1,0 +1,493 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+CQ.Workflow.Console.FailuresPanel = function(config) {
+    this.construct.call(this, config);
+};    
+
+CQ.Ext.extend(CQ.Workflow.Console.FailuresPanel, CQ.Workflow.Console.GridPanel, {
+    id:'cq.workflow.failures',
+    
+    title:CQ.I18n.getMessage('Failures'),
+    tabTip:CQ.I18n.getMessage('Lists workflow failure notifications'),
+    
+    listeners: {
+        rowcontextmenu: function(grid, index, e) {
+            if (!this.contextMenu) {
+                this.contextMenu = new CQ.Ext.menu.Menu({
+                    items: this.actions
+                });
+            }
+            var xy = e.getXY();
+            this.contextMenu.showAt(xy);
+            e.stopEvent();
+        }
+    },
+    
+    view: new CQ.Ext.grid.GroupingView({
+        forceFit:true,
+        groupTextTpl: '{text} ({[values.rs.length]} {[values.rs.length > 1 ? "'+CQ.I18n.getMessage("Items")+'" : "'+CQ.I18n.getMessage("Item")+'"]})'
+    }),
+    
+    construct: function(config) {
+        var myThis = this;
+        this.resourcePath = config.resourcePath;
+        
+        // store
+        this.store = new CQ.Ext.data.GroupingStore({
+            proxy: new CQ.Ext.data.HttpProxy({ 
+                url:this.resourcePath + "/failures.json",
+                method:"GET"
+            }),
+            listeners: {
+                exception: function(obj, action, data, it, response) {
+                    CQ.shared.HTTP.handleForbidden(response);
+                }
+            },
+            autoLoad:false,
+            reader: new CQ.Ext.data.JsonReader({
+                root: 'workflows',
+                totalProperty: 'results',
+                id: 'item',
+                fields: [
+                    'state',
+                    'initiator',
+                    'startTime',
+                    'model',
+                    'modelVersion',
+                    'payload',
+                    'comment',
+                    'title',
+                    'failureInfo.message',
+                    CQ.shared.XSS.getXSSPropertyName('title')
+                ]
+            })
+        });
+        this.store.setDefaultSort('startTime', 'DESC');
+        
+        // column model
+        this.cm = new CQ.Ext.grid.ColumnModel([new CQ.Ext.grid.RowNumberer(),
+            {
+                header: CQ.I18n.getMessage("Status"),
+                dataIndex: 'state'
+            },{
+                header: CQ.I18n.getMessage("Message"),
+                dataIndex: 'failureInfo.message'
+            },{
+                header: CQ.I18n.getMessage("Initiator"),
+                dataIndex: 'initiator',
+                renderer:myThis.renderInitiator
+            },{
+                header: CQ.I18n.getMessage("Start Time"),
+                dataIndex: 'startTime',
+                renderer: function(v, params, record) {
+                    return myThis.formatDate(v);
+                }
+            },{
+                header: CQ.I18n.getMessage("Workflow Model"),
+                dataIndex: 'model'
+            },{
+                header: CQ.I18n.getMessage("Model Version"),
+                dataIndex: 'modelVersion'
+            },{
+                header: CQ.I18n.getMessage("Payload"),
+                dataIndex: 'payload',
+                renderer:myThis.renderPayload
+            },{
+                header: CQ.I18n.getMessage("Comment"),
+                dataIndex: 'comment'
+            },{
+                header: CQ.I18n.getMessage("Workflow Title"),
+                dataIndex: 'title',
+                renderer: function(val, meta, rec) {
+                    return CQ.shared.XSS.xssPropertyRenderer(val, meta, rec, this);
+                }
+            }
+        ]);
+        this.cm.defaultSortable = true;
+        
+        // selection model
+        this.sm = new CQ.Ext.grid.RowSelectionModel({
+            singleSelect:false,
+            listeners: {
+                selectionchange: function(selectionModel) {
+                    myThis.failuresDetailsAction.setDisabled(!selectionModel.hasSelection());
+                    myThis.terminateAction.setDisabled(!selectionModel.hasSelection());
+                    myThis.terminateAndRestartAction.setDisabled(!selectionModel.hasSelection());
+                    myThis.openHistoryAction.setDisabled(!selectionModel.hasSelection());
+                    myThis.retryItemAction.setDisabled(!selectionModel.hasSelection());
+                    myThis.renameWorkflowTitleAction.setDisabled(!selectionModel.hasSelection());                   
+                }
+            }
+        });
+        
+        // actions
+        this.failuresDetailsAction = new CQ.Ext.Action({
+            cls:'cq.workflow.failures.showdetails',
+            text:CQ.I18n.getMessage('Failure Details'),
+            handler: function() {
+                var selections = myThis.getSelectionModel().getSelections();
+                if (selections && selections.length > 0) {
+                    var failureInfo = {
+                        message: selections[0].json.failureInfo.message,
+                        stepTitle: selections[0].json.failureInfo.nodeTitle,
+                        stack: selections[0].json.failureInfo.stack
+                    };
+
+                    var dialog = new CQ.workflow.FailureInfoDialog({}, failureInfo);
+                    dialog.show();
+                }
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Show failure details'),
+                text:CQ.I18n.getMessage('Show failure details'),
+                autoHide:true
+        }
+        });
+        this.failuresDetailsAction.setDisabled(true);
+
+        this.terminateAction = new CQ.Ext.Action({
+            cls:'cq.workflow.failures.terminate',
+            text:CQ.I18n.getMessage('Terminate Workflow'),
+            handler: function() {
+                var terminateDialogConfig = {
+                    xtype: 'dialog',
+                    title:CQ.I18n.getMessage('Terminate Workflow'),
+                    params: {
+                        "_charset_":"utf-8"
+                    },
+                    items: {
+                        xtype:'panel',
+                        items:[
+                            {
+                                xtype: 'textarea',
+                                name:'terminateComment',
+                                fieldLabel:CQ.I18n.getMessage('Comment'),
+                                id:"cq.workflow.failures.terminateComment"
+                            },{
+                                xtype: 'textfield',
+                                name:'state',
+                                hidden:true,
+                                value:'ABORTED'
+                            }
+                        ]
+                    },
+                    responseScope: myThis,
+                    buttons:[{
+                        "text": CQ.I18n.getMessage("OK"),
+                        //"disabled": true,
+                        "handler": function() {
+                                this.hide();
+                                var success = true;
+                                var selections = myThis.getSelectionModel().getSelections();
+                                for (var i=0; i<selections.length; i++) {
+                                    var selection = selections[i];
+                                    CQ.HTTP.post(
+                                        selection.id,
+                                        function(options, success, response) {
+                                            if (success) {
+                                                success &= true;
+                                            } else {
+                                                success = false;
+                                            }
+                                        },
+                                        {
+                                            "state":"ABORTED",
+                                            "_charset_":"utf-8",
+                                            "terminateComment": CQ.Ext.getCmp("cq.workflow.failures.terminateComment").getValue()
+                                        }
+                                    );
+                                }
+                                if (success) {
+                                        myThis.reload();
+                                        CQ.Ext.getCmp('cq.workflow.archive').reload();
+                                    } else {
+                                        CQ.Ext.Msg.alert(
+                                            CQ.I18n.getMessage("Error"),
+                                            CQ.I18n.getMessage("Could not terminate workflow"));
+                                    }
+                            }
+                        },
+                        CQ.Dialog.CANCEL
+                    ]
+                };
+                var terminateDialog = CQ.WCM.getDialog(terminateDialogConfig, "cq.workflow.failures.terminate.dialog");
+                terminateDialog.show();
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Terminate Workflow'),
+                text:CQ.I18n.getMessage('Terminates the selected workflow instance'),
+                autoHide:true
+            }
+        });
+        this.terminateAction.setDisabled(true);
+
+        this.terminateAndRestartAction = new CQ.Ext.Action({
+            cls:'cq.workflow.failures.terminate',
+            text:CQ.I18n.getMessage('Terminate and Start New Workflow'),
+            handler: function() {
+                var terminateDialogConfig = {
+                    xtype: 'dialog',
+                    title:CQ.I18n.getMessage('Terminate and start new workflow'),
+                    params: {
+                        "_charset_":"utf-8"
+                    },
+                    items: {
+                        xtype:'panel',
+                        items:[
+                            {
+                                xtype: 'textarea',
+                                name:'terminateComment',
+                                fieldLabel:CQ.I18n.getMessage('Comment'),
+                                id:"cq.workflow.failures.terminateComment"
+                            },{
+                                xtype: 'textfield',
+                                name:'state',
+                                hidden:true,
+                                value:'ABORTED'
+                            }
+                        ]
+                    },
+                    responseScope: myThis,
+                    buttons:[{
+                        "text": CQ.I18n.getMessage("OK"),
+                        //"disabled": true,
+                        "handler": function() {
+                            this.hide();
+                            var selections = myThis.getSelectionModel().getSelections();
+                            var IDs = [];
+                            for (var i=0; i<selections.length; i++) {
+                                var selection = selections[i];
+                                IDs.push(selection.id);
+                            }
+                            var toPost = { IDs: IDs };
+
+                            var url = "/libs/cq/workflow/failures";
+
+                            CQ.Ext.Ajax.request({
+                                "url": url,
+                                "method": "POST",
+                                "jsonData": JSON.stringify(toPost),
+                                "params": { 'command': 'TerminateAndRestart' },
+                                "success": function(response, options) {
+                                    myThis.reload();
+                                },
+                                "failure": function(response, options) {
+                                    CQ.Ext.Msg.alert(
+                                    CQ.I18n.getMessage("Error"),
+                                    CQ.I18n.getMessage("Could not terminate and restart workflow."));
+                                }
+                            });
+                        }
+                    },
+                        CQ.Dialog.CANCEL
+                    ]
+                };
+                var terminateDialog = CQ.WCM.getDialog(terminateDialogConfig, "cq.workflow.failures.terminate.dialog");
+                terminateDialog.show();
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Terminate and Start New Workflow'),
+                text:CQ.I18n.getMessage('Terminates the selected workflow and starts a new workflow instance on the same payload'),
+                autoHide:true
+            }
+        });
+        this.terminateAndRestartAction.setDisabled(true);
+
+        this.retryItemAction = new CQ.Ext.Action({
+            cls:'cq.workflow.failures.terminate',
+            text:CQ.I18n.getMessage('Retry Step'),
+            handler: function() {
+                var selections = myThis.getSelectionModel().getSelections();
+                var IDs = [];
+                for (var i=0; i<selections.length; i++) {
+                    var selection = selections[i];
+                    IDs.push(selection.json.itemid);
+                }
+                var toPost = { IDs: IDs };
+
+                var url = "/libs/cq/workflow/failures";
+
+                CQ.Ext.Ajax.request({
+                    "url": url,
+                    "method": "POST",
+                    "jsonData": JSON.stringify(toPost),
+                    "params": { 'command': 'RetryItem' },
+                    "success": function(response, options) {
+                        myThis.reload();
+                    },
+                    "failure": function(response, options) {
+                        CQ.Ext.Msg.alert(
+                            CQ.I18n.getMessage("Error"),
+                            CQ.I18n.getMessage("Could not retry step."));
+                    }
+                });
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Retry failed step'),
+                text:CQ.I18n.getMessage('Retry the step associated with this failure'),
+                autoHide:true
+            }
+        });
+        this.retryItemAction.setDisabled(true);
+
+        this.openHistoryAction = new CQ.Ext.Action({
+            cls:'cq.workflow.failures.openHistory',
+            text:CQ.I18n.getMessage('Open History'),
+            handler: function() {
+                var grid = new CQ.Ext.grid.GridPanel({
+                    store: new CQ.Ext.data.GroupingStore({
+                        proxy: new CQ.Ext.data.HttpProxy({ 
+                            url:myThis.resourcePath + "/history.json?workflow=" + myThis.getSelectionModel().getSelected().id 
+                        }),
+                        listeners: {
+                            exception: function(obj, action, data, it, response) {
+                                CQ.shared.HTTP.handleForbidden(response);
+                            }
+                        },
+                        autoLoad:true,
+                        reader: new CQ.Ext.data.JsonReader({
+                            root: 'historyItems',
+                            totalProperty: 'results',
+                            id: 'item',
+                            fields: [
+                                'status',
+                                'process',
+                                'user',
+                                'startTime',
+                                'endTime',
+                                'action',
+                                'comment'
+                            ]
+                        })
+                    }),
+                    cm:new CQ.Ext.grid.ColumnModel([
+                        new CQ.Ext.grid.RowNumberer(),
+                        {
+                            header:CQ.I18n.getMessage("Status"),
+                            dataIndex: 'status'
+                        },{
+                            header:CQ.I18n.getMessage("Title"),
+                            dataIndex: 'process'
+                        },{
+                            header:CQ.I18n.getMessage("User"),
+                            dataIndex: 'user'
+                        },{
+                            header:CQ.I18n.getMessage("Start Time"),
+                            dataIndex: 'startTime',
+                            renderer: function(v, params, record) {
+                                return myThis.formatDate(v);
+                            }
+                            
+                        },{
+                            header:CQ.I18n.getMessage("End Time"),
+                            dataIndex: 'endTime',
+                            renderer: function(v, params, record) {
+                                if (v) {
+                                    return myThis.formatDate(v);
+                                }
+                                return "";
+                            }
+                        },{
+                            header:CQ.I18n.getMessage("Action"),
+                            dataIndex: 'action'
+                        },{
+                            header:CQ.I18n.getMessage("Comment"),
+                            dataIndex: 'comment'
+                        }
+                    ]),
+                    viewConfig: {
+                        forceFit: true,
+                        groupTextTpl: '{text} ({[values.rs.length]} {[values.rs.length > 1 ? '+CQ.I18n.getMessage("Items")+' : '+CQ.I18n.getMessage("Item")+']})'
+                    },
+                    sm: new CQ.Ext.grid.RowSelectionModel({singleSelect:true})
+                });
+                win = new CQ.Ext.Window({
+                    title:CQ.I18n.getMessage('Workflow Instance History'),
+                    width:800,
+                    height:400,
+                    autoScroll:true,
+                    items: grid,
+                    layout:'fit',
+                    y:200
+                }).show();
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Open workflow history'),
+                text:CQ.I18n.getMessage('Opens the workflow history dialog'),
+                autoHide:true
+            }
+        });
+        this.openHistoryAction.setDisabled(true);
+
+        this.renameWorkflowTitleAction = new CQ.Ext.Action({
+            cls:'cq.workflow.failures.rename',
+            text:CQ.I18n.getMessage('Rename Workflow Title'),
+            handler: function() {
+                var newDialogConfig = {
+                    xtype: 'dialog',
+                    title:CQ.I18n.getMessage('Rename Workflow Title'),
+                    params: { "_charset_":"utf-8", "action":"UPDATE" },
+                    items: {
+                        xtype:'panel',
+                        items:[
+                            {
+                                xtype: 'textfield',
+                                name:'workflowTitle',
+                                fieldLabel:CQ.I18n.getMessage('Workflow Title'),
+                                value: myThis.getSelectionModel().getSelected().data.title
+                            }
+                        ]
+                    },
+                    responseScope: myThis,
+                    success: function(){ myThis.reload(); },
+                    failure: function(){
+                        CQ.Ext.Msg.alert(
+                            CQ.I18n.getMessage("Error"),
+                            CQ.I18n.getMessage("Could not change workflow title."));
+                    },
+                    buttons:CQ.Dialog.OKCANCEL
+                };
+                var newDialog = CQ.WCM.getDialog(newDialogConfig);
+                newDialog.form.url = myThis.getSelectionModel().getSelected().id;
+                newDialog.show();
+            },
+            tooltip: {
+                title:CQ.I18n.getMessage('Rename workflow title'),
+                text:CQ.I18n.getMessage('Renames the workflow title'),
+                autoHide:true
+            }
+        });
+        this.renameWorkflowTitleAction.setDisabled(true);
+
+        this.actions = [ this.failuresDetailsAction,
+                         "-",
+                         this.retryItemAction,
+                         "-",
+                         this.terminateAction,
+                         this.terminateAndRestartAction,
+                         "-",
+                         this.openHistoryAction ];
+        this.tbar = this.actions;
+        
+        this.bbar = new CQ.Ext.PagingToolbar({
+            pageSize:this.pageSize,
+            store:this.store,
+            displayInfo:true,
+            displayMsg:CQ.I18n.getMessage("Displaying entries {0} - {1} of {2}"),
+            emptyMsg:CQ.I18n.getMessage("No entries to display")
+        });
+    
+        CQ.Workflow.Console.FailuresPanel.superclass.constructor.call(this, config);
+        this.store.load({params:{start:0, limit:this.pageSize}});
+    }
+});

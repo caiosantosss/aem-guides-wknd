@@ -1,0 +1,586 @@
+/*
+ * Copyright 1997-2010 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.security.PermissionsDetailPanel
+ * @extends CQ.Ext.Panel
+ * @since 5.4
+ * The PermissionsDetailPanel Panel shows, for a given path and authorizableId,
+ * a detail view of the permissions and a list of groups that have an effect on the
+ * given path.
+ * @constructor
+ * Creates a new PermissionsDetailPanel Panel.
+ * @param {Object} config The config object
+ */
+CQ.security.PermissionsDetailPanel = CQ.Ext.extend(CQ.Ext.Panel, {
+
+    /**
+     * Store of the Group Permission Grid
+     * @param config
+     */
+    groupStore: null,
+
+    /**
+     * Store of the AuthRecords
+     * @param config
+     */
+    authStore: null,
+
+    /**
+     * Store for the Overview Permission Grid
+     * @param config
+     */
+    overviewStore: null,
+
+    /**
+     * @param config
+     */
+    path: null,
+
+    constructor: function(config) {
+
+        this.path = config.path;
+
+        this.addEvents(
+            /**
+             * @event memberUpdate
+             * Fires after the membership has been saved.
+             * param {PermissionsDetailPanel} this
+             * param {path} the current path
+             * param {record}
+             */
+            'memberUpdate'
+        );
+
+
+        // summary permissions grid
+
+        this.overviewStore = new CQ.Ext.ux.maximgb.tg.AdjacencyListStore({
+            autoLoad : false,
+            sortInfo: {field: 'name', direction: 'ASC'},
+            proxy: new CQ.Ext.data.HttpProxy({
+                url: CQ.HTTP.externalize("/.cqactions.json"),
+                method: 'GET'
+            }),
+            baseParams: {
+                "_charset_": "utf-8",
+                "authorizableId": config.authorizableId,
+                "predicate": "useradmin",
+                "depth": 0
+            },
+            listeners: {
+                "beforeload": function(store, options) {
+                    options.params.path = options.params.anode || "/";
+                },
+                scope: this
+            },
+            reader: new CQ.Ext.data.PermissionReader({
+                id: '_id',
+                totalProperty: "total",
+                root:"entries"
+            }, CQ.security.RightsPanel.RECORD)
+        });
+
+        var summaryPermGrid = new CQ.Ext.grid.EditorGridPanel({
+            flex:1,
+            disableSelection: true,
+            master_column_id : 'path',
+            stripeRows: true,
+            autoExpandColumn: 'path',
+            enableHdMenu: false,
+            enableColumnMove: false,
+            border: false,
+            viewConfig : {
+                enableRowBody: true,
+                forceFit: true,
+                sortClasses: [] // remove the sort highlight on first column.
+            },
+            store: this.overviewStore,
+            cm: new CQ.Ext.grid.ColumnModel({
+                defaults: {
+                    sortable: false,
+                    width: 65,
+                    menuDisabled: true,
+                    editable: false,
+                    fixed: true,
+                    scope: this
+                },
+                columns: [
+                    {id: 'path', header: CQ.I18n.getMessage("Path"), width: 220, dataIndex: 'name', renderer: this.renderPath},
+                    {id: 'read', header: CQ.I18n.getMessage("Read"), dataIndex: 'read', renderer: this.renderOverviewStatus},
+                    {id: 'modify', header: CQ.I18n.getMessage("Modify"), dataIndex: 'modify', renderer: this.renderOverviewStatus},
+                    {id: 'create', header: CQ.I18n.getMessage("Create"), dataIndex: 'create', renderer: this.renderOverviewStatus},
+                    {id: 'delete', header: CQ.I18n.getMessage("Delete"), dataIndex: 'delete', renderer: this.renderOverviewStatus},
+                    {id: 'acl_read', header: CQ.I18n.getMessage("Read ACL"), dataIndex: 'acl_read', renderer: this.renderOverviewStatus},
+                    {id: 'acl_edit', header: CQ.I18n.getMessage("Edit ACL"), dataIndex: 'acl_edit', renderer: this.renderOverviewStatus},
+                    {id: 'replicate', header: CQ.I18n.getMessage("Replicate"), dataIndex: 'replicate', renderer: this.renderOverviewStatus}
+                ]
+            })
+        });
+        this.reloadOverView();
+
+
+        // group permissions grid
+
+        this.groupStore = new CQ.Ext.data.Store({
+            autoLoad: true,
+            remoteSort: true,
+            sortInfo: {field:'authorizableId', direction:'ASC'},
+            baseParams: {
+                predicate: "useradmin",
+                detailView: true
+            },
+            proxy: new CQ.Ext.data.HttpProxy({
+                url: CQ.HTTP.externalize(config.path + ".cqactions.json"),
+                method: 'GET'
+            }),
+            reader: new CQ.Ext.data.JsonReader({
+                root: 'entries',
+                id: '_id',
+                idProperty: '_id',
+                totalProperty: 'results'
+            }, CQ.security.PermissionsDetailPanel.RECORD),
+            listeners: {
+                beforeload: function(store, options) {
+                    store.baseParams.authorizableId = config.authorizableId;
+                },
+                update: this.groupStoreChanged,
+                scope: this
+            }
+        });
+
+        var memberCheck = new CQ.security.PermissionsDetailPanel.CheckColumn({
+            id: 'isMember',
+            header: CQ.I18n.getMessage("Member"),
+            dataIndex: 'isMember',
+            authorizableId: config.authorizableId
+        });
+
+        var groupPermGrid = new CQ.Ext.grid.EditorGridPanel({
+            flex:5,
+            stripeRows: true,
+            autoExpandColumn: 'group',
+            enableHdMenu: false,
+            enableColumnMove: false,
+            border:false,
+            viewConfig: new CQ.Ext.grid.GridView({
+                enableRowBody:true,
+                forceFit: true,
+                sortClasses: [] // remove the sort highlight on first column.
+            }),
+            clicksToEdit: 1,
+            store: this.groupStore,
+            cm: new CQ.Ext.grid.ColumnModel({
+                columns: [
+                    {id: 'group', header: CQ.I18n.getMessage("ID"), width: 220, dataIndex: 'authorizableId', renderer: this.renderAuthorizableId},
+                    {id: 'read', header: CQ.I18n.getMessage("Read"), dataIndex: 'read', renderer: this.renderGroupStatus},
+                    {id: 'modify', header: CQ.I18n.getMessage("Modify"), dataIndex: 'modify', renderer: this.renderGroupStatus},
+                    {id: 'create', header: CQ.I18n.getMessage("Create"), dataIndex: 'create', renderer: this.renderGroupStatus},
+                    {id: 'delete', header: CQ.I18n.getMessage("Delete"), dataIndex: 'delete', renderer: this.renderGroupStatus},
+                    {id: 'acl_read', header: CQ.I18n.getMessage("Read ACL"), dataIndex: 'acl_read', renderer: this.renderGroupStatus},
+                    {id: 'acl_edit', header: CQ.I18n.getMessage("Edit ACL"), dataIndex: 'acl_edit', renderer: this.renderGroupStatus},
+                    memberCheck
+                ],
+                defaults: {
+                    width: 65,
+                    sortable: false,
+                    menuDisabled: true,
+                    scope: this
+                }
+            }),
+            sm: new CQ.Ext.grid.RowSelectionModel({
+                singleSelect:false
+            }),
+            plugins:memberCheck
+        });
+
+
+        // Authentication store
+
+        var storeConfig = CQ.Util.applyDefaults(config.store, {
+            "storeId":"cq-useradmin-permissions-authstore",
+            "autoLoad":true,
+            "proxy": new CQ.Ext.data.HttpProxy({
+                "url":"/bin/security/authorizables.json",
+                "method":"GET"
+            }),
+            "baseParams": {
+                "_charset_":"utf-8"
+            },
+            "reader": new CQ.security.data.AuthReader()
+        });
+        this.authStore = new CQ.Ext.data.Store(storeConfig);
+
+        CQ.Util.applyDefaults(config, {
+            layout: {
+                type:'vbox',
+                align:'stretch'
+            },
+            border:true,
+            cls:"cq-security-permissionsdetail",
+            items: [
+                {
+                    html: '<span class="cq-static-bold">' + CQ.I18n.getMessage("Permissions for ") + CQ.shared.XSS.getXSSValue(config.authorizableId) + '</span>',
+                    border: false,
+                    margins: "7 7 7 7"
+                },
+                summaryPermGrid,
+                {
+                    html: '<span class="cq-static-bold">' + CQ.I18n.getMessage("Permissions for path ") + CQ.shared.XSS.getXSSValue(this.path) + '</span>',
+                    border: false,
+                    margins: "7 7 7 7"
+                },
+                groupPermGrid
+            ]
+        });
+        CQ.security.PermissionsDetailPanel.superclass.constructor.call(this, config);
+    },
+
+    initComponent: function() {
+        CQ.security.PermissionsDetailPanel.superclass.initComponent.call(this);
+    },
+
+    /**
+     * Handler for saving the changes in the group pnael and update the related components.
+     */
+    saveHandler: function() {
+
+        var authRecord = this.authStore.getById(this.groupStore.baseParams.authorizableId);
+        var url = authRecord.get("home");
+
+        var groups = {};
+
+        var memberOf = authRecord.get("memberOf");
+        for(var i = 0 ; i < memberOf.length ; i++){
+            var member = encodeURIComponent(memberOf[i].id);
+            groups[member] = member;
+        }
+
+        // Add / Remove group which have changed
+        var modifiedRecords = this.groupStore.getModifiedRecords();
+        for(var i = 0 ; i < modifiedRecords.length ; i++){
+            var m = modifiedRecords[i];
+            var member = encodeURIComponent(m.get("authorizableId"));
+            if (m.get('isMember') == true) {
+                groups[member] = member;
+            }
+            else {
+                delete groups[member];
+            }
+        }
+
+        var groupArray = [];
+        for (group in groups) {
+            groupArray.push(groups[group]);
+        }
+
+        var params = {
+            "_charset_":"utf-8",
+            "memberAction": "memberOf",
+            "memberEntry": groupArray
+        };
+
+        CQ.HTTP.post(url, function(opt, succ){
+            if(succ) {
+                var sBut = CQ.Ext.getCmp("cq-useadmin-detailed-permissions-save");
+                sBut.disable();
+                //
+                this.authStore.removeAll();
+                this.authStore.reload({
+                    params: {
+                    },
+                    callback: function(records, option, success){
+                        if (success) {
+                            this.groupStore.reload();
+                            this.reloadOverView();
+                            //
+                            var rec = this.authStore.getById(this.groupStore.baseParams.authorizableId);
+                            this.fireEvent('memberUpdate', this, rec, 'memberOf', this.path);
+                        }
+                    },
+                    scope: this
+                });
+            }
+        },
+        params, this);
+    },
+
+    /**
+     * Handler for the group store modifications.
+     * Enable the save button.
+     * @param store
+     * @param rec
+     * @param action
+     * @private
+     */
+    groupStoreChanged: function(store, rec, action) {
+        var sBut = CQ.Ext.getCmp("cq-useadmin-detailed-permissions-save");
+        if (sBut && CQ.Ext.data.Record.COMMIT != action) {
+            sBut.enable();
+        }
+    },
+
+    /**
+     * Clear and reload the over view grid.
+     */
+    reloadOverView: function(){
+        this.overviewStore.removeAll();
+        this.overviewStore.setActiveNode(null);
+        this.overviewStore.load({
+            params:{
+                anode: this.path,
+                depth: 0
+            }});
+    },
+
+    /**
+     * @param items
+     * @param renderer
+     */
+    renderTemplate: function(items, renderer) {
+        var out = "";
+        for (var i = 0 ; i < items.length ; i++) {
+            out += renderer.call(renderer, items[i]);
+        }
+        return out;
+    },
+
+    /**
+     * Renders the grid cells for the 'Permissions for <authorizableId>' table.
+     * see {@link CQ.Ext.grid.Column#renderer}
+     *
+     * @param {String} value
+     * @param {Object} metaData
+     * @param {Object} record
+     * @param {Number} rowIndex
+     * @param {Number} colIndex
+     * @param {Object} store
+     */
+    renderOverviewStatus: function(value, metaData, record, rowIndex, colIndex, store){
+        var granted = record.get(metaData.id);
+        var declared = record.get("declared")[metaData.id];
+        var effective = declared["effective"];
+        var nonEffective = declared["non-effective"];
+
+        var qTips = undefined;
+        if (effective || nonEffective) {
+
+            var tips = [];
+
+            if (effective) {
+                tips.push("<table class='cq-security-qtip-table'>");
+                tips.push("<tr>");
+                tips.push("<th class='status " + (granted ? '' : 'not-') + "allowed-permission'>&nbsp;</th>");
+                tips.push("<th>" + (granted ? CQ.I18n.getMessage("Allowed for") : CQ.I18n.getMessage("Denied for")) + "</th>");
+                tips.push("<th>&nbsp;</th>");
+                tips.push("</tr>");
+                tips.push(CQ.security.RightsPanel.TreeGrid.renderTemplate(effective, function(item){
+                    var out = "<tr><td>&nbsp;</td><td>";
+                    /* double encode for QTip */
+                    out += CQ.shared.XSS.getXSSValue(CQ.shared.XSS.getXSSValue(item));
+                    out += "</td><td>&nbsp;</td></tr>";
+                    return out;
+                }));
+                tips.push("</table>");
+            }
+
+            if (nonEffective) {
+                if (effective) {
+                    tips.push("<hr class='cq-security-qtip-separator'/>");
+                }
+                tips.push("<table class='cq-security-qtip-table'>");
+                tips.push("<tr>");
+                tips.push("<th>" + CQ.I18n.getMessage("Noneffective") + "</th>");
+                tips.push("<th>&nbsp;</th>");
+                tips.push("</tr>");
+                tips.push(this.renderTemplate(nonEffective,function(item){
+                    var out = "<tr><td>";
+                    /* double encode for QTip */
+                    out += CQ.shared.XSS.getXSSValue(CQ.shared.XSS.getXSSValue(item));
+                    out += "</td></tr>";
+                    return out;
+                }));
+                tips.push("</table>");
+            }
+            qTips = tips.join('\n');
+            qTips = 'ext:qwidth="auto" ext:qtip="' + qTips + '"';
+
+        }
+
+        var className = ['x-grid3'];
+        className.push(granted ? 'check' : 'nocheck');
+        className.push((effective || nonEffective) ? 'ov' : 'in');
+        className.push(nonEffective ? 'res' : 'nores' );
+
+        return'<div ' + (qTips ? qTips : '') + '" class="x-grid3-check-col ' + className.join('-') + '">&nbsp;<div/>';
+    },
+
+    /**
+     * Renders the grid cells for the 'Permissions for path <path>' table.
+     * see {@link CQ.Ext.grid.Column#renderer}
+     *
+     * @private
+     * @param {String} value
+     * @param {Object} metaData
+     * @param {Object} record
+     * @param {Number} rowIndex
+     * @param {Number} colIndex
+     * @param {Object} store
+     */
+    renderGroupStatus: function(value, metaData, record, rowIndex, colIndex, store){
+        var granted = record.get(metaData.id);
+        var restrictions =  record.get("restrictions");
+        var qTips = undefined;
+        if (restrictions) {
+
+            var tips = [];
+
+            tips.push("<table class='cq-security-qtip-table'>");
+            tips.push("<tr>");
+            tips.push("<th>" + CQ.I18n.getMessage("Restrictions") + "</th>");
+            tips.push("<th>&nbsp;</th>");
+            tips.push("</tr>");
+            for (var restriction in restrictions) {
+                tips.push("<tr><td>");
+                tips.push(restriction);
+                tips.push("</td><td>");
+                tips.push(restrictions[restriction]);
+                tips.push("</td></tr>");
+            }
+            tips.push("</table>");
+            qTips = tips.join('\n');
+            qTips = 'ext:qwidth="auto" ext:qtip="' + qTips + '"';
+
+        }
+
+        var className = ['x-grid3'];
+        if (granted !== "") {
+            className.push((granted === true ? '' : 'no') + "check-in");
+            className.push((restrictions ? '' : 'no') + "res");
+            return '<div ' + (qTips ? qTips : '') + ' class="x-grid3-check-col ' + className.join('-') + '">&nbsp;<div/>';
+        }
+        else {
+            return "";
+        }
+    },
+
+    /**
+     * Renders the full path (eg. /lib/cq/security) for a record
+     * and display a folder|file icon if the node has children or not.
+     * see {@link CQ.Ext.grid.Column#renderer}
+     *
+     * @param {String} value
+     * @param {Object} metaData
+     * @param {Object} record
+     * @param {Number} rowIndex
+     * @param {Number} colIndex
+     * @param {Object} store
+     */
+    renderPath: function(value, metaData, record, rowIndex, colIndex, store){
+        var isLeaf = record.get('_is_leaf');
+        var out = '<span class="' + (isLeaf ? 'x-tree-node-leaf' : 'x-tree-node-collapsed') + '">';
+        out += '<img unselectable="on" class="x-tree-node-icon ' + (isLeaf ? 'file' : 'folder') + '" style="height:16px;" src="/libs/cq/ui/resources/0.gif"/> ';
+        out += record.get('_id');
+        out += '</span>';
+        return out;
+    },
+    
+    /**
+     * Renders the authorizable identifier.
+     * see {@link CQ.Ext.grid.Column#renderer}
+     *
+     * @param {String} value
+     * @param {Object} metaData
+     * @param {Object} record
+     * @param {Number} rowIndex
+     * @param {Number} colIndex
+     * @param {Object} store
+     */
+    renderAuthorizableId: function(value, metaData, record, rowIndex, colIndex, store){
+        return CQ.shared.XSS.getXSSValue(record.get('authorizableId'));
+    }
+});
+
+/**
+ * @class CQ.security.PermissionsDetailPanel.RECORD
+ * A specific {@link CQ.Ext.data.Record} type that represents a permision entry.
+ * @constructor
+ * @param {Object} config A data object to build the record.
+ */
+CQ.security.PermissionsDetailPanel.RECORD = CQ.Ext.data.Record.create(
+        [{name: '_id'},
+            {name: 'authorizableId'},
+            {name: 'read'},
+            {name: 'modify'},
+            {name: 'create'},
+            {name: 'delete'},
+            {name: 'acl_read'},
+            {name: 'acl_edit'},
+            {name: 'isMember', type: 'bool'},
+            {name: 'editMembership', type: 'bool'},
+            {name: '_id'},
+            {name: 'restrictions'}
+        ]);
+
+CQ.security.PermissionsDetailPanel.CheckColumn = function(config) {
+
+    authorizableId: null,
+
+    CQ.Ext.apply(this, config);
+    if (!this.id) {
+        this.id = CQ.Ext.id();
+    }
+    this.authorizableId = config.authorizableId;
+    this.renderer = this.renderer.createDelegate(this);
+};
+
+CQ.security.PermissionsDetailPanel.CheckColumn.prototype = {
+    init : function(grid) {
+        this.grid = grid;
+        this.grid.on('render', function() {
+            var view = this.grid.getView();
+            view.mainBody.on('mousedown', this.onMouseDown, this);
+        }, this);
+    },
+
+    onMouseDown : function(e, t) {
+        if (t.className && t.className.indexOf('x-grid3-cc-' + this.id) != -1) {
+            e.stopEvent();
+            var rowIndex = this.grid.getView().findRowIndex(t);
+            var columnIndex = this.grid.getView().findCellIndex(t);
+            var fieldName = this.grid.getColumnModel().getDataIndex(columnIndex);
+            var record = this.grid.store.getAt(rowIndex);
+            var authorizableId = record.get("authorizableId");
+            if (!record.data[this.id].disabled && record.data["editMembership"]) {
+                record.set(fieldName, !record.data[fieldName]);
+            }
+        }
+    },
+
+    /**
+     * @param {String} value
+     * @param {Object} metaData
+     * @param {Object} record
+     */
+    renderer : function(value, metaData, record) {
+        var authorizableId = record.get("authorizableId");
+        if (record.data[this.id] !== "" && this.authorizableId != authorizableId) {
+            metaData.css += ' x-grid3-check-col-td';
+            if (record.data[this.id].disabled || !record.data["editMembership"]) {
+                metaData.css += ' x-item-disabled';
+            }
+            return '<div class="x-grid3-check-col' + (value ? '-on' : '') + ' x-grid3-cc-' + this.id + '">&#160;</div>';
+        } else {
+            return "";
+        }
+    }
+};

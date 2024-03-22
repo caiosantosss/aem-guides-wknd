@@ -1,0 +1,1559 @@
+(function($) {
+    "use strict";
+
+    var Dam = window.Dam = window.Dam || {};
+
+    var template = (function() {
+        var el = this["input"] = document.createElement("input");
+        el.setAttribute("handle", "input");
+        el.className += " dam-ChunkFileUpload-input is-unselectable";
+        el.setAttribute("tabindex", "-1");
+        el.setAttribute("name", "");
+        el.setAttribute("type", "file");
+        el.setAttribute("accept", "");
+        return el;
+    });
+
+    var XHR_EVENT_NAMES = [
+        "loadstart",
+        "progress",
+        "load",
+        "error",
+        "loadend",
+        "readystatechange",
+        "abort",
+        "timeout"
+    ];
+
+    /**
+     Enumeration representing HTTP methods that can be used to upload files.
+     @memberof Dam.ChunkFileUpload
+     @enum {String}
+     */
+    var method = {
+        /** Send a POST request. Used when creating a resource. */
+        "POST": "POST",
+        /** Send a PUT request. Used when replacing a resource. */
+        "PUT": "PUT",
+        /** Send a PATCH request. Used when partially updating a resource. */
+        "PATCH": "PATCH"
+    };
+
+    // Validator/transform is used in the property and internally
+    var isValidMethod = Coral.validate.enumeration(method);
+    var transformMethod = function(value) {
+        return typeof value === "string" ? value.toUpperCase() : value;
+    };
+
+    Coral.register({
+        /**
+	      @class Dam.ChunkFileUpload
+	      @classdesc A FileUpload component supporting chunk file upload
+	      @htmltag dam-chunkfileupload
+	    */
+        name: "ChunkFileUpload",
+        namespace: Dam,
+        tagName: "dam-chunkfileupload",
+        className: "dam-ChunkFileUpload",
+
+        events: {
+            "capture:change input": "_onTargetInputChange",
+            "global:reset": "_onFormReset",
+
+            // Clickable hooks
+            "click [dam-fileupload-submit]": "_onSubmitButtonClick",
+            "click [dam-fileupload-clear]": "clear",
+            "click [dam-fileupload-select]": "_showFileDialog",
+            "click [dam-fileupload-abort]": "abort",
+            "click [dam-fileupload-abortfile]": "_onAbortFileClick",
+            "click [dam-fileupload-removefile]": "_onRemoveFileClick",
+            "click [dam-fileupload-uploadfile]": "_onUploadFileClick",
+
+            // Drag & Drop zones
+            "dragenter [dam-fileupload-dropzone]": "_onDragAndDrop",
+            "dragover [dam-fileupload-dropzone]": "_onDragAndDrop",
+            'dragleave [handle="input"]': "_onDragAndDrop",
+            'drop [handle="input"]': "_onDragAndDrop",
+
+            // Accessibility
+            "capture:focus [dam-fileupload-select]": "_onButtonFocusIn",
+            'capture:focus [handle="input"]': "_onInputFocusIn",
+            'capture:blur [handle="input"]': "_onInputFocusOut",
+
+            // Changing focus using navigation keys when the focus is on input element
+            'key:down [handle="input"]': "_focusNextItem",
+            'key:right [handle="input"]': "_focusNextItem",
+            'key:left [handle="input"]': "_focusPreviousItem",
+            'key:up [handle="input"]': "_focusPreviousItem",
+            'key:pageup [handle="input"]': "_focusPreviousItem",
+            'key:pagedown [handle="input"]': "_focusNextItem",
+            'key:home [handle="input"]': "_focusFirstItem",
+            'key:end [handle="input"]': "_focusLastItem"
+        },
+
+        additionalProperties: {
+            "chunkSize": null,
+            "chunkUploadMinFileSize": null,
+            "chunkUploadSupported": false,
+            "parallelUploads": null,
+            "dragDropSupported": null
+        },
+
+        properties: {
+            "chunkSize": null,
+            "chunkUploadMinFileSize": null,
+            "chunkUploadSupported": false,
+            "parallelUploads": null,
+            "dragDropSupported": null,
+
+            /**
+             Whether this field is disabled or not.
+             @type {Boolean}
+             @default false
+             @htmlattribute disabled
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "disabled": {
+                default: false,
+                reflectAttribute: true,
+                transform: Coral.transform.boolean,
+                attributeTransform: Coral.transform.booleanAttr,
+                set: function(value) {
+                    this._disabled = value;
+                    this._elements.input.disabled = this.disabled;
+                },
+                sync: function() {
+                    this._setElementState();
+                }
+            },
+
+            /**
+             Whether the current value of this field is invalid or not.
+             @type {Boolean}
+             @default false
+             @htmlattribute invalid
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "invalid": {
+                default: false,
+                reflectAttribute: true,
+                transform: Coral.transform.boolean,
+                attributeTransform: Coral.transform.booleanAttr,
+                set: function(value) {
+                    this._invalid = value;
+                    this._elements.input.setAttribute("aria-invalid", this.invalid);
+                },
+                sync: function() {
+                    this._setElementState();
+                }
+            },
+
+            /**
+             Whether this field is readOnly or not. Indicating that the user cannot modify the value of the control.
+             This is ignored for checkbox, radio or fileupload.
+             @type {Boolean}
+             @default false
+             @htmlattribute readonly
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "readOnly": {
+                default: false,
+                reflectAttribute: true,
+                attribute: "readonly",
+                transform: Coral.transform.boolean,
+                attributeTransform: Coral.transform.booleanAttr,
+                set: function(value) {
+                    this._readOnly = value;
+                    this._elements.input.disabled = this.readOnly;
+                },
+                sync: function() {
+                    this._setElementState();
+                }
+            },
+
+            /**
+             Whether this field is required or not.
+             @type {Boolean}
+             @default false
+             @htmlattribute required
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "required": {
+                default: false,
+                reflectAttribute: true,
+                transform: Coral.transform.boolean,
+                attributeTransform: Coral.transform.booleanAttr,
+                set: function(value) {
+                    this._elements.input.required = value;
+                },
+                get: function() {
+                    return this._elements.input.required;
+                },
+                sync: function() {
+                    this._setElementState();
+                }
+            },
+
+            /**
+             Name used to submit the data in a form.
+             @type {String}
+             @default ""
+             @htmlattribute name
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "name": {
+                default: "",
+                reflectAttribute: true,
+                transform: Coral.transform.string,
+                get: function() {
+                    return this._elements.input.name;
+                },
+                set: function(value) {
+                    this._elements.input.name = value;
+                }
+            },
+
+            /**
+             This field's current value.
+             @type {String}
+             @default ""
+             @htmlattribute value
+             @memberof Dam.ChunkFileUpload#
+             @fires Dam.ChunkFileUpload#change
+             */
+            "value": {
+                default: "",
+                transform: Coral.transform.string,
+                set: function(value) {
+                    if (value === "" || value === null) {
+                        this._clearQueue();
+                        this._clearFileInputValue();
+                    } else {
+                        // Throws dom exception if value is different than an empty string or null
+                        throw new Error("Dam.ChunkFileUpload accepts a filename, which may only be programmatically " +
+                            "set to the empty string.");
+                    }
+                },
+                get: function() {
+                    var item = (this._uploadQueue) ? this._getQueueItem(0) : null;
+
+                    // The first selected filename, or the empty string if no files are selected.
+                    return (item) ? "C:\\fakepath\\" + item.file.name : "";
+                }
+            },
+
+            /**
+             The names of the currently selected files.
+             When {@link Dam.ChunkFileUpload#multiple} is <code>false</code>, this will be an array of length 1.
+             @type {Array.<String>}
+             @memberof Dam.ChunkFileUpload#
+             */
+            "values": {
+                validate: [
+                    Coral.validate.valueMustChange,
+                    function(values) {
+                        return Array.isArray(values);
+                    }
+                ],
+                set: function(values) {
+                    if (values.length) {
+                        this.value = values[0];
+                    } else {
+                        this.value = "";
+                    }
+                },
+                get: function() {
+                    var values = this._uploadQueue.map(function(item) {
+                        return "C:\\fakepath\\" + item.file.name;
+                    });
+
+                    if (values.length && !this.multiple) {
+                        values = [ values[0] ];
+                    }
+
+                    return values;
+                }
+            },
+
+            /**
+             Reference to a space delimited set of ids for the HTML elements that provide a label for the formField.
+             Implementers should override this method to ensure that the appropriate descendant elements are labelled
+             using the <code>aria-labelledby</code> attribute.
+             This will ensure that the component is properly identified for accessibility purposes.
+             It reflects the <code>aria-labelledby</code> attribute to the DOM.
+             @type {?String}
+             @default null
+             @htmlattribute labelledby
+             @memberof Dam.ChunkFileUpload#
+             */
+            labelledBy: {
+                attribute: "labelledby",
+                transform: Coral.transform.string,
+                get: function() {
+                    return this._getLabellableElement().getAttribute("aria-labelledby");
+                },
+                set: function() {
+                    // The specified labelledBy property.
+                    var labelledBy = this.labelledBy;
+
+                    // An array of element ids to label control, the last being the select button element id.
+                    var ids = [];
+
+                    var button = this.querySelector("[dam-chunkfileupload-select]");
+
+                    if (button) {
+                        ids.push(button.id);
+                    }
+
+                    // If a labelledBy property exists,
+                    if (labelledBy) {
+                        // prepend the labelledBy value to the ids array
+                        ids.unshift(labelledBy);
+                    }
+
+                    // Set aria-labelledby attribute on the labellable element joining ids array into
+                    // space-delimited list of ids.
+                    this._elements.input.setAttribute("aria-labelledby", ids.join(" "));
+                }
+            },
+
+            /**
+             Array of additional parameters as key:value to send in addition of files.
+             A parameter must contain a <code>name</code> key:value and optionally a <code>value</code> key:value.
+             @type {Array.<Object>}
+             @default []
+             @memberof Dam.ChunkFileUpload#
+             */
+            "parameters": {
+                default: function() {
+                    return [];
+                },
+                attribute: null,
+                validate: [
+                    Coral.validate.valueMustChange,
+                    function(newValue, oldValue) {
+                        // Verify that every item has a name
+                        return Array.isArray(newValue) && newValue.every(function(el) {
+                            return el && el.name;
+                        });
+                    }
+                ],
+                sync: function() {
+                    if (!this.async) {
+                        Array.prototype.forEach.call(this.querySelectorAll('input[type="hidden"]'), function(input) {
+                            input.parentNode.removeChild(input);
+                        });
+
+                        // Add extra parameters
+                        this.parameters.forEach(function(param) {
+                            var input = document.createElement("input");
+                            input.type = "hidden";
+                            input.name = param.name;
+                            input.value = param.value;
+
+                            this.appendChild(input);
+                        }.bind(this));
+                    }
+                }
+            },
+
+            /**
+             Whether files should be uploaded asynchronously via XHR or synchronously e.g. within a
+             <code>&lt;form&gt;</code> tag. One option excludes the other. Setting a new <code>async</code> value
+             removes all files from the queue.
+             @type {Boolean}
+             @default false
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "async": {
+                default: false,
+                reflectAttribute: true,
+                transform: Coral.transform.boolean,
+                attributeTransform: Coral.transform.booleanAttr,
+                set: function(value) {
+                    this._async = value;
+
+                    // Sync extra parameters in case of form submission
+                    if (!this._async) {
+                        this._syncProp("parameters");
+                    }
+
+                    // Clear file selection
+                    if (this._uploadQueue) {
+                        this._clearQueue();
+                        this._clearFileInputValue();
+                    }
+                }
+            },
+
+            /**
+             The URL where the upload request should be sent. When used within a <code>&lt;form&gt;</code> tag to upload
+             synchronously, the action of the form is used. If an element is clicked that has a
+             <code>[dam-chunkfileupload-submit]</code> attribute as well as a <code>[formaction]</code> attribute, the
+             action of the clicked element will be used. Set this property before calling
+             {@link Dam.ChunkFileUpload#upload} to reset the action set by a click.
+             @type {String}
+             @default ""
+             @htmlattribute action
+             @memberof Dam.ChunkFileUpload#
+             */
+            "action": {
+                default: "",
+                attribute: "action",
+                transform: Coral.transform.string,
+                attributeTransform: Coral.transform.string,
+                set: function(action) {
+                    this._action = action;
+                    this.setAttribute("action", action);
+                    // Reset button action as action was set explcitly
+                    this._buttonAction = null;
+                },
+                get: function() {
+                    return this.getAttribute("action");
+                }
+            },
+
+            /**
+             The HTTP method to use when uploading files asynchronously. When used within a <code>&lt;form&gt;</code>
+             tag to upload synchronously, the method of the form is used. If an element is clicked that has a
+             <code>[dam-chunkfileupload-submit]</code> attribute as well as a <code>[formmethod]</code> attribute, the
+             method of the clicked element will be used. Set this property before calling
+             {@link Dam.ChunkFileUpload#upload} to reset the method set by a click.
+             @type {Dam.ChunkFileUpload.method}
+             @default Dam.ChunkFileUpload.method.POST
+             @htmlattribute method
+             @memberof Dam.ChunkFileUpload#
+             */
+            "method": {
+                default: method.POST,
+                transform: transformMethod,
+                validate: [
+                    Coral.validate.valueMustChange,
+                    isValidMethod
+                ],
+                set: function(value) {
+                    this._method = value;
+
+                    // Reset button method as method was set explcitly
+                    this._buttonMethod = null;
+                }
+            },
+
+            /**
+             Whether more than one file can be chosen at the same time to upload.
+             @type {Boolean}
+             @default false
+             @htmlattribute multiple
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "multiple": Coral.property.proxy({
+                reflectAttribute: true,
+                transform: Coral.transform.boolean,
+                attributeTransform: Coral.transform.booleanAttr,
+                path: "_elements.input.multiple"
+            }),
+
+            /**
+             File size limit in bytes for one file. The value of 0 indicates unlimited, which is also the default.
+             @type {Number}
+             @htmlattribute sizelimit
+             @default 0
+             @memberof Dam.ChunkFileUpload#
+             */
+            "sizeLimit": {
+                default: 0,
+                attribute: "sizelimit",
+                transform: Coral.transform.number,
+                attributeTransform: Coral.transform.number
+            },
+
+            /**
+             MIME types allowed for uploading (proper MIME types, wildcard '*' and file extensions are supported).
+             To specify more than one value, separate the values with a comma
+             (e.g. <code>&lt;input accept="audio/*,video/*,image/*" /&gt;</code>.
+             @type {String}
+             @default ""
+             @htmlattribute accept
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "accept": Coral.property.proxy({
+                reflectAttribute: true,
+                path: "_elements.input.accept"
+            }),
+
+            /**
+             Whether the upload should start immediately after file selection.
+             @type {Boolean}
+             @default false
+             @htmlattribute autostart
+             @htmlattributereflected
+             @memberof Dam.ChunkFileUpload#
+             */
+            "autoStart": {
+                default: false,
+                attribute: "autostart",
+                reflectAttribute: true,
+                transform: Coral.transform.boolean,
+                attributeTransform: Coral.transform.booleanAttr
+            },
+
+            /**
+             Files waiting impatiently to be uploaded.
+             @readonly
+             @default []
+             @type {Array.<Object>}
+             @memberof Dam.ChunkFileUpload#
+             */
+            "uploadQueue": {
+                attribute: null,
+                set: function() {}
+            }
+        },
+
+        // focus on next element sibling if exists
+        // else focus on first child of the parent node if exists
+        _focusNextItem: function(event) {
+            if (this.nextElementSibling) {
+                this.nextElementSibling.focus();
+            } else if (this.parentNode.firstChild) {
+                this.parentNode.firstChild.focus();
+            }
+        },
+
+        // focus on previous element sibling if exists
+        // else focus on last child of the parent node if exists
+        _focusPreviousItem: function(event) {
+            if (this.previousElementSibling) {
+                this.previousElementSibling.focus();
+            } else if (this.parentNode.lastChild) {
+                this.parentNode.lastChild.focus();
+            }
+        },
+
+        // focus on first child of the parent node if exists
+        _focusFirstItem: function(event) {
+            if (this.parentNode.firstChild) {
+                this.parentNode.firstChild.focus();
+            }
+        },
+
+        // focus on last child of the parent node if exists
+        _focusLastItem: function(event) {
+            if (this.parentNode.lastChild) {
+                this.parentNode.lastChild.focus();
+            }
+        },
+
+        _onButtonFocusIn: function(event) {
+            // Get the input
+            var input = this._elements.input;
+
+            // Get the button
+            var button = event.matchedTarget;
+
+            // Move the input to after the button
+            // This lets the next focused item be the correct one according to tab order
+            button.parentNode.insertBefore(input, button.nextElementSibling);
+
+            // Make sure the input gets focused on FF
+            window.setTimeout(function() {
+                input.focus();
+            }, 100);
+        },
+
+        _onInputFocusIn: function(event) {
+            var button = this.querySelector("[dam-fileupload-select]");
+            if (button) {
+                // Remove from the tab order so shift+tab works
+                button.tabIndex = -1;
+
+                // So shifting focus backwards with screen reader doesn't create a focus trap
+                button.setAttribute("aria-hidden", true);
+
+                // Mark the button as focused
+                button.classList.add("is-focused");
+            }
+        },
+
+        _onInputFocusOut: function(event) {
+            // Unmark all the focused buttons
+            var button = this.querySelector("[dam-fileupload-select].is-focused");
+            button.classList.remove("is-focused");
+
+            // Wait a frame so that shifting focus backwards with screen reader doesn't create a focus trap
+            requestAnimationFrame(function() {
+                button.tabIndex = 0;
+                // @a11y: aria-hidden is removed to prevent focus trap when navigating backwards using a screen reader's
+                // virtual cursor
+                button.removeAttribute("aria-hidden");
+            });
+        },
+
+        _onAbortFileClick: function(event) {
+            if (!this.async) {
+                throw new Error("Dam.ChunkFileUpload does not support aborting file(s) upload on synchronous mode.");
+            }
+
+            // Get file to abort
+            var fileName = event.target.getAttribute("dam-fileupload-abortfile");
+            if (fileName) {
+                this._abortFile(fileName);
+            }
+        },
+
+        _onRemoveFileClick: function(event) {
+            if (!this.async) {
+                throw new Error("Dam.ChunkFileUpload does not support removing a file from the queue " +
+                    "on synchronous mode.");
+            } else {
+                // Get file to remove
+                var fileName = event.target.getAttribute("dam-fileupload-removefile");
+                if (fileName) {
+                    this._clearFile(fileName);
+                }
+            }
+        },
+
+        _onUploadFileClick: function(event) {
+            if (!this.async) {
+                throw new Error("Dam.ChunkFileUpload does not support uploading a file from the queue on " +
+                    "synchronous mode.");
+            }
+
+            // Get file to upload
+            var fileName = event.target.getAttribute("dam-fileupload-uploadfile");
+            if (fileName) {
+                this.upload(fileName);
+            }
+        },
+
+        _onDragAndDrop: function(event) {
+            // Set dragging classes
+            if (event.type === "dragenter" || event.type === "dragover") {
+                this._addDragClass();
+            } else if (event.type === "dragleave" || event.type === "drop") {
+                this._removeDragClass();
+            }
+
+            this.trigger("dam-fileupload:" + event.type);
+        },
+
+        _addDragClass: function() {
+            clearTimeout(this._removeClassTimeout);
+            this._removeClassTimeout = setTimeout(this._doAddDragClass, 10);
+        },
+
+        _doAddDragClass: function() {
+            this.classList.add("is-dragging");
+
+            var dropZone = this.querySelector("[dam-fileupload-dropzone]");
+            if (dropZone) {
+                dropZone.classList.add("is-dragging");
+            }
+
+            // Put the input on top to enable file drop
+            this._elements.input.classList.remove("is-unselectable");
+        },
+
+        _removeDragClass: function() {
+            clearTimeout(this._removeClassTimeout);
+            this._removeClassTimeout = setTimeout(this._doRemoveDragClass, 10);
+        },
+
+        _doRemoveDragClass: function() {
+            this.classList.remove("is-dragging");
+
+            var dropZone = this.querySelector("[dam-fileupload-dropzone]");
+            if (dropZone) {
+                dropZone.classList.remove("is-dragging");
+            }
+
+            // Disable user interaction with the input
+            this._elements.input.classList.add("is-unselectable");
+        },
+
+        _onSubmitButtonClick: function(event) {
+            var target = event.matchedTarget;
+
+            // Override or reset the action/method given the button's configuration
+            this._buttonAction = target.getAttribute("formaction") || null;
+
+            // Make sure the method provided by the button is valid
+            var buttonMethod = transformMethod(target.getAttribute("formmethod"));
+            this._buttonMethod = buttonMethod && isValidMethod(buttonMethod) ? buttonMethod : null;
+
+            // Start the file upload
+            this.upload();
+        },
+
+        _onTargetInputChange: function(event) {
+            var targetInput = this._getTargetChangeInput();
+            // if the targetInput is null we still call _onInputChange to be backwards compatible
+            if (targetInput === event.target || targetInput === null) {
+                // we call _onInputChange since the target matches
+                this._onInputChange(event);
+            }
+        },
+
+        _onFormReset: function(event) {
+            if (event.target.contains(this)) {
+                this.reset();
+            }
+        },
+
+        _onInputChange: function(event) {
+            // Stop the current event
+            event.stopPropagation();
+
+            if (this.disabled) {
+                return;
+            }
+
+            var self = this;
+            var files = [];
+            var items = [];
+
+            // Retrieve files for select event
+            if (event.target.files && event.target.files.length) {
+                this._clearQueue();
+                files = event.target.files;
+
+                // Verify if multiple file upload is allowed
+                if (!this.multiple) {
+                    files = [ files[0] ];
+                }
+            // Retrieve files for drop event
+            } else if (event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length) {
+                this._clearQueue();
+                files = event.dataTransfer.files;
+
+                // Verify if multiple file upload is allowed
+                if (!this.multiple) {
+                    files = [ files[0] ];
+                }
+            } else {
+                return;
+            }
+
+
+            // Initialize items
+            for (var i = 0; i < files.length; i++) {
+                items.push(new Dam.ChunkFileUpload.Item(files[i]));
+            }
+
+            // Verify if file is allowed to be uploaded and trigger events accordingly
+            items.forEach(function(item) {
+                // If file is not found in uploadQueue using filename
+                if (!self._getQueueItemByFilename(item.file.name)) {
+                    // Check file size
+                    if (self.sizeLimit && item.file.size > self.sizeLimit) {
+                        self.trigger("dam-fileupload:filesizeexceeded", {
+                            item: item
+                        });
+                    // Check mime type
+                    } else if (self.accept && !item._isMimeTypeAllowed(self.accept)) {
+                        self.trigger("dam-fileupload:filemimetyperejected", {
+                            item: item
+                        });
+                    } else {
+                        // Add item to queue
+                        self._uploadQueue.push(item);
+
+                        self.trigger("dam-fileupload:fileadded", {
+                            item: item
+                        });
+                    }
+                }
+            });
+
+            if (this.autoStart) {
+                this.upload();
+            }
+
+            // Explicitly re-emit the change event
+            this.trigger("change");
+
+            // Clear file input once files are added to the queue to make sure next file selection will trigger a
+            // change event
+            if (this.async) {
+                this._clearFileInputValue();
+            }
+        },
+
+        _setElementState: function() {
+            Array.prototype.forEach.call(this.querySelectorAll(
+                "[dam-fileupload-select]," +
+                "[dam-fileupload-dropzone]," +
+                "[dam-fileupload-submit]," +
+                "[dam-fileupload-clear]," +
+                "[dam-fileupload-abort]," +
+                "[dam-fileupload-abortfile]," +
+                "[dam-fileupload-removefile]," +
+                "[dam-fileupload-uploadfile]"
+            ), function(item) {
+                item.invalid = this.invalid;
+                item.disabled = this.disabled;
+                item.required = this.required;
+                item.readOnly = this.readOnly;
+            }.bind(this));
+        },
+
+        _clearQueue: function() {
+            this._uploadQueue.slice().forEach(function(item) {
+                this._clearFile(item.file.name);
+            }.bind(this));
+        },
+
+        _clearFileInputValue: function() {
+            this._elements.input.value = "";
+        },
+
+        _clearFile: function(filename) {
+            var item = this._getQueueItemByFilename(filename);
+            if (item) {
+                // Abort file upload
+                this._abortFile(filename);
+
+                // Remove file from queue
+                this._uploadQueue.splice(this._getQueueIndex(filename), 1);
+
+                this.trigger("dam-fileupload:fileremoved", {
+                    item: item
+                });
+            }
+        },
+
+        _uploadFile: function(filename) {
+            var item = this._getQueueItemByFilename(filename);
+            if (item) {
+                this._abortFile(filename);
+                this._ajaxUpload(item);
+            }
+        },
+
+        _showFileDialog: function() {
+            // Show the dialog
+            // This ONLY works when the call stack traces back to another click event!
+            this._elements.input.click();
+        },
+
+        _abortFile: function(filename) {
+            var item = this._getQueueItemByFilename(filename);
+            if (item && item._xhr) {
+                item._xhr.abort();
+                item._xhr = null;
+            }
+        },
+
+        /**
+         Uploads the given filename, or all the files into the queue. It accepts extra parameters that are sent with the
+         file.
+         @param {String} [filename]
+         The name of the file to upload.
+         */
+        upload: function(filename) {
+            if (!this.async) {
+                if (typeof filename === "string") {
+                    throw new Error("Dam.ChunkFileUpload does not support uploading a file from the queue on " +
+                        "synchronous mode.");
+                }
+
+                var form = this.closest("form");
+                if (!form) {
+                    form = document.createElement("form");
+                    form.method = this.method.toLowerCase();
+                    form.enctype = "multipart/form-data";
+                    form.action = this.action;
+                    form.hidden = true;
+
+                    form.appendChild(this._elements.input);
+
+                    Array.prototype.forEach.call(this.querySelectorAll('input[type="hidden"]'), function(input) {
+                        form.appendChild(input);
+                    });
+
+                    // Make sure the form is connected before submission
+                    this.appendChild(form);
+                }
+
+                var input = document.createElement("input");
+                input.type = "hidden";
+                input.name = "_charset_";
+                input.value = "utf-8";
+
+                form.submit();
+            } else {
+                if (typeof filename === "string") {
+                    this._uploadFile(filename);
+                } else {
+                    var self = this;
+                    self._uploadQueue.forEach(function(item) {
+                        self._abortFile(item.file.name);
+                        self._ajaxUpload(item);
+                    });
+                }
+            }
+        },
+
+        /**
+         Abort upload of a given file or all files in the queue.
+         @param {String} [filename]
+         The filename of the file to abort. If a filename is not provided, all files will be aborted.
+         */
+        abort: function(filename) {
+            if (!this.async) {
+                throw new Error("Dam.ChunkFileUpload does not support aborting file(s) upload on synchronous mode.");
+            }
+
+            if (typeof filename === "string") {
+                // Abort a single file
+                this._abortFile(filename);
+            } else {
+                // Abort all files
+                var self = this;
+                self._uploadQueue.forEach(function(item) {
+                    self._abortFile(item.file.name);
+                });
+            }
+        },
+
+        /**
+         Resets the <code>value</code> to the initial value.
+         */
+        reset: function() {
+            // since the 'value' property is not reflected, form components use it to restore the initial value. When a
+            // component has support for values, this method needs to be overwritten
+            this.value = Coral.transform.string(this.getAttribute("value"));
+        },
+
+        /**
+         Remove a file or all files from the upload queue.
+         @param {String} [filename]
+         The filename of the file to remove. If a filename is not provided, all files will be removed.
+         */
+        clear: function(filename) {
+            if (!this.async) {
+                if (typeof filename === "string") {
+                    throw new Error("Dam.ChunkFileUpload does not support removing a file from the queue on " +
+                        "synchronous mode.");
+                }
+                this._clearQueue();
+                this._clearFileInputValue();
+            } else {
+                if (typeof filename === "string") {
+                    this._clearFile(filename);
+                } else {
+                    this._clearQueue();
+                }
+            }
+        },
+
+        _getLabellableElement: function() {
+            return this;
+        },
+
+        _getQueueItemByFilename: function(filename) {
+            return this._getQueueItem(this._getQueueIndex(filename));
+        },
+
+        _getQueueItem: function(index) {
+            return index > -1 ? this._uploadQueue[index] : null;
+        },
+
+        _getQueueIndex: function(filename) {
+            var index = -1;
+            this._uploadQueue.some(function(item, i) {
+                if (item.file.name === filename) {
+                    index = i;
+                    return true;
+                }
+            });
+            return index;
+        },
+
+        _getTargetChangeInput: function() {
+            return this._elements.input;
+        },
+
+        _positionInputOnDropZone: function() {
+            var input = this._elements.input;
+            var dropZone = this.querySelector("[dam-fileupload-dropzone]");
+
+            if (dropZone) {
+                var size = dropZone.getBoundingClientRect();
+
+                input.style.top = parseInt(dropZone.offsetTop, 10) + "px";
+                input.style.left = parseInt(dropZone.offsetLeft, 10) + "px";
+                input.style.width = parseInt(size.width, 10) + "px";
+                input.style.height = parseInt(size.height, 10) + "px";
+            } else {
+                input.style.width = "0";
+                input.style.height = "0";
+            }
+        },
+
+        _initialize: function() {
+            this._uploadQueue = [];
+
+            this._doAddDragClass = this._doAddDragClass.bind(this);
+            this._doRemoveDragClass = this._doRemoveDragClass.bind(this);
+            this._positionInputOnDropZone = this._positionInputOnDropZone.bind(this);
+
+            Coral.commons.addResizeListener(this, this._positionInputOnDropZone);
+
+            var button = this.querySelector("[dam-fileupload-select]");
+
+            if (button) {
+                button.id = button.id || Coral.commons.getUID();
+            }
+
+            // If no labelledby is specified, ensure input is at labelledby the select button
+            this._queueSync([ "labelledBy" ]);
+
+            // Reposition the input under the specified dropzone
+            this._observer = new MutationObserver(this._positionInputOnDropZone);
+            this._observer.observe(this, {
+                childList: true,
+                attributes: true,
+                attributeFilter: [ "dam-fileupload-dropzone" ],
+                subtree: true
+            });
+        },
+
+        _render: function() {
+            // Fetch additional parameters if any
+            var parameters = [];
+            Array.prototype.forEach.call(this.querySelectorAll('input[type="hidden"]'), function(input) {
+                parameters.push({
+                    name: input.name,
+                    value: input.value
+                });
+            });
+            this.parameters = parameters;
+
+            // Remove the input if it's already there
+            // A fresh input is preferred to value = '' as it may not work in all browsers
+            var input = this.querySelector('[handle="input"]');
+            if (input) {
+                input.parentNode.removeChild(input);
+            }
+
+            // Remove the object if it's already there
+            var object = this.querySelector("object");
+            if (object) {
+                object.parentNode.removeChild(object);
+            }
+
+            // Add the input to the component
+            this.appendChild(template.call(this._elements));
+            if (this.firstChild.classList.contains("_coral-Menu-item")) {
+                var inputLabel = this.querySelector("coral-list-item-content").innerText;
+                this.querySelector(".dam-ChunkFileUpload-input").setAttribute("aria-label", inputLabel);
+            }
+        },
+
+        isInitialised: false,
+
+        initialize: function() {
+            this.isInitialised = true;
+            this._setAdditionalProperties();
+        },
+
+        _setAdditionalProperties: function() {
+            var self = this;
+
+            for (var prop in this.additionalProperties) {
+                var attr = self.getAttribute(prop);
+                if (attr === "true" || attr === "TRUE") {
+                    self[prop] = true;
+                } else if (attr === "false" || attr === "FALSE") {
+                    self[prop] = false;
+                } else {
+                    self[prop] = parseInt(self.getAttribute(prop));
+                }
+            }
+        },
+
+        _ajaxUpload: function(item, fileParameters) {
+            var self = this;
+
+            return function() {
+                var def = $.Deferred();
+                if (item.isCancelled && item.isCancelled === true) {
+                    def.resolve();
+                    return def;
+                }
+                self.parameters = self.parameters ? self.parameters : [];
+                // We merge the global parameters with the specific file parameters and send them all together
+                var parameters = self.parameters.concat(item.parameters);
+                if (!self._canChunkedUpload(item)) {
+                    var action = self._buttonAction || self.action;
+                    var requestMethod = self._buttonMethod ? self._buttonMethod.toUpperCase() : self.method;
+
+                    var formData = new FormData();
+
+                    parameters.forEach(function(additionalParameter) {
+                        formData.append(additionalParameter.name, additionalParameter.value);
+                    });
+                    var fileName = item.name;
+                    formData.append("_charset_", "utf-8");
+                    formData.append(self.dataset.fileNameParameter || "fileName", fileName);
+                    formData.append(self.name, item._originalFile);
+
+                    // Store the XHR on the item itself
+                    item._xhr = new XMLHttpRequest();
+
+                    // Opening before being able to set response type to avoid IE11 InvalidStateError
+                    item._xhr.open(requestMethod, action);
+
+                    // CQ-96525:Add streaming upload header in file upload UI
+                    if (self.getAttribute("data-streaming-upload") === "true") {
+                        item._xhr.setRequestHeader("Sling-uploadmode", "stream");
+                    }
+
+                    // Reflect specific xhr properties
+                    item._xhr.timeout = item.timeout;
+                    item._xhr.responseType = item.responseType;
+                    item._xhr.withCredentials = item.withCredentials;
+
+                    XHR_EVENT_NAMES.forEach(function(name) {
+                        // Progress event is the only event among other ProgressEvents that can trigger multiple times.
+                        // Hence it's the only one that gives away usable progress information.
+                        var isProgressEvent = (name === "progress");
+                        (isProgressEvent ? item._xhr.upload : item._xhr).addEventListener(name, function(event) {
+                            var detail = {
+                                item: item,
+                                action: action,
+                                method: requestMethod
+                            };
+
+                            if (isProgressEvent) {
+                                detail.lengthComputable = event.lengthComputable;
+                                detail.loaded = event.loaded;
+                                detail.total = event.total;
+                            }
+
+                            self.trigger("dam-fileupload:" + name, detail);
+                        });
+                    });
+
+                    item._xhr.send(formData);
+
+                    item._xhr.onload = function() {
+                        def.resolve();
+                    };
+                    item._xhr.onabort = function() {
+                        def.resolve();
+                    };
+                    item._xhr.onerror = function() {
+                        def.resolve();
+                    };
+                } else {
+                    self.resolve = def.resolve;
+                    item.fileParameters = fileParameters;
+                    self._startChunkedUpload(item);
+                }
+                return def;
+            };
+        },
+
+        /**
+    	Upload a file item in chunks.
+    	@param {Object} item
+    	Object representing a file item
+    	*/
+        _startChunkedUpload: function(item) {
+            this._resumeChunkedUpload(item, 0);
+        },
+
+        /**
+        Resumes the upload of a file item from offset.
+
+        @param {Object} item
+        Object representing a file item
+        @param {Number} offset
+        Object representing a file item
+        */
+        _resumeChunkedUpload: function(item, offset) {
+            var self = this;
+            if (this._canChunkedUpload(item) === false) {
+                throw "cannot start chunk upload on [" + item.file.name + "]";
+            }
+            item._xhr = new XMLHttpRequest();
+            var upload = item._xhr.upload;
+
+            // TODO : encoding of special characters in file names
+            var file = item._originalFile;
+            var fileName = item.name;
+            var f = new FormData();
+            // Custom file and file name parameter
+            var sliceMethod = this._getFileSliceMethod(file);
+            var chunk = file[sliceMethod](offset, offset + this.chunkSize);
+            if (self.dataset.fileNameParameter) {
+                f.append(self.dataset.fileNameParameter || "fileName", fileName);
+                f.append(self.name + "@Offset", offset);
+                f.append(self.name + "@Length", file.size);
+                if (item["parameters"] !== null && item["parameters"] !== undefined) {
+                    item.parameters.forEach(function(additionalParam) {
+                        f.append(additionalParam.name, additionalParam.value);
+                    });
+                }
+                item._xhr.addEventListener("load", function(e) {
+                    self._onChunkUploadLoad(e, item, offset, chunk);
+                }, false);
+                upload.addEventListener("progress", function(e) {
+                    //   self._onChunkUploadProgress(e, item, offset, chunk);
+                }, false);
+                item._xhr.addEventListener("loadstart", function(e) {
+                    self._onChunkUploadLoadStart(e, item, offset, chunk);
+                }, false);
+
+                item._xhr.addEventListener("error", function(e) {
+                    self._onChunkUploadError(e, item, offset, chunk);
+                }, false);
+                item._xhr.addEventListener("timeout", function(e) {
+                    self._onChunkUploadTimeout(e, item, offset, chunk);
+                }, false);
+                item._xhr.addEventListener("abort", function(e) {
+                    self._onChunkUploadCanceled(e, item, offset, chunk);
+                }, false);
+
+                f.append("_charset_", "utf-8");
+                f.append("chunk@Length", chunk.size);
+                f.append(self.name, chunk);
+                item._xhr.open("POST", self.action + "?:ck=" +
+                    new Date().getTime(), true);
+
+                // TODO:CQ-96807:Integrate chunked upload with streaming upload
+                if (self.getAttribute("data-streaming-upload") === "true") {
+                    item._xhr.setRequestHeader("Sling-uploadmode", "stream");
+                }
+
+                item._xhr.send(f);
+            }
+        },
+
+        /**
+        Query chunk upload at the url.
+
+        @param {String} url
+        The url to query chunk upload
+        @param {Object} item
+        Object representing a file item. it is passed in
+        event listener callbacks
+        */
+        _queryChunkedUpload: function(url, item) {
+            var self = this;
+            var xhr = new XMLHttpRequest();
+            xhr.addEventListener("load", function(e) {
+                self._onQueryChunkUploadLoad(e, item);
+            }, false);
+            xhr.addEventListener("error", function(e) {
+                self._onQueryChunkUploadError(e, item);
+            }, false);
+            xhr.addEventListener("timeout", function(e) {
+                self._onQueryChunkUploadError(e, item);
+            }, false);
+            xhr.addEventListener("abort", function(e) {
+                self._onQueryChunkUploadError(e, item);
+            }, false);
+
+            xhr.open("GET", url + "?:ck=" + new Date().getTime() +
+                "&_charset_=utf-8", true);
+            xhr.send();
+        },
+
+        /**
+         * Deletes chunks at url. No-op if no chunks are present in url.
+         */
+        _deleteChunkedUpload: function(url, item) {
+            var self = this;
+            var xhr = new XMLHttpRequest();
+            var f = new FormData();
+            f.append(":operation", "delete");
+            f.append(":applyToChunks", "true");
+            f.append("_charset_", "utf-8");
+
+            xhr.addEventListener("load", function(e) {
+                self._onDeleteChunkUploadLoad(e, item);
+            }, false);
+            xhr.addEventListener("error", function(e) {
+                self._onDeleteChunkUploadError(e, item);
+            }, false);
+            xhr.addEventListener("timeout", function(e) {
+                self._onDeleteChunkUploadError(e, item);
+            }, false);
+            xhr.addEventListener("abort", function(e) {
+                self._onDeleteChunkUploadError(e, item);
+            }, false);
+
+            xhr.open("POST", url + "?:ck=" + new Date().getTime(), true);
+            xhr.send(f);
+        },
+
+        /* * @ignore */
+        _onQueryChunkUploadLoad: function(e, item) {
+            var self = this;
+            var request = e.target;
+            if (request.readyState === 4) {
+                if (_g.HTTP.isOkStatus(request.status)) {
+                    self.trigger("dam-chunkfileupload:querysuccess", {
+                        item: item,
+                        originalEvent: e,
+                        fileUpload: this
+                    });
+                } else {
+                    this._onQueryChunkUploadError(e, item);
+                }
+            }
+        },
+
+        /* * @ignore */
+        _onQueryChunkUploadError: function(e, item) {
+            var self = this;
+            var request = e.target;
+            self.trigger("dam-chunkfileupload:queryerror", {
+                item: item,
+                originalEvent: e,
+                message: request.responseText,
+                fileUpload: this
+            });
+        },
+
+        /* * @ignore */
+        _onDeleteChunkUploadLoad: function(e, item) {
+            var self = this;
+            var request = e.target;
+            if (request.readyState === 4) {
+                if (_g.HTTP.isOkStatus(request.status)) {
+                    self.trigger("dam-chunkfileupload:deletesuccess", {
+                        item: item,
+                        originalEvent: e,
+                        fileUpload: this
+                    });
+                } else {
+                    this._onDeleteChunkUploadError(e, item);
+                }
+            }
+        },
+
+        /* * @ignore */
+        _onDeleteChunkUploadError: function(e, item) {
+            var request = e.target;
+            this.trigger({
+                type: "dam-chunkfileupload:deleteerror",
+                item: item,
+                originalEvent: e,
+                message: request.responseText,
+                fileUpload: this
+            });
+        },
+
+
+        _onChunkUploadLoad: function(e, item, offset, chunk) {
+            var self = this;
+            var request = e.target;
+            if (request.readyState === 4) {
+                self._internalOnChunkUploadLoad(e, item, offset, chunk,
+                    request.status, request.responseText);
+            }
+        },
+
+        /* * @ignore */
+        _internalOnChunkUploadLoad: function(e, item, offset, chunk, requestStatus, responseText) {
+            var self = this;
+            if (_g.HTTP.isOkStatus(requestStatus)) {
+                self.trigger("dam-chunkfileupload:progress", {
+                    offset: offset,
+                    chunk: chunk,
+                    item: item,
+                    originalEvent: e,
+                    fileUpload: this
+                });
+                if (offset + chunk.size === item.file.size) {
+                    self.trigger("dam-chunkfileupload:loadend", {
+                        item: item,
+                        originalEvent: e,
+                        fileUpload: this
+                    });
+                    self.resolve();
+                } else {
+                    this._resumeChunkedUpload(item, offset + chunk.size);
+                }
+            } else {
+                self.trigger("dam-chunkfileupload:error", {
+                    offset: offset,
+                    chunk: chunk,
+                    item: item,
+                    originalEvent: e,
+                    message: responseText,
+                    fileUpload: this
+                });
+                self.resolve();
+            }
+        },
+
+        /**
+         * Returns true if chunk upload can be used for file item.
+         */
+        _canChunkedUpload: function(item) {
+            if ( // this._useHTML5 === true &&
+                this.chunkUploadSupported === true && item.file.size > this.chunkUploadMinFileSize && window.FormData) {
+                try {
+                    this._getFileSliceMethod(item._originalFile);
+                } catch (err) {
+                    return false;
+                }
+                return true;
+            }
+            return false;
+        },
+
+
+        /**
+     	Cancel uploaded chunck of a file item
+
+        @param {Object} item
+        Object representing a file item
+        */
+        _cancelChunckedUpload: function(item) {
+            var self = this;
+            if (item.isPaused && item.isPaused === true) {
+                self.resolve();
+            }
+            item.isPaused = false;
+            item._xhr.abort();
+        },
+
+        /**
+     	Pause uploaded chunck of a file item
+
+        @param {Object} item
+        Object representing a file item
+        */
+        _pauseChunckedUpload: function(item) {
+            item.isPaused = true;
+            item._xhr.abort();
+        },
+
+        /**
+         * Returns the file slice method that is applicable based on the browser
+         * @param file
+         * @return {string}
+         * @private
+         */
+        _getFileSliceMethod: function(file) {
+            if ("mozSlice" in file) {
+                return "mozSlice";
+            } else if ("webkitSlice" in file) {
+                return "webkitSlice";
+            } else if ("slice" in file) {
+                return "slice";
+            } else {
+                // file slice is not supported on the environment
+                // use a fallback mechanism
+                throw new Error("'Slicing file' operation not supported");
+            }
+        },
+
+        cancel: function(item) {
+            this.uploadQueue.splice(this._getQueueIndex(item.name), 1);
+            item.isCancelled = true;
+            this.trigger("dam-fileupload:abort", {
+                item: item
+            });
+        },
+
+        pause: function(item) {
+            this.trigger("dam-chunkfileupload:pause", {
+                item: item
+            });
+        },
+
+        resume: function(item) {
+            item.isPaused = false;
+            this.trigger("dam-chunkfileupload:resume", {
+                item: item
+            });
+        },
+
+        /* * @ignore */
+        _onChunkUploadProgress: function(e, item, offset, chunk) {
+            var self = this;
+            // Update progress bar
+            self.trigger("dam-chunkfileupload:progress", {
+                item: item,
+                offset: offset,
+                chunk: chunk,
+                originalEvent: e,
+                fileUpload: this
+            });
+        },
+
+        /* * @ignore */
+        _onChunkUploadError: function(e, item, offset, chunk) {
+            var self = this;
+
+            self.trigger("dam-chunkfileupload:error", {
+                offset: offset,
+                chunk: chunk,
+                item: item,
+                originalEvent: e,
+                fileUpload: this
+            });
+        },
+
+        /* * @ignore */
+        _onChunkUploadTimeout: function(e, item, offset, chunk) {
+            var self = this;
+
+            self.trigger("dam-chunkfileupload:timeout", {
+                offset: offset,
+                chunk: chunk,
+                item: item,
+                originalEvent: e,
+                fileUpload: this
+            });
+        },
+
+
+        /* * @ignore */
+        _onChunkUploadLoadStart: function(e, item, offset, chunk) {
+            var self = this;
+            self.trigger("dam-chunkfileupload:loadstart", {
+                offset: offset,
+                chunk: chunk,
+                item: item,
+                originalEvent: e,
+                fileUpload: this
+            });
+        },
+
+        /* * @ignore */
+        _onChunkUploadCanceled: function(e, item, offset, chunk) {
+            var self = this;
+            if (!(item.isPaused && item.isPaused === true)) {
+                self.resolve();
+            }
+            self.trigger("dam-chunkfileupload:cancel", {
+                offset: offset,
+                chunk: chunk,
+                item: item,
+                originalEvent: e,
+                fileUpload: this
+            });
+        }
+
+    });
+
+    // Expose enumerations
+    Dam.ChunkFileUpload.method = method;
+}(Granite.$));

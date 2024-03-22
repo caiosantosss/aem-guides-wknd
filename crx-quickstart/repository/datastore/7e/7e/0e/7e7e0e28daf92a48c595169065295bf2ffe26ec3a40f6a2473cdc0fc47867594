@@ -1,0 +1,641 @@
+/*
+  ADOBE CONFIDENTIAL
+
+  Copyright 2013 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+*/
+(function(document, Granite, $, undefined) {
+    "use strict";
+
+    var ns = ".user-admin";
+
+    CUI.UserAdmin = CUI.UserAdmin || {};
+
+    CUI.UserAdmin.membership = CUI.UserAdmin.membership || [];
+
+    var currentState = "init";
+    var userPageURL = "";
+    var currentProfileName = null;
+
+    /*
+    * Moves forward with the current state if the current operation was successful.
+    */
+    function goToNextState() {
+        var userId = $("[name='authorizableId']").val();
+
+        if (currentState === "init") {
+            currentState = "reorderProfiles";
+            updateProfilesOrder();
+        }
+        else if (currentState === "reorderProfiles") {
+            currentState = "addMembers";
+            var newGroups = $('.add-user-add-groups input[type="hidden"]');
+            updateGroupMembership(newGroups, null, userId, "addMembers");
+        }
+        else if (currentState === "addMembers") {
+            currentState = "removeMembers";
+            var deletedGroups = $(".deleted-item");
+
+            updateGroupMembership(deletedGroups, "foundation-collection-item-id", userId, "removeMembers");
+        }
+        else if (currentState === "removeMembers") {
+            currentState = "updatePhoto";
+            // update the user's photo if a new one was uploaded
+            updatePhoto();
+        }
+        else if (currentState === "updatePhoto"){
+            currentState = "init";
+            outputSubmitResult();
+        }
+    }
+
+    function updateProfilesOrder() {
+        var form = $("#profilesform");
+        var formData = form.serialize();
+
+        // submit the form using XHR
+        $.ajax({
+            type: form.prop("method"),
+            url: form.prop("action"),
+            contentType: form.prop("enctype"),
+            data: formData,
+            cache: false,
+            success: function() {
+                goToNextState();
+            }
+        }).fail( errorUpdatingUser );
+    }
+
+    function outputSubmitResult() {
+        var $submitTriggerId = $(document.activeElement).attr('id');
+        var authorizableId = $("[name='authorizableId']").val();
+        if ($submitTriggerId && $submitTriggerId.indexOf('done') >= 0) {
+
+            //store the name of the user that was successfully modified and redirect to the main user list
+            sessionStorage.setItem("modifiedAuthorizable", authorizableId);
+            var doneActivator = document.querySelector("#shell-propertiespage-doneactivator");
+            if (doneActivator) {
+                window.location.href = doneActivator.dataset.graniteFormSaveactivatorHref;
+            } else {
+                window.location.href = document.referrer ? document.referrer : CUI.AuthorizableUtils.USER_MAIN_LIST_PATH;
+            }
+        } else {
+            $(window).adaptTo('foundation-ui').notify('',
+                Granite.I18n.get("You have successfully saved changes to user {0}", _g.XSS.getXSSValue(authorizableId)),
+                    'success');
+        }
+    }
+
+    function updatePhoto() {
+        var currentPicPath = $('.granite-security-card img').prop('src');
+        //if a temporary photo exists it means that the existing one should be replaced with the temporary one which is the latest
+        if (currentPicPath && currentPicPath.indexOf("tempImage") >= 0) {
+            movePhotoToUserProfile(userPageURL, currentPicPath, currentProfileName);
+        } else {
+            goToNextState();
+        }
+    }
+
+    function movePhotoToUserProfile(userPageUrl, tempImagePath, profileName) {
+        var url = userPageUrl;
+        if (profileName) {
+            url += "/" + encodeURIComponent(profileName) + ".profile";
+        } else {
+            url += ".profile";
+        }
+        url = url + ".image";
+
+        $.ajax({
+            type: "POST",
+            url: url,
+            data: { "useTempImage": tempImagePath },
+            success: goToNextState,
+            error: errorUpdatingUser
+        });
+    }
+
+    /*
+    * Error handler for updating a user.
+    */
+    function errorUpdatingUser(data) {
+        var response = Granite.I18n.get("Something went wrong when saving the changes to the user.");
+        if (data) {
+            var parsedResponse = _g.HTTP.buildPostResponseFromHTML(data);
+            if (parsedResponse && parsedResponse.headers.Message) {
+                response = parsedResponse.headers.Message;
+            }
+        }
+        currentState = "init";
+        $(window).adaptTo('foundation-ui').notify('', response, 'error');
+    }
+
+    function updateGroupMembership($groups, dataProperty, userId, operation) {
+        var ajaxRequests = [];
+        $.each($groups, function(index) {
+            var groupHome = dataProperty ? $(this).data(dataProperty) : this.value;
+
+            if ( groupHome ) {
+                var data = {};
+                data[operation] = userId;
+                data['_charset_'] = 'utf-8';
+
+                ajaxRequests.push($.ajax({
+                    type: "POST",
+                    url: groupHome + ".rw.userprops.html",
+                    traditional: true,
+                    data: data
+                }));
+            }
+        });
+        //if all the requests where successfull call the goToNextState function and if at least one request failed call errorUpdatingUser function
+        $.when.apply(null, ajaxRequests).then(goToNextState, errorUpdatingUser);
+    }
+
+    function handleAccountStatus($form) {
+        var switchComp = $form.find('[name="userStatus"]')[0];
+        //disable the user status dropdown for admin users
+        var authorizableId = $("[name='authorizableId']").val();
+        if (authorizableId == "admin") {
+            switchComp.disabled = true;
+        }
+        //dynamically set initial value because rep:disabled field may have other values then true or false
+        var $hidden = $form.find('#repDisabled');
+        if ($hidden && $hidden.val()) {
+            switchComp.checked = false;
+        }
+    }
+
+    function getProfileImageUrl(profileName) {
+        return CUI.AuthorizableUtils.AUTHORIZABLE_HOME + "/" + encodeURIComponent(profileName)
+            + ".profile.image";
+    }
+
+    function bootstrapProfilesManagement(form) {
+        var profileProperties = {
+            ".email": "email",
+            ".title": "title",
+            ".first-name": "givenName",
+            ".last-name": "familyName",
+            ".gender": "gender",
+            "[name$='gender@Delete']": "gender@Delete",
+            ".phone": "phoneNumber",
+            ".job-title": "jobTitle",
+            ".about": "aboutMe",
+            ".street": "street",
+            ".city": "city",
+            ".postal-code": "postalCode",
+            ".country": "country",
+            "[name$='country@Delete']": "country@Delete"
+        };
+
+        function getProfileData(baseUrl, profileName) {
+            return $.ajax({
+                type: "get",
+                url: baseUrl + "?path=" + encodeURIComponent(profileName),
+                contentType: "JSON",
+                cache: false
+            });
+        }
+
+        function switchFormInputsToProfile(form, profileName) {
+            return function(profileData) {
+                $.each(profileProperties, function (inputCss, inputName) {
+                    var input = $(form).find(inputCss);
+                    input.attr('name', "./" + profileName + "/" + inputName);
+
+                    var value = profileData[inputName] || "";
+                    input.val(value);
+
+                    var visibleProperties = profileData.visibleProperties || [];
+                    if (!$.isArray(visibleProperties)) {
+                        visibleProperties = [visibleProperties];
+                    }
+
+                    if (inputName.indexOf("@Delete") === -1) {
+                        var formField = input.closest(".coral-Form-fieldwrapper");
+
+                        if (profileName === "profiles/private" || profileName === "profile" || visibleProperties.indexOf(inputName) !== -1) {
+                            formField.removeClass("hidden-profile-field");
+                        } else {
+                            formField.addClass("hidden-profile-field");
+                        }
+                    }
+                });
+
+                var profileImageUrl = getProfileImageUrl(profileName);
+
+                currentProfileName = profileName;
+                $('.photoupload')[0].action = profileImageUrl;
+                switchToImage(profileImageUrl);
+            }
+        }
+
+        function loadProfileValues(form, profileToLoad) {
+            var profileUrl = form.dataset.profilesUrl;
+            getProfileData(profileUrl, profileToLoad)
+                .done(switchFormInputsToProfile(form, profileToLoad));
+        }
+
+        function hookToProfileChanging(selectInput) {
+            var currentProfile = selectInput.selectedItem;
+            var form = $("#propertiesform");
+            var OK_ID = 0;
+            var CANCEL_ID = 1;
+            var message = Granite.I18n.get('Current profile data will be saved while switching to the new profile.');
+            var actions = [
+                {
+                    id: OK_ID,
+                    text: Granite.I18n.get('OK'),
+                    primary: true
+                }, {
+                    id: CANCEL_ID,
+                    text: Granite.I18n.get('Cancel')
+                }
+            ];
+
+            function saveTheForm() {
+                var formData = createPropertiesFormData(form);
+
+                // submit the form using XHR
+                return $.ajax({
+                    type: form.prop("method"),
+                    url: form.prop("action"),
+                    contentType: form.prop("enctype"),
+                    data: formData,
+                    cache: false
+                });
+            }
+
+            function saveThePicture() {
+                var currentPicPath = $('.granite-security-card img').prop('src');
+                //if a temporary photo exists it means that the existing one should be replaced with the temporary one which is the latest
+                if (currentPicPath && currentPicPath.indexOf("tempImage") >= 0) {
+                    var url = getProfileImageUrl(currentProfileName);
+
+                    return $.ajax({
+                        type: "POST",
+                        url: url,
+                        data: { "useTempImage": currentPicPath }
+                    });
+                }
+
+                return true;
+            }
+
+            function updateTheImageOfTheProfileInProfilesTab() {
+                var currentPicPath = $('.granite-security-card img').prop('src');
+                //if a temporary photo exists it means that the existing one should be replaced with the temporary one which is the latest
+                if (currentPicPath && currentPicPath.indexOf("tempImage") >= 0) {
+                    var url =getProfileImageUrl(currentProfileName);
+                    var cell = $(".granite-user-profiles-collection tr[data-profile-path=\""
+                        + currentProfileName.replace(/\"/g, "\\\"") + "\"] td:first-child");
+                    var img = cell.find("img");
+
+                    if (img.length > 0) {
+                        img.prop('src', url);
+                    } else {
+                        cell.empty().append($('<img>').prop('src', url));
+                    }
+                }
+            }
+
+            function switchToTheNewProfile() {
+                currentProfile = selectInput.selectedItem;
+                loadProfileValues(form[0], currentProfile.value);
+            }
+
+            function handleUserResponse(id) {
+                if (id === OK_ID) {
+                    saveTheForm()
+                        .then(saveThePicture)
+                        .then(updateTheImageOfTheProfileInProfilesTab)
+                        .then(switchToTheNewProfile)
+                        .fail(errorUpdatingUser);
+                } else {
+                    currentProfile.selected = true;
+                }
+            }
+
+            $(selectInput).on("change", function(){
+                $(window).adaptTo('foundation-ui').prompt("Confirm", message, "warning", actions, handleUserResponse);
+            });
+        }
+
+        var selectInput = form.find("coral-select[name='selected_profile']")[0];
+        var selectedProfile = selectInput.selectedItem;
+        if (selectedProfile) {
+            loadProfileValues(form[0], selectedProfile.value);
+        }
+
+        hookToProfileChanging(selectInput);
+    }
+
+    function getUploadedImageUrl(actionUrl, tempName) {
+        var imageUrl = CUI.AuthorizableUtils.AUTHORIZABLE_HOME + "/profile/photos/primary/";
+
+        if (actionUrl === CUI.AuthorizableUtils.CONTEXT_PATH + "/tmp") {
+            imageUrl = actionUrl + "/";
+        } else if (currentProfileName) {
+            imageUrl = CUI.AuthorizableUtils.AUTHORIZABLE_HOME + "/"
+                + encodeURIComponent(currentProfileName) + "/photos/primary/";
+        }
+
+        imageUrl = imageUrl + tempName + "?ck=" + new Date().getTime();
+
+        return imageUrl;
+    }
+
+    function cleanCard($card) {
+        $card.find("img").remove();
+        $card.find('.authorizable-card-icon-container').remove();
+    }
+
+    function switchToIcon() {
+        var $card = $('.granite-security-card');
+        cleanCard($card);
+
+        var iconHtml = "<div class='authorizable-card-icon-container'>";
+        if ($card[0].dataset.systemuser !== undefined) {
+            iconHtml += "<coral-icon icon=\"gears\" size=\"XXL\"></coral-icon>"
+        } else {
+            iconHtml += "<coral-icon icon=\"user\" size=\"XXL\"></coral-icon>"
+        }
+        iconHtml = iconHtml + "</div>";
+
+        $card.find('coral-card-asset').append($(iconHtml));
+    }
+
+    function switchToImage(imageUrl) {
+        var $card = $('.granite-security-card');
+        cleanCard($card);
+        var $cardImage = $('<img>').prop('src', imageUrl);
+        $card.find('coral-card-asset').append($cardImage);
+
+        $cardImage.on("error", switchToIcon);
+    }
+
+    $(document).on("foundation-contentloaded", function(e) {
+        var form = $('form#propertiesform');
+
+        if (CUI.AuthorizableUtils.IS_EDIT_MODE) {
+            alertIfExternalUser();
+            handleAccountStatus(form);
+        } else {
+            //remove the save only option when creating users
+            $('#shell-propertiespage-doneactivator').siblings('button')[0].remove();
+            $('#shell-propertiespage-doneactivator').siblings('coral-popover')[0].remove();
+        }
+
+        $("[name='./profile/email']").attr("type", "email");
+
+        // last name should come before first name in ja, ko and zh languages
+        var language = CUI.AuthorizableUtils.CURRENT_LANGUAGE;
+        var langCode = language.substr(0, 2).toLowerCase();
+        if (langCode == "ja" || langCode == "ko" || langCode == "zh") {
+            var firstName = $(".first-name");
+            var firstNameCopy = firstName.clone();
+
+            var firstNameLabel = $(".first-name").prev();
+            var firstNameLabelCopy = firstNameLabel.clone();
+
+            var lastName = $(".last-name");
+            var lastNameCopy = lastName.clone();
+
+            var lastNameLabel = $(".last-name").prev();
+            var lastNameLabelCopy = lastNameLabel.clone();
+
+            firstNameLabel.replaceWith(lastNameLabelCopy);
+            firstName.replaceWith(lastNameCopy);
+
+            lastNameLabel.replaceWith(firstNameLabelCopy);
+            lastName.replaceWith(firstNameCopy);
+        }
+
+        //handle the image upload on a temporary location when a new image is selected for upload by the user
+        var uploadComponent = $('.photoupload')[0];
+        if (uploadComponent) {
+            var actionURL = CUI.AuthorizableUtils.CONTEXT_PATH + "/tmp";
+            if (CUI.AuthorizableUtils.AUTHORIZABLE_HOME) {
+                actionURL = CUI.AuthorizableUtils.AUTHORIZABLE_HOME + ".profile.image";
+            }
+            uploadComponent.action = actionURL;
+            uploadComponent.name = $(uploadComponent).attr('name')  + new Date().getTime();
+
+            uploadComponent.addEventListener('coral-fileupload:load', function(evt) {
+                $(window).adaptTo('foundation-ui').clearWait();
+                if (evt.detail.item._xhr.status == 200) {
+                    var imageUrl = getUploadedImageUrl(actionURL, uploadComponent.name);
+
+                    switchToImage(imageUrl);
+                } else {
+                    $(window).adaptTo('foundation-ui').notify('', Granite.I18n.get('Error uploading user profile image.') , 'error');
+                }
+            });
+            //show spinner until the picture upload is finished
+            uploadComponent.addEventListener('coral-fileupload:loadstart', function(evt) {
+                $(window).adaptTo('foundation-ui').wait($('coral-card-asset'));
+            });
+        }
+
+        $(document).on("click", ".granite-user-profiles-collection button[icon='edit']", function(e){
+            e.preventDefault();
+            var profileRow = $(e.target).closest("tr");
+            var profilePath = profileRow.data("profile-path");
+            var profileEditUrl = $("[data-profile-edit-url]").data("profile-edit-url");
+
+            window.location.href = profileEditUrl + profilePath;
+        });
+
+        $(document).on("click", ".profile-delete-action", function(e) {
+            e.preventDefault();
+            var profileRow = $(e.target).closest("tr");
+            var profileRelativePath = profileRow.data("profile-path");
+
+            var userHomePath = $("[data-home]").data("home");
+            var profilePath = userHomePath + "/" + profileRelativePath;
+            var tableComponentPath = $("table[data-profiles-table-path]").data("profiles-table-path");
+
+            $(window).adaptTo('foundation-ui').prompt("Confirm",
+                Granite.I18n.get('Are you sure you want to delete the selected profile?'), "warning",
+                [
+                    {
+                        id: 0,
+                        text: Granite.I18n.get('OK'),
+                        primary: true
+                    },
+                    {
+                        id: 1,
+                        text: Granite.I18n.get('Cancel')
+                    }
+                ], function(id) {
+                    if (id === 0) {
+                        $.ajax({
+                            type: "post",
+                            url: profilePath,
+                            data: ":operation=delete",
+                            cache: false
+                        }).done( function() {
+                            $(window).adaptTo('foundation-ui').notify('', Granite.I18n.get('Profile deleted successfully.'), 'success');
+
+                            $.ajax({
+                                type: "get",
+                                url: tableComponentPath + ".html" + userHomePath,
+                                cache: false
+                            }).done(function(data) {
+                                $("table.granite-user-profiles-collection").replaceWith(Granite.UI.Foundation.Utils.sanitizeHtml(data));
+                            });
+
+                        }).fail(function (data) {
+                            $(window).adaptTo('foundation-ui').notify('', Granite.I18n.get('Could not delete user profile.') , 'error');
+                        });
+                    }
+                });
+
+        });
+
+        if (form.find("coral-select[name='selected_profile']").length === 1) {
+            bootstrapProfilesManagement(form);
+        }
+
+        // update authorizable ID value field
+        var authorizableIDInput = form.find("[name='authorizableId']");
+        if (authorizableIDInput.length > 0) {
+            authorizableIDInput.val(authorizableIDInput.data("val"));
+        }
+    });
+
+    function alertIfExternalUser() {
+        $.get(CUI.AuthorizableUtils.AUTHORIZABLE_HOME + '.json', function(data) {
+            if (data && (data['rep:externalId'] || data['samlResponse'])) {
+                var message = Granite.I18n.get("This user is managed by an external entity. Some of the profile values may be reset during the next " +
+                    "synchronization.");
+                $(window).adaptTo('foundation-ui').notify('', message , 'info');
+            }
+        })
+    }
+
+    /*
+    * Register the click event handler for the change password modal
+    */
+    $(document).on("submit" + ns, "#changeUserPasswordForm", function(e) {
+        e.preventDefault();
+        var form = $(this);
+        var formAction = form.attr('action');
+
+        // exclude retype password field when posting the data, as it would be saved as plain text on the node
+        var formData = form.find("input[name!='rep:re-password']").serialize() + "&" + CUI.AuthorizableUtils.CHARSET_ENCODING_XHR_PARAM;
+
+        // submit the form using XHR
+        $.ajax({
+            type: "post",
+            url: formAction,
+            contentType: form.prop("enctype"),
+            data: formData,
+            cache: false
+        }).always ( function() {
+            // clear the inputs in the form
+            var $dialog = $('#changePasswordDialog');
+            $dialog.get(0).hide();
+            form.find("input").val("");
+            $dialog.find('[type=submit]')[0].disabled = true;
+        }).done( function() {
+            $(window).adaptTo('foundation-ui').notify('', Granite.I18n.get('User password changed successfully.'), 'success')
+        }).fail(function (data) {
+            var message = Granite.I18n.get("Something went wrong while changing the user's password.");
+            if (data) {
+                if (data.responseText.indexOf("PasswordHistoryException") != -1) {
+                    message = Granite.I18n.get("New password was found in password history.");
+                } else {
+                    var parsedResponse = _g.HTTP.buildPostResponseFromHTML(data);
+                    if (parsedResponse && parsedResponse.headers.Message) {
+                        message = parsedResponse.headers.Message;
+                    }
+                }
+            }
+            $(window).adaptTo('foundation-ui').notify('', message , 'error');
+        });
+    });
+
+    function createPropertiesFormData(form) {
+        var disableAccountFormFieldName = 'rep:disabled';
+        var disableAccountReqParamName = 'disableUser';
+        // Get current selected value for user account status. If any string is provided, the account will be disabled with that reason.
+        // If empty string is provided, the account will be enabled.
+        var userStatusComp = form.find('[name="userStatus"]')[0];
+        var accountStatus = "";
+        if (userStatusComp && !userStatusComp.checked) {
+            accountStatus = "inactive";
+        }
+
+        //add & remove impersonators : build XHR param value
+        var updateImpersonatorUsers = {};
+        var newImpersonators = $('.add-impersonators input[type="hidden"]').map(function () {
+            return this.value;
+        }).get();
+        var removeImpersonators = $(".impersonators-list .deleted-item").map(function () {
+            return this.dataset.principalName;
+        }).get();
+        if (newImpersonators.length > 0) {
+            updateImpersonatorUsers["addImpersonators"] = newImpersonators;
+        }
+        if (removeImpersonators.length > 0) {
+            updateImpersonatorUsers["removeImpersonators"] = removeImpersonators;
+        }
+
+        // build XHR param value for disabling user
+        var enableDisableUser = "&" + disableAccountReqParamName + "=" + accountStatus;
+        //admin user can not be disabled so the parameter must be removed in that case, otherwise the backend will throw an exception
+        var authorizableId = $("[name='authorizableId']").val();
+        if (authorizableId == "admin") {
+            enableDisableUser = "";
+        }
+
+        // serialize the form, excluding the disabled field (need to pass the built enableDisableUser to XHR in order to update the status)
+        // exlude retype password field when posting the data, as it would be saved as plain text on the node
+        var formData = form.find("input[name!='" + disableAccountFormFieldName + "'][name!='rep:re-password'],textarea,select[name!='" + disableAccountFormFieldName + "']").serialize() + enableDisableUser + "&" + $.param(updateImpersonatorUsers) + "&" + CUI.AuthorizableUtils.CHARSET_ENCODING_XHR_PARAM;
+
+        return formData;
+    }
+
+    /*
+    * Register the click event handler for the Save button on the user properties form
+    */
+    $(document).on("submit" + ns, "#propertiesform", function(e) {
+        e.preventDefault();
+        var form = $(this);
+        var formData = createPropertiesFormData(form);
+
+        // submit the form using XHR
+        $.ajax({
+            type: form.prop("method"),
+            url: form.prop("action"),
+            contentType: form.prop("enctype"),
+            data: formData,
+            cache: false,
+            success: function(data, textStatus, jqXHR) {
+                var response = _g.HTTP.buildPostResponseFromHTML(data);
+                userPageURL = response.headers.Path;
+                goToNextState();
+             }
+        }).fail( errorUpdatingUser );
+    });
+	$(document).on("click", "#shell-propertiespage-closeactivator", function(e) {
+        var backHref = $("#shell-propertiespage-closeactivator").attr("href");
+        if (window.history.length < 1) {
+            window.location = backHref;
+        } else {
+            window.history.back();
+        }
+        e.preventDefault();
+    });
+})(document, Granite, Granite.$);

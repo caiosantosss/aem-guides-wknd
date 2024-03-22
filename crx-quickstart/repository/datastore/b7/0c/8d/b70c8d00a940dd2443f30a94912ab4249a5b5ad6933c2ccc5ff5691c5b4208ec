@@ -1,0 +1,669 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2020 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+//CreativeWorker.js
+(function (window, $, StandardWorker, creativeWorkerData)  {
+    "use strict";
+
+    var self;
+
+    // asset selector type filters
+    var LIGHTROOM = "lightroom",
+        PSD = "psd",
+        ATN = "atn";
+
+    // events
+    var EVT_LAUNCH_FOLDER_PICKER    = "launch-folder-picker",
+        EVT_LAUNCH_ASSET_PICKER     = "launch-asset-picker",
+        EVT_ITEM_SELECTED           = "item-selected";
+
+    // labels
+    var LABEL_CREATIVE_OP   = Granite.I18n.get("Creative Operation"),
+        LABEL_TARGET_FOLDER = Granite.I18n.get("Target Folder"),
+        LABEL_LIGHTROOM_PRESET = Granite.I18n.get("Lightroom Preset"),
+        LABEL_OUTPUT_PROPERTIES   = Granite.I18n.get("Output Properties"),
+        LABEL_PHOTOSHOP_TEMPLATE = Granite.I18n.get("Photoshop Template"),
+        LABEL_PHOTOSHOP_ACTION = Granite.I18n.get("Photoshop Action"),
+        LABEL_PHOTOSHOP_ACTION_NAME = Granite.I18n.get("Photoshop Action Name");
+
+    // prompts
+    var PROMPT_SELECT_TARGET_FOLDER     = Granite.I18n.get("Select an optional target folder to create assets"),
+        PROMPT_SELECT_LIGHTROOM_PRESET  = Granite.I18n.get("Select Lightroom preset"),
+        PROMPT_SELECT_PHOTOSHOP_TEMPLATE = Granite.I18n.get("Select Photoshop Template"),
+        PROMPT_SELECT_PHOTOSHOP_ACTION  = Granite.I18n.get("Select Photoshop Action"),
+        PROMPT_INPUT_PHOTOSHOP_ACTION   = Granite.I18n.get("Leave empty to apply all actions in the file");
+
+    // selector
+    var SEL_TARGET_FOLDER           = ".target-folder",
+        SEL_TARGET_FOLDER_WRAPPER   = "#target-folder-wrapper",
+        SEL_PROFILE_INFO            = "#profile-info",
+        SEL_SUB_ITEM                = ".sub-item",
+        SELECTED_OPERATION_WRAPPER = "selected-operation-wrapper";
+
+    var ASSET = "asset",
+        CREATIVE_WORKER_DATA = "creativeWorkerData";
+
+    // formats
+    var PNG = "png",
+        JPG = "jpeg";
+    var IMAGE_MASK_FORMATS = [{value: PNG, content: {textContent: PNG}}];
+    var FORMATS = [
+        {value: JPG, content: {textContent: JPG}},
+        {value: PNG, content: {textContent: PNG}}
+    ];
+
+    var SMALL   = "Small",
+    	MED     = "Medium",
+    	LARGE   = "Large";
+
+    var COMPRESSION_LEVELS = [
+    	{value: SMALL.toLowerCase(), content: {textContent: SMALL}},
+    	{value: MED.toLowerCase(), content: {textContent: MED}},
+    	{value: LARGE.toLowerCase(), content: {textContent: LARGE}}
+    	];
+
+    // default excludes
+    var DEFAULT_EXCLUDE_FORMATS = "application/.*,video/.*";
+
+ // standard NUI worker fields
+    var RENDITION_NAME = "rendition-name",
+        INCLUDES = "includes",
+        EXCLUDES = "excludes";
+
+    var FIELD_FMT = Granite.I18n.get("Extension"),
+	    FIELD_WATERMARK = Granite.I18n.get("Watermark"),
+	    FIELD_QUALITY = Granite.I18n.get("Quality"),
+	    FIELD_RENDITION_NAME = Granite.I18n.get("Rendition Name *"),
+	    FIELD_INCLUDES = Granite.I18n.get("Includes"),
+	    FIELD_EXCLUDES = Granite.I18n.get("Excludes");
+
+    var MSG_JPEG_QLT = Granite.I18n.get("Enter a quality value between 1-100.");
+
+    $(document).one("foundation-contentloaded", function () {
+        $(SEL_PROFILE_INFO).data(CREATIVE_WORKER_DATA, creativeWorkerData);
+    });
+
+    // Initialize CreativeWorker
+    class CreativeWorker extends StandardWorker {
+        constructor(options) {
+            super(options);
+            self = this;
+          }
+    };
+
+    CreativeWorker.prototype.init = function(options) {
+        self = this;
+        this.$parent = options.$parent;
+        this.$container = options.$container;
+    }
+
+    // setup ui (do nothing)
+    CreativeWorker.prototype.setupUI = function() {
+        // wrapper for target folder
+        var $pathBrowserWrapper = $(SEL_TARGET_FOLDER_WRAPPER);
+
+        // create text field
+        var opts = {};
+        opts.label          = LABEL_TARGET_FOLDER;
+        opts.className      = SEL_TARGET_FOLDER.replace(".", "");
+        opts.placeholder    = PROMPT_SELECT_TARGET_FOLDER;
+        opts.$wrapper       = $pathBrowserWrapper;
+        var $folderPath     = this.componentFactory.createTextfield(opts);
+
+        // create action button button for path browse
+        var params = {
+            "$wrapper": $pathBrowserWrapper,
+            "icon": "folder",
+            "variant":"quiet",
+            "className":"action-btn btn-browse-path"
+        }
+
+        // create delete button and add to DOM
+        var $btnBrowsePath = this.componentFactory.createIconButton(params);
+        $btnBrowsePath.data("$target", $folderPath.find("input"));
+        $btnBrowsePath.on("click", function() {
+            $(document).trigger({
+                "type": EVT_LAUNCH_FOLDER_PICKER,
+                "target": $(this).data("$target")
+            });
+        });
+    }
+
+    // add row
+    CreativeWorker.prototype.addRow = function(data) {
+
+        data = (data)? data : {};
+        data.name = (data["name"])? data["name"] : "";
+        data.fmt = (data["fmt"])? data["fmt"] : JPG;
+        data.hei = (data["hei"])? data["hei"] : "";
+        data.quality = (data["quality"])? data["quality"] : "";
+        data.watermark = (data["watermark"])? data["watermark"] : false;
+
+        // check if FPO.  If FPO rendition update FPO switch and quality
+        if (data.name === this.FPORENDITION) {
+            $("#fpo-wrapper").show();
+            $("#fpo").attr("checked", "checked");
+            $("#fpoQuality").val(data.quality);
+            return data;
+        }
+        // handle include/excludes
+        var includeMimeTypes = data["includeMimeTypes"] == undefined? this.DEFAULT_INCLUDE : data["includeMimeTypes"];
+        var excludeMimeTypes = data["excludeMimeTypes"] == undefined? DEFAULT_EXCLUDE_FORMATS : data["excludeMimeTypes"];
+        data.includeMimeTypes = includeMimeTypes.split(",");
+        data.excludeMimeTypes = excludeMimeTypes.split(",");
+
+        // create worker item and get content
+        var $contentWrapper = this.createWorkerItem();
+
+        var $row0 = this.createRow($contentWrapper, LABEL_CREATIVE_OP);
+        // create container for creative operations
+        $("<div></div>", {
+            "class" : SELECTED_OPERATION_WRAPPER
+        }).appendTo($contentWrapper);
+
+        var $row1 = this.createRow($contentWrapper, LABEL_OUTPUT_PROPERTIES);
+        var $row1_1 = this.createRow($contentWrapper);
+        var $row1_watermark = this.createRow($contentWrapper, null, "watermark");
+        var $row2 = this.createRow($contentWrapper, Granite.I18n.get("Mime Types"));
+
+	    /***
+	     * ROW 1 BEGIN
+	     */
+        // RENDITION NAME
+        var opts            = {};
+        opts.className      = this.MEDIUM + " " + RENDITION_NAME;
+        opts.label          = FIELD_RENDITION_NAME;
+        opts.name           = RENDITION_NAME;
+        opts.placeholder    = this.MSG_ENTER_RENDITION_NAME;
+        opts.$wrapper       = $row1;
+        opts.value          = data.name || "";
+        this.componentFactory.createTextfield(opts);
+
+        // RENDITION FORMAT (JPEG, GIF, ETC)
+        var opts            = {};
+        opts.className      = this.SMALL + " format";
+        opts.label          = FIELD_FMT;
+        opts.$wrapper       = $row1;
+        opts.value          = data.fmt;
+
+        var $fmt = this.componentFactory.createSelectControl(opts, FORMATS, data.fmt);
+        $fmt.data("$compressionContainer", $row1_1);
+        $fmt.data("$qltContainer", $row1_1);
+        $fmt.data("$mainContainer", $contentWrapper);
+
+        // add select listener for output format
+        $fmt.on("change", this.formatChangeHandler);
+
+        /**
+         * quality FIELD
+         */
+        var opts            = {};
+        opts.className      = this.SMALL + " quality";
+        opts.label          = FIELD_QUALITY;
+        opts.max            = 100;
+        opts.$wrapper       = $row1;
+        opts.value          = data.quality || 85;
+        opts.tooltip        = MSG_JPEG_QLT;
+        this.componentFactory.createNumberInput(opts);
+
+        /**
+         * WATERMARK FIELD
+         */
+        var componentFactory = this.componentFactory;
+        $.ajax({
+            url: "/content/dam.watermark.json",
+            cache: false
+        }).done(function(watermarkData) {
+            if(!watermarkData.watermarkImagePath){
+                return;
+            }
+            var watermarkData = watermarkData;
+            var opts            = {};
+            opts.label          = FIELD_WATERMARK;
+            opts.className      = "watermarkSwitch";
+            opts.$wrapper       = $row1_watermark;
+            componentFactory.createSwitch(opts);
+            var toggleSwith = opts.$wrapper.find(".watermarkSwitch");
+
+            if(data.watermark) {
+                toggleSwith.attr("checked", "checked");
+            }
+
+            if(!watermarkData.watermarkImagePath){
+                toggleSwith.addClass("watermarkNotValid")
+            }
+            toggleSwith.trigger("change");
+        });
+        /***
+         * ROW 1 END
+        */
+
+        /***
+         * ROW 2 BEGIN
+         */
+
+        /**s
+         * COMPRESSION FIELD
+         */
+        var opts            = {};
+        opts.className      = this.SMALL + " compression";
+        opts.label          = Granite.I18n.get("Compression");
+        opts.$wrapper       = $row1_1;
+        opts.value          = data.compression || LARGE.toLowerCase();
+
+        // compression
+        var $compression = this.componentFactory.createSelectControl(opts, COMPRESSION_LEVELS, opts.value);
+        $compression.parent().hide();
+
+        /**
+         * INCLUSION FIELD
+         */
+        opts                = {};
+        opts.className      = this.LARGE + " " + INCLUDES;
+        opts.items          = this.INCLUDE_FORMATS;
+        opts.values         = data.includeMimeTypes;
+        opts.label          = FIELD_INCLUDES;
+        opts.name           = INCLUDES;
+        opts.prompt         = this.MSG_ENTER_INCLUDE_MIME;
+        opts.$wrapper       = $row2;
+        this.componentFactory.createAutoComplete(opts).on("change", function() {
+            $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+        });
+
+        /**
+         * EXCLUSION FIELD
+         */
+        opts                = {};
+        opts.className      = this.LARGE + " " + EXCLUDES;
+        opts.items          = this.EXCLUDE_FORMATS;
+        opts.values         = data.excludeMimeTypes;
+        opts.label          = FIELD_EXCLUDES;
+        opts.prompt         = this.MSG_ENTER_EXCLUDE_MIME;
+        opts.name           = EXCLUDES;
+        opts.$wrapper       = $row2;
+        this.componentFactory.createAutoComplete(opts).on("change", function() {
+            $(self.SEL_PROFILE_INFO).trigger(self.ITEM_UPDATED);
+        });
+		/***
+		 * ROW 2 END
+		 */
+
+        // add custom rows
+        this.appendCustomRows($row0, data);
+
+        // dispatch event to update count in tab list
+        $("#profile-info").trigger("ITEM_ADDED");
+        return $contentWrapper;
+    }
+
+    // handler for output format change
+    CreativeWorker.prototype.formatChangeHandler = function() {
+
+    	var $compressionControl = $(this).data("$compressionContainer").find(".coral-Form-fieldwrapper.compression");
+        var $qltControl = $(this).data("$qltContainer").find(".coral-Form-fieldwrapper.quality");
+        var $operationControl = $(this).data("$mainContainer").find(".coral-Form-fieldwrapper .operation");
+
+        if ($(this).val() === JPG || $(this).val() === "webp") {
+            $qltControl.show();
+            $compressionControl.hide();
+        }
+        else if ($(this).val() === PNG) {
+            // hide compression control if operation is mask or cutout
+            var operation = $operationControl.val();
+            var op = $(SEL_PROFILE_INFO).data(CREATIVE_WORKER_DATA).OP;
+            if (operation === op.MASK || operation === op.CUTOUT) {
+                $compressionControl.hide();
+            }
+            else {
+                // this feature is not available at this time...
+                // $compressionControl.show();
+            }
+            $qltControl.hide();
+        }
+        else {
+        	$compressionControl.hide();
+        	$qltControl.hide();
+        }
+    };
+
+    CreativeWorker.prototype.data = function() {
+
+        var data = [];
+
+        // get renditions
+        $(".creative .item-content").each(function() {
+
+
+            var rendition = {};
+            rendition.name = $(this).find("input.rendition-name").val();
+            rendition.format = $(this).find("coral-select.format").val();
+
+            rendition.includes = $(this).find("coral-autocomplete.includes").data("items").toString();
+            rendition.excludes = $(this).find("coral-autocomplete.excludes").data("items").toString();
+
+            // get quality
+            if (rendition.format === "jpeg") {
+                var qltVal = $(this).find("coral-numberinput.quality").val();
+                if (qltVal) {
+                    rendition.quality = qltVal;
+                }
+            }
+
+            // get compression
+            if (rendition.format === PNG) {
+                var compressionVal = $(this).find("coral-select.compression").val();
+                if (compressionVal) {
+                    rendition.compression = compressionVal;
+                }
+            }
+
+            // get creative operation if applicable
+            var creativeOperation = $(this).find("coral-select.operation").val();
+            if (creativeOperation.length) {
+                var op = $(SEL_PROFILE_INFO).data(CREATIVE_WORKER_DATA).OP;
+
+                // set creative operation
+                rendition.operation = {"id": creativeOperation}
+
+                // set creative operation params
+                switch (creativeOperation) {
+                    case op.APPLYPRESET:
+                        // set source
+                        rendition.sources = {"preset" : $(this).find("input.preset").val()}
+                        break;
+                    case op.PSDSMARTOBJECT:
+                        // set source
+                        rendition.sources = {"template" : $(this).find("input.source").val()}
+
+                        // set operation prop/s
+                        rendition.operation["id"] = creativeOperation;
+                        rendition.operation["layerId"] = $(this).find("coral-select.smart-object").val();
+                        break;
+                    case op.PSDACTION:
+                        // set source
+                        rendition.sources = {"action" : $(this).find("input.action").val()}
+
+                        // set operation prop/s
+                        rendition.operation["id"] = creativeOperation;
+                        rendition.operation["actionName"] = $(this).find("input.actionName").val();
+                        break;
+                }
+            }
+
+            data.push(rendition);
+        });
+        return data;
+    }
+
+    CreativeWorker.prototype.appendCustomRows = function($wrapper, data) {
+        // hide width and height controls
+        $wrapper.find(".coral-Form-fieldwrapper.width").hide();
+        $wrapper.find(".coral-Form-fieldwrapper.height").hide();
+        $wrapper.find(".coral-Form-fieldwrapper.rendition-name").css({
+            "width": "100%",
+            "padding-right": "5px"
+        });
+
+        var data = data || {};
+        var $customRow1 = this.createRow($wrapper);
+        var creativeOperations = $(SEL_PROFILE_INFO).data(CREATIVE_WORKER_DATA).OPERATIONS;
+
+        // default to auto tone, and override if applicable
+        var operation = $(SEL_PROFILE_INFO).data(CREATIVE_WORKER_DATA).OP.AUTOTONE;
+
+        // set operation
+        if (data.operation && data.operation.id) {
+            operation = data.operation.id;
+        }
+
+        // set target folder
+        var targetFolder = data.targetFolder;
+        if (targetFolder) {
+            $("input" + SEL_TARGET_FOLDER).val(targetFolder);
+        }
+
+        // CREATIVE OPERATION select control for creative operation
+        var opts            = {};
+        opts.className      = this.LARGE + " operation";
+        opts.label          = LABEL_CREATIVE_OP;
+        opts.$wrapper       = $customRow1;
+        opts.value = operation;
+
+        // create creative operation select control
+        var $selectCreativeOperation = this.componentFactory.createSelectControl(opts, creativeOperations, opts.value);
+
+        // listen for data load
+        self = this;
+        var $selectControl = $selectCreativeOperation.find("select");
+        $selectControl.data("$parent", $wrapper);
+        $selectControl.data("$coralSelect", $selectCreativeOperation);
+        $selectControl.off("data-load").on("data-load", this.creativeOperationSelectHandler);
+
+        // listen for user interaction events
+        $selectCreativeOperation.data("$parent", $wrapper);
+        $selectCreativeOperation.data("$coralSelect", $selectCreativeOperation);
+        $selectCreativeOperation.off("change").on("change", this.creativeOperationSelectHandler);
+
+        /** load sub options **/
+        setTimeout(function() {
+            $($selectControl).trigger({
+                "type": "change",
+                "creativeData": data
+            });
+            $("coral-select.operation").trigger("data-load");
+        }, 1000);
+    }
+
+    CreativeWorker.prototype.creativeOperationSelectHandler = function(e) {
+        var eventData = e.creativeData;
+        var value = $(this).val();
+        var op = $(SEL_PROFILE_INFO).data(CREATIVE_WORKER_DATA).OP;
+
+        //
+        var $wrapper = $(this).data("$parent").parent();
+        var $selectedOperationWrapper = $wrapper.find("." + SELECTED_OPERATION_WRAPPER);
+
+        // remove the selected operation row
+        if ($selectedOperationWrapper && $selectedOperationWrapper.children().length) {
+            $selectedOperationWrapper.empty();
+        }
+
+        // handle creative operation selection
+        switch (value) {
+            case op.APPLYPRESET:
+                var $selectedOperationRow = self.createRow($selectedOperationWrapper, undefined, SELECTED_OPERATION_WRAPPER);
+                var preset = "";
+                if (eventData) {
+                    preset = eventData.sources.preset;
+                }
+                self.createAssetPickerControl(LABEL_LIGHTROOM_PRESET, PROMPT_SELECT_LIGHTROOM_PRESET, $selectedOperationRow, ASSET, "preset", preset, LIGHTROOM);
+                break;
+            case op.PSDSMARTOBJECT:
+                var source = "";
+                var layerId = "";
+                if (eventData) {
+                    source = eventData.sources.template;
+                    layerId = eventData.operation.layerId;
+                }
+                var $selectedOperationRow = self.createRow($selectedOperationWrapper, undefined, SELECTED_OPERATION_WRAPPER);
+                self.createPhotoShopRenderControls(LABEL_PHOTOSHOP_TEMPLATE, PROMPT_SELECT_PHOTOSHOP_TEMPLATE, $selectedOperationRow, source, layerId);
+                $("button.btn-browse-path").css("margin-top", "35px");
+                break;
+            case op.PSDACTION:
+                var action = "";
+                var actionName = "";
+                if (eventData) {
+                    action = eventData.sources.action;
+                    actionName = eventData.operation.actionName;
+                }
+                var $selectedOperationRow = self.createRow($selectedOperationWrapper, undefined, SELECTED_OPERATION_WRAPPER);
+                self.createPhotoShopActionControl(LABEL_PHOTOSHOP_ACTION, PROMPT_SELECT_PHOTOSHOP_ACTION, LABEL_PHOTOSHOP_ACTION_NAME, PROMPT_INPUT_PHOTOSHOP_ACTION, $selectedOperationRow, action, actionName);
+                $("button.btn-browse-path").css("margin-top", "35px");
+                break;
+        }
+
+        // reset select control if applicable
+        var $formatSelectControl = $wrapper.parent().find("coral-select.format");
+        var formatSelectValue = $formatSelectControl.val();
+        var items = $formatSelectControl.get(0).items;
+        items.clear();
+
+        if (value === op.MASK || value === op.CUTOUT) {
+            for (var i = 0; i < IMAGE_MASK_FORMATS.length; i++) {
+                items.add(IMAGE_MASK_FORMATS[i]);
+            }
+            // only a single value 'png', make sure it's selected
+            $formatSelectControl.val(IMAGE_MASK_FORMATS[0].value);
+        } else {
+            for (var i = 0; i < FORMATS.length; i++) {
+                items.add(FORMATS[i]);
+            }
+            $formatSelectControl.val(formatSelectValue || FORMATS[0].value);
+        }
+
+        // trigger change event to show/hide quality component
+        $formatSelectControl.trigger("change");
+    }
+
+    CreativeWorker.prototype.createAssetPickerControl = function(label, prompt, $wrapper, contentType, className, value, assetType) {
+        // assetType
+        var eventType;
+
+        if (contentType === ASSET) {
+            eventType = EVT_LAUNCH_ASSET_PICKER;
+        }
+        else {
+            eventType = EVT_LAUNCH_FOLDER_PICKER;
+        }
+
+        // create text field
+        var opts = {};
+        if (className) {
+            opts.className      = className;
+        }
+        opts.label          = label;
+        opts.placeholder    = prompt;
+        opts.$wrapper       = $wrapper;
+        opts.value          = value;
+        var $assetPath      = this.componentFactory.createTextfield(opts);
+        $assetPath = $assetPath.find("input");
+
+        // create action button button for path browse
+        var params = {
+            "$wrapper": $wrapper,
+            "icon": "folder",
+            "variant":"quiet",
+            "className":"action-btn btn-browse-path"
+        }
+
+        // create delete button and add to DOM
+        var $btnBrowsePath = this.componentFactory.createIconButton(params);
+        $btnBrowsePath.data("$target", $assetPath);
+        $btnBrowsePath.on("click", function() {
+            $(document).trigger({
+                "assetType": assetType,
+                "type": eventType,
+                "target": $(this).data("$target")
+            });
+        });
+        return $assetPath;
+    }
+
+    // manage sub controls for smart objects
+    CreativeWorker.prototype.createPhotoShopRenderControls = function(label, prompt, $wrapper, source, layerId) {
+        // create asset picker
+        var $assetPath = this.createAssetPickerControl(label, prompt, $wrapper, ASSET, "source", source, PSD);
+
+        // handle asset selection (load smart objects)
+        $assetPath.on(EVT_ITEM_SELECTED, function() {
+
+            var path = $(this).val();
+
+            // remove previously added items
+            if ($wrapper.parent().find(SEL_SUB_ITEM)) {
+                $wrapper.parent().find(SEL_SUB_ITEM).remove();
+            }
+
+            var smartObjects = [];
+            var url = path + "/_jcr_content/metadata.children.2.json";
+            $.get(Granite.HTTP.externalize(url)).done(function (response) {
+                for (const item of response) {
+                    if (item.id === "smartObjects") {
+                        self.mapItems(item, "smartObjects_").forEach(item =>
+                            smartObjects.push(item)
+                        );
+                    }
+                }
+                // create smart objects select control for smart objects
+                var $smartObjectsRow = self.createRow($wrapper.parent(), undefined, "selected-operation-wrapper " + SEL_SUB_ITEM.replace(".", ""));
+                var opts            = {};
+                opts.className      = self.LARGE + " smart-object";
+                opts.label          = "Smart Object";
+                opts.$wrapper       = $smartObjectsRow;
+                opts.value          = layerId;
+
+                // create smart objects select control
+                self.componentFactory.createSelectControl(opts, smartObjects, opts.value);
+            });
+        });
+
+        if (source && source.length > 0) {
+            $assetPath.trigger(EVT_ITEM_SELECTED);
+        }
+    }
+
+    CreativeWorker.prototype.createPhotoShopActionControl = function(label, prompt, nameLabel, namePrompt, $wrapper, action, actionName) {
+        var $assetPath = this.createAssetPickerControl(label, prompt, $wrapper, ASSET, "action", action, ATN);
+
+        // handle asset selection
+        $assetPath.on(EVT_ITEM_SELECTED, function() {
+            // remove previously added items
+            if ($wrapper.parent().find(SEL_SUB_ITEM)) {
+                $wrapper.parent().find(SEL_SUB_ITEM).remove();
+            }
+
+            // create smart objects select control for smart objects
+            var $actionNameRow = self.createRow($wrapper.parent(), undefined, "selected-operation-wrapper " + SEL_SUB_ITEM.replace(".", ""));
+            var opts            = {};
+            opts.className      = self.LARGE + " actionName";
+            opts.label          = nameLabel;
+            opts.placeholder    = namePrompt;
+            opts.$wrapper       = $actionNameRow;
+            opts.value          = actionName;
+
+            // create smart objects select control
+            self.componentFactory.createTextfield(opts);
+        });
+
+        if (action && action.length > 0) {
+            $assetPath.trigger(EVT_ITEM_SELECTED);
+        }
+    }
+
+    CreativeWorker.prototype.mapItems = function(item, prefix) {
+        return Object.entries(item)
+            .filter(([key]) => key.startsWith(prefix))
+            .map(([_, value]) => ({
+                value: value.id,
+                content: {
+                    textContent: value.name || value.id
+                }
+            }));
+    }
+
+    // CreativeWorker to global namespace
+    window.CreativeWorker = CreativeWorker;
+}(window, jQuery, StandardWorker, creativeWorkerData));

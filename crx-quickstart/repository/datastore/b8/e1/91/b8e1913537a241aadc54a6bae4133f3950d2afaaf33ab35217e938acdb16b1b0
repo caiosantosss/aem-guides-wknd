@@ -1,0 +1,528 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ *
+ */
+
+(function (document, $) {
+
+    "use strict";
+
+    // For cross browser support - CQ-37914
+    if (!String.prototype.endsWith) {
+        String.prototype.endsWith = function(suffix) {
+            return this.indexOf(suffix, this.length - suffix.length) !== -1;
+        }
+    }
+
+    var collectionItemRel = '.cq-damadmin-admin-childpages .foundation-collection-item';
+    var selectionItemRel = '.cq-damadmin-admin-childpages .foundation-selections-item';
+
+    $(document).on("keypress", ".data-fields input[type=text]", function (e) {
+        if (e.keyCode === 13) {
+            return false;
+        }
+    });
+
+    function validateRequiredFields () {
+        var ariaRequired = $('.data-fields.active [aria-required="true"]');
+        var dataRequired = $('.data-fields.active [data-required="true"]');
+        var isValid = true;
+        ariaRequired.each(function(index, item){
+           if ($(item).is("coral-multifield")) {
+               var child = $(item).children("coral-multifield-item");
+               var hasValue = false;
+
+               $(child).each(function(i, value) {
+                   if ($(value).find('input[is="coral-textfield"]').val() !== "") {
+                       hasValue = true;
+                   }
+               });
+               if (hasValue === false) {
+                   isValid = hasValue;
+               }
+           } else {
+               var requiredCascading = $(item).data("requiredcascading");
+               var requiredInput = $('input[aria-required="true"]', item);
+               if ("always" === requiredCascading && requiredInput.length === 1) {
+                   if (!requiredInput.val()) {
+                       isValid = false;
+                   }
+               } else if (!$(item).val()) {
+                   isValid = false;
+               }
+           }
+        });
+
+        dataRequired.each(function(index, item) {
+            if (!$('input.coral-Textfield', $(item)).val()) {
+                isValid = false;
+                if ($(item).data('metatype') == 'number')
+                    $(item).addClass('is-invalid');
+            }
+            else {
+                if ($(item).data('metatype') == 'number')
+                    $(item).removeClass('is-invalid');
+            }
+
+        });
+
+        return isValid;
+    }
+
+
+    // CFM:START
+    function saveMetadataChanges(e, data){
+    // CFM:END
+        var selectedArticles = $(selectionItemRel).length;
+
+        // @see CQ-29669 Don't validate for bulkeditor
+        if (selectedArticles == 1 && !validateRequiredFields()) {
+            // Invalid class sometimes doesn't get added to input element
+            //$('.data-fields.active .coral-DatePicker.is-invalid').each(function(index, field){
+            //$('input[type="text"]', field).addClass('is-invalid');
+            //});
+            // CFM:START
+            if (data && data.callback) {
+                data.callback(false, true);
+            }
+            // CFM:END
+            return;
+        }
+
+        var cur = $(e.currentTarget),
+            beforesubmit = $.Event('beforesubmit', {
+                originalEvent: e
+            });
+        cur.trigger(beforesubmit);
+        if(beforesubmit.isDefaultPrevented()){
+            return false;
+        }
+
+        if ($('#collection-modifieddate').length) {
+            $('#collection-modifieddate').attr('value' , (new Date()).toISOString())
+        }
+
+        createNewTags($("form.data-fields.active")).done(function(){
+            var form = $('form.data-fields.active');
+            handleResponse(form, submitForm(form), data);   // CFM:CHANGED
+        }).fail(function(response){
+            // CFM:START
+            if (!data || data.suppressErrors) {
+                showDialog('aem-assets-metadataedit-tags-error', 'error', Granite.I18n.get("Error"), Granite.I18n.get("Unable to create new tags. Check for access privileges to create tags."), '');
+            }
+            // CFM:END
+        });
+    }
+
+
+    $(document).on("click", '#shell-propertiespage-saveactivator', function(e) {
+        if (!$('.foundation-content-path').data('is-bulk-mode')) {
+            saveMetadataChanges(e);
+        }
+        return false;
+    });
+
+    $(document).on("click", "#soft-submit-popover .aem-assets-metadataeditor-bulk-submit", function(e) {
+        saveMetadataChanges(e);
+    });
+
+
+    function handleResponse(form, xhr, data) {                  // CFM:CHANGED
+        xhr.done(function(){
+            addRating();
+            createSuccessHandler(form, data);                   // CFM:CHANGED
+
+        }).fail(function(){
+            // CFM:START
+            if (!data || !data.suppressErrors) {
+                showDialog('aem-assets-metadataedit-error', 'error', Granite.I18n.get("Error"), Granite.I18n.get('Unable to edit properties.'), '');
+            }
+            // CFM:END
+        });
+    }
+
+    function createSuccessHandler(form, data) {             // CFM:CHANGED
+        var $articles = $(collectionItemRel);
+        var length = $articles.length;
+        if (length > 1) {
+            successModalForBulkEdit();
+        }
+        else {
+            // CFM:START
+            if (data) {
+                if (data.callback) {
+                    data.callback(true);
+                }
+                return;
+            }
+            // CFM:END
+            var url = $('[data-selfurl]').data('selfurl');
+            if (!url) {
+                // Fallback
+                url = '/mnt/overlay/dam/gui/content/assets/metadataeditor.html';
+            }
+            var assetPath = $articles.data('path');
+            assetPath = encodeURIComponent(assetPath);
+            url += assetPath;
+            var resp = "";
+            $.ajax({
+                type: "GET",
+                cache: false,
+                url: url
+            }).success(function(response){
+                window.location.reload();
+            });
+
+        }
+    }
+
+    function addRating () {
+        var rating = $(".rating.edit-mode .coral-Icon--star.current-rating").data("rate");
+        if (rating) {
+            var contentPath = $(collectionItemRel).data("path");
+            if (!contentPath) {
+                return;
+            }
+            var url = Granite.HTTP.getContextPath() + contentPath + '/ratings.social.json';
+            $.ajax({
+                type: 'POST',
+                url: url,
+                async: false,
+                data: {
+                    tallyGenerator: "assets",
+                    response: rating,
+                    tallyType: 'Rating',
+                    ':operation': 'social:postTallyResponse'
+                },
+                error: function(e) {
+                    showDialog('aem-assets-rating-error', 'error', Granite.I18n.get("Rating Failure"),
+                        Granite.I18n.get("Error in rating the asset."),
+                        '<button is="coral-button" class="aem-assets-rating-error" variant="default" coral-close>' + Granite.I18n.get("OK") + '</button>');
+                }
+            });
+        }
+    }
+
+    function showDialog(id, variant, header, content, footer){
+        var $dialog = $('#' + id);
+        var dialog;
+        if($dialog.length === 0){
+            dialog = new Coral.Dialog().set({
+                id: id,
+                variant: variant,
+                closable: "on",
+                header: {
+                    innerHTML: header
+                },
+                content: {
+                    innerHTML: content
+                },
+                footer: {
+                    innerHTML: footer
+                }
+            });
+        }else{
+            dialog = $dialog[0];
+            dialog.header.innerHTML = header;
+            dialog.content.innerHTML = content;
+            dialog.footer.innerHTML = footer;
+        }
+        // CFM:START
+        document.body.appendChild(dialog);
+        // CFM:END
+        dialog.show();
+    }
+
+    function successModalForBulkEdit () {
+        var selectedArticles = $(selectionItemRel);
+        var assets = new Array();
+        var limit = 10;
+        selectedArticles.each(function(item, value){
+            assets[item] = $(value).data('title');
+        });
+        var resp = "";
+        if (assets.length > 1) {
+            if (selectedArticles.hasClass('card-collection')) {
+                resp = "<p>" + Granite.I18n.get("The following {0} collections have been modified:", assets.length) +"</p>";
+            } else {
+                resp = "<p>" + Granite.I18n.get("The following {0} assets have been modified:", assets.length) +"</p>";
+            }
+        } else if (assets.length == 1){
+            if (selectedArticles.hasClass('card-collection')) {
+                resp = "<p>" + Granite.I18n.get("The following collection have been modified:") +"</p>";
+            } else {
+                resp = "<p>" + Granite.I18n.get("The following asset have been modified:") +"</p>";
+            }
+        }
+
+        resp += "<p class=\"item-list\">";
+        var iterLim = assets.length;
+        if (assets.length > limit) {
+            iterLim = limit - 1;
+        }
+        for (var i=0 ; i < iterLim ; i++) {
+            resp += _g.XSS.getXSSValue(assets[i]) + "<br>";
+        }
+        if (assets.length > limit) {
+            resp += "...<br>";
+        }
+        resp += "</p>";
+
+        showDialog('aem-assets-metadataedit-success', 'success', Granite.I18n.get("Asset(s) modified"), resp,
+            '<button is="coral-button" onclick="window.location.reload();" variant="default" coral-close>' + Granite.I18n.get("OK") + '</button>');
+    }
+
+    function submitForm(form) {
+        var data = formDataForMultiEdit(form);
+        return $.ajax({
+            type: 'post',
+            url: '/content/dam.html',
+            data: data,
+            cache: false,
+            async: false
+        });
+    }
+
+    function formDataForMultiEdit(form) {
+        var assets = new Array();
+        var articleMarkup = new Array();
+
+        var collectionItems = $(collectionItemRel);
+        var selectionItems = $(selectionItemRel);
+
+        var multiAssets = true;
+        if (selectionItems.length === 1) {
+            multiAssets = false;
+        }
+        selectionItems.each(function(index, value){
+            articleMarkup[index] = $(value);
+            assets[index] = articleMarkup[index].data('path');
+        });
+
+
+        var basePath = '/content/dam';
+        var charset = form.data('charset');
+        if (!charset) {
+            charset = "utf-8";
+        }
+
+        var hintFields = createHintFields(multiAssets, collectionItems.data('type') === 'collection');
+
+        var k = 0;
+        var data = new Array();
+        data[k++] = {'name' : '_charset_', 'value' : charset};
+        data[k++] = {'name': 'dam:bulkUpdate', 'value': 'true'};
+
+        var checked = $("#soft-submit-popover input:checkbox").prop("checked");
+        data[k++] = checked ? {'name': 'mode', 'value': 'soft'} : {'name': 'mode', 'value': 'hard'};         // check if soft mode is checked
+        if(checked) {
+            selectionItems.each(function (index, value) {
+                var cvm = $(value).data('contentvm');
+                var mdvm = $(value).data('metadatavm');
+                var p = {};
+                p['path'] = $(value).data('path');
+                p['cvm'] = cvm;
+                p['mdvm'] = mdvm;
+
+                data[k++] = {'name': 'asset', 'value': JSON.stringify(p)};
+            });
+        }
+
+        // CFM:START
+        var arrayEligibleFormData = jQuery.map($('.data-fields.active').serialize().split("&"),
+            function(elem, i){
+                var keyvalue = elem.split("=");
+                var obj = {};
+                obj['name'] = decodeURIComponent(keyvalue[0]);
+                var value = keyvalue.length > 1 ? keyvalue[1] : "";
+                value = value.replace(/\+/g, "%20");
+                obj['value'] = decodeURIComponent(value);
+                return obj;
+            }
+        );
+        // do not submit readOnly fields (same logic as in DAM)
+        arrayEligibleFormData = arrayEligibleFormData.filter(function (obj) { return jQuery('input[name="' + obj.name + '"][readOnly]').length == 0 });
+        // CFM:END
+
+        for (var i = 0 ; i < assets.length ; i++) {
+            for (var j = 0 ; j < arrayEligibleFormData.length ; j++) {
+                var name = arrayEligibleFormData[j]['name'];
+                if (arrayEligibleFormData[j]['name'].indexOf('./') !== 0) {
+                    if (i !== 0) {
+                        // Add to form data only once
+                        continue;
+                    }
+                } else {
+                    name = '.' + assets[i].substring(basePath.length) + name.substring(1);
+                }
+                var value = arrayEligibleFormData[j]['value'];
+
+                //to be removed after fixing coral issue CUI-4946
+                if(arrayEligibleFormData[j]['name'] === './jcr:created' || arrayEligibleFormData[j]['name'] === './jcr:created@TypeHint'){
+                    continue;
+                }
+
+                //publish all subassets if it is a s7 set
+                if (arrayEligibleFormData[j]['name'] === "./jcr:content/onTime" && articleMarkup[i].data("is-s7set") === true) {
+                    articleMarkup[i].data("s7set-subassets-path-list").split(":").forEach(function (val) {
+                        data[k++] = {
+                            'name': '.' + val.substring(basePath.length) + arrayEligibleFormData[j]['name'].substring(1),
+                            'value': value
+                        };
+                    });
+                }
+                data[k++] = {'name': name, 'value': value};
+            }
+
+            for (var j = 0; j < hintFields.length; j++) {
+                var name = '.' + assets[i].substring(basePath.length) + hintFields[j].name.substring(1);
+                data[k++] = {
+                    'name': name,
+                    'value': hintFields[j].value
+                };
+            }
+        }
+
+        return data;
+    }
+
+    function createHintFields(multiAssets, isCollection) {
+        var hintFields = [];
+        var $form = $('form.data-fields.active');
+        var allTags = $('[data-metatype=tags]', $form);
+        allTags.each(function (index, tag) {
+            var $tag = $(tag);
+            var name = $('.coral-TagList', $tag).data('fieldname');
+            if (!name) {
+                name = "./jcr:content/metadata/cq:tags";
+            }
+            if (!multiAssets) {
+                hintFields.push({
+                    'name': name + '@Delete',
+                    'value': 'delete-empty'
+                });
+            }
+        });
+
+
+
+        var allNumbers = $('[data-metatype=number]', $form);
+        allNumbers.each(function (index, number) {
+            var $number = $(number);
+            var typeHint = $number.data('typehint');
+            if (!typeHint) {
+                typeHint = 'Long';
+            }
+            var name = $number.attr('name');
+            if(! name)// fallback to textfield wrapped in form field
+                name = $('.coral-Textfield', $number).attr('name');
+            hintFields.push({
+                'name': name + '@TypeHint',
+                'value': typeHint
+            });
+        });
+
+        var allMVText = $('[data-metatype=mvtext]', $form);
+        allMVText.each(function (index, mvtext) {
+            var $mvtext = $(mvtext);
+            var typeHint = $mvtext.data('typehint');
+            if (!typeHint) {
+                typeHint = 'String[]';
+            }
+            var name = $mvtext.attr('name');
+            hintFields.push({
+                'name': name + '@TypeHint',
+                'value': typeHint
+            });
+        });
+
+
+        var allCheckbox = $('[data-metatype=checkbox]', $form);
+        allCheckbox.each(function (index, checkbox) {
+            var $checkbox = $(checkbox);
+            if($checkbox.is(":checked")){
+                $checkbox.attr('value','true');
+            }
+            else{
+                $checkbox.attr('value','false');
+            }
+            var typeHint = $checkbox.data('typehint');
+            if (!typeHint) {
+                typeHint = 'Boolean';
+            }
+            var name = $checkbox.attr('name');
+            hintFields.push({
+                'name': name + '@TypeHint',
+                'value': typeHint
+            });
+        });
+
+        return hintFields;
+    }
+
+    function createNewTags (form) {
+        return $.when.apply(null, form.find('[data-metatype="tags"].coral-PathBrowser+ul.coral-TagList input[type="hidden"][name]').map(function() {
+            var el = this;
+
+            if (el.value.indexOf(":") >= 0) return;
+
+            var tenantId = $(".foundation-form.mode-edit").attr("tenant-id");
+            el.value = tenantId ? ("mac:" + tenantId + "/default/" + el.previousElementSibling.textContent ) : el.previousElementSibling.textContent;
+            return createSingleTag(el.value).then(function(tag) {
+                // Fix tag name in select element
+                var tenantId = $(".foundation-form.mode-edit").attr("tenant-id");
+                if (!tenantId) {
+                    // Fix tag name in select element
+                    el.value = tag;
+                }
+            });
+        }));
+    }
+
+    function createSingleTag (name) {
+        return $.post(Granite.HTTP.externalize("/bin/tagcommand"), {
+            cmd: "createTagByTitle",
+            tag: name,
+            locale: "en", // This is fixed to "en" in old siteadmin also
+            "_charset_": "utf-8"
+        }).then(function(html) {
+            return $(html).find("#Path").text();
+        });
+    }
+
+    // CFM:START
+
+    $(document).on("cfm:savemetadata", function(e, data) {
+        saveMetadataChanges(e, data);
+    });
+
+    $(document).on("cfm:validate", function(e, data) {
+        var selectedArticles = $(selectionItemRel).length;
+        if (selectedArticles === 1) {
+            data.isValid = validateRequiredFields();
+            if (!data.isValid) {
+                showDialog('aem-assets-metadataedit-validationerror', 'error',
+                       Granite.I18n.get("Error"), Granite.I18n.get("One or more required field(s) is/are empty."),
+                        '<button is="coral-button" variant="default" coral-close>' + Granite.I18n.get("OK") + '</button>');
+            }
+        } else {
+            data.isValid = true;
+        }
+    });
+
+    // CFM:END
+
+})(document, Granite.$);

@@ -1,0 +1,930 @@
+/*
+ * Copyright 1997-2009 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * @class CQ.wcm.msm.BlueprintStatus
+ * @extends CQ.Ext.Panel
+ * The BlueprintStatus provides a panel to view and edit a Blueprint and its Live Copies relationships.
+ * Browsing is done through a {@link CQ.wcm.msm.BlueprintStatus.Tree}, edition through
+ * a {@link CQ.wcm.msm.BlueprintConfig} and a a {@link CQ.wcm.msm.LiveCopyProperties}.
+ * @constructor
+ * Creates a new BlueprintStatus.
+ * @param {Object} config The config object
+ */
+CQ.wcm.msm.BlueprintStatus = CQ.Ext.extend(CQ.Ext.Panel, {
+    /**
+     * @cfg {String} url
+     * URL to retrieve the BlueprintStatus store.
+     */
+    url: null,
+
+    /**
+     * @cfg {String} rootPath
+     * Path of the Blueprint
+     */
+    rootPath: null,
+
+    contextMenus: [],
+
+    constructor: function(config) {
+        config = (!config ? {} : config);
+        config = CQ.Util.applyDefaults(config, {
+            "url":"/libs/wcm/msm/content/commands/blueprintstatus.json",
+            "rootPath":"",
+            "defaultLCFilter":""
+        });
+
+        this.url = config.url;
+        this.rootPath = config.rootPath;
+        this.lcMaxColumns = CQ.wcm.msm.BlueprintStatus.DEFAULT_MAX_VISIBLE_COLUMNS;
+        this.headerStore = this.getHeaderStore(this.url, this.rootPath, config.defaultLCFilter);
+        this.treeContainer = new CQ.Ext.Panel({
+            "region": "west",
+            "split": true,
+            "layout":"fit",
+            "collapsible": true,
+            "collapseMode":"mini",
+            "animate": true,
+            "hideCollapseTool": true,
+            "border": false,
+            "width": 320
+        });
+
+        var legendData = [
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-synchronized"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-synchronized-cancelled-par"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-src-modified"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-src-modified-cancelled-par"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-target-modified"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-target-modified-cancelled-par"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-cancelled"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-new"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-skipped"],
+            CQ.wcm.msm.MSM.Texts.LR.States["msm-status-never-created"]
+        ];
+
+        this.gridContainer = new CQ.Ext.Panel({
+            "region": "center",
+            "layout": "fit",
+            "border": false,
+            "margins": "0 5 0 5"
+        });
+
+        var legendTpl = new CQ.Ext.Template([
+            '<div class="cq-blueprintstatus-legend-item">',
+                '<div class="cq-blueprintstatus-legend-item-icon {iconClass}"></div>',
+                '<div class="cq-blueprintstatus-legend-item-text">{text}</div>',
+            '</div>'
+        ]);
+
+        var legendItems = [];
+        for(var i = 0;i< legendData.length; i++) {
+            legendItems.push({
+                "xtype": "box",
+                "tpl": legendTpl,
+                "data": legendData[i]
+            })
+        }
+
+        this.legendContainer = new CQ.Ext.Panel({
+            "region": "east",
+            "layout": "table",
+            "layoutConfig": {
+               "columns": 1
+           },
+            "collapsible": true,
+            "collapsed": true,
+            "collapseMode":"mini",
+            "hideCollapseTool": true,
+            "split": true,
+            "border": false,
+            "width": 320,
+            "title": CQ.I18n.getMessage("Legend"),
+            "items": legendItems
+        });
+
+        var defaults = {
+            "layout": "border",
+            "height": 600,
+            "width": 1180,
+            //default tree config
+            "tree": {
+                "lines": true,
+                "border": false,
+                "borderWidth": CQ.Ext.isBorderBox ? 0 : 2, // the combined left/right border for each cell
+                "cls": "x-column-tree",
+                "stateful":false,
+                "rootVisible": false,
+                "autoScroll":true
+            },
+            "grid": {
+                "border": false
+            },
+            "items": [
+                this.treeContainer,
+                this.gridContainer,
+                this.legendContainer
+            ]
+        };
+
+        CQ.Util.applyDefaults(config, defaults);
+
+        // init component by calling super constructor
+        CQ.wcm.msm.BlueprintStatus.superclass.constructor.call(this, config);
+    },
+
+    getBPContextMenu: function() {
+        if (!this.BPContextMenu) {
+            this.BPContextMenu = new CQ.Ext.menu.Menu({
+                "listeners": {
+                    "beforeshow": function(menu) {
+                        menu.items.each(function(item) {
+                            item.setDisabled(false);
+
+                            if (item.disableHandler && item.disableHandler.call(item, menu.data[0])) {
+                                item.setDisabled(true);
+                            }
+                        });
+                    }
+                },
+                items: CQ.wcm.msm.BlueprintStatus.Commands.Menus.BPMenu
+            });
+            this.contextMenus.push(this.BPContextMenu);
+        }
+        return this.BPContextMenu;
+    },
+
+    getLCHeaderContextMenu: function() {
+        if (!this.LCHeaderContextMenu) {
+            this.LCHeaderContextMenu = new CQ.Ext.menu.Menu({
+                items: CQ.wcm.msm.BlueprintStatus.Commands.Menus.LCHeaderMenu
+            });
+            this.contextMenus.push(this.LCHeaderContextMenu);
+        }
+        return this.LCHeaderContextMenu;
+    },
+
+    getLCPageContextMenu: function() {
+        if (!this.LCPageContextMenu) {
+            this.LCPageContextMenu = new CQ.Ext.menu.Menu({
+                "listeners": {
+                    "beforeshow": function(menu) {
+                        menu.items.each(function(item) {
+                            if (item.disableHandler) {
+                                for (var i = 0; i < menu.data.length; i++) {
+                                    if(item.disableHandler.call(item, menu.data[i])) {
+                                        item.setDisabled(true);
+                                        return;
+                                    }
+                                }
+                             item.setDisabled(false);
+                            }
+                        });
+                    }
+                },
+                items: CQ.wcm.msm.BlueprintStatus.Commands.Menus.LCPageMenu
+            });
+            this.contextMenus.push(this.LCPageContextMenu);
+        }
+        return this.LCPageContextMenu;
+    },
+
+    hideContextMenu: function() {
+        for (var i = 0; i < this.contextMenus.length; i++) {
+            this.contextMenus[i].data = null;
+            this.contextMenus[i].widget = null;
+            this.contextMenus[i].hide();
+        }
+    },
+
+    showContextMenu: function(position, data) {
+        this.hideContextMenu();
+        //try to find a common set of actions for the menu, i.e. selected cells have common properties
+        var lcpage = 1;
+        var lcheader = 2;
+        var bp = 4;
+        var menuMask = 0;
+        for(var i=0;i<data.length;i++) {
+            if (data[i]["lr"]) {
+                menuMask |= lcpage;
+            } else {
+                if (data[i]["lcPath"]) {
+                    menuMask |= lcheader;
+                } else {
+                    menuMask |= bp;
+                }
+            }
+        }
+        var menu = null;
+        if (menuMask == lcpage) {
+            menu = this.getLCPageContextMenu();
+        } else if (menuMask == lcheader) {
+            menu = this.getLCHeaderContextMenu();
+        } else if (menuMask == bp) {
+            menu = this.getBPContextMenu();
+        }
+
+        if (menu) {
+            menu["data"] = data;
+            menu["widget"] = this;
+            menu.showAt(position);
+        }
+    },
+
+    getHeaderStore: function(url, rootPath, filter) {
+        url = CQ.HTTP.addParameter(url, "headers", true);
+        url = CQ.HTTP.addParameter(url, "rootPath", rootPath);
+        url = CQ.HTTP.addParameter(url, "filter", filter || "");
+        return new CQ.Ext.data.JsonStore({
+            "proxy": new CQ.Ext.data.HttpProxy({
+                "url": url
+            }),
+            "fields":["path", "name"]
+        });
+    },
+
+    /**
+     * Builds the browsing tree
+     * @private
+     */
+    getTree: function() {
+        var columns = new Array();
+        columns.push(CQ.Util.applyDefaults({
+            "dataIndex": "page",
+            "width": 300,
+            "renderer": function(nodeData, node, data) {
+                var html = "<div class=\"cq-msm-bpcell\">";
+                html += CQ.shared.XSS.getXSSValue(data.text);
+                html += "</div>";
+                return html;
+            },
+            "listeners": {
+                "contextmenu": function(e, elem, options) {
+                    var data = {};
+                    data["srcPath"] = options["node"]["attributes"]["path"];
+
+                    this.showContextMenu(e.getXY(), [data]);
+                    e.stopEvent();
+                },
+                "scope": this
+            }
+        }, this.initialConfig["treecolumn"]));
+
+        var currentObj = this;
+        this.bpPathChooser = new CQ.form.PathField({
+            "name": "blueprintSource",
+            "width": 280,
+            "value": this.rootPath,
+            "listeners": {
+                "render": function() {
+                    CQ.Ext.QuickTips.register({
+                        "target": this.getEl(),
+                        "title":CQ.I18n.getMessage("Blueprint path"),
+                        "text":CQ.I18n.getMessage("Choose the Blueprint root path of the tree"),
+                        "autoHide":true
+                    });
+                },
+                "specialkey": function(f, e) {
+                    if (e.getKey() == e.ENTER) {
+                        var v = currentObj.bpPathChooser.getValue();
+                        if (v && v != currentObj.rootPath) {
+                            currentObj.reconfigure(v);
+                        }
+                    }
+                }
+            }
+        });
+
+        this.tree = new CQ.wcm.msm.BlueprintStatus.Tree(CQ.Util.applyDefaults({
+            "columns": columns,
+            "url": this.url,
+            "rootFilter": this.rootFilter,
+            "rootPath": this.rootPath,
+            "listeners": {
+                "click": function(node) {
+                    currentObj.grid.reload(node.attributes["path"]);
+                }
+            },
+            "tbar": [
+                this.bpPathChooser,{
+                    "iconCls":"cq-siteadmin-refresh",
+                    "handler":function() {
+                        var v = this.bpPathChooser.getValue();
+                        if (v && v != this.rootPath) {
+                            this.reconfigure(v);
+                        } else {
+                            this.tree.reload();
+                        }
+                    },
+                    "tooltip": {
+                        "title":CQ.I18n.getMessage("Refresh tree"),
+                        "text":CQ.I18n.getMessage("Refreshes the parent of the selected page"),
+                        "autoHide":true
+                    },
+                    "scope": currentObj
+                }
+            ]
+        }, this.initialConfig["tree"]));
+
+        return this.tree;
+    },
+
+    getGrid: function(filter, maxCols) {
+        filter = filter || "";
+        if (!maxCols) {
+            maxCols = CQ.wcm.msm.BlueprintStatus.DEFAULT_MAX_VISIBLE_COLUMNS;
+        }
+        var columns = [CQ.Util.applyDefaults({
+            "header": "Page",
+            "dataIndex": "text",
+            "width": 150
+        })];
+
+        var fields = ["path", "text"];
+        var size = 0;
+        var records = this.headerStore.getRange();
+        if (records && records.length > 0) {
+            size = records.length;
+            for (var i = 0; i < records.length; i++) {
+                var path = records[i].get("path");
+                fields.push(path);
+                columns.push(CQ.Util.applyDefaults({
+                    "header": CQ.I18n.getMessage("{0}", records[i].get("name")),
+                    "dataIndex": path,
+                    "id": path,
+                    "tooltip": path,
+                    "width": 25,
+                    "hidden": i >= maxCols,
+                    "renderer": function(lr) {
+                        if (lr) {
+                            var info = CQ.wcm.msm.MSM.getRolloutInfo(lr, path);
+
+                            var html = "<div class=\"cq-msm-lccell\">";
+                            //TODO: adapt CSS classes to match deleted pages case (currently not shown). rolloutinfo must be removed
+                            html += CQ.wcm.msm.MSM.getRelationStatus(lr); // + "<div class='cq-msm-lccell-rolloutinfo " + info.css + "' title='" + info.text + "' alt='" + info.text + "'>" + /*info.shortText +*/ "</div>";
+                            html += "</div>";
+                            return html;
+                        }
+                    }
+                }, this.initialConfig["treecolumn"]));
+            }
+        }
+
+        var tbarItems = [];
+
+        var hasFilter = (filter && filter != "");
+        var currentObj = this;
+        this.lcPathFilter = new CQ.Ext.form.TriggerField({
+            "name": "lcFilter",
+            "width": 280,
+            "value": filter,
+            "listeners": {
+                "render": function() {
+                    CQ.Ext.QuickTips.register({
+                        "target": this.getEl(),
+                        "title":CQ.I18n.getMessage("Live Copies path filter"),
+                        "text":CQ.I18n.getMessage("Filter the Live Copy to display in the grid (by path substring)"),
+                        "autoHide":true
+                    });
+                },
+                "specialkey": function(f, e) {
+                    if (e.getKey() == e.ENTER) {
+                        currentObj.checkGridReload();
+                    }
+                }
+            },
+            "triggerClass": "x-form-clear-trigger",
+            "hideTrigger": !hasFilter,
+            "mimicBlur": function(e) {
+                if (this.wrap && !this.wrap.contains(e.target) && this.validateBlur(e)) {
+                    this.triggerBlur();
+                }
+            },
+            "onTriggerClick": function() {
+                this.setValue("");
+                this.trigger.hide();
+                currentObj.checkGridReload();
+            }
+        });
+
+        tbarItems.push(this.lcPathFilter);
+
+        this.displayColumn = new CQ.Ext.form.Label({
+            "text": CQ.I18n.getMessage("Display only the first"),
+            "style": {
+                "padding-left": "5px",
+                "padding-right": "5px"
+            }
+        });
+
+        this.lcMaxColumns = size < maxCols ? size : maxCols;
+        this.lcMaxColumnsFilter = new CQ.Ext.form.TextField({
+            "name": "lcMaxColumnsFilter",
+            "width": 20,
+            "value": this.lcMaxColumns,
+            "listeners": {
+                "render": function() {
+                    CQ.Ext.QuickTips.register({
+                        "target": this.getEl().parent(),
+                        "title":CQ.I18n.getMessage("Live Copies default display number"),
+                        "text":CQ.I18n.getMessage("Display only the x first Live Copies in the grid (you can still add extra Live Copies with the column header menu)"),
+                        "autoHide":true
+                    })
+                },
+                "specialkey": function(f, e) {
+                    if (e.getKey() == e.ENTER) {
+                        currentObj.checkGridReload();
+                    }
+                }
+            }
+        });
+
+        this.totalColumn = new CQ.Ext.form.Label({
+            "text": CQ.I18n.getMessage("out of {0}", size),
+            "style": {
+                "padding-left": "5px",
+                "padding-right": "5px"
+            }
+        });
+
+        if (size > CQ.wcm.msm.BlueprintStatus.DISPLAY_COLUMNS_NUMBER_FITLER) {
+            tbarItems.push(this.displayColumn);
+            tbarItems.push(this.lcMaxColumnsFilter);
+            tbarItems.push(this.totalColumn);
+        }
+
+        tbarItems.push({
+            "iconCls":"cq-siteadmin-refresh",
+            "handler":function() {
+                this.checkGridReload();
+            },
+            "tooltip": {
+                "title":CQ.I18n.getMessage("Refresh grid"),
+                "text":CQ.I18n.getMessage("Refreshes the relationship statuses of the grid based on the filters"),
+                "autoHide":true
+            },
+            "scope": this
+        });
+
+        tbarItems.push('->');
+        var lgCnt = this.legendContainer;
+        this.legendButton = new CQ.Ext.Button({
+            "text": CQ.I18n.getMessage("Legend"),
+            "enableToggle": true,
+            "pressed":!lgCnt.collapsed,
+            "expandHandler": function() {
+                this.toggle(true);
+            },
+            "collapseHandler": function() {
+                this.toggle(false);
+            },
+            "listeners": {
+                "toggle": function(btn, pressed) {
+                    if (pressed) {
+                        lgCnt.expand(true);
+                    } else {
+                        lgCnt.collapse(true);
+                    }
+                }
+            },
+            "tooltip": {
+                "title": CQ.I18n.getMessage("Legend"),
+                "text":CQ.I18n.getMessage("Expands the legend panel"),
+                "autoHide":true
+            }
+        });
+        lgCnt.on("collapse", this.legendButton.collapseHandler, this.legendButton);
+        lgCnt.on("expand", this.legendButton.expandHandler, this.legendButton);
+        this.gridContainer.on("remove", function() {
+            lgCnt.un("collapse", this.legendButton.collapseHandler, this.legendButton);
+            lgCnt.un("expand", this.legendButton.expandHandler, this.legendButton);
+        }, this);
+
+        tbarItems.push(this.legendButton);
+        var path = "";
+        var node = this.tree.getSelectionModel().getSelectedNode();
+        if (node && node.attributes) path = node.attributes.path;
+
+        var rsm = new CQ.wcm.CustomCellSelectionModel();
+        this.grid = new CQ.Ext.grid.GridPanel(CQ.Util.applyDefaults({
+            "id": "cq-blueprintstatus-grid",
+            "height": 350,
+            "cm":new CQ.Ext.grid.ColumnModel(columns),
+            "sm":rsm,
+            "viewConfig": new CQ.Ext.grid.GridView({}),
+            "hasFilter": hasFilter,
+            "store":new CQ.Ext.data.Store({
+                "autoLoad":true,
+                "proxy": new CQ.Ext.data.HttpProxy({
+                    "url": this.url,
+                    "method":"GET"
+                }),
+                "reader": new CQ.Ext.data.JsonReader({
+                    "id": "path",
+                    "fields": fields
+                }),
+                "baseParams": {
+                    "rootPath": this.rootPath,
+                    "filter": filter,
+                    "path":path
+                }
+            }),
+            "reload": function(path, filter) {
+                this.getEl().mask("Loading...");
+                if (path) {
+                    if (!this.store.baseParams) {
+                        this.store.baseParams = {};
+                    }
+                    this.store.baseParams["path"] = path;
+                }
+                if (filter) {
+                    if (!this.store.baseParams) {
+                        this.store.baseParams = {};
+                    }
+                    this.store.baseParams["filter"] = filter;
+                }
+                this.store.reload({
+                    "callback": function() {
+                        this.getEl().unmask();
+                    },
+                    "scope": this
+                });
+            },
+            "listeners": {
+                "cellcontextmenu": function(grid, rowIndex, colIndex, e) {
+                    var sm = grid.getSelectionModel();
+                    if (!sm.isSelected([rowIndex, colIndex])) {
+                        //right click without a previous left click
+                        // on clicked cell = clear selection + cell selection
+                        sm.clearSelections();
+                        sm.selectCell([rowIndex, colIndex]);
+                    }
+
+                    var parents;
+                    var node = currentObj.tree.getSelectionModel().getSelectedNode();
+                    if (node) {
+                        parents = node.attributes;//from tree selection if non data not loaded.
+                    }
+                    var selections = sm.getSelections();
+                    var data = [];
+                    for (var i = 0; i < selections.length; i++) {
+                        var r = selections[i][0];
+                        var c = selections[i][1];
+                        var record = grid.store.getAt(r);
+                        var d = {};
+                        if (c > 0) {
+                            //lr
+                            var lcPath = grid.getColumnModel().getColumnId(c);
+                            d["lr"] = record["data"][lcPath];
+                            d["srcPath"] = d["lr"][CQ.wcm.msm.MSM.PARAM_SOURCEPATH];
+                            d["targetPath"] = d["lr"][CQ.wcm.msm.MSM.PARAM_TARGETPATH];
+
+                            //set parent LR
+                            if (parents) {
+                                d["parentLr"] = parents[lcPath];
+                            }
+                        } else {
+                            //blueprint only
+                            d["srcPath"] = record["data"]["path"];
+                        }
+                        data.push(d);
+                    }
+                    currentObj.showContextMenu(e.getXY(), data);
+                    e.stopEvent();
+                },
+                "headercontextmenu": function(grid, colIndex, e) {
+                    var lcPath = grid.getColumnModel().getColumnId(colIndex);
+                    if (lcPath == colIndex) {
+                        //first col is BP. No menu.
+                        e.stopEvent();
+                        return;
+                    }
+
+                    var data = {};
+                    data["lcPath"] = lcPath;
+
+                    currentObj.showContextMenu(e.getXY(), data);
+                    e.stopEvent();
+                }
+            },
+            "columnFilter": filter,
+            "tbar": tbarItems
+        }, this.initialConfig["grid"]));
+
+        this.grid.on("viewready", function() {
+            /* position menu at the right place because of vertical headers*/
+            var view = this.grid.getView();
+            CQ.Ext.fly(view.innerHd).un("click", view.handleHdDown, view);
+            CQ.Ext.fly(view.innerHd).on("click", function(e, t) {
+                if(CQ.Ext.fly(t).hasClass('x-grid3-hd-btn')){
+                    e.stopEvent();
+                    var hd = this.findHeaderCell(t);
+                    CQ.Ext.fly(hd).addClass('x-grid3-hd-menu-open');
+                    var index = this.getCellIndex(hd);
+                    this.hdCtxIndex = index;
+                    var ms = this.hmenu.items, cm = this.cm;
+                    ms.get('asc').setDisabled(!cm.isSortable(index));
+                    ms.get('desc').setDisabled(!cm.isSortable(index));
+                    this.hmenu.on('hide', function(){
+                        CQ.Ext.fly(hd).removeClass('x-grid3-hd-menu-open');
+                    }, this, {single:true});
+                    //CQ: START
+                    if(index > 0) {
+                        this.hmenu.show(CQ.Ext.fly(t).parent().parent(), 'tr');
+                    } else {
+                        this.hmenu.show(t, 'tl-bl?');
+                    }
+                    //CQ: END
+                }
+            }, view);
+        }, this);
+
+        return this.grid;
+    },
+
+    checkGridReload: function() {
+        var filterValue = this.lcPathFilter.getValue();
+        var maxColumnsValue = this.lcMaxColumnsFilter.getValue();
+        if (filterValue != this.grid.columnFilter) {
+            this.grid.columnFilter = filterValue;
+            this.redrawGrid.defer(10, this, [filterValue]);
+        } else if (maxColumnsValue != this.lcMaxColumns) {
+            this.redrawGrid.defer(10, this, [filterValue, maxColumnsValue]);
+        } else {
+            this.grid.reload(null, filterValue);
+        }
+    },
+
+    build: function() {
+        this.treeContainer.add(this.getTree());
+        this.gridContainer.add(this.getGrid(this.initialConfig.defaultLCFilter));
+        this.doLayout();
+    },
+
+    redrawGrid: function(filter, maxCols) {
+        filter = filter || this.grid.columnFilter;
+        this.gridContainer.getEl().mask();
+        this.gridContainer.remove(this.grid);
+        this.headerStore = this.getHeaderStore(this.url, this.rootPath, filter);
+        this.headerStore.load({
+            "callback": function() {
+                this.gridContainer.add(this.getGrid(filter, maxCols));
+                this.gridContainer.doLayout();
+                this.gridContainer.getEl().unmask();
+            },
+            "scope": this});
+    },
+
+    reconfigure: function(rootPath) {
+        this.rootPath = rootPath;
+        this.tree.reconfigure(this.rootPath);
+        this.redrawGrid();
+    },
+
+    // overriding CQ.Ext.Component#initComponent
+    initComponent: function() {
+        CQ.wcm.msm.BlueprintStatus.superclass.initComponent.call(this);
+        this.on("render", function() {
+            this.headerStore.load({
+                "callback": this.build,
+                "scope": this})
+        }, this);
+    }
+});
+
+CQ.Ext.reg("blueprintstatus", CQ.wcm.msm.BlueprintStatus);
+
+/**
+ * @class CQ.wcm.msm.BlueprintStatus.Tree
+ * @extends CQ.Ext.Panel
+ * The BlueprintStatus provides a tree panel to browse, view and edit properties a complete Blueprint tree.
+ * @constructor
+ * Creates a new BlueprintStatus.
+ * @param {Object} config The config object
+ */
+CQ.wcm.msm.BlueprintStatus.Tree = CQ.Ext.extend(CQ.Ext.tree.TreePanel, {
+    /**
+     * @cfg {Object[]} columns
+     * Columns of the grid.
+     */
+    columns: null,
+
+    constructor: function(config) {
+        config = (!config ? {} : config);
+
+        var defaults = {
+            "columns": config.columns,
+            "loader": this.buildLoader(config.url, config.rootPath),
+            "root": this.buildRootNode(config.rootPath)
+        };
+
+        CQ.Util.applyDefaults(config, defaults);
+
+        // init component by calling super constructor
+        CQ.wcm.msm.BlueprintStatus.Tree.superclass.constructor.call(this, config);
+    },
+
+    buildRootNode: function(rootPath) {
+        return new CQ.Ext.tree.AsyncTreeNode({
+            "expanded": true,
+            "name": rootPath
+        });
+    },
+
+    buildLoader: function(url, rootPath) {
+        return new CQ.Ext.tree.TreeLoader({
+            "dataUrl": url,
+            "baseParams": {
+                "isRoot": true,
+                "isTree": true,
+                "rootPath": rootPath
+            },
+            "requestMethod": "GET",
+            "baseAttrs": {
+                "singleClickExpand": true,
+                "iconCls": "cq-msm-page",
+                "uiProvider": CQ.wcm.msm.BlueprintStatus.ColumnNodeUI
+            },
+            "listeners": {
+                "beforeload": function(loader, node) {
+                    if (!this.baseParams.isRoot) {
+                        this.baseParams.path = node.attributes["path"];
+                    } else {
+                        this.baseParams.path = this.baseParams.rootPath;
+                    }
+                },
+                "load": function() {
+                    //trick to manage the root differently
+                    if (this.baseParams.isRoot) {
+                        this.baseParams.isRoot = false;
+                    }
+                }
+            }
+        });
+    },
+
+    // overriding CQ.Ext.Component#initComponent
+    initComponent: function() {
+        CQ.wcm.msm.BlueprintStatus.Tree.superclass.initComponent.call(this);
+    },
+
+    reconfigure: function(rootPath) {
+        this.loader.baseParams.rootPath = rootPath;
+        this.loader.baseParams.path = rootPath;
+        this.loader.baseParams.isRoot = true;
+        this.setRootNode(this.buildRootNode(rootPath));
+    },
+
+    setRootNode: function(node) {
+        CQ.Ext.destroy(this.root);
+        if(!node.render){ // attributes passed
+            node = this.loader.createNode(node);
+        }
+        this.root = node;
+        node.ownerTree = this;
+        node.isRoot = true;
+        if (!node.childNodes) {
+            node.childNodes = [];
+        }
+        this.registerNode(node);
+        if(!this.rootVisible){
+            var uiP = node.attributes.uiProvider;
+            node.ui = uiP ? new uiP(node) : new CQ.Ext.tree.RootTreeNodeUI(node);
+        }
+        if(this.innerCt){
+            this.innerCt.update('');
+            this.root.render();
+            if(!this.rootVisible){
+                this.root.renderChildren();
+            }
+        }
+        return node;
+    },
+
+    reload: function() {
+        var cnt = this.getEl().parent();
+        cnt.mask("Loading...");
+        try {
+            var n = this.getSelectionModel().getSelectedNode();
+            //if n, reload parent.
+            if (n) {
+                n = n.parentNode;
+            }
+            var root = this.getRootNode();
+            if (!n || n == root) {
+                //reloading root node does not work. then reload root first child.
+                if (root.firstChild) {
+                    n = root.firstChild;
+                } else {
+                    n = root;
+                }
+            }
+            n.reload(function() {
+                cnt.unmask();
+            }, this);
+        } catch (error) {
+            cnt.unmask();
+        }
+    }
+});
+
+/**
+ * Overrides column node UI.
+ * @private
+ */
+CQ.wcm.msm.BlueprintStatus.ColumnNodeUI = CQ.Ext.extend(CQ.Ext.tree.TreeNodeUI, {
+    focus: CQ.Ext.emptyFn, // prevent odd scrolling behavior
+
+    renderElements : function(node, data, targetNode, bulkRender) {
+        this.indentMarkup = node.parentNode ? node.parentNode.ui.getChildIndent() : '';
+
+        var ownerTree = node.getOwnerTree();
+        var cols = ownerTree.columns;
+        var bw = ownerTree.borderWidth;
+        var aCol = cols[0];
+        var nodeText = CQ.shared.XSS.getXSSValue(node.text);
+        var buf = [
+            '<li class="x-tree-node"><div ext:tree-node-id="',node.id,'" class="x-tree-node-el x-tree-node-leaf ', data.cls,'">',
+            '<div class="x-tree-col" style="width:',aCol.width - bw,'px;">',
+            '<span class="x-tree-node-indent">',this.indentMarkup,"</span>",
+            '<img src="', this.emptyIcon, '" class="x-tree-ec-icon x-tree-elbow">',
+            '<img src="', data.icon || this.emptyIcon, '" class="x-tree-node-icon',(data.icon ? " x-tree-node-inline-icon" : ""),(data.iconCls ? " " + data.iconCls : ""),'" unselectable="on">',
+            '<a hidefocus="on" class="x-tree-node-anchor" href="',data.href ? data.href : "#",'" tabIndex="1" ',
+            data.hrefTarget ? ' target="' + data.hrefTarget + '"' : "", '>',
+            '<span unselectable="on">', (aCol.renderer ? aCol.renderer(data[aCol.dataIndex], node, data) : nodeText ? nodeText : data[aCol.dataIndex]),"</span></a>",
+            "</div>"];
+        for (var i = 1, len = cols.length; i < len; i++) {
+            aCol = cols[i];
+            buf.push('<div class="x-tree-col ', (aCol.cls ? aCol.cls : ''), '" style="width:', aCol.width - bw, 'px;">',
+                    '<div class="x-tree-col-text">', (aCol.renderer ? aCol.renderer(data[aCol.dataIndex], node, data) : data[aCol.dataIndex]), "</div>",
+                    "</div>");
+        }
+        buf.push(
+                '<div class="x-clear"></div></div>',
+                '<ul class="x-tree-node-ct" style="display:none;"></ul>',
+                "</li>");
+
+        if (bulkRender !== true && node.nextSibling && node.nextSibling.ui.getEl()) {
+            this.wrap = CQ.Ext.DomHelper.insertHtml("beforeBegin",
+                    node.nextSibling.ui.getEl(), buf.join(""));
+        } else {
+            this.wrap = CQ.Ext.DomHelper.insertHtml("beforeEnd", targetNode, buf.join(""));
+        }
+
+        this.elNode = this.wrap.childNodes[0];
+        if (cols[0]["listeners"]) {
+            var el = CQ.Ext.get(this.elNode);
+            var scope = cols[0]["listeners"]["scope"] || el;
+            for (var l in cols[0]["listeners"]) {
+                if (l != "scope") {
+                    el.on(l, cols[0]["listeners"][l], scope, {
+                        "column": cols[0],
+                        "data": data[cols[0].dataIndex],
+                        "node": node,
+                        "tree": ownerTree,
+                        "location": "node"
+                    });
+                }
+            }
+        }
+
+        this.ctNode = this.wrap.childNodes[1];
+        var cs = this.elNode.firstChild.childNodes;
+        this.indentNode = cs[0];
+        this.ecNode = cs[1];
+        this.iconNode = cs[2];
+        this.anchor = cs[3];
+        this.textNode = cs[3].firstChild;
+        var colNode = this.elNode.firstChild.nextSibling;
+        for (var i = 1, len = cols.length; colNode && i < len; i++) {
+            var elem = CQ.Ext.get(colNode);
+            if (cols[i]["listeners"]) {
+                var scope = cols[i]["listeners"]["scope"] || elem;
+                for (var l in cols[i]["listeners"]) {
+                    if (l != "scope") {
+                        elem.on(l, cols[i]["listeners"][l], scope, {
+                            "column": cols[i],
+                            "data": data[cols[i].dataIndex],
+                            "node": node,
+                            "tree": ownerTree,
+                            "location": "node"
+                        });
+                    }
+                }
+            }
+            colNode = colNode.nextSibling;
+        }
+    }
+});
+
+CQ.wcm.msm.BlueprintStatus.DEFAULT_MAX_VISIBLE_COLUMNS = 22;
+CQ.wcm.msm.BlueprintStatus.DISPLAY_COLUMNS_NUMBER_FITLER = 9;

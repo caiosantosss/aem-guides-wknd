@@ -1,0 +1,427 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+
+/**
+ * Property button for node panels
+ */
+var propBtn = {
+    id:'gear',
+    qtip:CQ.I18n.getMessage('Edit step properties'),
+    handler: function(e, target, panel) {
+        panel.editor.showProperties({ source:panel });
+    }
+};
+
+/**
+ * Remove button for node panels
+ */
+var closeBtn = {
+    id:'close',
+    qtip:CQ.I18n.getMessage('Remove step from model'),
+    handler: function(e, target, node) { 
+        CQ.Ext.MessageBox.confirm(CQ.I18n.getMessage('Delete Step?'),
+                CQ.I18n.getMessage('Do you really want to remove the step?') + '<br/>' 
+            + CQ.I18n.getMessage('This operation can not be undone!'),
+            function(btn) {
+                if (btn == "yes") {
+                    node.editor.removeItem(node)
+                }
+            }
+        );
+    }
+};
+
+/**
+ * Base class for nodes (workflow steps)
+ * @abstract
+ */
+CQ.Workflow.NodeBase = CQ.Ext.extend(CQ.Ext.Panel, {
+    title: CQ.I18n.getMessage('Step'), html: '', 
+    width:200, height:50, frame:true, cls:'cq-wf-node',
+    tooltipTemplate: new CQ.Ext.Template(
+        '<div><b>'+CQ.I18n.getMessage("Title")+':</b> {title}</div>',
+        '<div><b>'+CQ.I18n.getMessage("Description")+':</b> {description}</div>',
+        '<div><b>'+CQ.I18n.getMessage("Type")+':</b> {type}</div>'
+    ).compile(),
+    listeners: {
+        render: function(comp) {
+            comp.updateUI();
+            
+            new CQ.Ext.ToolTip({
+                target: comp.getEl(), width:200, trackMouse:false,
+                html: comp.tooltipTemplate.apply({
+                    title:comp.nodeData.title,
+                    description:comp.nodeData.description,
+                    type:comp.nodeData.type
+                })
+            });
+        }
+    },
+    updateUI: function() {
+        if (this.rendered) {
+            var ellipsisTitle = CQ.Ext.util.Format.ellipsis(this.nodeData.title, 22);
+            this.setTitle(ellipsisTitle, "node-" + this.nodeData.type);
+            
+            var ellipsisDesc = CQ.Ext.util.Format.ellipsis(this.nodeData.description, 34);
+            this.body.dom.innerHTML = ellipsisDesc;
+
+            this.setWidth(200);
+            this.setHeight(50);
+            
+            this.getEl().setWidth(200);
+            this.getEl().setHeight(50);
+        }
+    },
+    setData: function(data) {
+        this.nodeData = data;
+        this.updateUI();
+    },
+    getData: function() {
+        return this.nodeData;
+    }
+});
+CQ.Ext.override(CQ.Workflow.NodeBase, {
+    doLayout : CQ.Ext.Panel.prototype.doLayout.createSequence(function() {
+        this.setWidth(200);
+        this.setHeight(50);
+        
+        this.getEl().setWidth(200);
+        this.getEl().setHeight(50);
+
+        CQ.Workflow.NodeBase.superclass.doLayout.call(this);
+    })
+});
+
+/**
+ * Standard node (workflow step)
+ */
+CQ.Workflow.Node = CQ.Ext.extend(CQ.Workflow.NodeBase, {
+    tools: [ propBtn, closeBtn ],
+    DD_GROUP:'cq.workflow.node',
+    
+    listeners: {
+        render: function(comp) {
+            comp.updateUI();
+            
+            // HACK: (only one of many)
+            // somehow it doesn't work to add a draggable configuration as described in API docs
+            // so we need to init the DragSource by hand to enable dragging to ourself
+            comp.dd = new CQ.Ext.Panel.DD(this, { ddGroup:CQ.Workflow.Node.DD_GROUP });
+            
+            new CQ.Ext.dd.DropTarget(comp.getEl(), {
+                ddGroup:CQ.Workflow.Node.DD_GROUP,
+                notifyDrop: function(source, e, data) {
+                    if (comp != data.panel) {
+                        var dragData = data.panel.nodeData;
+                        data.panel.setData(comp.getData());
+                        comp.setData(dragData);
+                        
+                        // HACK: (actually there are to much hacks here)
+                        // somehow dragged panel is resized after copying the data
+                        // and it does not react on component resize operations,
+                        // so we need to fix this by hand
+                        data.panel.body.dom.style.height = '13px';
+                    }
+                }
+            });
+            new CQ.Ext.ToolTip({
+                target: comp.getEl(), width:200, trackMouse:false,
+                html: comp.tooltipTemplate.apply({
+                    title:comp.nodeData.title,
+                    description:comp.nodeData.description,
+                    type:comp.nodeData.type
+                })
+            });
+        }
+    },
+    
+    typeName: CQ.I18n.getMessage('Type'),
+    userGroupName: CQ.I18n.getMessage('User/Group'),
+    implName: CQ.I18n.getMessage('Implementation'),
+    subWfName: CQ.I18n.getMessage('Sub Workflow'),
+    titleName: CQ.I18n.getMessage('Title'),
+    descName: CQ.I18n.getMessage('Description'),
+    timeoutName: CQ.I18n.getMessage('Timeout'),
+    toHandlerName: CQ.I18n.getMessage('Timeout Handler'),
+    handlerAdvanceName: CQ.I18n.getMessage('Handler Advance'),
+    processArgs: CQ.I18n.getMessage('Process Arguments'),
+    doNotify: CQ.I18n.getMessage('Email notification'),
+    formPath: CQ.I18n.getMessage('Form path'),
+    
+    /**
+     * Apply properties edited with property grid
+     */
+    setProperties: function(props) {
+        this.nodeData.title = props[this.titleName];
+        this.nodeData.description = props[this.descName];
+        this.nodeData.type = props[this.typeName];
+        
+        // set type specific properties
+        if (this.nodeData.type == CQ.Workflow.Node.PARTICIPANT) {
+            this.nodeData.metaData.PARTICIPANT = props[this.userGroupName];
+            this.nodeData.metaData.DO_NOTIFY = props[this.doNotify];
+            this.nodeData.metaData.FORM_PATH = props[this.formPath];
+        } else if (this.nodeData.type == CQ.Workflow.Node.PROCESS) {
+            this.nodeData.metaData.PROCESS = props[this.implName];
+            this.nodeData.metaData.PROCESS_AUTO_ADVANCE = props[this.handlerAdvanceName];
+            this.nodeData.metaData.PROCESS_ARGS = props[this.processArgs];
+        } else if (this.nodeData.type == CQ.Workflow.Node.CONTAINER) {
+            this.nodeData.metaData.CONTAINER = props[this.subWfName];
+        }
+        // set timeout properties
+        if (props[this.timeoutName] == CQ.I18n.getMessage('Off')) {
+            delete this.nodeData.metaData.timeoutMillis;
+        } else {
+            this.nodeData.metaData.timeoutMillis = CQ.Workflow.ModelUtil.getTimeoutValue(props[this.timeoutName]);
+            if (CQ.Workflow.ModelUtil.propertyIsSet(props[this.toHandlerName])) {
+                this.nodeData.metaData.timeoutHandler = props[this.toHandlerName];
+            } else {
+                this.nodeData.metaData.timeoutHandler = CQ.Workflow.Node.TIMEOUT_HANDLER;
+            }
+        }
+        this.updateUI();
+    },
+    /**
+     * Returns properties to be edited with property grid
+     */
+    getProperties: function() {
+        var props = new Object();
+        props[this.titleName] = this.nodeData.title;
+        props[this.descName] = this.nodeData.description;
+        props[this.typeName] = this.nodeData.type;
+        
+        // set type specific properties
+        if (this.nodeData.type == CQ.Workflow.Node.PARTICIPANT) {
+            props[this.userGroupName] = this.nodeData.metaData.PARTICIPANT == null ? '' : this.nodeData.metaData.PARTICIPANT;
+            props[this.doNotify] = this.nodeData.metaData.DO_NOTIFY == null ? false : this.nodeData.metaData.DO_NOTIFY;
+            props[this.formPath] = this.nodeData.metaData.FORM_PATH == null ? '' : this.nodeData.metaData.FORM_PATH;
+        } else if (this.nodeData.type == CQ.Workflow.Node.PROCESS) {
+            props[this.implName] = this.nodeData.metaData.PROCESS == null ? '' : this.nodeData.metaData.PROCESS;
+            props[this.handlerAdvanceName] = this.nodeData.metaData.PROCESS_AUTO_ADVANCE == null ? true : this.nodeData.metaData.PROCESS_AUTO_ADVANCE;
+            props[this.processArgs] = this.nodeData.metaData.PROCESS_ARGS == null ? '' : this.nodeData.metaData.PROCESS_ARGS;
+        } else if (this.nodeData.type == CQ.Workflow.Node.CONTAINER) {
+            props[this.subWfName] = this.nodeData.metaData.CONTAINER == null ? '' : this.nodeData.metaData.CONTAINER;
+        }
+        // set timeout properties
+        props[this.timeoutName] = this.nodeData.metaData.timeoutMillis == null ? CQ.I18n.getMessage('Off') : CQ.Workflow.ModelUtil.getTimeoutDisplay(this.nodeData.metaData.timeoutMillis);
+        props[this.toHandlerName] = this.nodeData.metaData.timeoutHandler == null ? '' : this.nodeData.metaData.timeoutHandler;
+        return props;
+    },
+    
+    /**
+     * Returns the editors for the properties of the object
+     */
+    getPropertyEditors: function() {
+        var editors = {};
+        editors[this.typeName] = new CQ.Ext.grid.GridEditor(new CQ.Ext.form.ComboBox({
+            triggerAction: 'all',
+            selectOnFocus:true,
+            editable:false,
+            store:CQ.Workflow.Node.TYPES
+        }));
+        editors[this.userGroupName] = new CQ.Ext.grid.GridEditor(
+            new CQ.Ext.form.ComboBox({
+                store: new CQ.Ext.data.Store({
+                    proxy: new CQ.Ext.data.HttpProxy({
+                        url:"/libs/cq/workflow/content/console/participants.json",
+                        method:"GET"
+                    }),
+                    reader: new CQ.Ext.data.JsonReader(
+                        {
+                            totalProperty: 'results',
+                            root:'participants'
+                        },
+                        [ {name: 'pid'}, {name: 'label'} ]
+                    )
+                }),
+                listeners: {
+                    exception: function(obj, action, data, it, response) {
+                        CQ.shared.HTTP.handleForbidden(response);
+                    }
+                },
+                displayField:'label',
+                valueField:'pid',
+                selectOnFocus:true,
+                triggerAction: 'all',
+                allowBlank:false,
+                editable:false
+            })
+         );
+        editors[this.implName] = new CQ.Ext.grid.GridEditor(
+            new CQ.Ext.form.ComboBox({
+                store: new CQ.Ext.data.Store({
+                    proxy: new CQ.Ext.data.HttpProxy({
+                        url:"/libs/cq/workflow/content/console/process.json",
+                        method:"GET"
+                    }),
+                    reader: new CQ.Ext.data.JsonReader(
+                        {
+                            totalProperty: 'results',
+                            root:'processes'
+                        },
+                        [ {name: 'rid'}, {name: 'label'} ]
+                    )
+                }),
+                listeners: {
+                    exception: function(obj, action, data, it, response) {
+                        CQ.shared.HTTP.handleForbidden(response);
+                    }
+                },
+                displayField:'label',
+                valueField:'rid',
+                selectOnFocus:true,
+                triggerAction: 'all',
+                allowBlank:false,
+                editable:false
+            })
+         );
+        editors[this.subWfName] = new CQ.Ext.grid.GridEditor(
+            new CQ.Ext.form.ComboBox({
+                store: new CQ.Ext.data.Store({
+                    proxy: new CQ.Ext.data.HttpProxy({
+                        url:"/libs/cq/workflow/content/console/workflows.json",
+                        method:"GET"
+                    }),
+                    reader: new CQ.Ext.data.JsonReader(
+                        {
+                            totalProperty: 'results',
+                            root:'workflows'
+                        },
+                        [ {name: 'wid'}, {name: 'label'} ]
+                    )
+                }),
+                listeners: {
+                    exception: function(obj, action, data, it, response) {
+                        CQ.shared.HTTP.handleForbidden(response);
+                    }
+                },
+                displayField:'label',
+                valueField:'wid',
+                selectOnFocus:true,
+                triggerAction: 'all',
+                allowBlank:false,
+                editable:false
+            })
+         );
+        editors[this.titleName] = new CQ.Ext.grid.GridEditor(new CQ.Ext.form.TextField({allowBlank:false}));
+        editors[this.descName] = new CQ.Ext.grid.GridEditor(new CQ.Ext.form.TextField({allowBlank:false}));
+        editors[this.timeoutName] = new CQ.Ext.grid.GridEditor(new CQ.Ext.form.ComboBox({
+            triggerAction: 'all',selectOnFocus:true,
+            store:CQ.Workflow.Node.TIMEOUT_INTERVAL
+        }));
+        editors[this.toHandlerName] = new CQ.Ext.grid.GridEditor(new CQ.Ext.form.ComboBox({
+            store: new CQ.Ext.data.Store({
+                proxy: new CQ.Ext.data.HttpProxy({
+                    url:"/libs/cq/workflow/content/console/process.json",
+                    method:"GET"
+                }),
+                reader: new CQ.Ext.data.JsonReader(
+                    {
+                        totalProperty: 'results',
+                        root:'processes'
+                    },
+                    [ {name: 'rid'}, {name: 'label'} ]
+                )
+            }),
+            listeners: {
+                exception: function(obj, action, data, it, response) {
+                    CQ.shared.HTTP.handleForbidden(response);
+                }
+            },
+            displayField:'label',
+            valueField:'rid',
+            selectOnFocus:true,
+            triggerAction: 'all',
+            editable:false
+        }));
+        editors[this.doNotify] = new CQ.Ext.grid.GridEditor(new CQ.Ext.form.ComboBox({
+            triggerAction: 'all',selectOnFocus:true,
+            store:CQ.Workflow.Node.DO_NOTIFY_OPTS
+        }));
+        editors[this.formPath] = new CQ.Ext.grid.GridEditor(new CQ.form.PathField({
+            fieldLabel:CQ.I18n.getMessage("Forms Path"),
+            predicate: "hierarchy",
+            listeners:{
+                dialogselect:{
+                    fn:function(pathField, path, anchor) {
+                        this.nodeData.metaData.FORM_PATH = path;
+                        this.afterPropChange();
+                    },
+                    scope:this
+                }
+            }
+        }));
+        return editors;
+    },
+    
+    /**
+     * Callback for custom actions that must be executed after a property was changed
+     */
+    afterPropChange: function() {
+        this.editor.setDirty(true);
+        this.editor.showProperties({ source:this });
+    }
+});
+CQ.Ext.reg('cq.workflow.node', CQ.Workflow.Node);
+
+// TODO check panel extensions so that node types can be initialized before Node Panel
+CQ.Workflow.Node.ID_PREFIX = 'node';
+CQ.Workflow.Node.NEW_NAME = CQ.I18n.getMessage('New Step');
+CQ.Workflow.Node.NEW_DESC = CQ.I18n.getMessage('Description of the new step');
+
+CQ.Workflow.Node.START = CQ.I18n.getMessage('Start');
+CQ.Workflow.Node.END = CQ.I18n.getMessage('End');
+CQ.Workflow.Node.CONTAINER = CQ.I18n.getMessage('Container');
+CQ.Workflow.Node.PARTICIPANT = CQ.I18n.getMessage('Participant');
+CQ.Workflow.Node.PROCESS = CQ.I18n.getMessage('Process');
+
+// TODO: do not translate values!!!
+CQ.Workflow.Node.TYPES = [
+    [ CQ.Workflow.Node.CONTAINER, CQ.Workflow.Node.CONTAINER ],
+    [ CQ.Workflow.Node.PARTICIPANT, CQ.Workflow.Node.PARTICIPANT ],
+    [ CQ.Workflow.Node.PROCESS, CQ.Workflow.Node.PROCESS ]
+];
+
+CQ.Workflow.Node.TIMEOUT_HANDLER = 'com.day.cq.workflow.timeout.autoadvance.AutoAdvancer';
+CQ.Workflow.Node.TIMEOUT_INTERVAL = [
+    [ CQ.I18n.getMessage('Off'), CQ.I18n.getMessage('Off'), null ],
+    [ CQ.I18n.getMessage('Immediate'), CQ.I18n.getMessage('Immediate'), 0 ],
+    [ CQ.I18n.getMessage('1h'), CQ.I18n.getMessage('1h'), 3600 ],
+    [ CQ.I18n.getMessage('6h'), CQ.I18n.getMessage('6h'), 21600 ],
+    [ CQ.I18n.getMessage('12h'), CQ.I18n.getMessage('12h'), 43200 ],
+    [ CQ.I18n.getMessage('24h'), CQ.I18n.getMessage('24h'), 86400 ]
+];
+
+CQ.Workflow.Node.DO_NOTIFY_OPTS = [
+    [ 'off', CQ.I18n.getMessage('Off')],
+    [ 'on', CQ.I18n.getMessage('On')]
+]
+
+/**
+ * Special node for workflow start (reduces possible actions and sets some standard properties)
+ */
+CQ.Workflow.Node.Start = CQ.Ext.extend(CQ.Workflow.NodeBase, {
+    nodeTitle:CQ.I18n.getMessage('Start'),
+    nodeDescription:CQ.I18n.getMessage("Start of the workflow"),
+    nodeType:CQ.Workflow.Node.START
+});
+CQ.Ext.reg('cq.workflow.node.start', CQ.Workflow.Node.Start);
+
+/**
+ * Special node for workflow end (reduces possible actions and sets some standard properties)
+ */
+CQ.Workflow.Node.End = CQ.Ext.extend(CQ.Workflow.NodeBase, {
+    nodeTitle:CQ.I18n.getMessage('End'),
+    nodeDescription:CQ.I18n.getMessage("End of the workflow"),
+    nodeType:CQ.Workflow.Node.END
+});
+CQ.Ext.reg('cq.workflow.node.end', CQ.Workflow.Node.End);

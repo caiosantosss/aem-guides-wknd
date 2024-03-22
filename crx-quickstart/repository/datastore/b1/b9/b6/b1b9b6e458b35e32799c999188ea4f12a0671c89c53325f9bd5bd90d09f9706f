@@ -1,0 +1,415 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2021 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(document, Coral, Granite, $, URITemplate) {
+    "use strict";
+
+    var registry = $(window).adaptTo("foundation-registry");
+    // suggestion item id prefix
+    var ITEM_ID_PREFIX = "granite-omnisearch-suggestion-item-";
+    // maximum allowed suggestions
+    var MAX_SUGGESTIONS = 9;
+    // Predicate Id used to identify the location
+    var LOCATION_PREDICATE_ID = "location";
+
+    /**
+     * fetch navigation suggestions data
+     * store the fetched data to avoid subsequent calls
+     */
+    var getNavigationData = (function() {
+        var navigationData;
+        return function() {
+            if (!navigationData) {
+                var omnisearch = document.querySelector(".granite-omnisearch-overlay");
+                var navSrc = omnisearch.dataset.graniteOmnisearchOverlayNavsrc;
+
+                return $.get(navSrc).then(function(data) {
+                    navigationData = parseNavigationData(data);
+                    return navigationData;
+                });
+            }
+            return Promise.resolve(navigationData);
+        };
+    })();
+
+    /**
+     * returns escaped value from input value
+     * @param {String} inputValue input value/query
+     * @returns {String} escaped value
+     */
+    function getEscapedValue(inputValue) {
+        return inputValue.replace(/[.?*+^$[\]\\(){}|-]/g, "\\$&");
+    }
+
+    /**
+     * parse the fetched navigation data
+     * recursively parsed the data
+     * @param {Object} data navigation data
+     * @param {String} parent parent navigation string
+     * @returns {Array} parsed navigation data
+     */
+    function parseNavigationData(data, parent) {
+        return Object.keys(data).reduce(function(acc, value) {
+            var navItem = data[value];
+            if (navItem.href && navItem.title) {
+                acc.push({
+                    title: parent ? parent + " › " + navItem.title : navItem.title,
+                    href: navItem.href,
+                    icon: navItem.icon
+                });
+            } else if (typeof navItem === "object") {
+                acc = acc.concat(parseNavigationData(navItem, parent ? parent + " › " + navItem.title : navItem.title));
+            }
+            return acc;
+        }, []);
+    }
+
+    /**
+     * returns a suggestion sorter based on input value
+     * @param {String} inputValue input value/query
+     * @returns {Function} suggestion sorted function based on current input value.
+     */
+    function sorter(inputValue) {
+        /**
+         * The comparator to sort the suggestions.
+         * It favors suggestions starting with the input
+         * and works where the input is closer to the begining of the suggestions.
+         * @param {Object} a First suggestion
+         * @param {Object} b Second suggestion
+         * @returns {Number} position
+         */
+        return function(a, b) {
+            // Move exact matches to the top
+            if (inputValue === a.suggestion) {
+                return -1;
+            }
+
+            if (inputValue === b.suggestion) {
+                return 1;
+            }
+
+            var aIndex = a.suggestion.toLowerCase().indexOf(inputValue.toLowerCase());
+            var bIndex = b.suggestion.toLowerCase().indexOf(inputValue.toLowerCase());
+
+            // When the position is the same, prefer the shorter suggestions; use the position to order otherwise.
+            return aIndex === bIndex ? -(b.suggestion.length - a.suggestion.length) : aIndex - bIndex;
+        };
+    }
+
+    /**
+     * filter out texts which does not contain query
+     * @param {[String]} texts array which needs to be filtered
+     * @param {String} query on which texts needs be filtered
+     * @returns {[String]} matched texts array
+     */
+    function substringMatcher(texts, query) {
+        // Create a regex to match the the query
+        // If multiple words are located in the string, it needs to match all of the them
+        var substrRegex = new RegExp(query.split(" ").map(function(v) {
+            return "(?=.*" + v + ")";
+        }).join("") + ".+", "gi");
+
+        return texts.filter(function(v) {
+            return substrRegex.test(v.title);
+        });
+    }
+
+    /**
+     * fetch navigation data for specific locations
+     * when location specific navigation data is present,
+     * graniteUI data will be not be used.
+     * @param {String} location current location.
+     * @returns {Array} returns location based navigation data
+     */
+    function getLocationBasedNavigationData(location) {
+        var navigation;
+        Granite.UI.Foundation.Utils.everyReverse(
+            registry.get("foundation.omnisearch.navigation.suggestions"),
+            function(c) {
+                if (c.name === location) {
+                    navigation = c.handler(navigation);
+                }
+            }
+        );
+        return navigation || null;
+    }
+
+    /**
+     * returns matched navigation suggestions
+     * @param {Object} data suggestion response from server.
+     * @param {[String]} navigationData navigation based suggestions
+     * @param {String} inputValue input value/query
+     * @param {Number} addedSuggestionsCount already added suggestion count,
+     * used to avoid addition of more the <code>MAX_SUGGESTIONS</code> suggestions
+     * @returns {[Object]} returns an array of suggestion
+     */
+    function getNavigationSuggestions(data, navigationData, inputValue, addedSuggestionsCount) {
+        var escapedValue = getEscapedValue(inputValue);
+        var matches = substringMatcher(navigationData || [], escapedValue);
+
+        var ADAPTED_MAX_SUGGESTIONS = (data.predicateSuggestions && data.predicateSuggestions.length > 0)
+            ? MAX_SUGGESTIONS - 1 : MAX_SUGGESTIONS;
+        // filter navigation suggestion
+        var result = matches.filter(function() {
+            // filter until added suggestion count less than adapted max suggestion count
+            return !(addedSuggestionsCount++ >= ADAPTED_MAX_SUGGESTIONS);
+        });
+
+        return result;
+    }
+
+    /**
+     * returns navigation suggestions wrapped around <code>SelectList.Item</code>
+     * @param {Object} data suggestion response from server.
+     * @param {[String]} navigationData navigation based suggestions
+     * @param {String} inputValue input value/query
+     * @param {Number} addedSuggestionsCount already added suggestion count,
+     * used to avoid addition of more the <code>MAX_SUGGESTIONS</code> suggestions
+     * @returns {[HTMLElement]} an array of matched navigation suggestion wrapped around <code>SelectList.Item</code>
+     */
+    function getWrappedNavigationSuggestions(data, navigationData, inputValue, addedSuggestionsCount) {
+        var escapedValue = getEscapedValue(inputValue);
+        var regex = new RegExp("(" + escapedValue.split(" ").join("|") + ")", "gi");
+
+        var matches = getNavigationSuggestions(data, navigationData, inputValue, addedSuggestionsCount);
+
+        var result = matches.map(function(item, index) {
+            // wrap item around <code>SelectList.Item</code>
+            var selectListItem = new Coral.SelectList.Item();
+            var href = Granite.HTTP.externalize(item.href);
+            selectListItem.value = item.value;
+            selectListItem.id = ITEM_ID_PREFIX + (addedSuggestionsCount + index);
+            selectListItem.content.innerHTML =
+                "<coral-icon size='S' icon='" + item.icon + "'></coral-icon>" +
+                "<span class='granite-omnisearch-typeahead-suggestions-tip'>" +
+                    Granite.I18n.get("Press Enter to navigate") +
+                "</span>" +
+                Granite.I18n.get("Go to") + " " +
+                item.title.replace(regex, "<span class='u-coral-text-secondary'>$1</span>");
+
+            selectListItem.setAttribute("data-granite-omnisearch-typeahead-navigation", "");
+            selectListItem.setAttribute("data-granite-omnisearch-typeahead-navigation-href", href);
+
+            return selectListItem;
+        });
+
+        return result;
+    }
+
+    /**
+     * returns matched predicate suggestions
+     * @param {Object} data suggestion response from server.
+     * @param {String} inputValue input value/query
+     * @param {Number} addedSuggestionsCount already added suggestion count,
+     * used to avoid addition of more the <code>MAX_SUGGESTIONS</code> suggestions
+     * @returns {[Object]} an array of suggestion
+     */
+    function getPredicateSuggestions(data, inputValue, addedSuggestionsCount) {
+        var predicateSuggestions = data && data.predicateSuggestions ? data.predicateSuggestions : [];
+        // filter predicate suggestion
+        var result = predicateSuggestions.filter(function() {
+            // filter until added suggestion count less than max suggestion count
+            return !(addedSuggestionsCount++ >= MAX_SUGGESTIONS);
+        });
+
+        return result;
+    }
+
+    /**
+     * returns matched predicate suggestions wrapped around <code>SelectList.Item</code>
+     * @param {Object} data suggestion response from server.
+     * @param {String} inputValue input value/query
+     * @param {Number} addedSuggestionsCount already added suggestion count,
+     * used to avoid addition of more the <code>MAX_SUGGESTIONS</code> suggestions
+     * @returns {[Object]} an array of matched predicate suggestion wrapped around <code>SelectList.Item</code>
+     */
+    function getWrappedPredicateSuggestions(data, inputValue, addedSuggestionsCount) {
+        var escapedValue = getEscapedValue(inputValue);
+        var regex = new RegExp("(" + escapedValue.split(" ").join("|") + ")", "gi");
+
+        var matches = getPredicateSuggestions(data, inputValue, addedSuggestionsCount);
+
+        var result = matches.map(function(item, index) {
+            // wrap item around <code>SelectList.Item</code>
+            var href = Granite.HTTP.externalize(item.href);
+            var selectListItem = new Coral.SelectList.Item();
+            selectListItem.value = item.value;
+            selectListItem.id = ITEM_ID_PREFIX + (addedSuggestionsCount + index);
+            selectListItem.href = href;
+            selectListItem.content.innerHTML =
+                "<span class='granite-omnisearch-typeahead-suggestions-tip'>" +
+                    Granite.I18n.get("Press Tab to add") +
+                "</span>" +
+                "<coral-tag size='M'>" +
+                    "<span class='u-coral-text-capitalize u-coral-text-secondary u-coral-text-italic'>" +
+                        item.type + " : " +
+                    "</span>" +
+                    item.value.replace(regex, "<span class='u-coral-text-secondary'>$1</span>") +
+                "</coral-tag>";
+
+            // type and value should come translated from the server
+            // @todo: we need to define a predicateId, the location predicate doesn't contain a typePath
+            var predicateId = item.typePath ||
+                item.queryParameters.location !== "" ? LOCATION_PREDICATE_ID : item.type;
+            selectListItem.setAttribute("data-granite-omnisearch-typeahead-suggestion-predicateid", predicateId);
+            selectListItem.setAttribute("data-granite-omnisearch-typeahead-suggestion-tag", item.type);
+            selectListItem.setAttribute("data-granite-omnisearch-typeahead-suggestion-value", item.value);
+            $(selectListItem).data("granite-omnisearch-typeahead-suggestion-queryparameters", item.queryParameters);
+
+            return selectListItem;
+        });
+
+        return result;
+    }
+
+    /**
+     * returns matched text suggestions
+     * @param {Object} data suggestion response from server.
+     * @param {String} inputValue input value/query
+     * @param {Number} addedSuggestionsCount already added suggestion count,
+     * used to avoid addition of more the <code>MAX_SUGGESTIONS</code> suggestions
+     * @returns {[Object]} an array of text suggestion
+     */
+    function getTextSuggestions(data, inputValue, addedSuggestionsCount) {
+        var textSuggestions = [];
+        if (data && data.suggestions) {
+            var suggestionSorter = sorter(inputValue);
+            textSuggestions = data.suggestions;
+            // since they are not sorted in the server we sort and remove duplicates in the client
+            textSuggestions = textSuggestions.sort(suggestionSorter).filter(function(item, pos, array) {
+                return !pos || item.suggestion !== array[pos - 1].suggestion;
+            });
+        }
+
+        var result = textSuggestions.filter(function() {
+            // filter until added suggestion count less than adapted max suggestion count
+            return !(addedSuggestionsCount++ >= MAX_SUGGESTIONS);
+        });
+
+        return result;
+    }
+
+    /**
+     * returns matched text suggestions wrapped around <code>SelectList.Item</code>
+     * @param {Object} data suggestion response from server.
+     * @param {String} inputValue input value/query
+     * @param {Number} addedSuggestionsCount already added suggestion count,
+     * used to avoid addition of more the <code>MAX_SUGGESTIONS</code> suggestions
+     * @returns {[Object]} an array of matched text suggestion wrapped around <code>SelectList.Item</code>
+     */
+    function getWrappedTextSuggestions(data, inputValue, addedSuggestionsCount) {
+        var escapedValue = getEscapedValue(inputValue);
+        var regex = new RegExp("(" + escapedValue.split(" ").join("|") + ")", "gi");
+
+        var matches = getTextSuggestions(data, inputValue, addedSuggestionsCount);
+
+        var result = matches.map(function(item, index) {
+            // wrap item around <code>SelectList.Item</code>
+            var sanitizedValue = $("<div>").text(item.suggestion).html();
+            var selectListItem = new Coral.SelectList.Item();
+            selectListItem.value = item.value;
+            selectListItem.id = ITEM_ID_PREFIX + (addedSuggestionsCount + index);
+            selectListItem.content.innerHTML =
+                sanitizedValue.replace(regex, "<span class='u-coral-text-secondary'>$1</span>");
+
+            return selectListItem;
+        });
+        return result;
+    }
+
+    /**
+     * fetch the matched suggestions data from server
+     * @returns {Promise} resolved when data has been fetched, resolved with data
+     */
+    function fetchSuggestions() {
+        // omnisearch overlay
+        var overlay = document.querySelector(".granite-omnisearch-overlay");
+        var form = overlay.querySelector(".granite-omnisearch-form");
+        var typeahead = form.querySelector(".granite-omnisearch-typeahead");
+
+        var url = URITemplate.expand(typeahead.dataset.graniteOmnisearchTypeaheadSrc);
+
+        if (!url) {
+            return Promise.resolve([]);
+        }
+        // fetch suggestion from url
+        return $.ajax({
+            url: url,
+            method: $(form).attr("method"),
+            data: $(form).serialize()
+        }).then(function(data) {
+            return data;
+        });
+    }
+
+    /**
+     * retrieve all type of matched suggestion wrapped around <code>SelectList.Item</code>
+     * @param {String} location current location
+     * @param {String} inputValue input value/query
+     * @returns {Promise} resolved when all matched suggestion retrieved,
+     * resolved with array of wrapped matched suggestion
+     */
+    function getWrappedSuggestions(location, inputValue) {
+        var suggestions = [];
+
+        return Promise.all([ getNavigationData(), fetchSuggestions() ]).then(function(results) {
+            var navigationData = getLocationBasedNavigationData(location);
+            if (!navigationData) {
+                // when no location specific navigation data exists
+                // fall back to granite navigation data
+                navigationData = results[0];
+            }
+            // suggestion response
+            var data = results[1];
+
+            if (data) {
+                suggestions = suggestions.concat(getWrappedNavigationSuggestions(data, navigationData, inputValue, 0));
+                suggestions = suggestions.concat(getWrappedPredicateSuggestions(data, inputValue, suggestions.length));
+                suggestions = suggestions.concat(getWrappedTextSuggestions(data, inputValue, suggestions.length));
+                return suggestions;
+            }
+            return [];
+        }).catch(function() {
+            return [];
+        });
+    }
+
+    /**
+     * suggestions api to retrieve suggestions based on location and inputValue
+     */
+    registry.register("foundation.adapters", {
+        type: "granite-shell-omnisearch-suggestions",
+        selector: $(window),
+        adapter: function() {
+            return {
+                getSuggestions: function(location, inputValue) {
+                    if (!inputValue) {
+                        return Promise.resolve([]);
+                    }
+                    // todo implement a getSuggestions function similar to getWrappedSuggestions
+                    return fetchSuggestions(location, inputValue);
+                },
+
+                getWrappedSuggestions: function(location, inputValue) {
+                    if (!inputValue) {
+                        return Promise.resolve([]);
+                    }
+                    return getWrappedSuggestions(location, inputValue);
+                }
+            };
+        }
+    });
+})(document, Coral, Granite, Granite.$, Granite.URITemplate);

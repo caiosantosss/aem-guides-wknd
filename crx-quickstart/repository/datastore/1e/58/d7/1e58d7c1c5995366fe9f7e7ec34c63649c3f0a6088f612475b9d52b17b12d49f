@@ -1,0 +1,592 @@
+/*************************************************************************
+ * ADOBE CONFIDENTIAL
+ * ___________________
+ *
+ * Copyright 2020 Adobe
+ * All Rights Reserved.
+ *
+ * NOTICE: All information contained herein is, and remains
+ * the property of Adobe and its suppliers, if any. The intellectual
+ * and technical concepts contained herein are proprietary to Adobe
+ * and its suppliers and are protected by all applicable intellectual
+ * property laws, including trade secret and copyright laws.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe.
+ **************************************************************************/
+(function(window, document, Granite, $, Coral) {
+  'use strict';
+
+  const channel = $(window.document);
+  const STRUCTURE_PATH = "/mnt/overlay/dam/cfm/admin/content/v2/fragment-editor/structure.html";
+  const LOADER_SELECTOR = "#content-fragment-structure-loader";
+  const CONTAINER_SELECTOR = ".content-fragment-structure";
+  const STRUCTURE_TREE_ID = "content-fragment-structure__tree";
+  const NESTED_FRAGMENT_TYPE = "content-fragment-path";
+  const FORM_SELECTOR = "#aem-cfm-editor-elements-form";
+  const EDITOR_ID = "Editor";
+  const subTreeCache = {};
+  const cfDataCache = {};
+  const referenceFieldsCache = {};
+  const fieldsToUpdateOnTreeLoad = [];
+  const fieldsUpdatedExternally = [];
+  let tree;
+  let currentCFPath;
+  let updateObserver;
+
+  /**
+   * Relevant data for a content fragment
+   *
+   * @typedef {Object} CFData
+   * @property {string} path - Path to item.
+   * @property {string} name - Identifying name.
+   * @property {string} title - Display name.
+   */
+
+  channel.on("ready", () => {
+    addFormListeners();
+  });
+
+  /**
+   * Wait for Structure panel to be open before loading tree.
+   */
+  channel.on("coral-tabview:change.structure", e => {
+    const tabView = e.target;
+    const selectedPanel = tabView.panelStack.selectedItem;
+    const loader = selectedPanel.querySelector(LOADER_SELECTOR);
+
+    if (loader) {
+      channel.off("coral-tabview:change.structure");
+      loadStructureTree(loader);
+    }
+  });
+
+  /**
+   * Get first level subtree and trigger initStructure
+   *
+   * @param {HTMLElement} loader
+   */
+  function loadStructureTree(loader) {
+    const $loader = $(loader);
+    const fragmentPath = $loader.data("fragmentPath");
+
+    if (fragmentPath) {
+      currentCFPath = fragmentPath;
+
+      const wait = new Coral.Wait();
+      wait.size = Coral.Wait.size.MEDIUM;
+      loader.appendChild(wait);
+
+      getSubTree(fragmentPath)
+        .done(subTree => {
+          const container = document.createElement("div");
+          container.setAttribute("class", CONTAINER_SELECTOR.substring(1));
+          const structureTree = new Coral.Tree();
+          structureTree.id = STRUCTURE_TREE_ID;
+
+          container.append(structureTree);
+          structureTree.innerHTML = subTree.innerHTML;
+
+          $loader.replaceWith(container);
+          initStructure();
+        })
+        .fail(errorThrown => {
+          const errorMessage = Granite.I18n.get("Error loading structure tree.");
+          const errorAlert = new Coral.Alert();
+          errorAlert.variant = Coral.Alert.variant.ERROR;
+          errorAlert.content.innerText = errorMessage;
+
+          console.warn(errorMessage, errorThrown);
+
+          loader.removeChild(wait);
+          loader.appendChild(errorAlert);
+        });
+    }
+  }
+
+  function initStructure() {
+    addTreeListeners();
+
+    // trigger handleClick if hash exists
+    const hash = window.location.hash.substring(1);
+    if (hash){
+      const el = $(CONTAINER_SELECTOR).find(`[data-structure-name="${hash}"]`)[0];
+      handleClick(el);
+    }
+  }
+
+  /**
+   * Set up Tree-related event handlers
+   */
+  function addTreeListeners() {
+    tree = document.getElementById(STRUCTURE_TREE_ID);
+
+    if (tree) {
+      // set up observer, for lazy-loading subtrees
+      updateObserver = new IntersectionObserver(handleIntersectionChange);
+
+      tree.off("coral-tree:change.structure");
+      tree.on("coral-tree:change.structure", (event) => {
+        handleClick(event.detail.selection);
+      });
+
+      // When a reference field is expanded, we load the subtrees of referenced fragments
+      tree.off("coral-tree:expand.structure");
+      tree.on("coral-tree:expand.structure", (event) => {
+        const expandedItem = event.detail.item;
+
+        // Exit early if this item is a fragment node - they already contain their subtrees.
+        if (expandedItem.dataset.structureType === NESTED_FRAGMENT_TYPE) return;
+
+        // Exit early if already loaded
+        if (expandedItem.dataset.subTreeLoaded) return;
+
+        expandedItem.dataset.subTreeLoaded = "true";
+        const subTreeContainer = expandedItem.querySelector("[handle=\"subTreeContainer\"]");
+        const children = Array.from(subTreeContainer.children);
+
+        for (const child of children) {
+          if (child.dataset.structureType === NESTED_FRAGMENT_TYPE) {
+            updateObserver.observe(child);
+          }
+        }
+      });
+
+      if (fieldsToUpdateOnTreeLoad.length) {
+        for (const fieldToUpdate of fieldsToUpdateOnTreeLoad) {
+          handleFragmentReferenceChange(fieldToUpdate);
+        }
+        fieldsToUpdateOnTreeLoad.length = 0;
+      }
+    }
+  }
+
+  /**
+   * Set up Form-/Field-related event handlers
+   */
+  function addFormListeners() {
+    const $form = $(FORM_SELECTOR);
+
+    const $referenceFields = $form.find(".multifield-fragment-reference[data-element],"
+      + ".field-fragment-reference[data-element], "
+      + ".cfm-multieditor");
+
+    $referenceFields.each((index, field) => {
+      const structureName = getStructureName(field);
+      referenceFieldsCache[structureName] = {};
+      referenceFieldsCache[structureName].element = field;
+      referenceFieldsCache[structureName].referencePaths = getFragmentReferencePaths(field);
+    });
+
+    $referenceFields.on("change.structure", e => {
+      const formField = e.currentTarget;
+
+      // timeout needed, as if CF created in same thread, path won't be accessible.
+      window.setTimeout(() => {
+        handleFragmentReferenceChange(formField);
+      }, 0);
+    });
+
+    // Future improvement: include edit action.
+    const $externalActionButtons = $form.find(".new-content-fragment");
+    $externalActionButtons.on("click.structure", handleExternalActionButtonClick);
+
+    /**
+     * On returning to tab, update structure of any fields marked for external update.
+     * We use this to update fields where "New Content Fragment" has been created.
+     * (Future improvement: include "Edit Content Fragment" action.)
+     */
+    document.addEventListener("visibilitychange", function() {
+      if (document.visibilityState === "visible") {
+        fieldsUpdatedExternally.forEach(field => {
+          handleFragmentReferenceChange(field, true);
+        });
+
+        // clear array
+        fieldsUpdatedExternally.length = 0;
+      }
+    });
+  }
+
+  /**
+   *
+   * @param {string} fragmentPath
+   * @returns {Promise<HTMLElement|null>}
+   */
+  function getSubTree(fragmentPath) {
+    const deferred = $.Deferred();
+
+    if (typeof subTreeCache[fragmentPath] !== 'undefined') {
+      deferred.resolve(subTreeCache[fragmentPath]);
+      return deferred.promise();
+    }
+
+    const structureSrc = STRUCTURE_PATH + fragmentPath;
+
+    return $.ajax({
+      url: structureSrc,
+      method: "get",
+      dataType: "html",
+    })
+    .then(response => {
+      const $response = $(response);
+
+      // item has no references/children
+      if ($response.length === 0) {
+        subTreeCache[fragmentPath] = null;
+      } else if ($response.is(CONTAINER_SELECTOR)) {
+        subTreeCache[fragmentPath] = $response[0];
+      } else {
+        console.warn(Granite.I18n.get("getSubTree: unexpected response format for path:"), fragmentPath);
+        subTreeCache[fragmentPath] = null;
+      }
+      deferred.resolve(subTreeCache[fragmentPath]);
+
+      return deferred.promise();
+    });
+  }
+
+  /**
+   * @param {Coral.TreeItem} treeItem
+   */
+  function updateSubTree(treeItem) {
+    const subTreeContainer = treeItem.querySelector("[handle=\"subTreeContainer\"]");
+
+    if (isLoop(treeItem)) {
+      subTreeContainer.innerHTML = "";
+      treeItem.variant = Coral.Tree.Item.variant.LEAF;
+      return;
+    }
+
+    const fragmentPath = treeItem.dataset.structurePath;
+
+    getSubTree(fragmentPath)
+      .done(response => {
+        if (response) {
+          subTreeContainer.innerHTML = response.innerHTML;
+          treeItem.variant = Coral.Tree.Item.variant.DRILLDOWN;
+        } else {
+          subTreeContainer.innerHTML = "";
+          treeItem.variant = Coral.Tree.Item.variant.LEAF;
+        }
+      })
+      .fail(errorThrown => {
+        const errorMessage = Granite.I18n.get("Error updating structure for tree item:", fragmentPath);
+        console.warn(errorMessage, errorThrown);
+      });
+  }
+
+  /**
+   * Check if tree item is a descendant of itself.
+   * (Used to prevent infinite loops.)
+   *
+   * @param {Coral.TreeItem} treeItem
+   * @returns {boolean}
+   */
+  function isLoop(treeItem) {
+      const fragmentPath = treeItem.dataset.structurePath;
+
+      if (fragmentPath === currentCFPath) {
+        return true;
+      }
+
+      if (treeItem.parentElement
+        && treeItem.parentElement.closest(`coral-tree-item[data-structure-path="${fragmentPath}"]`)
+      ) {
+        return true;
+      }
+
+      return false;
+  }
+
+  /**
+   * When an "external action button" (create new CF) is clicked,
+   * we add the corresponding Reference Field to the list of those which should
+   * be updated when the user switches back from another tab.
+   *
+   * Possible future improvement: include Edit CF action
+   *
+   * @param {Event} e
+   */
+  function handleExternalActionButtonClick(e) {
+    const $externalActionButton = $(e.currentTarget);
+    const $fieldWrapper = $externalActionButton.prevAll(".coral-Form-fieldwrapper").first();
+    let field;
+
+    if ($fieldWrapper.length) {
+      const $field = $fieldWrapper.find(".multifield-fragment-reference, .field-fragment-reference");
+      if ($field.length) {
+        field = $field[0];
+      }
+    } else {
+      const $multifield = $externalActionButton.closest(".multifield-fragment-reference");
+      if ($multifield.length) {
+        field = $multifield[0];
+      }
+    }
+
+    if (field && fieldsUpdatedExternally.indexOf(field) === -1) {
+      fieldsUpdatedExternally.push(field);
+    }
+  }
+
+  /**
+   * React to change in fragment reference(s), updating the sidebar tree.
+   * @param {Element} formField
+   * @param {boolean=} forceUpdate - Trigger update even if path(s) the same as before
+   *                                 (used when config edited in different tab).
+   */
+  function handleFragmentReferenceChange(formField, forceUpdate) {
+    // If tree not yet initialized, save reaction to trigger later.
+    if (!tree) {
+      if (formField && fieldsToUpdateOnTreeLoad.indexOf(formField) === -1) {
+        fieldsToUpdateOnTreeLoad.push(formField);
+      }
+      return;
+    }
+
+    const structureName = getStructureName(formField);
+    const referencePaths = getFragmentReferencePaths(formField);
+    const savedPaths = referenceFieldsCache[structureName].referencePaths;
+
+    if (!forceUpdate && (referencePaths.toString() === savedPaths.toString())) {
+      return;
+    }
+
+    // save current form field values to cache
+    referenceFieldsCache[structureName].referencePaths = referencePaths;
+
+    // top level tree item with matching name
+    const changedTreeItem = tree.querySelector(
+      `#${STRUCTURE_TREE_ID} > coral-tree-item[data-structure-name="${structureName}"]`
+    );
+
+    // exit if no tree node to update
+    if (!changedTreeItem) return;
+
+    let newSubTreeItems = [];
+
+    referencePaths.forEach(path => {
+      if (path) {
+        const cfData = getCFData(path, forceUpdate);
+
+        if (cfData) {
+          newSubTreeItems.push(buildCoralTreeItem(cfData));
+        }
+      }
+    });
+
+    changedTreeItem.items.clear();
+
+    if (newSubTreeItems.length) {
+      newSubTreeItems.forEach(item => {
+        changedTreeItem.items.add(item);
+        updateObserver.observe(item);
+      });
+      changedTreeItem.variant = Coral.Tree.Item.variant.DRILLDOWN;
+      changedTreeItem.expanded = true;
+    } else {
+      changedTreeItem.variant = Coral.Tree.Item.variant.LEAF;
+    }
+  }
+
+  function getStructureName(formField) {
+    if ($(formField).hasClass("cfm-multieditor")) {
+      const input = formField.querySelector("[data-cfm-multieditor-inputfield=\"true\"]");
+      return input.name;
+    }
+
+    return formField.dataset.element;
+  }
+
+  /**
+   * @param {Element} formField
+   * @returns {string[]} array of content reference paths
+   */
+  function getFragmentReferencePaths(formField) {
+    let referencePaths = [];
+
+    // For multiline fields, we extract URLs from HTML links in the text
+    if ($(formField).hasClass("cfm-multieditor")) {
+      const input = formField.querySelector("[data-cfm-multieditor-inputfield=\"true\"]");
+      if (input) {
+        referencePaths = getFragmentReferencePathsFromHTMLString(input.value);
+      }
+    } else if (formField.dataset.typeMulti === "true") {
+      referencePaths = Array.from(formField.querySelectorAll(".field-fragment-reference")).map(field => field.value);
+    } else {
+      referencePaths.push(formField.value);
+    }
+
+    return referencePaths.filter(Boolean);
+  }
+
+  function getFragmentReferencePathsFromHTMLString(htmlString) {
+    const testDiv = document.createElement("div");
+    testDiv.innerHTML = htmlString;
+    const links = testDiv.querySelectorAll("a");
+
+    return Array.from(links)
+      .map(link => link.href)
+      .filter(link => {
+        // ignore links not in DAM
+        if (link.indexOf("/content/dam") === -1) return false;
+
+        // relative paths are same origin
+        if (link.startsWith("/")) return true;
+
+        try {
+          const url = new URL(link);
+          return url.origin === window.location.origin;
+        } catch (err) {
+          return false;
+        }
+      })
+      .map(link => link.substring(link.indexOf("/content/dam")));
+  }
+
+  /**
+   * Create a <coral-tree-item> element for a referenced content fragment.
+   *
+   * @param {CFData} cfData
+   * @returns {Coral.TreeItem}
+   */
+  function buildCoralTreeItem(cfData) {
+    if (!cfData) return null;
+
+    const treeItem = new Coral.TreeItem();
+    treeItem.dataset.structureName = cfData.name;
+    treeItem.dataset.structureType = NESTED_FRAGMENT_TYPE;
+    treeItem.dataset.structurePath = cfData.path || cfData.name;
+    treeItem.content.innerHTML = getCoralTreeItemContent(cfData);
+    treeItem.variant = Coral.Tree.Item.variant.LEAF;
+
+    return treeItem;
+  }
+
+  function getCoralTreeItemContent(node) {
+    return '<span class="editor-ContentTree-item u-coral-ellipsis">'
+      + '<span class="editor-ContentTree-itemTitle">' + node.name + ': </span>' + node.title
+      + '</span>';
+  }
+
+  /**
+   * @param {string} cfPath
+   * @param {boolean=} forceUpdate - Do not use cached data.
+   * @returns {CFData|null}
+   */
+  function getCFData(cfPath, forceUpdate) {
+    let cfData = null;
+
+    if (cfPath) {
+      if (!forceUpdate && (typeof cfDataCache[cfPath] !== 'undefined')) {
+        return cfDataCache[cfPath];
+      }
+
+      $.ajax(cfPath + ".3.json", {
+          async: false,
+          success: function(data) {
+              if (data && data["jcr:content"] && data["jcr:content"].contentFragment) {
+                cfData = {};
+                cfData.path = cfPath;
+                // in certain cases the "cq:name" is not in the JCR, so we derive from path
+                cfData.name = data["jcr:content"]["cq:name"] || cfPath.split("/").pop();
+                cfData.title = data["jcr:content"]["jcr:title"];
+                try {
+                  cfData.data = JSON.parse(JSON.stringify(data["jcr:content"].data.master));
+                }
+                catch (err) {
+                  console.warn("getCFData: no relevant data stored");
+                }
+              }
+          },
+          error: function(err) {
+            console.warn("getCFData: Error retrieving data from path", cfPath, err);
+          }
+      });
+
+      // store even if null
+      cfDataCache[cfPath] = cfData;
+    }
+
+    if (!cfData) {
+      console.warn("Not a valid Content Fragment path.", cfPath);
+    }
+
+    return cfData;
+  }
+
+  /* handle click on tree-items */
+  function handleClick(el) {
+    if (el) {
+      // if el has parent with [handle="subTreeContainer"], edit cf in new Tab, otherwise scroll to element in Editor
+      if (el.closest('[handle="subTreeContainer"]')) {
+        editContentFragment(el);
+      } else {
+        scrollToElement(el);
+      }
+    }
+  }
+
+  /* scroll target element into view */
+  function scrollToElement(el) {
+    // in case of scroll to an element in a new tab, also highlight the item in tree
+    const link = $(el).find('._coral-TreeView-itemLink')[0];
+    if(!$(link).hasClass('is-selected')) {
+      $(link).addClass('is-selected');
+    }
+
+    // find in form where name = targetElementNameData
+    const targetElementNameData = $(el).data("structureName");
+    const targetEl = $(`${FORM_SELECTOR} [data-element="${targetElementNameData}"]`);
+    const targetWrapper = targetEl.closest('.coral-Form-fieldwrapper')[0];
+    const offset = 5;
+    let topPos;
+
+    if (targetWrapper) {
+      topPos = targetWrapper.offsetTop;
+    } else if (targetEl[0]) {
+      // dataType boolean is not wrapped in div.coral-Form-fieldwrapper, so we need a fallback-element
+      topPos = targetEl[0].offsetTop;
+    }
+
+    if (topPos) {
+      document.getElementById(EDITOR_ID).scrollTop = topPos - offset;
+    }
+  }
+
+  /* open the referenced content fragment in a new tab */
+  function editContentFragment(el) {
+    const elWithFragmentPath = $(el).closest(`[data-structure-type="${NESTED_FRAGMENT_TYPE}"]`)[0];
+    const structurePath = $(elWithFragmentPath).data("structurePath");
+
+    // don't navigate away if the nested referenced fragment is the current one
+    if (structurePath === currentCFPath) return;
+
+    // set a hash if it's a field of the referenced content-fragment
+    const hash = (elWithFragmentPath === el) ? "" : "#" + $(el).data("structureName");
+    const targetPathExternalized = structurePath ? Granite.HTTP.externalize('/editor.html' + structurePath + '?tab=4' + hash) : "";
+
+    if (targetPathExternalized) {
+      window.open(targetPathExternalized , "_self");
+    }
+  }
+
+  /**
+   * Trigger updateSubTree when Content Fragment tree item in viewport
+   *
+   * @param {IntersectionEvent} e
+   */
+  function handleIntersectionChange(e) {
+    Object.keys(e).forEach((key) => {
+      const observerEntry = e[key];
+      const target = observerEntry.target;
+
+      if (observerEntry.isIntersecting) {
+        updateObserver.unobserve(target);
+        updateSubTree(target);
+      }
+    });
+  }
+
+})(window, document, Granite, Granite.$, Coral);

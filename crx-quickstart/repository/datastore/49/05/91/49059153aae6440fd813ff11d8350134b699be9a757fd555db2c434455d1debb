@@ -1,0 +1,652 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2014 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (window, document, Granite, $) {
+    "use strict";
+
+    const OT_ASSETS_ASYNC_COPY = "OT_ASSETS-24764";
+    const NUMBER_ASSETS_COPY = 5;
+    const ASYNC_COPY_NUMBER_OF_ASSETS = 100;
+    const COMMAND_URL = Granite.HTTP.externalize("/bin/wcmcommand");
+    let ids = null;
+    let isBulkCopy = false;
+    let sourceParentPath = null;
+    const exceptPath = [];
+    let destText = "Paste";
+    let createDialogEl;
+    const relPasteDialog = ".cq-siteadmin-admin-pastepagedialog";
+    const pasteActivator = ".cq-wcm-paste-activator";
+    const formFieldWrapper = " coral-Form-fieldwrapper";
+    const formFieldLabel = " coral-Form-fieldlabel";
+
+    function createEl(name) {
+        return $(document.createElement(name));
+    }
+
+    function closeBrowserWarning() {
+        return Granite.I18n.get("Paste operation is in progress. Refreshing page may cause unexpected results.");
+    }
+
+    function updatePasteButton(context) {
+        context = context || document;
+        const pasteButton = $(pasteActivator, context);
+        toggleButton(pasteButton);
+    }
+
+    function updateSitesPasteButton(context) {
+        context = context || document;
+        const sitesPasteButton = $(".cq-wcm-sites-paste-activator", context);
+        toggleButton(sitesPasteButton);
+    }
+
+    function toggleButton(button) {
+        if (!ids) {
+            button.attr("hidden", "hidden");
+        } else {
+            button.removeAttr("hidden");
+        }
+    }
+
+    function getDestPath(activator) {
+        const dest = activator.data("cqWcmPasteActivatorDest");
+        if (dest) {
+            return dest;
+        }
+
+        const target = activator.data("cqWcmPasteActivatorTarget");
+        if (!target) {
+            return;
+        }
+
+        const collection = $(target);
+        if (!collection.hasClass("foundation-collection")) {
+            return;
+        }
+
+        if (collection.hasClass("foundation-layout-columns")) {
+            // FIXME There is a bug in foundation-layout-columns such that the [data-foundation-collection-id] is wrong when there is no active item.
+            // So let's do a workaround temporarily here.
+
+            const columns = collection.children(".coral-ColumnView-column");
+
+            if (columns.filter(".is-active").length === 0) {
+                const first = columns.first().find(".foundation-collection-item").first();
+                if (first.length > 0) {
+                    const id = first.data("foundationCollectionItemId");
+                    const parts = id.split("/");
+                    parts.pop();
+                    return parts.join("/");
+                }
+            } else {
+                return collection.data("foundationCollectionId");
+            }
+        } else {
+            return collection.data("foundationCollectionId");
+        }
+    }
+
+    function getPasteDestination(activator) {
+        destText = "Paste Page In " + getDestPath(activator);
+        return destText;
+    }
+
+    function triggerPasteCompletionEvent(args, params) {
+        if (!Granite.Toggles.isEnabled(OT_ASSETS_ASYNC_COPY)) {
+            if ($.isArray(args[0])) {
+                // Multiple items pasted
+                for (let i = 0; i < args.length; i++) {
+                    params[i].destPath = $(args[i][0]).find("#Message").html();
+                }
+            } else {
+                // Single item pasted
+                params[0].destPath = $(args[0]).find("#Message").html();
+            }
+        }
+        $(document).trigger("cq-wcm-paste-completed", [params]);
+    }
+
+    $(window).adaptTo("foundation-registry").register("foundation.collection.action.action", {
+        name: "cq.wcm.copy",
+        handler: function (name, el, config, collection, selections) {
+            ids = selections.map(function (v) {
+                return $(v).data("foundationCollectionItemId");
+            });
+
+            if (!ids.length) return;
+
+            isBulkCopy = config && config.target && config.activeSelectionCount === "bulk"
+                && collection && collection.dataset && collection.dataset.foundationSelectionsSelectallMode === "true";
+
+            if (isBulkCopy) {
+                $(collection).find(".foundation-collection-item:not(.foundation-selections-item)").each(function () {
+                    const itemPath = this.dataset.foundationCollectionItemId;
+                    if (itemPath) {
+                        exceptPath.push(itemPath);
+                    }
+                });
+                sourceParentPath = collection.dataset.foundationCollectionId;
+            }
+
+            updateSitesPasteButton();
+            if ( $("button.cq-siteadmin-admin-pastepagedialog.cq-wcm-sites-paste-activator", document).length !== 0) {
+                if(createDialogEl) {
+                    createDialogEl = null;
+                }
+                initPasteDialog();
+            }
+            updatePasteButton();
+            $(collection).adaptTo("foundation-selections").clear();
+        }
+    });
+
+    function getOutputData(source, destination, isShallow) {
+        return {
+            srcPath: source,
+            destParentPath: destination,
+            before: "",
+            shallow: isShallow
+        }
+    }
+
+    function getBulkCopyAssetPromise(activator, destParentPath) {
+        const selector = activator.hasClass("cq-damadmin-admin-pasteasset") ? "bulkassets" : "bulkpages";
+        return $.post(sourceParentPath + "." + selector + ".copy", {
+            sourceParentPath: sourceParentPath,
+            destParentPath: destParentPath,
+            exceptPath: exceptPath
+        })
+    }
+
+    function getUpdatedDestParentPath(v, destParentPath) {
+        // check if we are copying a template which is stored in /conf
+        const relativeTemplateParent = "settings/wcm/templates";
+        if (v.indexOf("/conf") === 0
+            && v.indexOf(relativeTemplateParent) >= 0
+            && destParentPath.indexOf(relativeTemplateParent) === -1) {
+            destParentPath += "/" + relativeTemplateParent;
+        }
+        return destParentPath;
+    }
+
+    function getDefaultCopyAssetPromise(source, destination, isShallow, newSiteName) {
+        return $.ajax({
+            url: COMMAND_URL,
+            type: "POST",
+            data: {
+                _charset_: "UTF-8",
+                cmd: "copyPage",
+                srcPath: source,
+                destParentPath: destination,
+                before: "",
+                destName: newSiteName,
+                shallow: isShallow
+            }
+        });
+    }
+
+    function showCopyErrorDialog(message) {
+        var $errDialog = $("copyErrorDialog");
+        var errDialog;
+        if ($errDialog.length <= 0) {
+            errDialog = new Coral.Dialog().set({
+                id: "copyErrorDialog",
+                variant: "error",
+                header: {
+                    innerHTML: Granite.I18n.get("Error")
+                },
+                content: {
+                    innerHTML: $("<p></p>").text(message)[0].outerHTML
+                },
+                footer: {
+                    innerHTML: $('<button is="coral-button" variant="primary" ' +
+                                    'coral-close size="M"></button>').text(Granite.I18n.get("Ok"))[0].outerHTML
+                }
+            });
+            document.body.appendChild(errDialog);
+        } else {
+            errDialog = $errDialog[0];
+        }
+        errDialog.show();
+    }
+
+    function asyncCopy(destParentPath, ui) {
+        $.ajax({
+            url: "/bin/asynccommand",
+            type: "post",
+            data: {
+                force: true,
+                _charset_: "UTF-8",
+                operation: "COPY",
+                optype: "copy",
+                sourceParentPath: ids,
+                destParentPath: destParentPath,
+                exceptPath: exceptPath,
+                description: `Copying ${ids} to ${destParentPath}`
+            },
+            success: function() {
+                // eslint-disable-line max-len
+                var successMessage = Granite.I18n.get("Your copy job has been initiated. You will be notified on successful completion.");
+                ui.prompt(Granite.I18n.get("Success"), successMessage, "success", [{
+                    text: Granite.I18n.get("OK"),
+                    primary: true
+                }]);
+            },
+            error: function(response) {
+                ui.clearWait();
+                showCopyErrorDialog(Granite.I18n.get("Failed to copy - {}",  response.statusText));
+            }
+        });
+
+    }
+
+
+    function initPasteDialog() {
+        const pasteDialog = new PasteDialog().set("pastePage", document.querySelector(relPasteDialog));
+        pasteDialog.initialize();
+    }
+
+    $(document).on("click", pasteActivator, function (e) {
+        e.preventDefault();
+        const activator = $(this);
+        return performPaste(activator, false);
+    });
+
+    function getAssetAndFolderCount() {
+        var count = 0;
+        // count number of assets
+        $.ajax({
+            async: false,
+            url: Granite.HTTP.externalize("/bin/numberofentitiesinfolders.json"),
+            type: "POST",
+            data: {
+                "folderpaths": ids
+            },
+            success: function(response) {
+                count = response.entitycount;
+            },
+            error: function() {
+                count = 0;
+            }
+        });
+        return count;
+    }
+
+    function hasBulkCopy() {
+        var count = getAssetAndFolderCount();
+        return (count >= NUMBER_ASSETS_COPY);
+    }
+
+    function isBulkShallowCopy(isShallow) {
+        if (isBulkCopy && sourceParentPath && !isShallow) {
+            return true;
+        }
+        return hasBulkCopy();
+    }
+
+    function asyncOrSyncPaste(promises, outputParams, ui, destParentPath, activator, isShallow, newSiteName) {
+        // 1. async copy if toggle is enabled and we are copying more than 5 assets
+        if (Granite.Toggles.isEnabled(OT_ASSETS_ASYNC_COPY) && (isBulkShallowCopy(isShallow)
+           || ids.length >= ASYNC_COPY_NUMBER_OF_ASSETS)) {
+            asyncCopy(destParentPath, ui);
+        // 2. legacy sync copy using bulk copy
+        } else if (isBulkCopy && sourceParentPath && !isShallow) {
+            promises.push(getBulkCopyAssetPromise(activator, destParentPath));
+            outputParams.push(getOutputData(sourceParentPath, destParentPath, false));
+        // 3. legacy sync copy using default copy
+        } else {
+            ids.forEach(function(pathToCopy) {
+                const updatedDestParentPath = getUpdatedDestParentPath(pathToCopy, destParentPath);
+                promises.push(getDefaultCopyAssetPromise(pathToCopy, updatedDestParentPath, isShallow, newSiteName));
+                outputParams.push(getOutputData(pathToCopy, updatedDestParentPath, isShallow));
+            });
+        }
+    }
+
+    function performPaste(activator, isShallowCopy, newSiteName) {
+        const destParentPath = getDestPath(activator);
+        if (!destParentPath) {
+            return;
+        }
+
+        const ui = $(window).adaptTo("foundation-ui");
+        ui.wait();
+        $(window).on("beforeunload", closeBrowserWarning);
+
+        const promises = [];
+        const outputParams = [];
+        const isShallow = isShallowCopy;
+        asyncOrSyncPaste(promises, outputParams, ui, destParentPath, activator, isShallow, newSiteName);
+
+        $.when.apply(null, promises)
+            .always(function () {
+                $(window).off("beforeunload", closeBrowserWarning);
+
+                ui.clearWait();
+            })
+            .done(function () {
+                triggerPasteCompletionEvent(arguments, outputParams);
+
+                const target = activator.data("cqWcmPasteActivatorTarget");
+                if (target) {
+                    const api = $(target).adaptTo("foundation-collection");
+                    if (api && "reload" in api) {
+                        api.reload();
+                        return;
+                    }
+                }
+
+                const contentApi = $(".foundation-content").adaptTo("foundation-content");
+                if (contentApi) {
+                    contentApi.refresh();
+                }
+
+            })
+            .fail(function (xhr) {
+                if (xhr.status === 0 || xhr.readyState === 0) {
+                    // premature reload, do nothing
+                    return;
+                }
+
+                const title = Granite.I18n.get("Error");
+                const message = Granite.I18n.getVar($(xhr.responseText).find("#Message").html());
+                ui.alert(title, message, "error");
+            });
+    }
+
+    $(document).on("foundation-contentloaded", function (e) {
+        updateSitesPasteButton(e.target);
+        updatePasteButton(e.target);
+    });
+
+    $(window).adaptTo("foundation-registry").register("foundation.collection.action.action", {
+        name: "cq.wcm.paste.shallow",
+        handler: function(name, el, config, collection, selections) {
+            const control = $(el);
+            const nesting = config.data.nesting;
+            if (nesting === "hide") {
+                const parentAPI = control.closest(".foundation-toggleable").adaptTo("foundation-toggleable");
+                if (parentAPI) {
+                    parentAPI.hide();
+                }
+            }
+            const activator = $(pasteActivator);
+            if (activator.length > 0) {
+                performPaste(activator, true);
+            }
+        }
+    });
+
+    const PasteDialog = new Class({
+        pastePage: null,
+        dialog: null,
+        _ALLOWED_FILENAME_CHARS: /^[a-zA-Z0-9_\-,]+$/,
+
+        set: function(prop, value) {
+            this[prop] = value;
+            return this;
+        },
+
+        initialize: function() {
+            const self = this;
+            $("._coral-BaseOverlay,._coral-Dialog-wrapper").remove();
+            if (!self.dialog) {
+                self.dialog = self.createDialog();
+                document.body.appendChild(self.dialog);
+            }
+
+            // PasteDialog is actually created at the copy step when we know just the source but do not know the
+            // destination yet. Hence we need to update the destination path on each initialization otherwise the
+            // dialog will always use the source path to display as destination causing SITES-10668
+            const activator = $(relPasteDialog);
+            const destination = getPasteDestination(activator);
+            self.dialog.getElementsByTagName("coral-dialog-header")[0].innerHTML = destination;
+
+            Coral.commons.ready(self.pastePage, function() {
+                self.pastePage
+                    .on("click", function() {
+                        const parentAPI = $(self.pastePage).closest(".foundation-toggleable")
+                            .adaptTo("foundation-toggleable");
+                        if (parentAPI) {
+                            parentAPI.hide();
+                        }
+                        self._cleanDialog();
+                        self.dialog.show();
+                    });
+            });
+        },
+
+        createCopiedFromField: function(contentForm) {
+            contentForm.appendChild(function() {
+                const fieldDiv = document.createElement("div");
+                const titleLabel = document.createElement("label");
+                fieldDiv.className += formFieldWrapper;
+                titleLabel.innerHTML = Granite.I18n.get("Copied From");
+                titleLabel.className += formFieldLabel;
+                fieldDiv.appendChild(titleLabel);
+                const valueCopiedFrom = createEl("P").appendTo(fieldDiv);
+                let copiedFrom = ids[0];
+                copiedFrom = copiedFrom.substr(0, copiedFrom.lastIndexOf("/"));
+                valueCopiedFrom.text(copiedFrom);
+                return fieldDiv;
+            }());
+        },
+
+        createNewSiteName: function (contentForm, dialog) {
+            const self = this;
+            let newSiteName;
+            contentForm.appendChild(function() {
+                const fieldDiv = document.createElement("div");
+                const titleLabel = document.createElement("label");
+                fieldDiv.className += formFieldWrapper;
+                titleLabel.innerHTML = Granite.I18n.get("New Site Name *");
+                titleLabel.className += formFieldLabel;
+                const input = new Coral.Textfield().set({
+                    name: ":name"
+                }).on("input", function() {
+                    newSiteName = $(this).get(0);
+                    self._validateAndAddTooltip(newSiteName.value);
+                }).on("keypress", function(event) {
+                    const charCode = event.which || event.keyCode;
+                    if (charCode === 13) {
+                        event.preventDefault();
+                        self._submit();
+                    }
+                });
+                input.className += " coral-Form-field";
+                input.placeholder = ids[0].substring(ids[0].lastIndexOf("/") + 1);
+                dialog.nameInput = input;
+                fieldDiv.appendChild(titleLabel);
+                fieldDiv.appendChild(input);
+                return fieldDiv;
+            }());
+        },
+
+        pasteFiles: function(contentForm) {
+            contentForm.appendChild(function() {
+                const fieldDiv = document.createElement("div");
+                const titleLabel = document.createElement("label");
+                fieldDiv.className += formFieldWrapper;
+                titleLabel.innerHTML = Granite.I18n.get("Pasting Files");
+                titleLabel.className += formFieldLabel;
+                fieldDiv.appendChild(titleLabel);
+                const list = [];
+                const maxCount = Math.min(ids.length, 12);
+                for (let i = 0, ln = maxCount; i < ln; i++) {
+                    const fileName =ids[i].substring(ids[i].lastIndexOf("/") + 1);
+                    list.push(createEl("span").text(fileName).prop("outerHTML"));
+                }
+                if (ids.length > maxCount) {
+                    list.push("&#8230;"); // &#8230; is ellipsis
+                }
+                createEl("p").html(list.join("<br>")).appendTo(fieldDiv);
+                return fieldDiv;
+            }());
+        },
+
+        createDialog: function() {
+            const self = this;
+            const activator = $(relPasteDialog);
+            let dialogExists = false;
+            if (!createDialogEl) {
+                dialogExists = true;
+                createDialogEl = new Coral.Dialog().set( {
+                    id: "pastePageDialog",
+                    header: {
+                        innerHTML: getPasteDestination(activator)
+                    },
+                    closable: "on"
+                });
+            }
+            const dialog = createDialogEl;
+            const content = dialog.content;
+            let contentForm;
+            if (dialogExists) {
+                contentForm = content.appendChild(document.createElement("form"));
+                contentForm.className += " coral-Form--vertical";
+                if (ids.length === 1) {
+                    this.createNewSiteName(contentForm, dialog);
+                }
+
+                this.createCopiedFromField(contentForm);
+                this.pasteFiles(contentForm);
+
+                const shallowPaste = new Coral.Checkbox().on("change", function() {
+                    dialog.shallowPaste = this.checked;
+                });
+                shallowPaste.label.innerHTML = Granite.I18n.get("Paste Without Children");
+                $(shallowPaste).addClass("shallow-paste-checkbox");
+                contentForm.appendChild(shallowPaste);
+
+                const footer = dialog.footer;
+                const cancel = new Coral.Button();
+                cancel.label.textContent = Granite.I18n.get("Cancel");
+                footer.appendChild(cancel).on("click", function() {
+                    self._cleanDialog();
+                    dialog.hide();
+                });
+
+                const submitButton = new Coral.Button().set({
+                    variant: "primary"
+                }).on("click", function() {
+                    self._submit();
+                });
+                submitButton.label.textContent = Granite.I18n.get("Paste");
+
+                footer.appendChild(submitButton);
+                dialog.shallowPaste = false;
+            }
+            return dialog;
+        },
+
+        _validateAndAddTooltip: function(enteredText) {
+            const self = this;
+            // Remove the stale tooltips if any
+            Array.prototype.slice.call(self.dialog.nameInput.parentElement.getElementsByClassName("error-info-icon"))
+                .forEach(function(item) {
+                    item.remove();
+                });
+            // Do validation and add tooltip if required
+            if (self._hasRestrictedChar(enteredText)) {
+                const errorIcon = new Coral.Icon().set({
+                    id: "new-site-name-textfield-fielderror",
+                    icon: "infoCircle",
+                    size: "S"
+                });
+                errorIcon.className += " coral-Form-fieldinfo error-info-icon";
+                self.dialog.nameInput.parentElement.appendChild(errorIcon);
+
+                const errorTooltip = new Coral.Tooltip().set({
+                    content: {
+                        innerHTML: Granite.I18n.get("The name must use characters matching the following regular expression {0}. Invalid characters were replaced by {1}", // eslint-disable-line max-len
+                            [ self._getValidCharSet(), "-" ])
+                    },
+                    variant: "inspect",
+                    target: "#new-site-name-textfield-fielderror",
+                    placement: "left",
+                    id: "new-site-name-textfield-fielderror-tooltip"
+                });
+                self.dialog.nameInput.parentElement.appendChild(errorTooltip);
+                const validValue = self._replaceRestrictedCodes(enteredText).replace(/ /g, "-");
+                self.dialog.nameInput.value = validValue;
+            } else {
+                self.dialog.nameInput.value = enteredText.replace(/ /g, "-");
+            }
+        },
+
+        _getValidCharSet: function() {
+            const self = this;
+            return self._ALLOWED_FILENAME_CHARS.toString();
+        },
+
+        _cleanDialog: function() {
+            const self = this;
+            $.each(self.dialog.getElementsByTagName("input"), function(cnt, input) {
+                if (input.type === "text") {
+                    input.value = "";
+                } else if (input.type === "checkbox") {
+                    input.checked = false;
+                }
+            });
+            Array.prototype.slice.call(self.dialog.getElementsByClassName("error-info-icon")).forEach(function(item) {
+                item.remove();
+            });
+            self.dialog.shallowPaste = false;
+        },
+
+        _isRestricted: function(code) {
+            const charVal = String.fromCharCode(code);
+            return !charVal.match(this._ALLOWED_FILENAME_CHARS);
+        },
+
+        _hasRestrictedChar: function(textValue) {
+            const self = this;
+            for (let i = 0, ln = textValue.length; i < ln; i++) {
+                if (self._isRestricted(textValue.charCodeAt(i))) {
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        _replaceRestrictedCodes: function(name) {
+            const self = this;
+            let jcrValidName = "";
+            for (let i = 0, ln = name.length; i < ln; i++) {
+                if (self._isRestricted(name.charCodeAt(i))) {
+                    jcrValidName += "-";
+                } else {
+                    jcrValidName += name[i];
+                }
+            }
+            return jcrValidName;
+        },
+
+        _submit: function() {
+            const self = this;
+            const activator = $(relPasteDialog);
+            if (ids.length === 1) {
+                performPaste(activator, self.dialog.shallowPaste, self.dialog.nameInput.value);}
+            else {
+                performPaste(activator, self.dialog.shallowPaste);
+            }
+            self._cleanDialog();
+            self.dialog.hide();
+        },
+    });
+
+    $(document).on("click", ".cq-siteadmin-admin-pastepagedialog", initPasteDialog);
+
+})(window, document, Granite, Granite.$);

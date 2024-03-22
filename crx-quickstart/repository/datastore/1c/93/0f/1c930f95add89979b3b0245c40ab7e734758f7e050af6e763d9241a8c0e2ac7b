@@ -1,0 +1,1085 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+* Copyright 2016 Adobe
+* All Rights Reserved.
+*
+* NOTICE: All information contained herein is, and remains
+* the property of Adobe and its suppliers, if any. The intellectual
+* and technical concepts contained herein are proprietary to Adobe
+* and its suppliers and are protected by all applicable intellectual
+* property laws, including trade secret and copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe.
+**************************************************************************/
+(function(window, document, $, Coral, Granite, URITemplate) {
+    "use strict";
+
+    var isIE11 = window.navigator.userAgent.indexOf("Trident/7.0") >= 0;
+
+    var PropertyBuilder = $(window).adaptTo("foundation-util-propertybuilder");
+
+    var KB_TAB = 9;
+    var KB_ENTER = 13;
+    var KB_ESCAPE = 27;
+    var KB_ARROW_UP = 38;
+    var KB_ARROW_DOWN = 40;
+
+    var DEFAULT_DELAY = 500;
+
+    var DATA_ATTRIBUTE_FOUNDATION_AUTOCOMPLETE_PREFIX = "foundationAutocompleteCustom";
+
+    function Autocomplete() {
+        // eslint-disable-next-line no-undef
+        var self = Reflect.construct(HTMLElement, [], this.constructor);
+
+        self._construct();
+
+        return self;
+    }
+
+    Autocomplete.prototype = Object.create(HTMLElement.prototype);
+
+    Autocomplete.prototype.constructor = Autocomplete;
+
+    Object.defineProperties(Autocomplete.prototype, {
+        field: {
+            get: function() {
+                return this._input;
+            }
+        },
+
+        delay: new PropertyBuilder(PropertyBuilder.createAttrBasedProperty("delay"))
+            .mix(PropertyBuilder.integerType(DEFAULT_DELAY))
+            .mix(PropertyBuilder.positiveNumber(DEFAULT_DELAY))
+            .build(),
+
+        pickerSrc: PropertyBuilder.createAttrBasedProperty("pickersrc"),
+
+        valueDisplayMode: PropertyBuilder.createAttrBasedProperty("valuedisplaymode", "inline"),
+
+        variant: PropertyBuilder.createAttrBasedProperty("variant"),
+
+        name: PropertyBuilder.createAttrBasedProperty("name", ""),
+
+        placeholder: PropertyBuilder.createAttrBasedProperty("placeholder", ""),
+
+        labelledBy: PropertyBuilder.createAttrBasedProperty("labelledby", ""),
+
+        labelled: PropertyBuilder.createAttrBasedProperty("labelled", Granite.I18n.get("Open Selection Dialog")),
+
+        disabled: PropertyBuilder.createBooleanAttrBasedProperty("disabled"),
+
+        readOnly: PropertyBuilder.createBooleanAttrBasedProperty("readonly"),
+
+        invalid: PropertyBuilder.createBooleanAttrBasedProperty("invalid"),
+
+        required: PropertyBuilder.createBooleanAttrBasedProperty("required"),
+
+        multiple: PropertyBuilder.createBooleanAttrBasedProperty("multiple"),
+
+        forceSelection: PropertyBuilder.createBooleanAttrBasedProperty("forceselection"),
+
+        droppable: PropertyBuilder.createBooleanAttrBasedProperty("droppable"),
+
+        value: {
+            get: function() {
+                if (this.multiple) {
+                    return this.values[0];
+                } else {
+                    return this.values[0] || "";
+                }
+            },
+            set: function(value) {
+                this.values = [ value ];
+            }
+        },
+
+        values: {
+            get: function() {
+                return this._getValueAPI(function(api) {
+                    return api.getValues().map(function(v) {
+                        return v.value;
+                    });
+                });
+            },
+            set: function(values) {
+                var self = this;
+
+                this._getValueAPI(function(api) {
+                    var selections = values.map(function(v) {
+                        return {
+                            value: v,
+                            text: v
+                        };
+                    });
+
+                    if (self.multiple) {
+                        api.setValues(selections);
+                    } else {
+                        api.setValues(selections.length > 0 ? [ selections[0] ] : []);
+                    }
+
+                    self._validate();
+                });
+            }
+        }
+    });
+
+    Autocomplete.prototype._construct = function() {
+        var self = this;
+        var $this = $(this);
+
+        this._render();
+
+        var inputTimeout;
+
+        if (isIE11) {
+            // IE 10 and 11 fire the input event when an input field with a placeholder is focused
+            // or on page load when the placeholder contains certain characters, like Chinese.
+            // In this case, we simply solve it by using keydown event instead.
+            this._input.addEventListener("keydown", function(e) {
+                clearTimeout(inputTimeout);
+                inputTimeout = setTimeout(self._onUserInput.bind(self), self.delay);
+            });
+        } else {
+            this._input.addEventListener("input", function(e) {
+                clearTimeout(inputTimeout);
+                inputTimeout = setTimeout(self._onUserInput.bind(self), self.delay);
+            });
+        }
+
+        this._input.addEventListener("keydown", function(e) {
+            switch (e.keyCode) {
+                case KB_ARROW_UP:
+                case KB_ARROW_DOWN:
+                    e.preventDefault();
+                    clearTimeout(inputTimeout);
+
+                    if (self._suggestion.open) {
+                        self._focus(self._suggestion, e.keyCode === KB_ARROW_UP);
+                    } else {
+                        self._onUserInput();
+                    }
+                    break;
+                case KB_ESCAPE:
+                    e.preventDefault();
+                    if (self._suggestion.open) {
+                        e.stopPropagation();
+                    }
+                    clearTimeout(inputTimeout);
+                    self._cancelSuggestion();
+                    break;
+                case KB_TAB:
+                    clearTimeout(inputTimeout);
+                    self._cancelSuggestion();
+                    break;
+                case KB_ENTER:
+                    // this allows group mode to be submitted using ENTER
+                    if (self._suggestion.open || (self.valueDisplayMode !== "inline" && self._input.value !== "")) {
+                        e.preventDefault();
+                    }
+
+                    clearTimeout(inputTimeout);
+
+                    var userInput = self._input.value.trim();
+
+                    if (userInput.length) {
+                        self._appendValue(userInput).then(function() {
+                            self._cancelSuggestion();
+                            self._input.value = "";
+                        });
+                    }
+                    break;
+            }
+        });
+
+        this._input.addEventListener("blur", function(e) {
+            if (!self.multiple) {
+                var value = self._input.value;
+                if (value !== "" && value.trim() !== value) {
+                    self._appendValue(self._input.value.trim(), true).then(function() {
+                        self._cancelSuggestion();
+                    });
+                }
+            }
+
+            if (!self.multiple && self.forceSelection) {
+                // restore last selection
+                self._getValueAPI(function(api) {
+                    var values = api.getValues();
+
+                    if (values.length) {
+                        self._input.value = values[0].text;
+                    } else {
+                        self._input.value = "";
+                    }
+                });
+            }
+        });
+
+        $this.on("foundation-assetdropped", ".foundation-autocomplete-droppable", function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            self._appendValue(e.path, true);
+        });
+
+        $this.on("change", "coral-taglist[foundation-autocomplete-value]", function(e) {
+            self._onValueChangeByUser();
+        });
+
+        $this.on("coral-collection:remove", "coral-taglist[foundation-autocomplete-value]", function(e) {
+            if (!self.classList.contains("foundation-field-mixed")) {
+                return;
+            }
+
+            var removedTag = e.originalEvent.detail.item;
+
+            if (!removedTag.value.startsWith("+")) {
+                self._removedValuesWhenMixed.push(removedTag.value);
+            }
+        });
+
+        $this.on("change foundation-field-change", function(e) {
+            if (e.target !== self) {
+                // Prevent the event to leak out of the autocomplete.
+                e.stopImmediatePropagation();
+            }
+        });
+
+        this._button.addEventListener("click", function(e) {
+            e.preventDefault();
+            self._togglePicker();
+        });
+
+        this._suggestion = {
+            el: null,
+            open: false,
+            api: null
+        };
+
+        this._value = {
+            el: null,
+            api: null
+        };
+
+        this._picker = {
+            el: null,
+            open: false,
+            loading: false,
+            api: null
+        };
+
+        this._removedValuesWhenMixed = [];
+
+        this._setupValueObserver();
+
+        // Call attributeChangedCallback to handle initial setup
+        var attributes = this.attributes;
+        for (var i = 0; i < attributes.length; i++) {
+            this.attributeChangedCallback(attributes[i].name, undefined, attributes[i].value);
+        }
+    };
+
+    Autocomplete.prototype._render = function() {
+        // clean up children
+        for (var i = 0; i < this.children.length; i++) {
+            var child = this.children[i];
+            if (child.classList.contains("foundation-autocomplete-inputgroupwrapper")) {
+                this.removeChild(child);
+            }
+        }
+
+        // input group
+        this._inputGroup = document.createElement("div");
+        this._inputGroup.classList.add("coral-InputGroup");
+        this._inputGroup.setAttribute("role", "presentation");
+
+        // input field
+        this._input = new Coral.Textfield();
+        this._input.classList.add("coral-InputGroup-input");
+        this._input.autocomplete = "off";
+        this._input.placeholder = this.placeholder;
+        this._input.labelledBy = this.labelledBy;
+        this._input.setAttribute("role", "combobox");
+        this._input.setAttribute("aria-expanded", false);
+        this.droppable && this._input.classList.add("foundation-autocomplete-droppable");
+
+        // button wrapper
+        var buttonWrapper = document.createElement("span");
+        buttonWrapper.classList.add("coral-InputGroup-button");
+
+        // picker button
+        this._button = new Coral.Button().set({
+            icon: "FolderOpenOutline",
+            title: this.labelled,
+            type: "button"
+        });
+        this._button.setAttribute("aria-label", this.labelled);
+
+        // append button to button wrapper
+        buttonWrapper.appendChild(this._button);
+
+        // append input and button wrapper to input wrapper.
+        this._inputGroup.appendChild(this._input);
+        this._inputGroup.appendChild(buttonWrapper);
+
+        // Flexbox doesn't work with table as an item (which is used by InputGroup), so need to wrap.
+        this._inputGroupWrapper = document.createElement("div");
+        this._inputGroupWrapper.classList.add("foundation-autocomplete-inputgroupwrapper");
+        this._inputGroupWrapper.appendChild(this._inputGroup);
+
+        this.insertBefore(this._inputGroupWrapper, this.firstChild);
+
+        this._onVariantChange();
+    };
+
+    Autocomplete.prototype.attributeChangedCallback = function(name, oldVal, newVal) {
+        if (name === "pickersrc") {
+            this._picker.el = null;
+            return;
+        }
+
+        if (name === "variant") {
+            this._onVariantChange();
+            return;
+        }
+
+        if (name === "name") {
+            this._getValueAPI(function(api) {
+                api.setName(newVal);
+            });
+            return;
+        }
+
+        if (name === "placeholder") {
+            this._input.setAttribute("placeholder", newVal);
+            this._input.setAttribute("aria-label", newVal);
+            return;
+        }
+
+        if (name === "labelledby") {
+            this._input.setAttribute("labelledby", newVal);
+            return;
+        }
+
+        if (name === "labelled") {
+            this._button.setAttribute("aria-label", newVal);
+            return;
+        }
+
+        if (name === "disabled") {
+            var disabled = newVal !== null;
+
+            this._input.disabled = disabled;
+            this._button.disabled = disabled;
+
+            this._getValueAPI(function(api) {
+                api.setDisabled(disabled);
+            });
+            return;
+        }
+
+        if (name === "readonly") {
+            var readOnly = newVal !== null;
+
+            this._input.readOnly = readOnly;
+            this._button.disabled = readOnly;
+
+            this._getValueAPI(function(api) {
+                api.setReadOnly(readOnly);
+            });
+            return;
+        }
+
+        if (name === "invalid") {
+            this._input.invalid = newVal !== null;
+            return;
+        }
+
+        if (name === "required") {
+            this._input.setAttribute("aria-required", newVal !== null);
+            return;
+        }
+    };
+
+    Autocomplete.prototype.focus = function() {
+        // Somehow the rAF is required to make focus() work.
+        requestAnimationFrame(function() {
+            this._input.focus();
+        }.bind(this));
+    };
+
+    Autocomplete.prototype.clear = function() {
+        this.values = [];
+        if (this._input) {
+            requestAnimationFrame(function() {
+                this._input.value = "";
+            }.bind(this));
+        }
+    };
+
+    Autocomplete.prototype._setupValueObserver = function() {
+        var self = this;
+
+        var stack = [ this._handleInputSize(), this._handleSingleSelectionMode() ];
+
+        var perform = function() {
+            self._getValueAPI(function() {
+                stack.forEach(function(v) {
+                    v.perform.call(self);
+                });
+            });
+        };
+
+        // Do a perform for the scenario where the whole DOM structure is ready,
+        // like in the case for server-side rendering.
+        perform();
+
+        var observer = new MutationObserver(function(changes) {
+            changes.forEach(function(c) {
+                $(c.addedNodes).filter("[foundation-autocomplete-value]").each(function() {
+                    perform();
+                });
+                // Currently we don't handle scenario where `[foundation-autocomplete-value]` element is removed.
+            });
+        });
+
+        observer.observe(this, {
+            childList: true
+        });
+    };
+
+    Autocomplete.prototype._handleInputSize = function() {
+        var refreshInputSize = function(valueEl) {
+            var $input = $(this._input);
+
+            if (this.multiple && this.valueDisplayMode === "inline") {
+                if (valueEl) {
+                    var padding = $(valueEl).outerWidth(true);
+                    $input.css("padding-left", padding);
+                } else {
+                    $input.css("padding-left", "");
+                }
+            } else {
+                $input.css("padding-left", "");
+            }
+        }.bind(this);
+
+        var valueResizeHandler = function(e) {
+            refreshInputSize(this);
+        };
+
+        return {
+            perform: function() {
+                Coral.commons.addResizeListener(this._value.el, valueResizeHandler);
+            },
+            destroy: function() {
+                refreshInputSize();
+                Coral.commons.removeResizeListener(this._value.el, valueResizeHandler);
+            }
+        };
+    };
+
+    Autocomplete.prototype._handleSingleSelectionMode = function() {
+        // For single selection mode, sync the first tag to the text field.
+
+        var f = function() {
+            var firstTag = this._value.el.items.getAll()[0];
+            if (firstTag) {
+                this._input.value = firstTag.value;
+            }
+        }.bind(this);
+
+        var observer;
+
+        return {
+            perform: function() {
+                if (!this.multiple) {
+                    requestAnimationFrame(function() { // Wait for custom element upgrade
+                        f();
+                    });
+                }
+
+                observer = new MutationObserver(function(changes) {
+                    if (this.multiple) {
+                        return;
+                    }
+
+                    changes.forEach(function(c) {
+                        var hasNewTag = $(c.addedNodes).filter("coral-tag").length;
+                        if (hasNewTag) {
+                            f();
+                        }
+                    });
+                }.bind(this));
+
+                observer.observe(this._value.el, {
+                    childList: true
+                });
+            },
+            destroy: function() {
+                observer.disconnect();
+            }
+        };
+    };
+
+    Autocomplete.prototype._onVariantChange = function() {
+        var value = this.variant;
+
+        if (value === "omnisearch") {
+            this._input.variant = "quiet";
+            this._button.variant = "quiet";
+            this._inputGroup.classList.add("coral-InputGroup--quiet");
+        } else {
+            this._input.variant = Coral.Textfield.variant.DEFAULT;
+            this._button.variant = Coral.Button.variant.DEFAULT;
+            this._inputGroup.classList.remove("coral-InputGroup--quiet");
+        }
+    };
+
+    Autocomplete.prototype._onUserInput = function() {
+        var self = this;
+
+        if (!this.multiple) {
+            this._appendValue(this._input.value, true);
+        }
+
+        var setValue = function(value) {
+            self._input.value = value;
+        };
+
+        this._getSuggestionAPI(function(api) {
+            var currentSelections = this._getValueAPI(function(valueAPI) {
+                return valueAPI.getValues();
+            }, function() {
+                return [];
+            });
+
+            api.pick(self, currentSelections, self._input.value, setValue).then(function(selections) {
+                self._suggestion.open = false;
+
+                self._input.value = "";
+                self._input.focus();
+                self._setSelections(selections);
+            }, function() {
+                self._suggestion.open = false;
+            });
+
+            self._suggestion.open = true;
+        });
+    };
+
+    Autocomplete.prototype._onValueChangeByUser = function(deferChangeEvent) {
+        var self = this;
+
+        if (deferChangeEvent) {
+            if (!this._deferChangeEvent) {
+                this._deferChangeEvent = true;
+
+                // Trigger `change` before `focusout`
+                // Somehow jQuery is needed to do this and using `addEventListener` doesn't give the right order
+                $(this._input).on("focusout", function f(e) {
+                    $(self._input).off("focusout", f);
+                    self._deferChangeEvent = null;
+
+                    // If user clicks on a suggestion, we skip validation and "change" event here
+                    // to do it only once
+                    if (e.relatedTarget && self.contains(e.relatedTarget) &&
+                            e.relatedTarget.hasAttribute("coral-list-item")) {
+                        return;
+                    }
+
+                    self._validate();
+                    self._triggerChangeEvent();
+                });
+            }
+            return;
+        }
+
+        this._triggerChangeEvent();
+        this._validate();
+    };
+
+    Autocomplete.prototype._triggerChangeEvent = function() {
+        var event = document.createEvent("HTMLEvents");
+        event.initEvent("change", true, false);
+        this.dispatchEvent(event);
+
+        // Also handle other `foundation` contracts.
+        $(this).trigger("foundation-field-change");
+    };
+
+    Autocomplete.prototype._getSuggestionAPI = function(callback, failureCallback) {
+        if (!this._suggestion.api) {
+            var $el = $(this).children("[foundation-autocomplete-suggestion]").first();
+
+            if (!$el.length) {
+                if (failureCallback) {
+                    return failureCallback.call(this);
+                }
+                return;
+            }
+
+            this._suggestion.el = $el[0];
+            this._suggestion.api = $el.adaptTo("foundation-picker");
+        }
+
+        return callback.call(this, this._suggestion.api);
+    };
+
+    Autocomplete.prototype._getValueAPI = function(callback, failureCallback) {
+        if (!this._value.api) {
+            var $el = $(this).children("[foundation-autocomplete-value]").first();
+
+            if (!$el.length) {
+                if (failureCallback) {
+                    return failureCallback.call(this);
+                }
+                return;
+            }
+
+            this._value.el = $el[0];
+            this._value.api = createValueAPI($el[0]);
+        }
+
+        return callback.call(this, this._value.api);
+    };
+
+    Autocomplete.prototype._focus = function(config, last) {
+        if ("focus" in config.api) {
+            config.api.focus(last);
+        } else {
+            config.el.focus();
+        }
+    };
+
+    Autocomplete.prototype._validate = function() {
+        var validationAPI = $(this).adaptTo("foundation-validation");
+        if (validationAPI) {
+            validationAPI.checkValidity();
+            validationAPI.updateUI();
+        }
+    };
+
+    Autocomplete.prototype._setSelections = function(selections, deferChangeEvent) {
+        var self = this;
+
+        self._getValueAPI(function(api) {
+            if (self.multiple) {
+                if (self.classList.contains("foundation-field-mixed")) {
+                    api.appendValues(selections.map(function(s) {
+                        var index = self._removedValuesWhenMixed.indexOf(s.value);
+
+                        if (index >= 0) {
+                            self._removedValuesWhenMixed.splice(index, 1);
+                        } else {
+                            s.value = "+" + s.value;
+                        }
+                        return s;
+                    }));
+                } else {
+                    api.appendValues(selections);
+                }
+            } else {
+                if (selections.length) {
+                    api.setValues([ selections[0] ]);
+                } else {
+                    api.setValues([]);
+                }
+            }
+
+            self._onValueChangeByUser(deferChangeEvent);
+        });
+    };
+
+    Autocomplete.prototype._cancelSuggestion = function() {
+        var self = this;
+
+        if (!self._suggestion.open) {
+            return;
+        }
+
+        this._getSuggestionAPI(function(api) {
+            api.cancel();
+            self._suggestion.open = false;
+        });
+    };
+
+    Autocomplete.prototype._appendValue = function(userInput, deferChangeEvent) {
+        var self = this;
+
+        if (!this.multiple && userInput.length === 0) {
+            this._setSelections([], deferChangeEvent);
+            return $.when();
+        }
+
+        var deferred = $.Deferred();
+
+        this._getSuggestionAPI(function(api) {
+            api.resolve([ userInput ]).then(function(selections) {
+                if (selections[0] !== null) {
+                    self._setSelections(selections, deferChangeEvent);
+                    deferred.resolve();
+                } else if (!self.forceSelection) {
+                    self._setSelections([{
+                        value: userInput,
+                        text: userInput,
+                        isUserDefined: true
+                    }], deferChangeEvent);
+                    deferred.resolve();
+                }
+            });
+        }, function() {
+            if (self.forceSelection) {
+                return deferred.reject();
+            }
+
+            self._setSelections([{
+                value: userInput,
+                text: userInput,
+                isUserDefined: true
+            }], deferChangeEvent);
+            deferred.resolve();
+        });
+
+        return deferred.promise();
+    };
+
+    Autocomplete.prototype._resolvePickerSrc = function() {
+        var currentSelections = this._getValueAPI(function(valueAPI) {
+            return valueAPI.getValues();
+        }, function() {
+            return [];
+        });
+        var variables = {
+            value: ""
+        };
+
+        if (currentSelections.length > 0) {
+            variables.value = currentSelections[currentSelections.length - 1].value;
+        }
+
+        this._resolvedPickerSrc = URITemplate.expand(this.pickerSrc, variables);
+    };
+
+    Autocomplete.prototype._loadAndShowPicker = function() {
+        var self = this;
+
+        this._picker.loading = true;
+        this._resolvePickerSrc();
+        resolveElement(this._resolvedPickerSrc).then(function(picker) {
+            self._picker.loading = false;
+            self._picker.el = picker;
+            self._picker.api = $(picker).adaptTo("foundation-picker");
+            self._showPicker();
+        }, function() {
+            self._picker.loading = false;
+        });
+    };
+
+    Autocomplete.prototype._togglePicker = function() {
+        if (this._picker.loading) {
+            return;
+        }
+
+        if (this._picker.el) {
+            if (this._picker.open) {
+                this._picker.api.cancel();
+                this._onCancelPicker();
+            } else {
+                this._loadAndShowPicker();
+            }
+        } else {
+            this._loadAndShowPicker();
+        }
+    };
+
+    Autocomplete.prototype._showPicker = function() {
+        var self = this;
+        var api = this._picker.api;
+
+        api.attach(this);
+
+        var currentSelections = this._getValueAPI(function(valueAPI) {
+            return valueAPI.getValues();
+        }, function() {
+            return [];
+        });
+
+        api.pick(this, currentSelections, this._input.value).then(function(selections) {
+            self._picker.api.detach();
+            self._picker.open = false;
+
+            self._input.setAttribute("aria-expanded", false);
+            self._input.focus();
+
+            self._setSelections(selections);
+        }, function() {
+            self._onCancelPicker();
+        });
+
+        this._focus(this._picker);
+
+        this._picker.open = true;
+        this._input.setAttribute("aria-expanded", true);
+    };
+
+    Autocomplete.prototype._onCancelPicker = function() {
+        this._picker.api.detach();
+        this._picker.open = false;
+        this._input.setAttribute("aria-expanded", false);
+        this._input.focus();
+    };
+
+    Autocomplete.observedAttributes = [
+        "pickersrc",
+        "variant",
+        "name",
+        "placeholder",
+        "labelledby",
+        "labelled",
+        "disabled",
+        "readonly",
+        "invalid",
+        "required"
+    ];
+
+    window.customElements.define("foundation-autocomplete", Autocomplete);
+
+    function resolveElement(src) {
+        if (!src) {
+            return $.Deferred().reject().promise();
+        }
+
+        if (src[0] === "#") {
+            return $.when(document.querySelector(src));
+        }
+
+        return $.ajax({
+            url: src,
+            cache: false
+        }).then(function(html) {
+            return $(window).adaptTo("foundation-util-htmlparser").parse(html);
+        }).then(function(fragment) {
+            return $(fragment).children()[0];
+        });
+    }
+
+    /**
+     * Create the Value API that is specifically backed by `Coral.TagList`.
+     */
+    function createValueAPI(el) {
+        return {
+            setName: function(name) {
+                el.setAttribute("name", name);
+            },
+            setDisabled: function(disabled) {
+                el.disabled = disabled;
+            },
+            setReadOnly: function(readOnly) {
+                el.readOnly = readOnly;
+            },
+            getValues: function() {
+                return el.items.getAll().map(function(tag) {
+                    return {
+                        value: tag.value,
+                        text: tag.label.textContent,
+                        isUserDefined: tag.hasAttribute("data-foundation-autocomplete-value-userdefined")
+                    };
+                });
+            },
+            setValues: function(selections) {
+                el.items.clear();
+                this.appendValues(selections);
+            },
+            appendValues: function(selections) {
+                selections.forEach(function(s) {
+                    var tag = new Coral.Tag().set({
+                        closable: true,
+                        value: s.value,
+                        label: {
+                            textContent: s.text
+                        }
+                    });
+
+                    if (s.isUserDefined) {
+                        tag.setAttribute("data-foundation-autocomplete-value-userdefined", "");
+                    }
+
+                    // data to be passed as data attributes
+                    if (s.data) {
+                        for (var key in s.data) {
+                            if (s.data.hasOwnProperty(key)) {
+                                var dataKey = key;
+                                var firstCharacter = key.charAt(0);
+
+                                if (firstCharacter !== firstCharacter.toUpperCase()) {
+                                    dataKey = firstCharacter.toUpperCase();
+
+                                    if (key.length > 1) {
+                                        dataKey += key.substr(1);
+                                    }
+                                }
+
+                                tag.dataset[DATA_ATTRIBUTE_FOUNDATION_AUTOCOMPLETE_PREFIX + dataKey] = s.data[key];
+                            }
+                        }
+                    }
+
+                    el.items.add(tag);
+                });
+            }
+        };
+    }
+
+
+    var registry = $(window).adaptTo("foundation-registry");
+
+    registry.register("foundation.adapters", {
+        type: "foundation-overlay-anchor",
+        selector: "foundation-autocomplete",
+        adapter: function(el) {
+            return {
+                getElement: function() {
+                    return el._inputGroupWrapper;
+                }
+            };
+        }
+    });
+
+
+    registry.register("foundation.validation.selector", {
+        submittable: "foundation-autocomplete",
+        candidate: "foundation-autocomplete:not([readonly]):not([disabled])",
+        exclusion: "foundation-autocomplete *"
+    });
+
+    // Validator for required of foundation-autocomplete
+    registry.register("foundation.validation.validator", {
+        selector: "foundation-autocomplete",
+        validate: function(el) {
+            if (!el.required) {
+                return;
+            }
+
+            if (el.multiple && el.values.length === 0) {
+                return Granite.I18n.get("Please fill out this field.");
+            } else if (!el.multiple && el.value.length === 0) {
+                return Granite.I18n.get("Please fill out this field.");
+            }
+        }
+    });
+
+
+    registry.register("foundation.adapters", {
+        type: "foundation-field",
+        selector: "foundation-autocomplete",
+        adapter: function(el) {
+            var $el = $(el);
+
+            return {
+                getName: function() {
+                    return el.name;
+                },
+                setName: function(name) {
+                    $el.children(".foundation-field-related").each(function() {
+                        if (this.name.startsWith(el.name + "@")) {
+                            this.name = name + this.name.substring(el.name.length);
+                        }
+                    });
+                    el.name = name;
+                },
+                isDisabled: function() {
+                    return el.disabled;
+                },
+                setDisabled: function(disabled) {
+                    el.disabled = disabled;
+                    $el.children(".foundation-field-related:not(.foundation-field-mixed-patchcontrol)")
+                        .prop("disabled", disabled);
+                },
+                isInvalid: function() {
+                    return el.invalid;
+                },
+                setInvalid: function(invalid) {
+                    el.invalid = invalid;
+                },
+                isRequired: function() {
+                    return el.required;
+                },
+                setRequired: function(required) {
+                    el.required = required;
+                },
+                getValue: function() {
+                    return el.value;
+                },
+                setValue: function(value) {
+                    el.value = value;
+                },
+                getLabelledBy: function() {
+                    return el.labelledBy;
+                },
+                setLabelledBy: function(labelledBy) {
+                    el.labelledBy = labelledBy;
+                },
+                getLabelled: function() {
+                    return el.labelled;
+                },
+                setLabelled: function(labelled) {
+                    el.labelled = labelled;
+                },
+                getValues: function() {
+                    return el.values;
+                },
+                setValues: function(values) {
+                    el.values = values;
+                },
+                clear: function() {
+                    el.clear();
+                }
+            };
+        }
+    });
+
+    /**
+     * Register a presubmit handler to handle mixed scenario.
+     */
+    registry.register("foundation.form.submit", {
+        selector: "*",
+        handler: function(form) {
+            var cleanups = [];
+
+            $(form).find("foundation-autocomplete.foundation-field-mixed").each(function() {
+                var fieldEl = this;
+
+                fieldEl._removedValuesWhenMixed.forEach(function(value) {
+                    var input = document.createElement("input");
+                    input.type = "hidden";
+                    input.name = fieldEl.name;
+                    input.value = "-" + value;
+
+                    fieldEl.appendChild(input);
+
+                    cleanups.push(function() {
+                        fieldEl.removeChild(input);
+                    });
+                });
+
+                cleanups.push(function() {
+                    fieldEl._removedValuesWhenMixed = [];
+                });
+            });
+
+            return {
+                post: function() {
+                    cleanups.forEach(function(f) {
+                        f();
+                    });
+                    return $.when();
+                }
+            };
+        }
+    });
+})(window, document, Granite.$, Coral, Granite, Granite.URITemplate);

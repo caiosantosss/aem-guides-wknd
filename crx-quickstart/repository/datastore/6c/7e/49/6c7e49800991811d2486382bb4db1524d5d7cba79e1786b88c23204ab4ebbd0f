@@ -1,0 +1,540 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2015 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+(function (window, document, Granite, $) {
+    "use strict";
+
+    //DOM
+    var EDITOR_INFO = '.dm-setup-info',
+        VIEWER_AREA = 'set-viewerarea', //do not add # for ID. This is used by viewer
+        NO_CONTENT_AREA = '#set-nocontent',
+        PRESET_LIST = '#set-presetlist',
+        PRESET_LIST_BTN = '#set-presetlist-btn',
+        BLANK_SAMPLE = '#dm-sample-blank';
+
+
+    //Data Key in Info
+    var INFO_KEY = {
+        isAsset: 'asset-isasset',
+        assetPath: 'assetPath',
+        assetJcrPath: 'assetJcrpath',
+        assetType: 'assetType',
+        previewVideoServer: 'previewVideoServer',
+        viewerRootPath: 'viewerPath',
+        companyJcrPath: 'companyJcrpath'
+    }
+
+    //Viewer Constructor
+    var VIEWER_CON = {
+        'imageset': 'ZoomViewer',
+		'verticalzoom': 'ZoomVerticalViewer',
+        'spinset': 'SpinViewer',
+        'mixedmediaset': 'MixedMediaViewer',
+        'flyout': 'FlyoutViewer'
+    }
+
+    //JCR Set type to IS Set Type for mock data
+    var JCR_SET_TO_IS = {
+        'imageset': 'img_set',
+		'verticalzoom':'vertical_zoom',
+        'spinset': 'spin',
+        'mixedmediaset': 'media_set'
+    };
+
+    //Filter for preset list
+    var PRESET_FILTER = {
+        'imageset': 'category,image_set,flyout_zoom,vertical_zoom',
+        'spinset': 'category,spin_set',
+        'mixedmediaset': 'category,mixed_media'
+    }
+
+    //Temporary IS Call data stack
+    var ISTemp = {},
+        prevStateId = -1;
+
+    //IS Constants
+    var IS_CONST = {
+        maxRetry: 10,
+        interval: 500
+    };
+
+    //URL
+    var PRESET_URL = Granite.HTTP.externalize('/etc/dam/presets.viewerpresets.json?include=');
+
+	var defaultAsset = '';
+
+    $(document).one($.s7dm.datactl.event.DATA_LOADED, function(){
+        var isAsset = $(EDITOR_INFO).data(INFO_KEY.isAsset);
+        var assetPath = $(EDITOR_INFO).data(INFO_KEY.assetPath);
+        var assetType =  $(EDITOR_INFO).data(INFO_KEY.assetType);
+        assetType = assetType.toLowerCase();
+		defaultAsset= $(BLANK_SAMPLE).data(INFO_KEY.assetPath);
+        if (!isAsset) {
+			assetPath = defaultAsset;
+            $(PRESET_LIST_BTN).prop('disabled', true);
+            initViewer(assetType, assetPath, isAsset);
+        }
+        else {
+            initViewer(assetType, assetPath, isAsset);
+        }
+        if (assetType == 'imageset') {
+            loadExtraFlyout();
+			loadExtraVerticalZoom();
+        }
+        loadViewerPreset();
+        //To always show preset list button since foundation will hide empty list and we add list on fly
+        if (document.querySelector("#set-presetlist-btn").show) {
+            document.querySelector("#set-presetlist-btn").show();
+        }
+    });
+
+    //Listen to data change for refresh preview - have to delay redrawing of viewer to prevent blocking of rail generation
+    $(document).on($.s7dm.datactl.event.DATA_CHANGED, function(e){ setTimeout(function(){refreshPreview(e)},100)});
+
+
+    /**
+     * @private
+     * Initialize viewer
+     * @param {String} assetType asset type
+     * @param {String} assetPath path to asset
+     * @param {Boolean} isAsset is this an asset?
+     * @param {String} config viewer preset
+     * @param {Function} afterInit after initialization call
+     */
+    function initViewer(assetType, assetPath, isAsset, config, afterInit) {
+        var viewerConId = VIEWER_CON[assetType];
+        var params = {
+            'asset': assetPath + '?cache=off',
+            'serverurl': Granite.HTTP.externalize('/is/image/'),
+            'contenturl': Granite.HTTP.externalize('/')
+        };
+        //for mixed media, pass video server url to parameter manager
+        if (assetType == 'mixedmediaset') {
+            params['videoserverurl'] = $(EDITOR_INFO).data(INFO_KEY.previewVideoServer);
+            params['playback'] = 'progressive';
+            params['progressivebitrate'] = '1500';
+        }
+        if (config) {
+            params['config'] = config;
+        }
+        if (assetPath.indexOf('/') != 0) {
+            //DMS7 case
+            if (assetType != 'spinset') {
+                //spinset contains mismatch format for mock-set response
+                //so we have to use aemmode=1 from viewer package
+                params['aemmode'] = '0';
+            }
+            params['contenturl'] = Granite.HTTP.externalize('/is/content/');
+        }
+        var viewer = new s7viewers[viewerConId]({
+            'containerId': VIEWER_AREA,
+            'params': params
+        });
+        viewer.setLocalizedTexts(getLocalizedText()); //passing localized text to the viewer
+        //call after init function when it's passed to this function.
+        if (afterInit) {
+            viewer.setHandlers({
+                initComplete: function(){
+                    //TODO Find root cause of multiple refresh call after switch preset
+                    setTimeout(afterInit, 10);
+                }
+            });
+        }
+        viewer.init();
+		setViewerObj(viewer);
+        if (isAsset) {
+            setViewArea(isAsset);
+        }
+    }
+
+    function rebuildViewer(config, category) {
+        var isAsset = $(EDITOR_INFO).data(INFO_KEY.isAsset);
+        var assetPath = $(EDITOR_INFO).data(INFO_KEY.assetPath);
+        var assetType =  $(EDITOR_INFO).data(INFO_KEY.assetType);
+		var viewer = getViewerObj();
+        //dispose current viewer first
+        if (viewer) {
+            viewer.dispose();
+            viewer = null;
+        }
+        assetType = assetType.toLowerCase();
+        if (!isAsset) {
+			assetPath = defaultAsset;
+        }
+        if (category == 'flyout_zoom') {
+            assetType = 'flyout';
+        }
+        if (category == 'vertical_zoom') {
+            assetType = 'verticalzoom';
+        }
+        initViewer(assetType, assetPath, true, config, refreshPreview);
+    }
+
+
+
+
+	/**
+     * Switch between placeholder and preview based on whether there is asset or not
+     * @param {Boolean} hadAsset
+     *
+     */
+    function setViewArea(hadAsset){
+        if (hadAsset) {
+            $(NO_CONTENT_AREA).hide();
+            $('#'+VIEWER_AREA).show();
+        }
+        else {
+        	$(NO_CONTENT_AREA).show();
+            $('#'+VIEWER_AREA).hide();
+        }
+    }
+
+    /**
+     * Attach viewer to the preview
+     * @param {Object} viewer S7 Viewer
+     */
+    function setViewerObj(viewer){
+        if ($('#'+VIEWER_AREA).data('viewer')) {
+            $('#'+VIEWER_AREA).data('viewer').dispose();
+        }
+        $('#'+VIEWER_AREA).data('viewer', viewer);
+    }
+
+    /**
+     * Get viewer object from view area
+     * @return {Object} S7 Viewer
+     */
+    function getViewerObj(){
+        var viewer = $('#'+VIEWER_AREA).data('viewer');
+        return viewer;
+    }
+
+
+	/**
+     * @private
+     * Refresh preview based on the current data stack
+     */
+    function refreshPreview(e) {
+        if (typeof e == 'undefined' || e.field !== 'settings') {
+            //do not redraw viewer for settings change
+            if (typeof ISTemp.items != 'undefined' && ISTemp.items.length == $.s7dm.datactl.data.getOrderedItemsCount()){
+				//Reorder data without refill req=set call
+                reorderISTemp();
+                updatePreview();
+            }
+            else {
+				//Refill data when set member change
+                var items = $.s7dm.datactl.data.getOrderedItems();
+                ISTemp = {}; //reset ISTemp data holder
+                ISTemp.stateId = $.s7dm.datactl.data.getStateId();
+                ISTemp.items = [];
+                if (ISTemp.timer) {
+                    clearTimeout(ISTemp.timer);
+                    ISTemp.retry = 0;
+                }
+                for (var i = 0; i < items.length; i++){
+                    ISTemp.items.push({path: items[i].assetId, set: null});
+                    issueISCall(items[i].assetId, ISTemp.stateId + '-' + i);
+                }
+                checkISComplete();
+            }
+        }
+    }
+
+
+    /**
+     * Check that current IS calls for data gathering is completed.
+     */
+    function checkISComplete() {
+        var completed = true;
+        if (ISTemp.stateId == $.s7dm.datactl.data.getStateId()) {
+            for (var i = 0; i < ISTemp.items.length; i++) {
+                if (ISTemp.items[i].set == null) {
+					completed = false;
+                    break;
+                }
+            }
+            if (completed) {
+                updatePreview();
+            }
+            else {
+                var adjustedMaxRetry = IS_CONST.maxRetry + Math.floor(ISTemp.items.length/10); //add more retry cycle for every 10 asset
+                ISTemp.retry++
+                if (ISTemp.retry < adjustedMaxRetry) {
+                	ISTemp.timer = setTimeout(checkISComplete, IS_CONST.interval);
+                }
+            }
+        }
+    }
+
+
+    /**
+     * @private
+     * Update preview with data from datactl + additional info from req=set
+     */
+    function updatePreview(){
+        //if there is data, update preview
+        if ($.s7dm.datactl.data.getOrderedItemsCount() > 0) {
+            if (prevStateId != ISTemp.stateId) {
+                prevStateId == ISTemp.stateId;
+                var assetType = $(EDITOR_INFO).data(INFO_KEY.assetType);
+                var ISType = JCR_SET_TO_IS[assetType.toLowerCase()];
+                var updatedSet = {};
+                if (assetType.toLowerCase() === 'spinset') {
+                    updatedSet = createSpinSetResponse(ISType);
+                }
+                else {
+                    updatedSet = createImageSetResponse(ISType);
+                }
+                var viewer = getViewerObj();
+                viewer.getComponent('mediaSet').setMediaSetData(updatedSet);
+                setViewArea(true);
+                $(PRESET_LIST_BTN).prop('disabled', false);
+            }
+        }
+        else {
+            //no data - show placeholder
+            setViewArea(false);
+            $(PRESET_LIST_BTN).prop('disabled', true);
+        }
+    }
+
+
+
+	/**
+     * @private
+     * Making req=set call to IS for additional data, which will get callback with s7dmParse by JSONP
+     * @param {String} assetPath Asset path for req=set call to get additional info
+     * @param {String} id unique request ID consist of stateID-assetPos
+     */
+	function issueISCall(assetPath, id) {
+        var url = Granite.HTTP.externalize('/is/image/')
+        		+ assetPath
+                + '?req=set,json,utf-8&handler=s7dmParse&cache=off&id='
+                + id;
+        $('body').append('<script async="true" src="' + url +'"></script>');
+
+    }
+
+    /**
+     * @private
+     * Reorder ISTemp without calling req=set for filling member's set definition
+     */
+    function reorderISTemp() {
+		var orderedItems = $.s7dm.datactl.data.getOrderedItems();
+        var newISTemp = {
+            stateId: $.s7dm.datactl.data.getStateId(),
+            items: []
+        };
+        for (var i = 0; i < orderedItems.length; i++) {
+            newISTemp.items.push({path: orderedItems[i].assetId, set: null});
+        }
+        for (var i = 0; i < newISTemp.items.length; i++) {
+            for (var j = 0; j < ISTemp.items.length; j++){
+                if (ISTemp.items[j].path == newISTemp.items[i].path) {
+					newISTemp.items[i].set = ISTemp.items[j].set;
+                    break;
+                }
+            }
+        }
+        ISTemp = newISTemp;
+    }
+
+	//register public s7dmParse for req=set parser
+    window.s7dmParse = function(json, id){
+        var ids = id.split('-');
+        if (ISTemp.stateId == ids[0]) {
+            var itemId = ids[1];
+            ISTemp.items[itemId].set = trimResponse(json);
+        }
+    }
+
+
+    /**
+     * @private
+     * Clean up JSON response from IS
+     * @param {Object} json JSON object from req=set
+     * @return {Object} json JSON object without redundant data
+     */
+    function trimResponse(json) {
+        if (json.set.type == 'img') {
+            json.set.item.i.n = json.set.item.i.n.replace(/&cache=off/g, '');
+            return json.set.item;
+        }
+        else{
+            return { 'type': json.set.type ,
+                     's': {'n': json.set.n },
+                     'set': json.set };
+        }
+
+    }
+
+    /**
+     * @private
+     * Create mock spin set data
+     * @param {String} ISType IS set type
+     * @return {Object} JSON object representing spin set
+     */
+    function createSpinSetResponse(ISType) {
+        var updatedSet = { 'type': ISType,
+                           'n': 'tmp',
+                           'item': {} };
+        var orderedItems = $.s7dm.datactl.data.getOrderedItems();
+        updatedSet.item = { 'set' : {
+            							'n': 'tmp',
+            							'item': []
+        							}
+                          };
+        for (var i = 0; i < ISTemp.items.length; i++) {
+            updatedSet.item.set.item.push(ISTemp.items[i].set);
+        }
+
+        return updatedSet;
+    }
+
+	/**
+     * @private
+     * Create mock image/mixed media set data
+     * @param {String} ISType IS set type
+     * @return {Object} JSON object representing image and mixed media set
+     */
+    function createImageSetResponse(ISType){
+        var updatedSet = { 'type': ISType,
+                           'n':'tmp',
+                           'item': [] };
+        var orderedItems = $.s7dm.datactl.data.getOrderedItems();
+        for (var i = 0; i < ISTemp.items.length; i++) {
+            if (orderedItems[i].swatchId) {
+                ISTemp.items[i].set['s'] = { 'n' : orderedItems[i].swatchId };
+            }
+            updatedSet.item.push(ISTemp.items[i].set);
+        }
+
+        return updatedSet;
+    }
+
+    /**
+     *  Load viewer preset to the list depending on editor set type
+     */
+    function loadViewerPreset(){
+        var assetType =  $(EDITOR_INFO).data(INFO_KEY.assetType);
+        assetType = assetType.toLowerCase();
+        var filter = PRESET_FILTER[assetType];
+        if (assetType) {
+        	var url = PRESET_URL + filter;
+            $.getJSON(url, function(json){
+                var coralAnchorList = $('<coral-anchorlist>');
+				$(PRESET_LIST).append(coralAnchorList);
+                for (var i = 0; i < json.length; i++) {
+                    if ( json[i].id != 'rep:policy') {
+                        if (json[i]['jcr:content'].isactive) {
+                            var presetPath = json[i].uri;
+                            if (json[i]['jcr:content']['metadata'] && json[i]['jcr:content']['metadata']['dam:scene7File']) {
+                                presetPath = json[i]['jcr:content']['metadata']['dam:scene7File'];
+                            }
+							var vpItem = buildVPItem(json[i].id, presetPath, json[i]['jcr:content'].category.toLowerCase());
+                            coralAnchorList.append(vpItem);
+                            vpItem.on('click', pickVPItem);
+                        }
+                    }
+                }
+            });
+       	}
+    }
+
+    /**
+     * Build Viewer Preset Item
+     * @private
+     * @param {String} id preset id
+     * @param {String} uri preset path
+     * @param {String} category preset category
+     * @returns {Object} jQuery object for viewer preset item
+     */
+    function buildVPItem(id, uri, category){
+        var item = $('<a is="coral-anchorlist-item" href="' + uri + '" data-id="' +  id + '" data-category="' + category + '" >' + id +'</a>');
+        return item;
+    }
+
+    /**
+     * Event handler for picking viewer preset item
+     * @param {Event} e event object for preset selection
+     */
+    function pickVPItem(e){
+        e.preventDefault();
+        resetCheckVPItem();
+        $(this).attr('icon','check');
+		$(PRESET_LIST_BTN).trigger('click');
+        changePresetBtnLabel($(this).data('id'));
+        rebuildViewer($(this).attr('href'), $(this).data('category'));
+    }
+
+    /**
+     * Reset viewer preset item selection icon
+     */
+    function resetCheckVPItem(){
+        $(PRESET_LIST).find('a').each(function(){
+            $(this).removeAttr('icon');
+        })
+    }
+
+    /**
+     * Change viewer preset button label
+     * @param {String} label selected preset label
+     */
+    function changePresetBtnLabel(label) {
+        $(PRESET_LIST_BTN).find('coral-button-label').html(label);
+    }
+    //Load extra flyout viewer
+    function loadExtraFlyout() {
+        var viewerRootPath =  $(EDITOR_INFO).data(INFO_KEY.viewerRootPath) + 'html5/js/FlyoutViewer.js?namespace=s7viewers';
+        $('body').append('<script src="' + viewerRootPath + '"></script>');
+    }
+	//Load extra vertical zoom viewer
+    function loadExtraVerticalZoom() {
+        var viewerRootPath =  $(EDITOR_INFO).data(INFO_KEY.viewerRootPath) + 'html5/js/ZoomVerticalViewer.js?namespace=s7viewers';
+        $('body').append('<script src="' + viewerRootPath + '"></script>');
+    }	
+    /**
+     * Get localized text for viewer from s7sdk_i18n.localizedText
+     * @return JSON for localized text
+     */
+    function getLocalizedText() {
+        var localizedText = {};
+        localizedText[Granite.I18n.getLocale()] = formatLocalizedText(s7sdk_i18n.localizedText);
+        localizedText['defaultLocale'] = Granite.I18n.getLocale();
+        return localizedText;
+    }
+
+    /**
+     * Format localized text into a correct viewer format
+     * @param localizedText localized text parsed from s7sdk
+     * @return formatted localized text with correct key for viewer
+     */
+    function formatLocalizedText(localizedText) {
+        var formatTexts = {};
+        for (var compKey in localizedText) {
+            var compObj = localizedText[compKey];
+            for (var symbolKey in compObj) {
+                var modKey = compKey + '.' + symbolKey;
+                var symbolVal = compObj[symbolKey];
+                formatTexts[modKey] = symbolVal;
+            }
+        }
+        return formatTexts;
+    }
+
+
+})(window, document, Granite, Granite.$);

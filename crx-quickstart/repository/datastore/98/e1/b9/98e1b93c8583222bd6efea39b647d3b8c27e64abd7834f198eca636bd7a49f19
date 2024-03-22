@@ -1,0 +1,812 @@
+/*
+ * Copyright 1997-2008 Day Management AG
+ * Barfuesserplatz 6, 4001 Basel, Switzerland
+ * All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Day Management AG, ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the license agreement you entered into
+ * with Day.
+ */
+// TODO comment
+CQ.wcm.DamAdmin = {};
+
+/** action conditions */
+CQ.wcm.DamAdmin.openPages = function () {
+    var selection = this.getSelectedPages();
+    var url = CQ.HTTP.externalize("/bin/wcmcommand") + "?cmd=open";
+    url += "&_charset_=utf-8";
+    for (var i = 0; i < selection.length; i++) {
+        url = CQ.HTTP.addParameter(url, "path", selection[i].id);
+    }
+    CQ.shared.Util.open(url, null, "AssetEditorWindow");
+};
+
+CQ.wcm.DamAdmin.openAsset = function (path, record) {
+    var tabPanel = CQ.Ext.getCmp(window.CQ_SiteAdmin_id + "-tabpanel");
+    if (tabPanel) {
+    	tabPanel.on("beforeremove", function() {
+    		if(this.activeTab.editorClose() == false) {
+    	    	CQ.Ext.Msg.show({
+    	            "title": CQ.I18n.getMessage("Unsaved Changes"),
+    	            "msg": CQ.I18n.getMessage("You have unsaved changes. Do you still want to close the tab?"),
+    	            "buttons": CQ.Ext.Msg.YESNO,
+    	            "icon": CQ.Ext.MessageBox.QUESTION,
+    	            "fn": function(btnId) {
+    	                if (btnId == "yes") {
+    	                    this.activeTab.destroy();
+    	                } else if (btnId == "no") {
+
+    	                }
+    	            },
+    	            "scope":this
+    	        });
+    	    	return false;
+    		}
+    	});
+        var id = CQ.DOM.encodeId(path);
+        var editor = CQ.Ext.getCmp(id);
+
+        var locked = false;
+        if (record) {
+            var locker = record.data.lockedBy;
+            var currentUserID = CQ.User.getUserID();
+            if (locker.length > 0 && locker != currentUserID) {
+                locked = true;
+            }
+        }
+        if (!editor) {
+            var title = record ? record.get("title") : "";
+            // For records from search result page. see CQ5-28869
+            var mime = record ? record.get("mime") || record.get("mimeType"): "";
+            var suffix = "";
+            if (mime) {
+                // replace all non-alphanumeric characters with a slash
+                for (var i = 0; i < mime.length; i++) {
+                    var c = mime.charCodeAt(i);
+                    if (c >= 97 && c <= 122 || // a-z
+                        c >= 65 && c <= 90 || // A-Z
+                        c >= 48 && c <= 57) { // 0-9
+
+                        suffix += mime.charAt(i);
+                    }
+                    else {
+                        // encode invalid characters and the escape character (":")
+                        suffix += "/";
+                    }
+                }
+            }
+            if (suffix != "") suffix = "/" + suffix + ".json";
+            var json = CQ.HTTP.eval("/libs/dam/content/asseteditors/asseteditor.overlay.infinity.json" + suffix);
+            if (!json.formItems) {
+                json.formItems = CQ.HTTP.eval("/libs/dam/content/asseteditors/formitems.overlay.infinity.json" + suffix);
+            }
+
+            var config = CQ.Util.formatData(json);
+            config = CQ.utils.Util.applyDefaults(config, {
+                "xtype": "asseteditor",
+                "contentPath": "/jcr:content/metadata",
+                "assetInfo": {
+                    "width": record ? record.get("width") : 0,
+                    "height": record ? record.get("height") : 0,
+                    "size": record ? record.get("size") : 0,
+                    "lastModified": record ? record.get("lastModified") : 0,
+                    "title": title ? title : "",
+                    "mime": mime ? mime : ""
+                },
+                "readOnly": locked
+            });
+            // see if this asset is in a scene7 shared folder
+            var scene7ConfigJson = CQ.HTTP.eval(path + ".s7config.json");
+
+            if (scene7ConfigJson
+                && scene7ConfigJson.scene7ConfigPath) {
+                // found scene7 config path, update the asset's config
+                config.scene7ConfigPath = scene7ConfigJson.scene7ConfigPath;
+                config.scene7 = true;
+            } else {
+                // signal that this is not a scene7 asset, so the upload/re-upload link will not be displayed
+                config.scene7 = false;
+            }
+
+            config.id = id;
+            config.path = path;
+            config.title = undefined; // title will be build from fileName
+
+            editor = CQ.Util.build(config, true);
+
+            tabPanel.add(editor);
+        }
+        tabPanel.setActiveTab(editor);
+
+        if (locked) {
+            var msg = CQ.I18n.getMessage("Locked");
+            var description = CQ.I18n.getMessage("This asset is currently locked by {0}", [locker]);
+            CQ.Notification.notify(msg, description, 10);
+        }
+    }
+};
+
+CQ.wcm.DamAdmin.internalDeleteAsset = function (/* boolean */ force) {
+    this.mask();
+    var selections = this.getSelectedPages();
+    var tree = CQ.Ext.getCmp(this.id + "-tree");
+    var list = CQ.Ext.getCmp(this.id + "-grid");
+
+    // collect necessary information
+    var paths = [];
+    var nodes = [];
+    for (var i = 0; i < selections.length; i++) {
+        var selection = selections[i];
+        paths.push(selection.id);
+
+        // find corresponding tree nodes
+        var path = selection.id.split("/");
+        if (tree) {
+            var node = tree.getRootNode();
+            var rootPath = node.getPath().split("/");
+            for (var j = rootPath.length; j < path.length; j++) {
+                node = node.findChild("name", path[j]);
+            }
+            // only add nodes that are available in tree (i.e. folders)
+            if (node) nodes.push(node);
+        }
+    }
+
+    CQ.Ext.Ajax.request({
+        "url": CQ.HTTP.externalize("/bin/wcmcommand"),
+        "method": "POST",
+        "callback": function (options, success, xhr) {
+            var response = CQ.HTTP.buildPostResponseFromHTML(xhr.responseText);
+            var status = response.headers[CQ.utils.HTTP.HEADER_STATUS];
+            if (status == 200) {
+                this.unmask();
+                // remove items from grid and close possible asset editor
+                for (var i = 0; i < selections.length; i++) {
+                    var id = CQ.DOM.encodeId(selections[i].id);
+                    var editor = CQ.Ext.getCmp(id);
+                    if (editor) {
+                        var tabPanel = CQ.Ext.getCmp(window.CQ_SiteAdmin_id + "-tabpanel");
+                        tabPanel.remove(editor);
+                    }
+                    list.getStore().remove(selections[i]);
+                }
+                // remove items from tree (i.e. folders)
+                if (tree) {
+                    for (var i = 0; i < nodes.length; i++) {
+                        try {
+                            nodes[i].remove();
+                        } catch (e) {
+                        }
+                    }
+                }
+            } else if (status == 412) {
+                this.unmask();
+                CQ.Ext.Msg.show({
+                    "title": CQ.I18n.getMessage("Delete Asset"),
+                    "msg": CQ.I18n.getMessage("One or more selected assets are referenced and/or activated. Click 'yes' to proceed deleting the assets, click 'no' to review the references or 'cancel' to cancel the operation."),
+                    "buttons": CQ.Ext.Msg.YESNOCANCEL,
+                    "icon": CQ.Ext.MessageBox.QUESTION,
+                    "fn": function (btnId) {
+                        if (btnId == "yes") {
+                            CQ.wcm.DamAdmin.internalDeleteAsset.call(this, true);
+                        } else if (btnId == "no") {
+                            CQ.wcm.SiteAdmin.showReferences.call(this);
+                        }
+                    },
+                    "scope": this
+                });
+            } else if (status == 500) {
+                this.unmask();
+                CQ.Notification.notifyFromResponse(response);
+            } else {
+                this.unmask();
+            }
+        },
+        "params": {
+            "path": paths,
+            "_charset_": "utf-8",
+            "cmd": "deletePage",
+            "force": force
+        },
+        "scope": this
+    });
+};
+
+CQ.wcm.DamAdmin.deactivateAsset = function () {
+    var selections = this.getSelectedPages();
+    var msg = CQ.I18n.getMessage("You are going to deactivate the following assets: ") + "<br/>";
+    for (var i = 0; i < selections.length; i++) {
+        msg += CQ.shared.XSS.getXSSValue(selections[i].id) + "<br/>";
+    }
+    msg += "<br/>" + CQ.I18n.getMessage("Are you sure?");
+
+    var title = (selections.length > 1) ?
+        CQ.I18n.getMessage("Deactivate Assets")
+        : CQ.I18n.getMessage("Deactivate Asset");
+
+    CQ.Ext.Msg.show({
+        "title": title,
+        "msg": msg,
+        "buttons": CQ.Ext.Msg.YESNO,
+        "icon": CQ.Ext.MessageBox.QUESTION,
+        "fn": function (btnId) {
+            if (btnId == "yes") {
+                CQ.wcm.SiteAdmin.internalDeactivatePage.call(this, false);
+            }
+        },
+        "scope": this
+    });
+};
+
+CQ.wcm.DamAdmin.deleteAsset = function () {
+    var selections = this.getSelectedPages();
+    var msg;
+    if (selections.length == 1 && selections[0].get("type") != "dam:Asset") {
+        // selection is folder in tree
+        msg = CQ.I18n.getMessage("You are going to delete the following folder including all assets inside:");
+    } else {
+        msg = (selections.length > 1) ?
+            CQ.I18n.getMessage("You are going to delete the following assets:") :
+            CQ.I18n.getMessage("You are going to delete the following asset:");
+    }
+    msg += "<br/><br/>";
+    var max = 7;
+    for (var i = 0; i < selections.length; i++) {
+        if (i == max) {
+            msg += CQ.I18n.getMessage("(and {0} more...)", [selections.length - i], "assets to delete") + "<br/>";
+            break;
+        }
+        // Get either the title or the label
+        // If '_displayTitle_' property is defined, the selection has been made through left tree,
+        // where 'label' is not XSS safe, because the raw value is needed at some point
+        // but 'title' is protected
+        var asset = selections[i].get("_displayTitle_") && selections[i].get("title")
+            ? selections[i].get("title")
+            : selections[i].get("label");
+   if (asset == undefined) {
+     asset = selections[i].id.substring(selections[i].id.lastIndexOf("/") + 1);
+   }
+        msg += asset + "<br/>";
+    }
+    msg += "<br/>" + CQ.I18n.getMessage("Are you sure?");
+
+    var title = (selections.length > 1) ?
+        CQ.I18n.getMessage("Delete Assets")
+        : CQ.I18n.getMessage("Delete Asset");
+
+    CQ.Ext.Msg.show({
+        "title": title,
+        "msg": msg,
+        "buttons": CQ.Ext.Msg.YESNO,
+        "icon": CQ.Ext.MessageBox.QUESTION,
+        "fn": function (btnId) {
+            if (btnId == "yes") {
+                CQ.wcm.DamAdmin.internalDeleteAsset.call(this, false);
+            }
+        },
+        "scope": this
+    });
+};
+
+
+CQ.wcm.DamAdmin.createFolder = function (action, event) {
+    CQ.wcm.SiteAdmin.createFolder.call(this, action, event, "itemname");
+};
+
+CQ.wcm.DamAdmin.createMetadataTemplate = function (action, event) {
+    var admin = this;
+    var parentPath = this.getCurrentPath();
+    var dlg = new CQ.dam.CreateMetadataTemplateWizard({});
+
+    dlg.on("beforesubmit", function () {
+        admin.mask();
+    });
+    dlg.success = function () {
+        admin.reloadCurrentTreeNode();
+        window.setTimeout(function () {
+            dlg.destroy();
+        }, 1000);
+        CQ.Ext.Msg.show({
+            "title": CQ.I18n.getMessage("Changes Saved"),
+            "msg": CQ.I18n.getMessage("Metadata template created successfully "),
+            "buttons": CQ.Ext.Msg.OK
+        });
+    };
+    dlg.failure = function (form, response) {
+        admin.unmask();
+        window.setTimeout(function () {
+            dlg.destroy();
+        }, 1000);
+        console.log([response]);
+        CQ.Ext.Msg.alert(
+            CQ.I18n.getMessage("Error"),
+            CQ.I18n.getMessage("Could not create template")
+        );
+    };
+
+    dlg.loadContent({
+        dstPath: this.getCurrentPath()
+    });
+
+    dlg.show();
+
+};
+
+CQ.wcm.DamAdmin.applyMetadataTemplate = function (action, event) {
+    var admin = this;
+    var parentPath = this.getCurrentPath();
+    var msg = CQ.I18n.getMessage("Metadata template already applied to this folder:");
+    msg += "<br/><br/>";
+    msg += CQ.I18n.getMessage("Click 'Yes' to replace the applied Metadata Template or 'No' to cancel the operation.");
+    if (CQ.wcm.DamAdmin.isMetadataTemplateApplied()) {
+        CQ.Ext.Msg.confirm(
+            CQ.I18n.getMessage("Warning"),
+            msg,
+            function (btnId) {
+                if (btnId == "yes") {
+                    CQ.wcm.DamAdmin.internalApplyMetadataTemplate(admin, parentPath, true);
+                }
+            });
+        return false;
+    } else {
+        CQ.wcm.DamAdmin.internalApplyMetadataTemplate(admin, parentPath, false);
+    }
+};
+
+/**
+ * @private
+ */
+CQ.wcm.DamAdmin.internalApplyMetadataTemplate = function (admin, parentPath, toupdate) {
+    var selection = (admin.getSelectedPages())[0];
+    var dlg = new CQ.dam.ApplyMetadataTemplateWizard(selection["id"]);
+    dlg.on("beforesubmit", function () {
+        admin.mask();
+        if (toupdate) {
+            CQ.HTTP.post(selection["id"] + "/jcr:content/" +
+                CQ.shared.HTTP.encodePath("metadata"), null, {
+                    ":operation": "delete"
+                }
+            );
+        }
+    });
+
+    dlg.on("submit", function () {
+        console.log(this);
+    });
+
+    dlg.success = function () {
+        admin.reloadCurrentTreeNode();
+        window.setTimeout(function () {
+            dlg.hide();
+        }, 1000);
+        CQ.Ext.Msg.show({
+            "title": CQ.I18n.getMessage("Changes Saved"),
+            "msg": CQ.I18n.get("Metadata template applied successfully to the folder {0}",selection["id"]),
+            "icon": CQ.Ext.Msg.INFO,
+            "buttons": CQ.Ext.Msg.OK
+        });
+    };
+
+    dlg.failure = function (form, response) {
+        admin.unmask();
+        console.log([response]);
+        CQ.Ext.Msg.alert(
+            CQ.I18n.getMessage("Error"),
+            CQ.I18n.getMessage("Could not apply template: {0}", [response["result"]["Message"]])
+        );
+    };
+
+    dlg.show();
+};
+
+CQ.wcm.DamAdmin.editMetadataTemplate = function (action, event) {
+    var admin = this;
+    var parentPath = this.getCurrentPath();
+    var selection = (admin.getSelectedPages())[0];
+    var json = selection.json;
+    var parentTplPath = json["cq:ingestionTemplateName"];
+    var formItems = CQ.HTTP.eval(parentTplPath + "/jcr:content/items.infinity.json");
+    var metadataItems = CQ.HTTP.eval(selection.json.path + "/jcr:content/template-metadata.infinity.json");
+    var items = [];
+    var url = selection.json.path;
+
+    for (var v in formItems) {
+        if (typeof(formItems[v]) === 'object') {
+            items.push(formItems[v]);
+        }
+    }
+
+    for (var v in items) {
+        if (typeof(items[v]["name"]) === 'string' && items[v]["name"] != "") {
+            var n = items[v]["name"];
+            n = n.split("/")[1];
+            if (metadataItems[n]) {
+                items[v]["value"] = metadataItems[n];
+            }
+        }
+    }
+
+    var editDialog = {
+        "jcr:primaryType": "cq:Dialog",
+        "id": CQ.Util.createId("cq-createdialog"),
+        "title": CQ.I18n.getMessage("Edit Metadata Template"),
+        "formUrl": CQ.shared.HTTP.externalize(selection["id"] + "/jcr:content/template-metadata"),
+        "autoScroll": true,
+        "params": {
+            "_charset_": "utf-8"
+        },
+        "height": 520,
+        "items": {
+            "jcr:primaryType": "cq:Panel",
+            "items": [
+                {
+                    "fieldLabel": CQ.I18n.getMessage("(Instance Name)"),
+                    "fieldDescription": CQ.I18n.getMessage("Name of the Metadata Template instance"),
+                    "name": "./cq:ingestionTemplateInstanceName",
+                    "allowBlank": false,
+                    "value": json["cq:ingestionTemplateInstanceName"]
+                },
+                {
+                    "fieldLabel": CQ.I18n.getMessage("(Based on)"),
+                    "fieldDescription": CQ.I18n.getMessage("Parent Metadata Template of this instance"),
+                    "readOnly": true,
+                    "name": "./cq:ingestionTemplateName",
+                    "value": json["cq:ingestionTemplateName"]
+                },
+                items
+            ]
+        },
+        "okText": CQ.I18n.getMessage("Save")
+    };
+
+
+    var dialog = CQ.WCM.getDialog(editDialog);
+
+    dialog.on("beforesubmit", function () {
+        admin.mask();
+    });
+
+    dialog.success = function () {
+        admin.reloadCurrentTreeNode();
+        CQ.Ext.Msg.show({
+            "title": CQ.I18n.getMessage("Changes Saved"),
+            "msg": CQ.I18n.getMessage("Metadata template on the folder {0}  edited successfully",selection["id"]),
+            "icon": CQ.Ext.Msg.INFO,
+            "buttons": CQ.Ext.Msg.OK
+        });
+    };
+
+    dialog.failure = function (form, response) {
+        admin.unmask();
+        console.log([response]);
+        CQ.Ext.Msg.alert(
+            CQ.I18n.getMessage("Error"),
+            CQ.I18n.getMessage("Could not edit template: {0}", [response["result"]["Message"]])
+        );
+    };
+    dialog.addHidden({
+        "parentPath": parentPath
+    });
+    dialog.show();
+
+};
+
+CQ.wcm.DamAdmin.removeMetadataTemplate = function () {
+    var admin = CQ.Ext.getCmp(window.CQ_SiteAdmin_id);
+    if (admin) {
+        var selections = admin.getSelectedPages();
+        for (var i = 0; i < selections.length; i++) {
+            try {
+                var selection = selections[i];
+                if (selection.json["cq:ingestionTemplateInstanceName"]) {
+                    CQ.Ext.Msg.confirm(
+                        CQ.I18n.getMessage("Warning"),
+                        CQ.I18n.getMessage("Are you sure you wish to remove Applied Metadata Template"),
+                        function (btnId) {
+                            if (btnId == "yes") {
+                                CQ.HTTP.post(selection["id"] + "/jcr:content/template-metadata", null, {
+                                    ":operation": "delete"
+                                });
+
+                                admin.reloadCurrentTreeNode();
+                                return true;
+
+                            }
+                            return false;
+                        });
+                }
+            } catch (e) {
+            }
+        }
+    }
+    return false;
+};
+
+CQ.wcm.DamAdmin.isMetadataTemplateApplied = function () {
+    var admin = CQ.Ext.getCmp(window.CQ_SiteAdmin_id);
+    if (admin) {
+        var selections = admin.getSelectedPages();
+        for (var i = 0; i < selections.length; i++) {
+            try {
+                var selection = selections[i];
+                if (selection.json["cq:ingestionTemplateInstanceName"]) {
+
+                    return true;
+                }
+            } catch (e) {
+            }
+        }
+    }
+    return false;
+};
+
+/***
+ * The rollout action of the file-menu
+ */
+CQ.wcm.DamAdmin.rollout = function() {
+  var selections = this.getSelectedPages();
+  var admin = this;
+  if (selections.length==1) {
+    CQ.wcm.SiteAdmin.openRolloutDialog.call(admin, selections[0].id, undefined, true);
+  } else {
+    var paths = new Array();
+    for(var i=0; i<selections.length; ++i){
+      paths.push(selections[i].id)
+    }
+    var rolloutWizard = new CQ.wcm.msm.RolloutWizard({
+      "path": paths,
+      "hideComponents": true,
+      "hideRolloutPlan": true,
+      "isBackground": true,
+      "listeners" : {
+        "beforesubmit": {
+          "fn": function(){admin.mask();}
+        }
+      }
+    });
+    rolloutWizard.success = function() {
+      CQ.Ext.getCmp(admin.id + "-tree").getSelectionModel().getSelectedNode().reload();
+      CQ.Ext.getCmp(admin.id + "-grid").getSelectionModel().clearSelections();
+      admin.reloadPages();
+    };
+    rolloutWizard.failure = function(){admin.unmask();};
+    rolloutWizard.show();
+  }
+};
+
+
+CQ.wcm.DamAdmin.extractZip = function() {
+    var admin = this;
+    var id = CQ.Util.createId("cq-extract-zip-dialog");
+    var zipFilePath = this.getSelectedPages()[0].id;
+    var progressRequestInterval = 5000;
+    var progressBarId = CQ.Ext.id();
+    var abortButtonId = CQ.Ext.id();
+
+    // explicitly set button texts to identify later
+    var cancelText = CQ.I18n.getMessage("Cancel");
+    var okText = CQ.I18n.getMessage("Start");
+
+    // extract path from file
+    var i = zipFilePath.lastIndexOf('/');
+    var destParentPath = decodeURIComponent(zipFilePath.substring(0, i));
+
+    // later set for progress report
+    var progressUrl = "";
+
+    // the column layout container for the progress bar and the abort button
+    var progressContainerId = CQ.Ext.id();
+
+    var startWorkflowDialog = {
+        "jcr:primaryType": "cq:Dialog",
+        "title": CQ.I18n.getMessage("Extract ZIP"),
+        "id": id,
+        "params": {
+            "_charset_":"utf-8",
+            "payloadType":"JCR_PATH"
+        },
+        "okText": okText,
+        "cancelText": cancelText,
+        "buttons": CQ.Dialog.OKCANCEL,
+        "items": {
+            "xtype": "panel",
+            "items": {
+                "jcr:primaryType": "cq:WidgetCollection",
+                "destination": {
+                    "xtype": "fieldset",
+                    "title": CQ.I18n.get("Location"),
+                    "stateful": false,
+                    "name": "location",
+                    "items": [{
+                        "xtype": "pathfield",
+                        "fieldLabel": CQ.I18n.getMessage("Destination"),
+                        "anchor": "100%",
+                        "name": "destParentPath",
+                        "value": destParentPath,
+                        "allowBlank": false,
+                        "listeners": {
+                            "blur": function() { // from HeavyMoveDialog.js
+                                while (/(.*)\/$/.test(this.getValue())) {
+                                    this.setValue(this.getValue().replace(/(.*)\/$/, "$1"));
+                                }
+                            }
+                        }
+                    }]
+                },
+                "replacementStrategy": {
+                    "xtype": "fieldset",
+                    "title": CQ.I18n.get("Replacement Strategy"),
+                    "stateful": false,
+                    "name": "replacementStrategy",
+                    "items": [{
+                        "xtype": "selection",
+                        "type": "radio",
+                        "fieldLabel": CQ.I18n.getMessage("Strategy"),
+                        "name": "replacement",
+                        "value": "versionize",
+                        "allowBlank": false,
+                        "options": [
+						{
+                            "text": CQ.I18n.getMessage("Create Version"),
+                            "value": "versionize"
+                        },{
+                            "text": CQ.I18n.getMessage("Replace"),
+                            "value": "replace"
+                        },{
+                            "text": CQ.I18n.getMessage("Keep Both"),
+                            "value": "keep_both"
+                        },{
+                            "text": CQ.I18n.getMessage("Skip"),
+                            "value": "skip"
+                        }]
+                    }]
+                },
+                "progress": {
+                    "xtype": "fieldset",
+                    "title": CQ.I18n.get("Progress"),
+                    "items": [{
+                        "xtype": "container",
+                        "id": progressContainerId,
+                        "layout": "column",
+                        "items": [{
+                            "xtype": "progress",
+                            "id": progressBarId,
+                            "value": "foo",
+                            "columnWidth": .8
+                        },{
+                            "xtype": "spacer",
+                            "columnWidth": .1,
+                            "anchor": "100%",
+                            "height": 1
+                        },{
+                            "xtype": "button",
+                            "id": abortButtonId,
+                            "disabled": true,
+                            "text": CQ.I18n.get("Abort"),
+                            "columnWidth": .1,
+                            "handler": function() {
+                                // stop unzipping
+                                if (progressUrl) {
+                                    var xhr = new XMLHttpRequest();
+                                    xhr.addEventListener("load", function(event) {
+                                        // restore init (activated) state
+                                        dialog.form.findField("destParentPath").setDisabled(false);
+                                        dialog.form.findField("replacement").setDisabled(false);
+                                        dialog.abortButton.setDisabled(true);
+                                        dialog.okButton.setDisabled(false);
+                                        dialog.cancelButton.setText(cancelText);
+
+                                        // consider race conditions (GET vs DELETE)
+                                        dialog.canceled = true;
+
+                                        dialog.progress.updateProgress(0);
+                                        admin.unmask();
+                                    });
+                                    xhr.open("DELETE", progressUrl);
+                                    xhr.send();
+                                }
+                            }
+                        }]
+                    }]
+                }
+            }
+        }
+    };
+    var dialog = CQ.WCM.getDialog(startWorkflowDialog);
+
+    dialog.progress = CQ.Ext.getCmp(progressBarId);
+    dialog.abortButton = CQ.Ext.getCmp(abortButtonId);
+    dialog.zipFile = zipFilePath;
+
+    // get dialog buttons
+    dialog.cancelButton = dialog.buttons[1];
+    dialog.okButton = dialog.buttons[0];
+
+    var updateProgressbar = function (opt, success, xhr) {
+        if (dialog.canceled) {
+            // process has already been canceled (via a DELETE request)
+            return;
+        }
+
+        var response = JSON.parse(xhr.responseText);
+
+        if (response.state === "SUCCEEDED") {
+            progressUrl = "";
+            dialog.success();
+        } else if (response.state === "ACTIVE") {
+            dialog.abortButton.setDisabled(false);
+            dialog.progress.updateProgress(response.done / response.total);
+            progressRequestInterval = 2000;
+
+            setTimeout(function() {
+                CQ.HTTP.get(CQ.shared.HTTP.noCaching(progressUrl), updateProgressbar, this);
+            }, progressRequestInterval);
+        } else if (response.state === "QUEUED") {
+            // just continue listening
+            setTimeout(function() {
+                CQ.HTTP.get(CQ.shared.HTTP.noCaching(progressUrl), updateProgressbar, this);
+            }, progressRequestInterval);
+
+            dialog.abortButton.setDisabled(true);
+        }
+    };
+
+    dialog.ok = function(okButton) {
+        var preCond = this.form.isValid();
+        var requestUrl = dialog.zipFile + ".unzip.json";
+
+        if (preCond) {
+            admin.mask();
+
+            var dest = dialog.form.findField("destParentPath");
+            var replacementStrategy = dialog.form.findField("replacement");
+
+            // forbid changes during unzipping
+            replacementStrategy.setDisabled(true);
+            dest.setDisabled(true);
+            okButton.setDisabled(true);
+
+            // request unzipping
+            CQ.HTTP.post(requestUrl, function(options, success, xhr) {
+                if (success) {
+                    var response = JSON.parse(xhr.responseText);
+                    progressUrl = response.url;
+                    dialog.canceled = false;
+                    CQ.HTTP.get(progressUrl, updateProgressbar, dialog);
+                    dialog.cancelButton.setText(CQ.I18n.getMessage("Process in background"));
+                } else {
+                    dialog.failure();
+                }
+            }, {
+                destPath: dest.getValue(),
+                conflictMode: replacementStrategy.getValue()
+            }, dialog);
+        }
+
+        return false;
+    };
+
+    dialog.on("beforehide", function(){
+        // cancel any ongoing progress requests
+        dialog.canceled = true;
+        admin.unmask();
+    });
+
+    dialog.success = function(){
+        admin.reloadPages();
+        admin.reloadCurrentTreeNode();
+        dialog.hide();
+    };
+
+    dialog.failure = function(){
+        admin.unmask();
+        CQ.Ext.Msg.alert(CQ.I18n.getMessage("Error"), CQ.I18n.getMessage("Could not extract ZIP."));
+        dialog.hide();
+    };
+
+    dialog.show();
+};
+
+

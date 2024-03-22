@@ -1,0 +1,567 @@
+<%--
+  ADOBE CONFIDENTIAL
+
+  Copyright 2016 Adobe Systems Incorporated
+  All Rights Reserved.
+
+  NOTICE:  All information contained herein is, and remains
+  the property of Adobe Systems Incorporated and its suppliers,
+  if any.  The intellectual and technical concepts contained
+  herein are proprietary to Adobe Systems Incorporated and its
+  suppliers and may be covered by U.S. and Foreign Patents,
+  patents in process, and are protected by trade secret or copyright law.
+  Dissemination of this information or reproduction of this material
+  is strictly forbidden unless prior written permission is obtained
+  from Adobe Systems Incorporated.
+--%><%
+%><%@page session="false"
+          import="com.adobe.cq.projects.api.Project,
+                  com.adobe.cq.projects.api.ProjectLink,
+                  com.adobe.granite.security.user.UserProperties,
+                  com.adobe.granite.security.user.UserPropertiesManager,
+                  com.adobe.granite.security.user.UserPropertiesService,
+                  com.adobe.granite.translation.api.TranslationConfig,
+                  com.day.cq.commons.jcr.JcrConstants,
+                  org.apache.commons.lang.StringUtils,
+                  org.apache.jackrabbit.api.security.user.Authorizable,
+                  org.apache.jackrabbit.api.security.user.UserManager,
+                  org.apache.sling.api.resource.Resource,
+                  org.apache.sling.api.resource.ValueMap,
+                  org.apache.sling.jcr.base.util.AccessControlUtil,
+                  org.slf4j.Logger,
+                  org.slf4j.LoggerFactory,
+                  java.util.Date,
+                  javax.jcr.RepositoryException,
+                  javax.jcr.Session,
+                  javax.jcr.security.AccessControlManager,
+                  javax.jcr.security.Privilege,
+                  java.net.URLEncoder,
+                  java.text.SimpleDateFormat,
+                  java.util.ArrayList,
+                  java.util.Calendar,
+                  java.util.HashMap,
+                  java.util.Iterator,
+                  com.adobe.cq.launches.api.Launch,
+                  java.util.Set,
+                  org.apache.sling.api.resource.ResourceResolver,
+                  org.apache.sling.api.resource.ValueMap,
+                  javax.jcr.Node,
+                  javax.jcr.Property,
+                  javax.jcr.RepositoryException,
+                  com.day.cq.commons.LanguageUtil,
+                  com.adobe.cq.projects.api.ProjectMember,
+                  com.adobe.cq.projects.api.ProjectMemberRole,
+                  com.adobe.granite.ui.components.AttrBuilder,
+                  com.adobe.granite.translation.api.TranslationConstants.TranslationStatus,
+                  java.util.List" %>
+<%!
+    private final Logger log = LoggerFactory.getLogger(getClass()); %>
+<%
+%><%@include file="/libs/granite/ui/global.jsp"%>
+<%@include file="/libs/cq/gui/components/projects/admin/translation/utils/utils.jsp"%>
+
+<ui:includeClientLib categories="cq.projects.admin.pod,cq.projects.admin.pod.translationprojectsummarypod" />
+<%
+    String strUniqueID = "cq-translation-projects-tile--" + new Date().getTime();
+    Resource parentResource = (Resource) request.getAttribute("projectLinkResource");
+    boolean isOwner = false;
+    AccessControlManager acm = null;
+    try {
+        acm = resourceResolver.adaptTo(Session.class).getAccessControlManager();
+    } catch (RepositoryException e) {
+        log.error("Unable to get access manager", e);
+    }
+
+    List<String> permissions = new ArrayList<String>();
+    permissions.add("cq-project-admin-actions-open-activator");
+
+    if (hasPermission(acm, parentResource, Privilege.JCR_REMOVE_NODE)) {
+        permissions.add("cq-projects-admin-actions-delete-link-activator");
+    }
+
+    String projectPath = slingRequest.getRequestPathInfo().getSuffix();
+    String popoverName = "translation_popover_" + parentResource.getName();
+    String podName = "translation_pod_" + parentResource.getName();
+    Resource childPagesResource = parentResource.getChild("child_pages");
+    List<Resource> pageList = new ArrayList<Resource>();
+    List<Resource> assetList = new ArrayList<Resource>();
+    List<Resource> contentFragmentList = new ArrayList<Resource>();
+    List<Resource> i18nDictList = new ArrayList<Resource>();
+    List<Resource> tagsList = new ArrayList<Resource>();
+    boolean canAddNewObjects = false;
+
+    if(childPagesResource!=null){
+
+        canAddNewObjects = hasPermission(acm, childPagesResource, Privilege.JCR_ADD_CHILD_NODES);
+
+        Iterator<Resource> childIt = listChildPageChildren(childPagesResource);
+
+        while(childIt.hasNext()) {
+            Resource childPage = childIt.next();
+            ValueMap childMap = childPage.adaptTo(ValueMap.class);
+            String fileType = childMap.get("translationFileType", "");
+            if ("PAGE".equals(fileType)) {
+                pageList.add(childPage);
+            }
+            else if ("ASSET".equals(fileType)) {
+                assetList.add(childPage);
+            }
+            else if ("CONTENTFRAGMENT".equals(fileType)) {
+                contentFragmentList.add(childPage);
+            }
+            else if ("I18NDICTIONARY".equals(fileType) || "I18NCOMPONENTSTRINGDICT".equals(fileType)) {
+                i18nDictList.add(childPage);
+            }
+            else if ("TAG".equals(fileType) || "TAG".equals(fileType)) {
+                tagsList.add(childPage);
+            }
+        }
+    }
+    else{
+        canAddNewObjects = hasPermission(acm, parentResource, Privilege.JCR_ADD_CHILD_NODES);
+    }
+
+    String ref = request.getPathInfo();
+
+    String translationJobActionsLink = "/libs/cq/core/content/projects/gadgets/translationjobactions.html?item=" + parentResource.getPath() + "&project=" + projectPath;
+    String xssActionWizard = request.getContextPath() + translationJobActionsLink;
+
+    ValueMap attributeMap = parentResource.adaptTo(ValueMap.class);
+    int cardWeight = attributeMap.get("cardWeight", 0);
+    String strCurrentStatus = attributeMap.get("translationStatus", "");
+    String targetLanguage = attributeMap.get("destinationLanguage", "");
+    String languageDisplayName = getLanguageDisplayName(resourceResolver, targetLanguage);
+
+    String xssStatus = strCurrentStatus;
+    if("SCOPE_COMPLETED".equals(xssStatus)){
+        xssStatus = i18n.get("Scope Completed");
+    }
+    else if("SCOPE_REQUESTED".equals(xssStatus)){
+        xssStatus = i18n.get("Scope Requested");
+    }
+    else if("COMMITTED_FOR_TRANSLATION".equals(xssStatus)){
+        xssStatus = i18n.get("Committed for translation");
+    }
+    else if("TRANSLATION_IN_PROGRESS".equals(xssStatus)){
+        xssStatus = i18n.get("Translation in progress");
+    }
+    else if("READY_FOR_REVIEW".equals(xssStatus)){
+        xssStatus = i18n.get("Ready for review");
+    }
+    else if("ERROR_UPDATE".equals(xssStatus)){
+        xssStatus = i18n.get("Error update");
+    }
+    else if("UNKNOWN_STATE".equals(xssStatus)){
+        xssStatus = i18n.get("Unknown state");
+    }
+    else if("DRAFT".equals(xssStatus)){
+        xssStatus = i18n.get("Draft");
+    }
+    else if("SUBMITTED".equals(xssStatus)){
+        xssStatus = i18n.get("Submitted");
+    }
+    else if("TRANSLATED".equals(xssStatus)){
+        xssStatus = i18n.get("Translated");
+    }
+    else if("REJECTED".equals(xssStatus)){
+        xssStatus = i18n.get("Rejected");
+    }
+    else if("APPROVED".equals(xssStatus)){
+        xssStatus = i18n.get("Approved");
+    }
+    else if("COMPLETE".equals(xssStatus)){
+        xssStatus = i18n.get("Complete");
+    }
+    else if("CANCEL".equals(xssStatus)){
+        xssStatus = i18n.get("Cancel");
+    }
+    else if("ARCHIVE".equals(xssStatus)){
+        xssStatus = i18n.get("Archive");
+    }
+    else {
+        xssStatus = i18n.get("Draft");
+    }
+    xssStatus = xssAPI.encodeForHTML(xssStatus);
+
+    int pageCnt = pageList.size();
+    int assetCnt = assetList.size();
+    int contentFragmentCnt = contentFragmentList.size();
+    int i18nDictCnt = i18nDictList.size();
+    int tagCnt = tagsList.size();
+    Calendar jobStartDate = attributeMap.get("dueDate", Calendar.class);
+    String xssDueDate=null;
+    String calendarDueDateString="";
+    String strTranslationMethod = "";
+    String strDestinationLanguage = "";
+    String strTranslationProvider = "";
+    Boolean isMultiLanguageProject = false;
+    {
+        ProjectLink link = parentResource.adaptTo(ProjectLink.class);
+        Project project = link.getProject();
+        Resource projectResource = project.adaptTo(Resource.class);
+        Resource projectContent = projectResource.getChild(JcrConstants.JCR_CONTENT);
+        ValueMap projectValueMap = projectResource.adaptTo(ValueMap.class);
+        ValueMap projectContentVM = projectContent.adaptTo(ValueMap.class);
+        isMultiLanguageProject = projectContentVM.get("isMultiLanguage", false);
+        Calendar startDate = projectContentVM.get("project.dueDate", Calendar.class);
+        strTranslationMethod = projectContentVM.get("translationMethod", String.class);
+        strDestinationLanguage = projectContentVM.get("destinationLanguage", String.class);
+        strTranslationProvider = projectContentVM.get("translationProvider", String.class);
+        if(jobStartDate==null){
+            jobStartDate = startDate;
+        }
+        SimpleDateFormat fmt = new SimpleDateFormat(i18n.get("MMM dd","Used in Translation project dashboard - CQ-37143"), slingRequest.getLocale());
+        SimpleDateFormat fmtDueDate = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss");
+        if (jobStartDate != null) {
+            xssDueDate = xssAPI.filterHTML(fmt.format(jobStartDate.getTime()));
+            calendarDueDateString = fmtDueDate.format(jobStartDate.getTime());
+        }
+
+        Session userSession = resourceResolver.adaptTo(Session.class);
+        String userId = userSession.getUserID();
+        if (projectResource != null) {
+            Set<ProjectMember> members = project.getMembers();
+            for (ProjectMember member : members) {
+                if (member.getId().equals(userId)) {
+                    Set<ProjectMemberRole> roles = member.getRoles();
+                    for (ProjectMemberRole role : roles) {
+                        String roleId = role.getId();
+                        if (roleId.equals("owner") ||
+                                roleId.equals("translationprojectmanager")
+                                || roleId.equals("translationproducer")) {
+                            isOwner = true;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    AttrBuilder attrBuilder = new AttrBuilder(request, xssAPI);
+    attrBuilder.addOther("translationjobpath", parentResource.getPath());
+    attrBuilder.addOther("targetLanguage", strDestinationLanguage);
+    attrBuilder.addOther("duedate", calendarDueDateString);
+
+    AttrBuilder attrBuilderTranslationContent = new AttrBuilder(request, xssAPI);
+    attrBuilderTranslationContent.addOther("translationmethod", strTranslationMethod);
+    attrBuilderTranslationContent.addOther("translationstatus", strCurrentStatus);
+    attrBuilderTranslationContent.addOther("translationjobpath", parentResource.getPath());
+
+    boolean bShowScopeRequest = false, bShowScopeComplete = false, bShowStart = false, bShowCancel = false, bShowImport = true, bShowExport = true,
+            bShowDuedate = false, bShowComplete = false, bShowArchive = false, bShowRename = true;
+    TranslationStatus translationStatus = TranslationStatus.fromString(strCurrentStatus);
+    switch (translationStatus) {
+        case CANCEL:
+            bShowArchive = true;
+            break;
+        case COMMITTED_FOR_TRANSLATION:
+            bShowCancel = true;
+            break;
+        case COMPLETE:
+            bShowExport = false;
+            bShowImport = false;
+            bShowArchive = true;
+            break;
+        case DRAFT:
+            bShowScopeRequest = true;
+            bShowStart = true;
+            bShowExport = true;
+            bShowImport = true;
+            bShowDuedate = true;
+            break;
+        case ERROR_UPDATE:
+            break;
+        case READY_FOR_REVIEW:
+            if ("MACHINE_TRANSLATION".equals(strTranslationMethod)) {
+                bShowComplete = true;
+            }
+            break;
+        case APPROVED:
+            bShowComplete = true;
+            break;
+        case SCOPE_COMPLETED:
+            bShowStart = true;
+            bShowDuedate = true;
+            break;
+        case SUBMITTED:
+            bShowStart = true;
+            bShowScopeRequest = true;
+            break;
+        case TRANSLATED:
+            bShowComplete = true;
+            break;
+        case TRANSLATION_IN_PROGRESS:
+            bShowCancel = true;
+            break;
+        case SCOPE_REQUESTED:
+            bShowDuedate = true;
+            bShowStart = true;
+            break;
+        default:
+            bShowExport = false;
+            bShowImport = false;
+            break;
+    }
+    bShowScopeComplete = attributeMap.get("scopeComplete", false);
+
+    if("MACHINE_TRANSLATION".equals(strTranslationMethod)){
+        bShowScopeRequest = false;
+        bShowScopeComplete = false;
+        bShowImport = false;
+        bShowExport = false;
+        bShowDuedate = false;
+    }
+    if(StringUtils.isEmpty(strTranslationProvider)){
+        bShowScopeRequest = false;
+        bShowScopeComplete = false;
+        bShowStart = false;
+        bShowDuedate = false;
+        bShowCancel = false;
+    }
+
+    if(bShowCancel || bShowComplete || bShowArchive){
+        if(isLaunchPresent(resourceResolver,pageList)){
+            attrBuilder.addOther("launchPresent", "true");
+        }
+        if(isTemporaryAssetPresent(resourceResolver,assetList)){
+            attrBuilder.addOther("temporaryAssetPresent", "true");
+        }
+    }
+
+
+    ValueMap properties = parentResource.adaptTo(ValueMap.class);
+    String jobTitle = xssAPI.encodeForHTML(i18n.get(properties.get(JcrConstants.JCR_TITLE, String.class)));
+    String strJobPodLink = "/libs/cq/core/content/projects/gadgets/translationjobpodlinks.html" + parentResource.getPath() +
+            "?project=" + projectPath+"&translationjob="+parentResource.getPath() + "&targetLanguage="+strDestinationLanguage;
+    String jobPodDetailsLink = xssAPI.getValidHref(strJobPodLink);
+    String jobName = parentResource.getName();
+
+    String strWorkflowOperationError = attributeMap.get("workflowOperationError", "");
+    boolean bPodErrorPresent = false;
+    if (!StringUtils.isEmpty(strWorkflowOperationError)
+            && !strWorkflowOperationError.equals("NO_ERROR")) {
+        bPodErrorPresent = true;
+        if (strWorkflowOperationError.equals("SCOPE_REQUEST_OPERATION_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to request scope");
+        } else if (strWorkflowOperationError.equals("START_TRANSLATION_OPERATION_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to start translation");
+        } else if (strWorkflowOperationError.equals("START_IMPORT_OPERATION_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to import");
+        } else if (strWorkflowOperationError.equals("START_EXPORT_OPERATION_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to export");
+        } else if (strWorkflowOperationError.equals("ARCHIVE_JOB_OPERATION_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to archive job");
+        } else if (strWorkflowOperationError.equals("COMPLETE_JOB_OPERATION_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to complete");
+        } else if (strWorkflowOperationError.equals("CANCEL_JOB_OPERATION_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to cancel job");
+        } else if (strWorkflowOperationError.equals("DELETE_JOB_OPERATION_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to delete job");
+        } else if (strWorkflowOperationError.equals("START_IMPORT_OPERATION_NO_XLIFF_SERVICE_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to import. XLIFF service is not available");
+        } else if (strWorkflowOperationError.equals("START_EXPORT_OPERATION_NO_XLIFF_SERVICE_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to export. XLIFF service is not available");
+        } else if (strWorkflowOperationError.equals("PROMOTE_LAUNCH_JOB_FAILURE")) {
+            strWorkflowOperationError = i18n.get("Failed to promote Launch");
+        }
+    }
+%>
+<div <%=attrBuilderTranslationContent.build()%> class="cq-translation-pod cq-projects-AppDetails cq-projects-translation-job-Pod" id="<%=strUniqueID%>">
+    <table class="cq-projects-translation-job-table">
+        <tr>
+            <td class="cell-icon"><coral-icon class="u-coral-pullLeft" icon="infoCircle" size="S" style="padding-right: 5px;"></coral-icon><%=i18n.get("Status")%></td>
+            <td class="cell-status-value"><%= xssStatus %></td>
+        </tr>
+        <%
+        if (isMultiLanguageProject) { %>
+            <tr>
+                <td class="cell-icon"><coral-icon class="u-coral-pullLeft" icon="playCircle" size="S" style="padding-right: 5px;"></coral-icon><%=i18n.get("Target")%></td>
+                <% if (languageDisplayName!=null && !languageDisplayName.isEmpty()) { %>
+                    <td class="cell-status-value"><%= xssAPI.encodeForHTML(i18n.getVar(languageDisplayName)) %></td>
+                 <% } else { %>
+                    <td class="cell-status-value" style="cursor:pointer;"><coral-icon class="cq-translation-pod-action-set-target" data-translationjobpath= <%= parentResource.getPath()%> icon="edit" size="S"></coral-icon></td>
+                 <% } %>
+            </tr>
+        <% } %>
+        <tr>
+            <td class="cell-icon cq-translation-pod-gadget-pages-cell"><coral-icon class="u-coral-pullLeft" icon="pages" size="S" style="padding-right: 5px;"></coral-icon><%=i18n.get("Pages")%></td>
+            <td class="cell-status-value"><%= pageCnt %></td>
+        </tr>
+        <tr>
+            <td class="cell-icon cq-translation-pod-gadget-assets-cell"><coral-icon class="u-coral-pullLeft" icon="asset" size="S" style="padding-right: 5px;"></coral-icon><%=i18n.get("Assets")%></td>
+            <td class="cell-status-value"><%= assetCnt %></td>
+        </tr>
+        <tr>
+            <td class="cell-icon"><coral-icon class="u-coral-pullLeft" icon="fileTxt" size="S" style="padding-right: 5px;"></coral-icon><%=i18n.get("Content Fragments")%></td>
+            <td class="cell-status-value"><%= contentFragmentCnt %></td>
+        </tr>
+        <tr>
+            <td class="cell-icon"><coral-icon class="u-coral-pullLeft" icon="book" size="S" style="padding-right: 5px;"></coral-icon><%=i18n.get("I18n Dictionaries")%></td>
+            <td class="cell-status-value"><%= i18nDictCnt %></td>
+        </tr>
+        <tr>
+            <td class="cell-icon"><coral-icon class="u-coral-pullLeft" icon="tag" size="S" style="padding-right: 5px;"></coral-icon><%=i18n.get("Tags")%></td>
+            <td class="cell-status-value"><%= tagCnt %></td>
+        </tr>
+        <% if (xssDueDate != null) {%>
+        <tr>
+            <td class="cq-projects-translation-job-pod-due-date"><coral-icon class="u-coral-pullLeft" icon="clock" size="S" style="padding-right: 5px;"></coral-icon><%=i18n.get("Due on {0}", "Show the due date of the project", xssDueDate)%></td>
+        </tr>
+        <% }%>
+    </table>
+</div>
+
+<% if (bPodErrorPresent) {%>
+    <div>
+        <coral-alert size="L" variant="error" style="min-width:inherit">
+          <coral-alert-header><%=i18n.get("Error")%></coral-alert-header>
+          <coral-alert-content>
+            <%= xssAPI.encodeForHTML(strWorkflowOperationError) %>
+            <div style="text-align:right">
+              <button is="coral-button" variant="minimal" coral-close=""><%=i18n.get("Close")%></button>
+            </div>
+          </coral-alert-content>
+        </coral-alert>
+    </div>
+<% }%>
+<script>
+    var title = $($($($.find('#<%=strUniqueID%>')[0]).parent()[0]).find('h1.cq-projects-CardDashboard-title')[0])
+    var newHeaderText = "<%=xssAPI.encodeForHTML(jobTitle)%>";
+    title.html(newHeaderText);
+</script>
+
+<%!
+    String getStringAttribute(Resource resource, String strAttributeName, String strDefaultValue) {
+        try {
+            Node node = resource.adaptTo(Node.class);
+            if (node.hasProperty(strAttributeName)) {
+                Property property = node.getProperty(strAttributeName);
+                if (property != null) {
+                    return property.getString();
+                }
+            }
+        } catch (RepositoryException ex) {
+        }
+        return strDefaultValue;
+    }
+    String getTranslationObjectSourcePath(Resource resource) {
+        String strSourcePath = getStringAttribute(resource,"sourcePath","");
+        if (strSourcePath == null) {
+            strSourcePath = "";
+        }
+        return strSourcePath;
+    }
+    boolean isLaunchPresent(ResourceResolver resourceResolver, List<Resource> pageList){
+        boolean bRetVal = false;
+        if(pageList!=null){
+            for(Resource resource : pageList){
+                String strSourcePath = getTranslationObjectSourcePath(resource);
+                try{
+                    Resource sourceResource = resourceResolver.resolve(strSourcePath);
+                    Launch launch = getLaunchFromResource(sourceResource);
+                    if(launch!=null){
+                        bRetVal = true;
+                        break;
+                    }
+                }catch(Exception e){}
+            }
+        }
+        return bRetVal;
+    }
+    boolean isTemporaryAssetPresent(ResourceResolver resourceResolver, List<Resource> assetList){
+        boolean bRetVal = false;
+        if(assetList!=null){
+            for(Resource resource : assetList){
+                String strSourcePath = getTranslationObjectSourcePath(resource);
+                try{
+                    Resource sourceResource = resourceResolver.resolve(strSourcePath);
+                    Node sourceNode = sourceResource.adaptTo(Node.class);
+                    if(isTemporaryAssetNode(sourceNode)){
+                        bRetVal = true;
+                        break;
+                    }
+                }catch(Exception e){}
+            }
+        }
+        return bRetVal;
+    }
+    String CQ_ASSET_TYPE = "dam:Asset";
+    String ATTRIBUTE_DESTINATION_LANGUAGE_COPY_PATH = "dam:destinationLanguageCopy";
+    boolean isTemporaryAssetNode(Node node) throws RepositoryException {
+        if (null != node) {
+            if (node.isNodeType(CQ_ASSET_TYPE) && node.hasNode(JcrConstants.JCR_CONTENT)) {
+                Node assetContentNode = node.getNode(JcrConstants.JCR_CONTENT);
+                if (assetContentNode.hasProperty(ATTRIBUTE_DESTINATION_LANGUAGE_COPY_PATH)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    Launch getLaunchFromResource(Resource pageResource) {
+        Launch retVal = null;
+        if (pageResource != null) {
+            retVal = pageResource.adaptTo(Launch.class);
+            if (retVal == null) {
+                retVal = getLaunchFromResource(pageResource.getParent());
+            }
+        }
+        return retVal;
+    }
+
+    Iterator<Resource> listChildPageChildren(Resource childPagesResource) throws RepositoryException {
+        ArrayList<Resource> childResList = new ArrayList<>();
+        Iterator<Resource> childPageChildren  = childPagesResource.listChildren();
+        while(childPageChildren.hasNext()) {
+            Resource childRes = childPageChildren.next();
+            Node objectNode = childRes.adaptTo(Node.class);
+            if(objectNode.hasProperty("translationFileType")) {
+                childResList.add(childRes);
+            } else {
+                Iterator<Resource> bucketChildren = childRes.listChildren();
+                while(bucketChildren.hasNext()) {
+                    childResList.add(bucketChildren.next());
+                }
+            }
+        }
+        return childResList.iterator();
+    }
+
+    String getNodeProperty(Node node, String strAttributeName){
+        String strValue = "";
+        try {
+            if(node.hasProperty(strAttributeName)){
+                Property prop = node.getProperty(strAttributeName);
+                if(prop!=null){
+                    strValue = prop.getString();
+                }
+            }
+        } catch (RepositoryException e) {
+            // if we have a error then we will return false.
+        }
+        return strValue;
+    }
+    boolean hasPermission(AccessControlManager acm, Resource resource, String privilege) {
+        try {
+            if (acm != null && resource!= null) {
+                Privilege p = acm.privilegeFromName(privilege);
+                return acm.hasPrivileges(resource.getPath(), new Privilege[]{p});
+            }
+        } catch (RepositoryException e) {
+            // if we have a error then we will return false.
+        }
+        return false;
+    }
+
+    String imageCK(Resource resource) {
+        if (resource == null) return "";
+        ValueMap metadata = resource.adaptTo(ValueMap.class);
+        Calendar cal = metadata.get("jcr:lastModified", Calendar.class);
+        if (cal == null) return "";
+        return "?ck=" + (cal.getTimeInMillis() / 1000);
+    }
+%>
+

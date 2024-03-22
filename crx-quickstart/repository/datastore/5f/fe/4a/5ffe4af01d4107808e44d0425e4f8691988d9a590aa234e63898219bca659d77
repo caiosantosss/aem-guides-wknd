@@ -1,0 +1,683 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2013 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ */
+;(function(document, ns) {
+
+    "use strict";
+
+    var workflowServletURL = "/etc/workflow/instances";
+    var translationProjectWorkflowModel;
+    var translationWorkflowModel;
+
+    var projectDetails;
+    var projectsSeparator = "####";
+
+    // Listen to the selectall event (checkbox in detail title)
+    ns.$root.on(ns.EVENT_SELECTALL, function() {
+        if (ns.$root.data("type") !== "languageCopy")
+            return;
+        var c = ns.$detailToolbars.find(".detail-toolbar.active .coral-Collapsible");
+        if (c.length > 0) {
+            c.data("accordion").setActive(false);
+        }
+        ns.$detailToolbars.find(".detail-toolbar")
+            .toggleClass("active")
+            .toggleClass("hidden");
+
+        // get the list item that is a self reference to the currently selected page
+        var $selfReference = ns.$detailList.find('section[data-path="' + Granite.References.getReferencePath() + '"]');
+        // delete contained checkbox input and hide checkbox container
+        var $checkbox = $selfReference.find(".granite-references-detail-item-checkbox");
+        $checkbox.find(".coral-Checkbox-input").remove();
+        $checkbox.hide();
+    });
+
+    /**
+     * Is called when the list of language copies is loaded. It hides the language options in
+     * the "Create & Translate" toolbar, for which there already exists a language copy.
+     * Furthermore it marks the list items that are currently in a translation workflow.
+     */
+    ns.$detail.on("cui-contentloaded.data-api", function () {
+        var languages = ns.$detail.find("[name='languages'] option");
+        if (ns.$root.data("type") !== "languageCopy") {
+            return;
+        }
+
+        var $start = ns.$detailToolbars.find(".detail-toolbar.start");
+        var $startForm = $start.find("form");
+
+        var $update = ns.$detailToolbars.find(".detail-toolbar.update");
+        var $updateForm = $update.find("form");
+
+        // get translation workflow model using project translation pods
+        translationProjectWorkflowModel = $start.data("translationprojectworkflowmodel");
+
+        // get translation workflow model (kept for backward compatibility)
+        translationWorkflowModel = $start.data("translationworkflowmodel");
+
+        // get projects detail URL
+        projectDetails = $start.data("projectdetails");
+
+        // iterate over all language copies
+        languages.each(function () {
+            var $option = $(this);
+
+            // check if this language copy already exists in a language
+            var languageCode = $option.val();
+            var $section = ns.$detail.find("[data-language-code='" + languageCode + "']");
+            if ($section.length > 0) {
+
+                // remove option as language copy already exists
+                $option.remove();
+
+                // check if the resource is currently in the translation workflow
+                var workflows = $section.data("workflows");
+                if ($.inArray(translationWorkflowModel, workflows) >= 0) {
+                    // show alert icon and change subtitle text
+                    $section.find(".right .coral-Icon--alert").show();
+                    $section.find(".left .granite-references-subtitle").text(Granite.I18n.get("Currently in translation"));
+                } else if ($section.data('launch-promoted') === false) {
+                    $section.find(".right .coral-Icon--alert").show();
+                    $section.find(".left .granite-references-subtitle").text(Granite.I18n.get("Ready for review"));
+                }
+            }
+        });
+
+        $.each([$startForm,$updateForm], function( indexInput, $form ){
+
+        // group projects by name
+        // TODO: to be improved once there will be sub-projects
+        var newOptions = [];
+        var $project = $form.find("[name='project']");
+        var projects = $project.find(">option");
+        var regExp = /(.*)\s\[(.*)]/;
+        projects.each(function() {
+            var $option = $(this);
+
+            var groups = regExp.exec($option.text());
+            if (groups && groups.length === 3) {
+                newOptions.push({
+                    title: groups[1],
+                    language: groups[2].toLowerCase(),
+                    path: $option.val()
+                });
+                $option.remove();
+            }
+        });
+        $(newOptions).each(function() {
+            var self = this;
+            var $option = $project.find(">option[data-project='" + encodeURIComponent(self.title).replace("'", "\\'") + "']");
+            if ($option.length === 0) {
+                $project.append(
+                    $("<option data-project=\"" + encodeURIComponent(self.title) + "\"></option>")
+                        .val(self.language + "|" + self.path)
+                        .text(self.title)
+                );
+            } else {
+                $option.val($option.val() + projectsSeparator + self.language + "|" + self.path);
+            }
+        });
+
+        });
+
+        // Hide the toolbar and disable its elements if there is no language to translate to
+        if (!$startForm.find("[name='languages'] option").length) {
+            $start.hide();
+        }
+
+        var $submit = $startForm.find(".coral-Button[data-role='submit']");
+        if ($submit.length > 0) {
+            $submit.data("defaulttext", $submit.text());
+        }
+    });
+
+    /**
+     * Shows a message in a notification slider.
+     */
+    var showNotification = function(notificationInfo) {
+        var notificationSelector = ".endor-Page-content.endor-Panel.foundation-content";
+        var notificationSlider = new Granite.UI.NotificationSlider($(notificationSelector));
+        notificationSlider.notificationDuration = notificationInfo.duration;
+        notificationSlider.notify(notificationInfo);
+    };
+
+
+    // --- CREATE & TRANSLATE
+
+    /**
+     * Handler on activation of "Create & Translate" panel
+     */
+    ns.$detailToolbars.on("activate", ".detail-toolbar.start .coral-Collapsible", function (e) {
+        adjustStartFormLayout();
+    });
+
+    /**
+     * Handler for clicks on the "Create/Add" button in the "Create & Translate" toolbar.
+     */
+    ns.$detailToolbars.on("click", ".detail-toolbar.start .coral-Collapsible .coral-Button[data-role='submit']", function (e) {
+        if (ns.$root.data("type") !== "languageCopy")
+            return;
+
+        var $start = $(".detail-toolbar.start");
+
+        // gather POST data
+        var $form = $start.find("form");
+        var projectType = $form.find("[name='projectType']").val();
+        var data = {
+            "_charset_": "utf-8",
+            ":status": "browser",
+            payloadType: "JCR_PATH",
+            model: $start.data("workflowmodel"),
+
+            createNonEmptyAncestors: true,
+            deep: !!$form.find("input[name='deep']").prop("checked"),
+            payload: ns.getReferencePath(),
+            translationWorkflowModel: translationProjectWorkflowModel
+        };
+
+        // get existing projects
+        var $projectOption = $form.find("[name='project'] option:selected");
+        var projects = {};
+        var projectTitle = $projectOption.text();
+        if (projectType === "add_existing") {
+            var tmp = $projectOption.val().split(projectsSeparator);
+            for (var i = 0; i < tmp.length; i++) {
+                var current = tmp[i].split("|", 2);
+                if (current.length === 2) {
+                    projects[current[0]] = current[1];
+                }
+            }
+        }
+
+        // submit POST requests sequentially (parallel POST requests cause problems creating the workflows on the server side)
+        var promise = $.Deferred().resolve();
+        var projectCreated = [];
+        var projectUpdated;
+        var languageCount = $start.find("[name='languages'] option:selected").length;
+        var projectCreatedCount = 0;
+        var languages = [];
+        $start.find("[name='languages'] option:selected").each(function (i) {
+            var $option = $(this);
+            var languageCode = $option.val();
+            promise = promise.then(function () {
+                data.language = languageCode;
+                var workflowTitle;
+                if (projectType === "add_existing" && projects[languageCode]) {
+                    data.projectType = "add_existing";
+                    try{
+                        data.projectTitle = $form.find("[name='project']").parent().data('select')._buttonText.text();
+                    }catch(e){}
+                    data.projectPath = projects[languageCode];
+                    workflowTitle = Granite.I18n.get("Translation of \"{0}\" using existing project \"{1}\" in \"{2}\"", [
+                        data.payload,
+                        data.projectPath,
+                        $option.text()
+                    ]);
+
+                    projectUpdated = {
+                        title: projectTitle,
+                        data: data
+                    };
+                }
+                else if (projectType === "add_structure_only") {
+                    data.projectType = "add_structure_only";
+                    delete data.translationWorkflowModel;
+                    workflowTitle = Granite.I18n.get("Copy Structure \"{0}\" ", [
+                        data.payload
+                    ]);
+                }
+                 else {
+                    // New project (either clearly selected, or existing project doesn't exist in that language)
+                    data.projectType = "add_new";
+                    if (projectType === "add_existing") {
+                        data.projectTitle = projectTitle;
+                        delete data.projectPath;
+                    } else {
+                        data.projectTitle = $form.find("[name='projectTitle']").val();
+                    }
+
+                    projectCreated.push({
+                        data: data
+                    });
+
+                    workflowTitle = Granite.I18n.get("Translation of \"{0}\" using new project \"{1}\" in \"{2}\"", [
+                        data.payload,
+                        data.projectTitle,
+                        $option.text()
+                    ]);
+                }
+                data.workflowTitle = workflowTitle;
+
+                var deferred = $.Deferred();
+                // submit POST request
+                $.post(workflowServletURL, data, function() {
+
+                    $.each(projectCreated, function(i, projectCreated) {
+                       if(projectCreated.data === data) {
+                           projectCreatedCount++;
+                           languages.push(projectCreated.data.language.toUpperCase());
+                           return false;
+                       }
+                    });
+
+                    if(i === (languageCount-1)) {
+                        var notificationMessages = [];
+                        if(projectCreatedCount > 0) {
+                            if(projectCreatedCount === 1) {
+                                notificationMessages.push(Granite.I18n.get("Translation project created ({0})", [languages.join(', ')]));
+                            }
+                            else {
+                                notificationMessages.push(Granite.I18n.get("{0} translation projects created ({1})", [projectCreatedCount, languages.join(', ')]));
+                            }
+                        }
+
+                        if(projectUpdated && projectUpdated.data === data) {
+                            if(!projectUpdated.data.deep) {
+                                notificationMessages.push(Granite.I18n.get("Selected page has been added to translation project '{0}'", [projectUpdated.title]));
+                            }
+                            else {
+                                notificationMessages.push(Granite.I18n.get("Selected pages have been added to translation project '{0}'", [projectUpdated.title]));
+                            }
+                        }
+
+                        if(notificationMessages.length) {
+                            if(notificationMessages.length === 1) {
+                                showNotification({
+                                    content: notificationMessages[0],
+                                    type: "info",
+                                    closable: true,
+                                    className: "notification-alert--absolute",
+                                    duration: 6000
+                                });
+                            }
+                            else {
+                                var timeoutCount = 0;
+                                var duration = 3000;
+
+                                // Display both notifications 3000 ms one after the other
+                                notificationMessages.forEach(function(notificationMessage) {
+                                    setTimeout(function() {
+                                        showNotification({
+                                            content: notificationMessage,
+                                            type: "info",
+                                            closable: true,
+                                            className: "notification-alert--absolute",
+                                            duration: duration
+                                        });
+                                    }, timeoutCount);
+                                    timeoutCount += duration;
+                                });
+                            }
+                        }
+                    }
+
+                }).fail(function () {
+                    showNotification({
+                        content: Granite.I18n.get("Failed to start the language copy creation workflow for language {0}", [languageCode]),
+                        type: "error",
+                        closable: true,
+                        className: "notification-alert--absolute",
+                        duration: 6000
+                    });
+                }).always(function () {
+                    deferred.resolve();
+                });
+                return deferred.promise();
+            });
+        });
+        promise.then(function() {
+            // all requests are done (either failed or succeeded)
+            // wait a bit (for the language copies to be created by the workflows)
+            setTimeout(function () {
+                ns.$detailToolbars.find(".detail-toolbar.active .coral-Collapsible").data("accordion").setActive(false);
+                ns.refreshDetail();
+            }, 400);
+        });
+    });
+
+    /**
+     * Handler for changes in languages selection.
+     */
+    $(document).on("itemadded itemremoved", ".languages", function (e) {
+        adjustStartFormLayout();
+    });
+
+    /**
+     * Handler for changes in project type selection.
+     */
+    $(document).on("selected", ".projectType", function (e) {
+        var $form = $(e.currentTarget).parents('.detail-toolbar');
+
+        // Show/hide corresponding fields
+        $form.find(".projectTitle")
+            .attr("hidden", e.selected !== "add_new")
+            .find("[name='projectTitle']")
+            .val("");
+        $form
+            .find("[name='project']")
+            .val("")
+            .closest(".coral-Form-fieldwrapper")
+            .attr("hidden", e.selected !== "add_existing");
+        if($form.hasClass('update')){
+            adjustUpdateFormLayout(true);
+        }
+        else{
+            adjustStartFormLayout(true);
+        }
+    });
+
+    $(document).on("keyup", "[name='projectTitle']", function (e) {
+        adjustStartFormLayout();
+    });
+
+    /**
+     * Adjust update form layout based on current input
+     */
+    var adjustUpdateFormLayout = function() {
+        var $form = ns.$detailToolbars.find(".detail-toolbar.update form");
+        // Adjust form layout
+        ns.triggerResize({
+            detail: true
+        });
+
+        var languagesCount = $(".detail-list").find("section[data-type=languageCopy] :checkbox:checked").length;
+        var projectType = $form.find("[name='projectType']").val();
+        var $projectTitle = $form.find(".projectTitle");
+        
+
+        // Toggle submit disabled state based on that
+        var $submit = $form.find(".coral-Button[data-role='submit']");
+
+        var formValid = languagesCount > 0
+            && (
+            (projectType === "add_new" && $projectTitle.find("[name='projectTitle']").val() !== "")
+            ||
+            (projectType === "add_existing" && $form.find("[name='project']").val() !== "")
+            ||
+            (projectType === "add_structure_only")
+            );
+
+        $submit.attr("disabled", !formValid);
+    };
+
+    /**
+     * Adjust start form layout based on current input
+     */
+    var adjustStartFormLayout = function() {
+        var $form = ns.$detailToolbars.find(".detail-toolbar.start form");
+        var $project = $form.find("[name='project']");
+        var firstValue = $project.find('option:first').val();
+
+        // Set select value to first option value
+        if($project.val() === null && firstValue) {
+            $project.parents("[data-init='select']")
+              .data("select")
+              .setValue(firstValue);
+        }
+
+        // Adjust form layout
+        ns.triggerResize({
+            detail: true
+        });
+
+        // Fix to enable submit button if at least one language is selected
+        var languagesCount = $form.find("[name='languages']")
+          .parents("[data-init='select']")
+          .data("select")
+          .getValue()
+          .length;
+        var projectType = $form.find("[name='projectType']").val();
+        var $projectTitle = $form.find(".projectTitle");
+
+        // Tooltip for multiple selection of
+        $projectTitle.find(".fieldDescription").toggle(languagesCount > 1);
+
+        // Check if form is filled correctly
+        var formValid = languagesCount > 0
+            && (
+            (projectType === "add_new" && $projectTitle.find("[name='projectTitle']").val() !== "")
+            ||
+            (projectType === "add_existing" && $form.find("[name='project']").val() !== "")
+            ||
+            (projectType === "add_structure_only")
+            );
+
+        // Toggle submit disabled state based on that
+        var $submit = $form.find(".coral-Button[data-role='submit']");
+        $submit.attr("disabled", !formValid);
+
+        if (projectType === "add_existing") {
+            $submit.text($submit.data("oppositetext"));
+        } else {
+            $submit.text($submit.data("defaulttext"));
+        }
+    };
+
+
+    // --- UPDATE
+
+    /**
+     * Get the title to use for the update language copy workflow.
+     *
+     * @returns {string}
+     */
+    var getWorkflowLaunchTitle = function(title, strLaunchCount) {
+        if (!title || title.length == 0) {
+            var selectedItems = $(".cq-siteadmin-admin-childpages.foundation-collection").find(".foundation-selections-item");
+
+            if (selectedItems.length > 0) {
+                title = selectedItems.eq(0).data('item-title');
+            }
+        }
+
+        var iCount = parseInt(strLaunchCount);
+
+        if(!isNaN(iCount)){
+            iCount++;
+            return Granite.I18n.get("Translation review {0} {1}", [title, iCount]);   
+        }
+
+        return Granite.I18n.get("Translation review {0}", title);
+    };
+
+    /**
+     * Handler for clicks on the "Start" button in the "Update language copies" toolbar.
+     */
+    ns.$detailToolbars.on("click", ".detail-toolbar.update .coral-Collapsible .coral-Button[data-role='submit']", function (e) {
+        var $update = $(".detail-toolbar.update");
+        var $updateForm = $update.find("form");
+
+        if (ns.$root.data("type") !== "languageCopy")
+            return;
+        // gather POST data
+        var $form = $update.find("form");
+        var strProjectType = $form.find("[name='projectType']").val();
+        if(strProjectType==null || strProjectType.length==0){
+            strProjectType = 'update';
+        }
+        var strProjectTitle = "";
+        var projectPaths = {};
+        if (strProjectType === "add_existing") {
+            var $projectOption = $($updateForm.find("[name='project'] option:selected").get(0));
+            var tmp = $projectOption.val().split(projectsSeparator);
+            for (var i = 0; i < tmp.length; i++) {
+                var current = tmp[i].split("|", 2);
+                if (current.length === 2) {
+                    projectPaths[current[0]] = current[1];
+                }
+            }
+            strProjectTitle = $projectOption.text();
+        }
+        else if (strProjectType === "add_new"){
+            strProjectTitle = $form.find("[name='projectTitle']").val()
+        }
+
+        var data = {
+            "_charset_": "utf-8",
+            ":status": "browser",
+            payloadType: "JCR_PATH",
+            model: $update.data("workflowmodel"),
+            projectTitle: strProjectTitle,
+            deep: $updateForm.find("input[name='deep']").prop("checked"),
+            projectType: strProjectType,
+            translationWorkflowModel: translationProjectWorkflowModel
+        };
+
+        // submit POST requests sequentially (parallel POST requests cause
+        // problems creating the workflows on the server side)
+        var promise = $.Deferred().resolve();
+        $(".detail-list").find("section[data-type=languageCopy] input:checked").each(function () {
+            var $section = $(this).closest("section");
+            var sourceLanguageCode = $section.data("source-language-code");
+            var destinationLanguageCode = $section.data("language-code");
+            var destinationLanguageTitle = $section.data("language-code-title");
+            var launchCount = $section.data("launch-count");
+            promise = promise.then(function () {
+                data.payload = $section.data("path");
+                data.language = sourceLanguageCode;
+                data.destinationLanguage = destinationLanguageCode;
+                data.projectPath = projectPaths[destinationLanguageCode];
+                data.workflowLaunchTitle = getWorkflowLaunchTitle(destinationLanguageTitle,launchCount);
+                var deferred = $.Deferred();
+                // submit POST request
+                $.post(workflowServletURL, data).fail(function () {
+                    showNotification({
+                        content: Granite.I18n.get("Failed to start the language copy update workflow for language {0}", [languageCode]),
+                        type: "error",
+                        closable: true,
+                        className: "notification-alert--absolute",
+                        duration: 6000
+                    });
+                }).always(function() {
+                    deferred.resolve();
+                });
+                return deferred.promise();
+            });
+        });
+        promise.then(function() {
+            // all requests are done (either failed or succeeded)
+            // collapse toolbar
+            setTimeout(function () {
+                // reset header checkbox
+                ns.updateMainCheckbox();
+                // disable multiselect
+                ns.$detailList.data("multiselect", false);
+                ns.$detailToolbars.find(".detail-toolbar.active .coral-Collapsible").data("accordion").setActive(false);
+                ns.refreshDetail();
+            }, 1000);
+        });
+    });
+
+    /**
+     * Handler on activation of "Update language copies" panel
+     */
+    ns.$detailToolbars.on("activate", ".detail-toolbar.update .coral-Collapsible", function (e) {
+        adjustUpdateFormLayout();
+    });
+
+    /**
+     * Handler for selection on existing language copies
+     */
+    $(document).on("change", ".detail-list section[data-type=languageCopy] :checkbox", function() {
+        adjustUpdateFormLayout()
+    });
+
+    $(document).on("keyup", ".detail-toolbar.update [name='projectTitle']", function (e) {
+        adjustUpdateFormLayout();
+    });
+
+    /**
+     * Handler for clicks on the "Go to Projects" button
+     */
+    $(document).on("click", ".detail section[data-type=languageCopy] .gotoprojects", function() {
+        var $section = $(this).closest("section");
+        var projectPath = $section.data('translation-project');
+        if (projectPath) {
+            window.open(projectDetails + projectPath);
+        }
+    });
+
+    /**
+     * Handler for clicks on the "Open Page" button while looking at a page which is currently being updated, so that the page can be opened in the context of a launch.
+     */
+    $(document).on("click", ".detail section[data-type=languageCopy] .open-languagecopy-launch-page", function() {
+        var $section = $(this).closest("section");
+        var launchPath = $section.data('launch-path');
+        var path = $section.data('path');
+        if (launchPath) {
+            var url = Granite.HTTP.externalize("/bin/wcmcommand");
+            url += "?cmd=open";
+            url += "&path=" + launchPath + path;
+            window.open(url);
+        }
+    });
+
+    /**
+     * Handler for clicks on the "Promote" button while looking at a page which is currently being updated, so that the launch can be promoted.
+     */
+    $(document).on("click", ".detail section[data-type=languageCopy] .promote-languagecopy-launch", function() {
+        var $section = $(this).closest("section");
+        var launchPath = $section.data('launch-path') + $section.data('path');
+
+        if (launchPath) {
+            location.href = Granite.HTTP.externalize("/libs/wcm/core/content/sites/promotelaunchwizard.html" + launchPath);
+        }
+    });
+
+    /**
+     * Handler for clicks on the "Update" button of a language copy list item.
+     */
+    $(document).on("click", ".detail section[data-type=languageCopy] .update", function (e) {
+        var $section = $(this).closest("section");
+        // gather POST data
+        var data = {
+            "_charset_": "utf-8",
+            ":status": "browser",
+            payloadType: "JCR_PATH",
+            model: $(".detail-toolbar.update").data("workflowmodel"),
+
+            deep: false,
+            language: $section.data("source-language-code"),
+            payload: $section.data("path"),
+            projectType: "update",
+            workflowLaunchTitle: getWorkflowLaunchTitle("","")
+        };
+        var projectPath = $section.data("translation-project");
+        if (projectPath) {
+            data.projectPath = projectPath;
+            data.translationWorkflowModel = translationProjectWorkflowModel;
+        } else {
+            data.translationWorkflowModel = translationWorkflowModel;
+        }
+
+        // submit POST request
+        $.post(workflowServletURL, data).done(function () {
+            setTimeout(function () {
+                ns.$detailToolbars.find(".detail-toolbar.active .coral-Collapsible").data("accordion").setActive(false);
+                ns.refreshDetail();
+            }, 1000);
+        }).fail(function () {
+            showNotification({
+                content: Granite.I18n.get("Failed to start the language copy update workflow for language {0}", [languageCode]),
+                type: "error",
+                closable: true,
+                className: "notification-alert--absolute",
+                duration: 6000
+            });
+        });
+    });
+
+}(document, Granite.References));
